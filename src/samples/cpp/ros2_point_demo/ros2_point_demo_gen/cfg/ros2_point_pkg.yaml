@@ -1,0 +1,60 @@
+# IBMW config for ros2_point_app (Pkg mode)
+#
+# Usage: ibmw run cfg/ros2_point_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: simple_thread_executor
+        type: dedicated
+        options:
+          thread_num: 4
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+    subscribers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+
+  modules:
+    packages:
+      - path: libros2_point_pkg.so
+        enable_modules: [PointPublisherModule, PointSubscriberModule]
+    modules:
+      - name: PointPublisherModule
+        log_level: INFO
+      - name: PointSubscriberModule
+        log_level: INFO

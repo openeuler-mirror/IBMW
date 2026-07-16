@@ -1,0 +1,58 @@
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: simple_thread_executor
+        type: dedicated
+        options:
+          thread_num: 4
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 0
+          # ROS2兼容模式配置 - 必须在driver options中
+          ros2_compatible_mode: true
+          ros2_topic_prefix: "rt"
+
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+
+    publishers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+
+    subscribers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: PointPublisherModule
+        log_level: INFO
+      - name: PointSubscriberModule
+        log_level: INFO

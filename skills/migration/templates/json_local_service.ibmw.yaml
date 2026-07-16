@@ -1,0 +1,44 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+
+# JSON/local RPC skeleton using native JSON request/response structs.
+schema_version: 2
+project:
+  name: json_local_service
+  namespace: migration_practice
+
+json_types:
+  messages:
+    - name: AddTwoInts_Request
+      fields:
+        - {name: a, type: int64_t, default: "0"}
+        - {name: b, type: int64_t, default: "0"}
+    - name: AddTwoInts_Response
+      fields:
+        - {name: sum, type: int64_t, default: "0"}
+
+modules:
+  - name: RpcServerModule
+    type: rpc_server
+    transport: json
+    message_type: AddTwoIntsService
+    service_name: AddTwoInts
+    methods:
+      - name: AddTwoInts
+        request: AddTwoInts_Request
+        response: AddTwoInts_Response
+  - name: RpcClientModule
+    type: rpc_client
+    transport: json
+    custom_config:
+      rpc_frq: 2.0
+    message_type: AddTwoIntsService
+    service_name: AddTwoInts
+    methods:
+      - name: AddTwoInts
+        request: AddTwoInts_Request
+        response: AddTwoInts_Response
+
+apps:
+  - name: json_local_service_inproc_app
+    type: rpc
+    modules: [RpcServerModule, RpcClientModule]

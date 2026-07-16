@@ -1,0 +1,203 @@
+IBMW (Intelligence Boom Robot Middleware)
+Copyright 2024-2026 IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+https://gitcode.com/openeuler/IB_Robot
+https://gitcode.com/openeuler/IBMW
+
+================================================================================
+DERIVATION NOTICE
+================================================================================
+
+This software is an independently evolved project whose initial architecture
+was informed by design concepts and key mechanisms found in ROS 2, Dora,
+AimRT, and openHIVA.
+
+Certain concepts and components were adapted from these projects and have
+since been substantially modified, redesigned, and integrated into a broader,
+independently developed architecture. The applicable original copyright
+notices and attribution requirements are retained in accordance with the
+respective upstream licenses.
+
+Except for third-party components that remain subject to their respective
+licenses, this software, including its original contributions and
+modifications, is licensed under the Apache License, Version 2.0.
+
+================================================================================
+THIRD-PARTY SOFTWARE NOTICES
+================================================================================
+
+This project can download, link, or use software developed by third parties.
+The list below covers the direct dependencies and release tools declared by
+this source tree. A distributor must also preserve the license, copyright, and
+NOTICE materials shipped by the exact dependency versions included in its
+source bundle, binary package, container image, or installer.
+
+--------------------------------------------------------------------------------
+Asio (standalone)
+  https://think-async.com/Asio/
+  Boost Software License 1.0
+--------------------------------------------------------------------------------
+Backward-cpp
+  https://github.com/bombela/backward-cpp
+  MIT License
+--------------------------------------------------------------------------------
+Boost
+  https://www.boost.org/
+  Boost Software License 1.0
+--------------------------------------------------------------------------------
+{fmt}
+  https://github.com/fmtlib/fmt
+  MIT License (with optional exception)
+--------------------------------------------------------------------------------
+gflags
+  https://github.com/gflags/gflags
+  BSD 3-Clause License
+--------------------------------------------------------------------------------
+Google Test (GTest)
+  https://github.com/google/googletest
+  BSD 3-Clause License
+--------------------------------------------------------------------------------
+JsonCpp
+  https://github.com/open-source-parsers/jsoncpp
+  MIT License
+--------------------------------------------------------------------------------
+LZ4
+  https://github.com/lz4/lz4
+  BSD 2-Clause License / GPLv2 (library is BSD)
+--------------------------------------------------------------------------------
+MCAP
+  https://github.com/foxglove/mcap
+  MIT License
+--------------------------------------------------------------------------------
+nghttp2
+  https://github.com/nghttp2/nghttp2
+  MIT License
+--------------------------------------------------------------------------------
+nlohmann/json
+  https://github.com/nlohmann/json
+  MIT License
+--------------------------------------------------------------------------------
+Eclipse Paho MQTT C Client
+  https://github.com/eclipse/paho.mqtt.c
+  Eclipse Public License 2.0 / Eclipse Distribution License 1.0
+--------------------------------------------------------------------------------
+oneTBB (Threading Building Blocks)
+  https://github.com/oneapi-src/oneTBB
+  Apache License 2.0
+--------------------------------------------------------------------------------
+yaml-cpp
+  https://github.com/jbeder/yaml-cpp
+  MIT License
+--------------------------------------------------------------------------------
+Zstandard (zstd)
+  https://github.com/facebook/zstd
+  BSD 3-Clause License / GPLv2 (library is BSD)
+--------------------------------------------------------------------------------
+libunifex
+  https://github.com/facebookexperimental/libunifex
+  Apache License 2.0 with LLVM Exceptions
+--------------------------------------------------------------------------------
+
+The following dependencies are optional and only included when the corresponding
+build options are enabled:
+
+--------------------------------------------------------------------------------
+Fast DDS / Fast CDR (eProsima)
+  https://github.com/eProsima/Fast-DDS
+  https://github.com/eProsima/Fast-CDR
+  Apache License 2.0
+  (Required when IBMW_BUILD_DDS_EXTENSION=ON)
+--------------------------------------------------------------------------------
+Fast DDS-Gen (eProsima)
+  https://github.com/eProsima/Fast-DDS-Gen
+  Apache License 2.0
+  (Used to generate DDS type-support sources)
+--------------------------------------------------------------------------------
+tinyxml2
+  https://github.com/leethomason/tinyxml2
+  zlib License
+  (Used by the optional source-prefix Fast DDS build)
+--------------------------------------------------------------------------------
+foonathan/memory
+  https://github.com/foonathan/memory
+  zlib License
+  (Used by the optional source-prefix Fast DDS build)
+--------------------------------------------------------------------------------
+Eclipse iceoryx
+  https://github.com/eclipse-iceoryx/iceoryx
+  Apache License 2.0
+  (Required when IBMW_BUILD_ICEORYX_EXTENSION=ON)
+--------------------------------------------------------------------------------
+OpenTelemetry C++
+  https://github.com/open-telemetry/opentelemetry-cpp
+  Apache License 2.0
+  (Required when IBMW_BUILD_OPENTELEMETRY_EXTENSION=ON)
+--------------------------------------------------------------------------------
+OpenTelemetry Protocol (opentelemetry-proto)
+  https://github.com/open-telemetry/opentelemetry-proto
+  Apache License 2.0
+  (Required when IBMW_BUILD_OPENTELEMETRY_EXTENSION=ON)
+--------------------------------------------------------------------------------
+Zenoh-C
+  https://github.com/eclipse-zenoh/zenoh-c
+  Eclipse Public License 2.0 / Apache License 2.0
+  (Required when IBMW_BUILD_ZENOH_EXTENSION=ON)
+--------------------------------------------------------------------------------
+ROS 2 (rclcpp and related packages)
+  https://github.com/ros2
+  Apache License 2.0
+  (Required when IBMW_BUILD_WITH_ROS2=ON)
+--------------------------------------------------------------------------------
+iRobot Events Executor
+  https://github.com/irobot-ros/events-executor
+  Apache License 2.0
+  (Required when IBMW_BUILD_WITH_ROS2=ON)
+--------------------------------------------------------------------------------
+Protocol Buffers (protobuf)
+  https://github.com/protocolbuffers/protobuf
+  BSD 3-Clause License
+  (Required for protobuf-based type support)
+--------------------------------------------------------------------------------
+gRPC
+  https://github.com/grpc/grpc
+  Apache License 2.0
+  (Required when IBMW_BUILD_GRPC_EXTENSION=ON)
+--------------------------------------------------------------------------------
+stdexec (P2300 Reference Implementation)
+  https://github.com/NVIDIA/stdexec
+  Apache License 2.0 with LLVM Exceptions
+  (Required when coroutine/sender-receiver features are enabled)
+--------------------------------------------------------------------------------
+cpptoml
+  https://github.com/skystrife/cpptoml
+  MIT License
+  (Optional configuration format support)
+--------------------------------------------------------------------------------
+
+The Python CLI and release workflow declare the following Python packages.
+They are not vendored in this source tree; include their upstream notices when
+redistributing an environment or executable bundle that contains them:
+
+--------------------------------------------------------------------------------
+PyYAML
+  https://github.com/yaml/pyyaml
+  MIT License
+--------------------------------------------------------------------------------
+Jinja
+  https://github.com/pallets/jinja
+  BSD 3-Clause License
+--------------------------------------------------------------------------------
+autopep8
+  https://github.com/hhatto/autopep8
+  MIT License
+--------------------------------------------------------------------------------
+setuptools
+  https://github.com/pypa/setuptools
+  MIT License
+--------------------------------------------------------------------------------
+PyInstaller
+  https://github.com/pyinstaller/pyinstaller
+  GNU General Public License v2 or later, with the PyInstaller bootloader
+  exception described by the upstream project
+  (Build/distribution tool; review the exception and ship its notices when
+  redistributing a PyInstaller-produced bundle)
+--------------------------------------------------------------------------------

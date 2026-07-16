@@ -1,0 +1,46 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+  scheduling:
+    executors:
+      - name: work_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+  messaging:
+    drivers:
+      - type: local
+        options:
+          subscriber_use_inline_executor: false
+          subscriber_executor: work_executor
+    publishers:
+      - topic: "(.*)"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "(.*)"
+        enable_drivers: [local]
+  modules:
+    packages:
+      - path: ./libcontext_pkg.so
+        enable_modules: [ContextTransportPublisherModule, ContextSubscriberOnExecutorModule]
+    modules:
+      - name: ContextTransportPublisherModule
+        log_level: INFO
+      - name: ContextSubscriberOnExecutorModule
+        log_level: INFO
+
+
+ContextTransportPublisherModule:
+  topic: test_topic
+  transport_frq: 1
+
+ContextSubscriberOnExecutorModule:
+  topic: test_topic

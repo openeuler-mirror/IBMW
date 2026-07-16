@@ -1,0 +1,37 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# ibmw-gen project definition for the multi_driver_demo sample.
+#
+# This yaml exists primarily so that scripts/regen_in_tree.sh discovers the
+# sample (via its src/samples/cpp/*/*.ibmw.yaml glob) and re-emits a parallel
+# multi_driver_demo_gen/ tree on every regen pass. The byte-equality of that
+# generated tree is checked by the verification workflow.
+#
+# The actual end-to-end IBMW_USE_DRIVERS exerciser lives in the hand-written
+# managed/multi_driver_module/ subdirectory next to this file. Because the
+# `bare` module type does not know about transport-driver members, the
+# generator stub is intentionally minimal -- it is not the artifact that
+# proves the macro compiles. The hand-written module + pkg + standalone app
+# (built by ../CMakeLists.txt under the IBMW_BUILD_DDS_EXTENSION AND
+# IBMW_BUILD_ICEORYX_EXTENSION double-guard) carry that proof.
+#
+# Usage:
+#   cd src/samples/cpp/multi_driver_demo
+#   python3 ../../../tools/ibmw_gen/ibmw_gen.py \
+#       multi_driver_demo.ibmw.yaml -o multi_driver_demo_gen
+
+schema_version: 2
+project:
+  name: multi_driver_demo
+  namespace: ibmw::examples::cpp::multi_driver_demo
+
+modules:
+  - name: MultiDriverModule
+    type: bare
+
+apps:
+  - name: multi_driver_demo_gen_app
+    type: bare
+    modules:
+      - MultiDriverModule

@@ -1,0 +1,40 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+
+# DDS/ROS2-compatible pub/sub skeleton.
+# Example shape: std_msgs/msg/String over a DDS-compatible ROS2 wire topic.
+# Note: direct_ros2_* modules may emit R10 escape-hatch warnings because this
+# This direct interoperability shape is intentionally transport-coupled.
+schema_version: 2
+project:
+  name: dds_ros2_pubsub
+  namespace: migration_practice
+
+messages:
+  std_msgs::msg::String:
+    wire:
+      ros2:
+        include: "std_msgs/msg/string.hpp"
+        type: "std_msgs/msg/String"
+
+dds_driver:
+  domain_id: 0
+  ros2_compatible_mode: true
+  ros2_topic_prefix: "rt"
+
+modules:
+  - name: PublisherModule
+    type: direct_ros2_publisher
+    topic: "chatter"
+    message: "std_msgs::msg::String"
+  - name: SubscriberModule
+    type: direct_ros2_subscriber
+    topic: "chatter"
+    message: "std_msgs::msg::String"
+
+apps:
+  - name: dds_ros2_pubsub_app
+    modules: [PublisherModule, SubscriberModule]
+  - name: dds_ros2_pub_only_app
+    modules: [PublisherModule]
+  - name: dds_ros2_sub_only_app
+    modules: [SubscriberModule]

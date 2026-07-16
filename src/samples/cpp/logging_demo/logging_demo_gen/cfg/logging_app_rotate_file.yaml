@@ -1,0 +1,29 @@
+# IBMW config for logging_app (App mode, rotate_file)
+#
+# Usage: ./logging_app cfg/logging_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+      - type: rotate_file
+        options:
+          path: ./log
+          filename: logging_demo_rotate_file.log
+          max_file_size_m: 4
+          max_file_num: 10
+
+  scheduling:
+    executors:
+      - name: work_executor
+        type: dedicated
+      - name: sync_timer_executor
+        type: thread_pool
+      - name: log_executor
+        type: thread_pool
+
+  modules:
+    modules:
+      - name: LoggerModule
+        log_level: TRACE

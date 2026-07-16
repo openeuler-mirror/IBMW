@@ -1,0 +1,33 @@
+# Demo 8 — bring-your-own IDL pub/sub (App mode, local transport)
+#
+# Usage: ./my_msg_pubsub_app cfg/my_msg_pubsub_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "my_msg_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "my_msg_topic"
+        enable_drivers: [local]
+
+  modules:
+    modules:
+      - name: MyMsgPublisherModule
+        log_level: INFO
+      - name: MyMsgSubscriberModule
+        log_level: INFO

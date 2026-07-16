@@ -1,0 +1,31 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: log_control_extension
+# Loads log_control extension which registers RPC service for
+# GetModuleLogLevel / SetModuleLogLevel (init/shutdown lifecycle only)
+
+ibmw:
+  extensions:
+    items:
+      - name: log_control_extension
+        path: ./libibmw_log_control.so
+        options: {}
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

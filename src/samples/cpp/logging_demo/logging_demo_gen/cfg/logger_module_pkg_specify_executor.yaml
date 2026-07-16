@@ -1,0 +1,28 @@
+# IBMW config for logging_app (Pkg mode, specify_executor)
+#
+# Usage: ibmw run cfg/logger_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+        options:
+          log_executor_name: log_executor
+
+  scheduling:
+    executors:
+      - name: work_executor
+        type: dedicated
+      - name: sync_timer_executor
+        type: thread_pool
+      - name: log_executor
+        type: thread_pool
+
+  modules:
+    packages:
+      - path: liblogger_module_pkg.so
+        enable_modules: [LoggerModule]
+    modules:
+      - name: LoggerModule
+        log_level: TRACE

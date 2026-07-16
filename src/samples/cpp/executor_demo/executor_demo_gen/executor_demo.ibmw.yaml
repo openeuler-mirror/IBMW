@@ -1,0 +1,116 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# executor_demo — Demonstrates IBMW executor framework patterns:
+#   1. executor_module       — Basic dispatch, thread-safe (strand), timed scheduling
+#   2. executor_co_module    — Coroutine-based dispatch/schedule/timed
+#   3. executor_co_loop_module — Minimal coroutine periodic loop
+#   4. timer_module          — Repeating timer with CreateTimer/Reset/Cancel
+#   5. real_time_module      — Real-time SCHED_FIFO/RR/OTHER, CPU affinity
+#
+# All modules are "bare" type (no transport) — user writes executor logic.
+# ibmw-gen generates the module scaffold + all 5 YAML configs with executor
+# definitions. The user then fills in the actual executor/coroutine code.
+
+schema_version: 2
+project:
+  name: executor_demo
+  namespace: executor_demo
+
+modules:
+  - name: ExecutorModule
+    type: bare
+
+  - name: ExecutorCoModule
+    type: bare
+
+  - name: ExecutorCoLoopModule
+    type: bare
+
+  - name: TimerModule
+    type: bare
+
+  - name: RealTimeModule
+    type: bare
+
+apps:
+  # 1. Basic executor demo — dispatch, strand, timed
+  - name: executor_app
+    type: bare
+    modules: [ExecutorModule]
+    executors:
+      - name: work_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: thread_safe_executor
+        type: strand
+        options:
+          bind_thread_pool_executor_name: work_executor
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  # 2. Coroutine executor demo
+  - name: executor_co_app
+    type: bare
+    modules: [ExecutorCoModule]
+    executors:
+      - name: work_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: thread_safe_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  # 3. Coroutine loop demo
+  - name: executor_co_loop_app
+    type: bare
+    modules: [ExecutorCoLoopModule]
+    executors:
+      - name: time_schedule_executor
+        type: thread_pool
+
+  # 4. Timer demo — repeating timer with reset/cancel
+  - name: executor_timer_app
+    type: bare
+    modules: [TimerModule]
+    executors:
+      - name: timer_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+
+  # 5. Real-time demo — SCHED_FIFO, SCHED_RR, SCHED_OTHER, CPU affinity
+  - name: executor_real_time_app
+    type: bare
+    modules: [RealTimeModule]
+    executors:
+      - name: sched_fifo_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: "SCHED_FIFO:80"
+          thread_bind_cpu: [0, 1]
+          timeout_alarm_threshold_us: 100
+      - name: sched_other_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: "SCHED_OTHER"
+          thread_bind_cpu: [2, 3]
+          timeout_alarm_threshold_us: 100
+      - name: sched_rr_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: "SCHED_RR:80"
+          thread_bind_cpu: [4, 5, 6]
+          timeout_alarm_threshold_us: 100

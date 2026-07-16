@@ -1,0 +1,67 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Module status and exception messages
+//
+// Note: The original protobuf used oneof for StatusValue and map for status_map.
+// DDS IDL does not natively support maps, so we use a sequence of key-value pairs.
+// The StatusValue uses a union to represent the variant types.
+
+#include "Header.idl"
+
+module ibmw {
+  module protocols {
+    module common {
+
+      // Discriminator for status value types
+      enum StatusValueKind {
+        STATUS_BOOL,
+        STATUS_INT,
+        STATUS_DOUBLE,
+        STATUS_STRING,
+        STATUS_BYTES
+      };
+
+      // A variant status value (replaces protobuf oneof)
+      union StatusValue switch (StatusValueKind) {
+        case STATUS_BOOL:
+          boolean bool_value;
+        case STATUS_INT:
+          long long int_value;
+        case STATUS_DOUBLE:
+          double double_value;
+        case STATUS_STRING:
+          string string_value;
+        case STATUS_BYTES:
+          sequence<octet> bytes_value;
+      };
+
+      // Key-value pair for status map entries (replaces protobuf map<string, Status>)
+      struct StatusEntry {
+        string key;
+        StatusValue value;
+      };
+
+      struct ModuleStatus {
+        ibmw::protocols::common::Header header;
+        string from;
+        sequence<StatusEntry> status_entries;
+      };
+
+      // Key-value pair for context map entries
+      struct ContextEntry {
+        string key;
+        string value;
+      };
+
+      struct ModuleException {
+        ibmw::protocols::common::Header header;
+        string from;
+        long long code;
+        string msg;
+        sequence<ContextEntry> context_entries;
+      };
+
+    };
+  };
+};

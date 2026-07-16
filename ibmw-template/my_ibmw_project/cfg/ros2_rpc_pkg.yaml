@@ -1,0 +1,42 @@
+# IBMW config for ros2_rpc_app (Pkg mode)
+#
+# Usage: ibmw run cfg/ros2_rpc_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 4
+      - name: timeout_handle
+        type: timer
+        options:
+          bind_executor: work_thread_pool
+
+  service:
+    drivers:
+      - type: local
+        options:
+          timeout_executor: timeout_handle
+    clients:
+      - func_name: "(.*)"
+        enable_drivers: [local]
+    servers:
+      - func_name: "(.*)"
+        enable_drivers: [local]
+
+  modules:
+    packages:
+      - path: libros2_rpc_pkg.so
+        enable_modules: [Ros2RpcServerModule, Ros2RpcClientModule]
+    modules:
+      - name: Ros2RpcServerModule
+        log_level: INFO
+      - name: Ros2RpcClientModule
+        log_level: INFO

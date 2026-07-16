@@ -1,0 +1,19 @@
+# IBMW config for executor_co_loop_app (App mode)
+#
+# Usage: ./executor_co_loop_app cfg/executor_co_loop_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: time_schedule_executor
+        type: thread_pool
+
+  modules:
+    modules:
+      - name: ExecutorCoLoopModule
+        log_level: INFO

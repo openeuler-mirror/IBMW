@@ -1,0 +1,33 @@
+# IBMW config for json_pubsub_app (App mode)
+#
+# Usage: ./json_pubsub_app cfg/json_pubsub_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "json_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "json_topic"
+        enable_drivers: [local]
+
+  modules:
+    modules:
+      - name: JsonPublisherModule
+        log_level: INFO
+      - name: JsonSubscriberModule
+        log_level: INFO

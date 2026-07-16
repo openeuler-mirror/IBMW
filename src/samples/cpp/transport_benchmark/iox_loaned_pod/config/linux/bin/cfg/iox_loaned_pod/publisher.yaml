@@ -1,0 +1,53 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# iox_loaned_pod publisher process configuration.
+#
+# - bench_options drives the publish loop (size/rate/duration/label).
+# - shm_init_size is sized to comfortably hold one payload chunk so the
+#   warmup phase doesn't stall on iceoryx LoanShm doublings.
+# - runtime_id MUST differ from the subscriber's runtime_id (the iox-roudi
+#   daemon registers each PoshRuntime by id).
+
+ibmw:
+  extensions:
+    items:
+      - name: iceoryx_extension
+        path: ./libibmw_iceoryx_transport.so
+        options:
+          shm_init_size: 4096
+          runtime_id: "iox_loaned_pod_pub"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: iceoryx
+        options:
+          listener_thread_name: "iox_pub_listen"
+
+  modules:
+    modules:
+      - name: IoxLoanedPodPublisherModule
+        log_level: INFO
+
+# Per-module configuration. The Configurator surfaces this subtree to the
+# module via GetConfigFilePath() (config_subsystem.cc serialises just this
+# block into a temp file before handing the path back).
+IoxLoanedPodPublisherModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: iox_loaned_pod_1KB
+    warmup_messages: 50

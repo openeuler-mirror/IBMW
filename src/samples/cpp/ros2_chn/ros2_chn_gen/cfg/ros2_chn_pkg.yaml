@@ -1,0 +1,36 @@
+# IBMW config for ros2_chn_app (Pkg mode)
+#
+# Usage: ibmw run cfg/ros2_chn_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "test_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "test_topic"
+        enable_drivers: [local]
+
+  modules:
+    packages:
+      - path: libros2_chn_pkg.so
+        enable_modules: [NormalPublisherModule, NormalSubscriberModule]
+    modules:
+      - name: NormalPublisherModule
+        log_level: INFO
+      - name: NormalSubscriberModule
+        log_level: INFO

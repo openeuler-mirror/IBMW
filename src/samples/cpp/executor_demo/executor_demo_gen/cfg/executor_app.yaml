@@ -1,0 +1,29 @@
+# IBMW config for executor_app (App mode)
+#
+# Usage: ./executor_app cfg/executor_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: thread_safe_executor
+        type: strand
+        options:
+          bind_thread_pool_executor_name: work_executor
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    modules:
+      - name: ExecutorModule
+        log_level: INFO

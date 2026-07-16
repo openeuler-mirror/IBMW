@@ -1,0 +1,68 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// App-mode entry point for ROS2 pub/sub demo.
+
+#include <csignal>
+#include <iostream>
+
+#include "cpp/core.h"
+#include "engine/engine.h"
+#include "ros2_publisher_module/ros2_publisher_module.h"
+#include "ros2_subscriber_module/ros2_subscriber_module.h"
+
+using namespace ibmw::runtime::core;
+
+Engine* global_core_ptr = nullptr;
+
+void SignalHandler(int sig) {
+  if (global_core_ptr && (sig == SIGINT || sig == SIGTERM)) {
+    global_core_ptr->Shutdown();
+    return;
+  }
+  raise(sig);
+}
+
+int32_t main(int32_t argc, char** argv) {
+  signal(SIGINT, SignalHandler);
+  signal(SIGTERM, SignalHandler);
+
+  std::cout << "ros2_pubsub_app start." << std::endl;
+
+  try {
+    Engine core;
+    global_core_ptr = &core;
+
+    // Register modules
+    my_project::Ros2PublisherModule publisher_module;
+    my_project::Ros2SubscriberModule subscriber_module;
+
+    core.GetModuleBus().RegisterModule(publisher_module.NativeHandle());
+    core.GetModuleBus().RegisterModule(subscriber_module.NativeHandle());
+
+    // Initialize
+    Engine::Options options;
+    if (argc > 1) {
+      options.cfg_file_path = argv[1];
+    } else {
+      std::cerr << "Usage: " << argv[0] << " <config.yaml>" << std::endl;
+      return -1;
+    }
+
+    core.Initialize(options);
+
+    // Start (blocking)
+    std::cout << "Starting engine..." << std::endl;
+    core.Start();
+
+    // Shutdown
+    core.Shutdown();
+    global_core_ptr = nullptr;
+  } catch (const std::exception& e) {
+    std::cerr << "Fatal error: " << e.what() << std::endl;
+    return -1;
+  }
+
+  std::cout << "ros2_pubsub_app exit." << std::endl;
+  return 0;
+}

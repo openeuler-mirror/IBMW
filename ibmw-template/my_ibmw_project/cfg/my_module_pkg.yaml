@@ -1,0 +1,17 @@
+# IBMW config for my_app (Pkg mode)
+#
+# Usage: ibmw run cfg/my_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  modules:
+    packages:
+      - path: libmy_module_pkg.so
+        enable_modules: [MyModule]
+    modules:
+      - name: MyModule
+        log_level: INFO

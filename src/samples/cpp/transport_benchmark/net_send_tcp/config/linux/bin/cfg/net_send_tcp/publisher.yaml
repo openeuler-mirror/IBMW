@@ -1,0 +1,73 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# net_send_tcp publisher process configuration.
+#
+# Standard `ibmw::transport::Send()` over the IBMW native net_extension
+# (libibmw_net_transport.so) using its raw asio TCP transport driver.
+# This is THE non-DDS, non-iceoryx baseline: serialization (CDR via
+# bench_send_payloads.h's GenericDdsPubSubType type support) +
+# kernel TCP socket loopback + custom binary frame format.
+#
+# Differences vs cfg/dds_send_tcp/publisher.yaml:
+#   - extension is net_extension, not dds_extension. No DDS / RTPS at
+#     all. The net tcp driver opens a fresh TCP client connection to
+#     the configured server_url_list and pushes a binary frame
+#     (pattern + serialization_type + ctx-meta + serialized payload).
+#   - publisher does NOT need tcp_options.listen_port (it's a pure
+#     TCP client). Subscriber side opens the listener.
+#   - driver type is "tcp" (vs dds_send_tcp's "dds"). Same Send<T>
+#     userland API; the difference is which transport_bus driver
+#     handles the MessageFrame.
+#   - topic "net_bench_send_tcp_topic" so it cannot collide with any
+#     dds_* sample's RTPS discovery (different protocol stack
+#     entirely, but distinct topic keeps CSV labels clean).
+#
+# The Send-side serialization still goes through
+# bench_send_payloads.h type-support's "cdr" path, so the wire format
+# is byte-equivalent to dds_send_tcp on the payload portion -- only
+# the framing protocol differs (custom binary vs RTPS).
+
+ibmw:
+  extensions:
+    items:
+      - name: net_extension
+        path: ./libibmw_net_transport.so
+        options:
+          thread_num: 2
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: tcp
+        options:
+          publishers:
+            - topic: "net_bench_send_tcp_topic"
+              server_url_list: ["127.0.0.1:5200"]
+    publishers:
+      - topic: "net_bench_send_tcp_topic"
+        enable_drivers: [tcp]
+
+  modules:
+    modules:
+      - name: NetSendTcpPublisherModule
+        log_level: INFO
+
+NetSendTcpPublisherModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: net_send_tcp_1KB
+    warmup_messages: 50

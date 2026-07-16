@@ -1,0 +1,40 @@
+# IBMW config for loaned_pub_iox_app (Pkg mode)
+#
+# Usage: ibmw run cfg/point_iceoryx_loaned_publisher_pkg.yaml
+#
+# Prerequisite: iceoryx RouDi must be running first, e.g.:
+#   nohup ./iox-roudi > /tmp/roudi.log 2>&1 &
+# (kill via:  ps -ef | grep iox-roudi  +  kill -9 <PID>)
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: iceoryx_extension
+        path: libibmw_iceoryx_transport.so
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: iceoryx
+    publishers:
+      - topic: "point_topic"
+        enable_drivers: [iceoryx]
+
+  modules:
+    packages:
+      - path: libpoint_iceoryx_loaned_publisher_pkg.so
+        enable_modules: [PointIceoryxLoanedPublisher]
+    modules:
+      - name: PointIceoryxLoanedPublisher
+        log_level: INFO

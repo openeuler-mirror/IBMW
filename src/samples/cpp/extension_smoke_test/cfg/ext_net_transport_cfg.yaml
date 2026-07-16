@@ -1,0 +1,31 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: net_extension (TCP/HTTP transport)
+# Loads net transport in client-only mode (no external server needed)
+
+ibmw:
+  extensions:
+    items:
+      - name: net_extension
+        path: ./libibmw_net_transport.so
+        options:
+          thread_num: 2
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

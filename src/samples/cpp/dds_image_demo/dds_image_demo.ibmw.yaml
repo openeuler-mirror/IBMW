@@ -1,0 +1,48 @@
+schema_version: 2
+project:
+  name: dds_image_demo
+  namespace: dds_image_demo
+
+messages:
+  ImageMsg: {}
+custom_dds_types:
+  namespace: "ibmw::examples::dds_image_demo"
+
+  constants:
+    - {name: kImageBufferSize, type: uint64, value: 1048576}
+
+  enums:
+    - name: ImageEncoding
+      underlying_type: uint32
+      values:
+        - {name: RGB8, value: 0}
+        - {name: RGBA8, value: 1}
+        - {name: GRAY8, value: 2}
+        - {name: GRAY16, value: 3}
+
+  messages:
+    - name: ImageMsg
+      fields:
+        - {name: frame_id, type: uint64, default: "0"}
+        - {name: timestamp, type: int64, default: "0"}
+        - {name: width, type: uint32, default: "0"}
+        - {name: height, type: uint32, default: "0"}
+        - {name: encoding, type: ImageEncoding, default: "ImageEncoding::RGB8"}
+        - {name: data, type: "array<uint8, kImageBufferSize>"}
+        - {name: data_size, type: uint32, default: "0"}
+
+modules:
+  - name: ImagePublisher
+    type: publisher
+    transport: dds
+    topic: image_topic
+    message: ImageMsg
+  - name: ImageSubscriber
+    type: subscriber
+    transport: dds
+    topic: image_topic
+    message: ImageMsg
+apps:
+  - name: dds_image_app
+    type: pubsub
+    modules: [ImagePublisher, ImageSubscriber]

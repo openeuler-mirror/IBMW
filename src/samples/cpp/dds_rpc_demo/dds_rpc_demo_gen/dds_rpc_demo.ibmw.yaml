@@ -1,0 +1,80 @@
+# ibmw-gen project definition for dds_rpc_demo (DDS RPC demo).
+#
+# Demonstrates the IBMW DDS RPC framework using the pure-DDS service driver
+# (type: dds) — no rcl/rclcpp dependency. The IDL types match the ROS2
+# example_interfaces/srv/AddTwoInts service definition, and the 'srv' field
+# makes the DDS type names ROS2-compatible, enabling transparent interop
+# with native ROS2 service clients/servers via `ros2 service call`.
+#
+# What gets generated:
+#   - DDS IDL type definitions matching AddTwoInts.srv fields
+#   - RPC gencode (serialization wrappers) with ROS2 DDS type names
+#   - A sync RPC server module that handles "AddTwoInts" requests
+#   - A sync RPC client module that sends periodic "AddTwoInts" requests
+#   - Config YAML with dds_extension and dds service driver
+#   - CMake integration with dds_idl_gen + dds_idl_gen_rpc codegen
+#
+# Usage:
+#   python3 <ibmw-gen>/ibmw_gen.py dds_rpc_demo.ibmw.yaml -o dds_rpc_demo_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: dds_rpc_demo
+  namespace: dds_rpc_demo
+
+messages:
+  AddTwoIntsService:
+    wire:
+      dds:
+        service: AddTwoIntsService
+dds_types:
+  namespace: dds_rpc_demo
+  groups:
+    - name: AddTwoInts
+      messages:
+        - name: AddTwoInts_Request
+          fields:
+            - {name: a, type: int64, default: "0"}
+            - {name: b, type: int64, default: "0"}
+        - name: AddTwoInts_Response
+          fields:
+            - {name: sum, type: int64, default: "0"}
+
+  rpc_services:
+    - name: AddTwoIntsService
+      group: AddTwoInts
+      srv: example_interfaces/srv/AddTwoInts
+      methods:
+        - name: AddTwoInts
+          request: AddTwoInts_Request
+          response: AddTwoInts_Response
+
+dds_driver:
+  domain_id: 0
+  ros2_compatible_mode: true
+
+modules:
+  - name: RpcServerModule
+    type: rpc_server
+    transport: dds
+    message: AddTwoIntsService
+  - name: RpcClientModule
+    type: rpc_client
+    transport: dds
+    custom_config:
+      rpc_frq: 2.0
+
+    message: AddTwoIntsService
+apps:
+  - name: dds_rpc_server_app
+    type: rpc
+    modules:
+      - RpcServerModule
+
+  - name: dds_rpc_client_app
+    type: rpc
+    modules:
+      - RpcClientModule

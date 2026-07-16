@@ -1,0 +1,26 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// IMU state message - orientation, angular velocity, linear acceleration
+
+#include "Header.idl"
+#include "Quaternion.idl"
+#include "Vector3.idl"
+
+module ibmw {
+  module protocols {
+    module sensor {
+
+      struct ImuState {
+        ibmw::protocols::common::Header header;
+        ibmw::protocols::geometry::Quaternion orientation;
+        sequence<double> orientation_covariance;           // 9-element 3x3 row-major
+        ibmw::protocols::geometry::Vector3 angular_velocity;
+        sequence<double> angular_velocity_covariance;      // 9-element 3x3 row-major
+        ibmw::protocols::geometry::Vector3 linear_acceleration;
+        sequence<double> linear_acceleration_covariance;   // 9-element 3x3 row-major
+      };
+
+    };
+  };
+};

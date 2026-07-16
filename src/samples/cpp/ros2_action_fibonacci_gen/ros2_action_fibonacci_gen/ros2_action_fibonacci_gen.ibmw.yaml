@@ -1,0 +1,26 @@
+# ibmw-gen project definition for the experimental Fibonacci Action proof.
+#
+# Generates a private DDS-only ROS2-compatible Action proof for
+# example_interfaces/action/Fibonacci. This is intentionally not a generic
+# .action parser and does not add public action_server/action_client module
+# types.
+#
+# Usage:
+#   python3 <ibmw-gen>/ibmw_gen.py ros2_action_fibonacci_gen.ibmw.yaml -o ros2_action_fibonacci_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: ros2_action_fibonacci_gen
+  namespace: ibmw::examples::cpp::ros2_action_fibonacci
+
+modules: []
+apps: []
+
+experimental_actions:
+  - name: fibonacci
+    action: example_interfaces/action/Fibonacci
+    transport: dds
+    roles: [server, client]

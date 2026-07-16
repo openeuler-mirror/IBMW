@@ -1,0 +1,11 @@
+  // IBMW_PUBSUB_BARE_BODY_BEGIN
+  MW_INFO("ExecutorModule::Setup succeeded.");
+  return true;
+  // IBMW_PUBSUB_BARE_BODY_END
+  // IBMW_PUBSUB_BARE_BODY_BEGIN
+  MW_INFO("ExecutorModule::Run succeeded.");
+  return true;
+  // IBMW_PUBSUB_BARE_BODY_END
+  // IBMW_PUBSUB_BARE_BODY_BEGIN
+  MW_INFO("ExecutorModule::Stop succeeded.");
+  // IBMW_PUBSUB_BARE_BODY_END

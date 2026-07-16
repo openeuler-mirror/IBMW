@@ -1,0 +1,21 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+  scheduling:
+    executors:
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+  modules:
+    packages:
+      - path: ./libcontext_pkg.so
+        enable_modules: [ContextExecutorModule]
+    modules:
+      - name: ContextExecutorModule
+        log_level: INFO

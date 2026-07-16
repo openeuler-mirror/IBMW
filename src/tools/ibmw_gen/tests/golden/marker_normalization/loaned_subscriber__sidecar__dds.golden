@@ -1,0 +1,11 @@
+  // IBMW_PUBSUB_LOANED_SUBSCRIBER_BODY_BEGIN
+  // IBMW: user code begin (on_message_body)
+  // Default impl: log every 5th message. Override in a subclass or
+  // edit in place to do real work. msg is non-null on entry.
+  uint64_t count = received_.load();
+  if (count <= 3 || (count % 5 == 0)) {
+    MW_INFO("[RECV] {} #{} ptr={}",
+            "point_topic", count, static_cast<const void*>(msg.get()));
+  }
+  // IBMW: user code end (on_message_body)
+  // IBMW_PUBSUB_LOANED_SUBSCRIBER_BODY_END

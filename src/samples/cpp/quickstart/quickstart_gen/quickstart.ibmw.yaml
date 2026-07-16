@@ -1,0 +1,27 @@
+# ibmw-gen project definition for quickstart demo.
+#
+# Generates a minimal "Hello World" IBMW module with:
+#   - One bare module (HelloWorldModule) — no transport, no RPC
+#   - App mode (standalone executable)
+#   - Pkg mode (shared library for ibmw run)
+#
+# Usage:
+#   python3 <ibmw-gen>/ibmw_gen.py quickstart.ibmw.yaml -o quickstart_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: quickstart
+  namespace: ibmw::examples::cpp::helloworld
+
+modules:
+  - name: HelloWorldModule
+    type: bare
+
+apps:
+  - name: helloworld_app
+    type: bare
+    modules:
+      - HelloWorldModule

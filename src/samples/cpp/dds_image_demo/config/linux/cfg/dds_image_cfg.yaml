@@ -1,0 +1,63 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# DDS Image Demo configuration
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      # ASIO thread pool executor for async image processing
+      - name: image_processor
+        type: thread_pool
+        options:
+          thread_num: 4
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+                # Enable data sharing for zero-copy
+                data_sharing: auto
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+                # Enable data sharing for zero-copy
+                data_sharing: auto
+
+    publishers:
+      - topic: "image_topic"
+        enable_drivers: [dds]
+
+    subscribers:
+      - topic: "image_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: ImagePublisherModule
+        log_level: INFO
+      - name: ImageSubscriberModule
+        log_level: INFO

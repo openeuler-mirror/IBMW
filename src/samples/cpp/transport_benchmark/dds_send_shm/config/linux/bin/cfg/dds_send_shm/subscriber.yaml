@@ -1,0 +1,60 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# dds_send_shm subscriber process configuration.
+#
+# bench_options.payload_bytes / hz / duration_sec MUST match
+# publisher.yaml (subscriber uses them to pre-size LatencyStats and
+# label CSV rows). csv_path receives one summary row per run; multiple
+# runs append.
+#
+# domain_id 43 MUST match publisher.yaml; ros2_compatible:false MUST
+# match too (driver suffixes "_native_<sanitized_msg_type>" for the
+# 5 typed slots, see dds_loaned NOTES).
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 43
+          transport_policy: shm_only
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 43
+          ros2_compatible: false
+    subscribers:
+      - topic: "dds_bench_send_shm_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: DdsSendSubscriberModule
+        log_level: INFO
+
+DdsSendSubscriberModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    message_count: 0
+    start_delay_ms: 0
+    label: dds_send_shm_1KB
+    warmup_messages: 50
+    csv_path: /tmp/ibmw_bench/iox_bench_lat.csv

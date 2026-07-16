@@ -1,0 +1,52 @@
+# IBMW config for dds_rpc_server_app (App mode)
+#
+# Usage: ./dds_rpc_server_app cfg/dds_rpc_server_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: timeout_handle
+        type: timer
+        options:
+          bind_executor: work_thread_pool
+
+  service:
+    drivers:
+      - type: dds
+        options:
+          ros2_compatible: true
+          timeout_executor: timeout_handle
+      - type: local
+        options:
+          timeout_executor: timeout_handle
+    clients:
+      - func_name: "(.*)"
+        enable_drivers: [dds, local]
+    servers:
+      - func_name: "(.*)"
+        enable_drivers: [dds, local]
+
+  modules:
+    modules:
+      - name: RpcServerModule
+        log_level: INFO

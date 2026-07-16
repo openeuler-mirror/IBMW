@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ibmw_msgs</name>
+  <version>0.1.0</version>
+  <description>Supplemental ROS2 msgs package for IBMW (IB Middleware)</description>
+
+  <maintainer email="fanglinxu@huawei.com">IB-Robot Group &amp; openEuler Embedded SIG &amp; openharmony-robot sig_RoboFrame</maintainer>
+
+  <license>Apache License 2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <depend>builtin_interfaces</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

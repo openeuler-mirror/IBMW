@@ -1,0 +1,30 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: parallel executor type
+# Tests the "parallel" executor type (TBB-based parallel thread pool)
+# which is registered by the core but has no existing demo coverage.
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: parallel_exec
+        type: parallel
+        options:
+          thread_num: 4
+          queue_threshold: 10000
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

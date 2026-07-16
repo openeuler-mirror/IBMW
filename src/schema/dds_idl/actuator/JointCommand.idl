@@ -1,0 +1,32 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Joint command messages
+//
+// Note: In the original IBMW protobuf, this was under package
+// ibmw.protocols.sensor (not actuator). We correct this to use
+// the actuator module to match the directory structure.
+
+#include "Header.idl"
+
+module ibmw {
+  module protocols {
+    module actuator {
+
+      struct JointCommand {
+        string name;
+        double position;
+        double velocity;
+        double effort;
+        double stiffness;
+        double damping;
+      };
+
+      struct JointCommandArray {
+        ibmw::protocols::common::Header header;
+        sequence<JointCommand> joints;
+      };
+
+    };
+  };
+};

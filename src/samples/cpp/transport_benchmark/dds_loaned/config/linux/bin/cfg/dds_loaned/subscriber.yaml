@@ -1,0 +1,70 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# dds_loaned subscriber process configuration.
+#
+# bench_options.payload_bytes / hz / duration_sec MUST match publisher.yaml
+# (subscriber uses them to pre-size LatencyStats and label CSV rows).
+# csv_path receives one summary row per run; multiple runs append.
+# domain_id MUST match publisher.yaml.
+# enable_data_sharing MUST match publisher.yaml so writer/reader QoS
+# negotiate to the same DataSharing transport (otherwise the reader
+# silently falls back to SHM/Intraprocess).
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 42
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 42
+          ros2_compatible: false
+          enable_data_sharing: true
+          subscribers:
+            - topic: "dds_bench_loaned_topic"
+              executor: work_thread_pool
+              loan_mode: async
+            - topic: ".*BenchPlainPayload4KB"
+              qos:
+                history: keep_last
+                depth: 8192
+                reliability: reliable
+                durability: volatile
+    subscribers:
+      # Route the dds_loaned topic to the dds driver so OnMessage<>
+      # wires through the FastDDS DataReader (and not through the
+      # default 'local' fallback which would silently never deliver).
+      - topic: "dds_bench_loaned_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: DdsLoanedSubscriberModule
+        log_level: INFO
+
+DdsLoanedSubscriberModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: dds_loaned_1KB
+    warmup_messages: 50
+    csv_path: /tmp/ibmw_bench/iox_bench_lat.csv

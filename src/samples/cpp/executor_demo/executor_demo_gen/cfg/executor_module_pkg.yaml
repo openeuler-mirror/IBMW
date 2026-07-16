@@ -1,0 +1,32 @@
+# IBMW config for executor_app (Pkg mode)
+#
+# Usage: ibmw run cfg/executor_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: thread_safe_executor
+        type: strand
+        options:
+          bind_thread_pool_executor_name: work_executor
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: libexecutor_module_pkg.so
+        enable_modules: [ExecutorModule]
+    modules:
+      - name: ExecutorModule
+        log_level: INFO

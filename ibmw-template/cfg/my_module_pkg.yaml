@@ -1,0 +1,20 @@
+# IBMW Pkg-mode config for my_module
+#
+# Usage: ibmw run cfg/my_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+  modules:
+    packages:
+      - path: ./libmy_module_pkg.so
+    modules:
+      - name: MyModule
+        log_level: INFO
+
+# Module custom configuration (accessible via core.GetConfigurator())
+MyModule:
+  greeting: "Hello from IBMW!"
+  count: 42

@@ -1,0 +1,49 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# iceoryx_inproc_demo: single-process pub + sub over Iceoryx shared memory.
+#
+# shm_init_size is set very small (256 bytes) so that publishing 1 KB / 16 KB
+# / 256 KB / 1 MB payloads triggers multiple LoanShm doubling cycles. Watch
+# the iceoryx logs for "Loan ... bytes" messages — each large payload should
+# walk through ~8-12 size doublings before fitting.
+
+ibmw:
+  extensions:
+    items:
+      - name: iceoryx_extension
+        path: ./libibmw_iceoryx_transport.so
+        options:
+          shm_init_size: 256        # bytes, intentionally tiny — exercises grow path
+          runtime_id: ""            # empty -> fallback "iceoryx<pid>" (single process)
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: iceoryx
+        options:
+          listener_thread_name: "iox_listen"
+    publishers:
+      - topic: "compressed_image_topic"
+        enable_drivers: [iceoryx]
+    subscribers:
+      - topic: "compressed_image_topic"
+        enable_drivers: [iceoryx]
+
+  modules:
+    modules:
+      - name: PublisherModule
+        log_level: INFO
+      - name: SubscriberModule
+        log_level: INFO

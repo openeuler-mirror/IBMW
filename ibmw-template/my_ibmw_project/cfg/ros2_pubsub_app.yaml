@@ -1,0 +1,33 @@
+# IBMW config for ros2_pubsub_app (App mode)
+#
+# Usage: ./ros2_pubsub_app cfg/ros2_pubsub_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "ros2_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "ros2_topic"
+        enable_drivers: [local]
+
+  modules:
+    modules:
+      - name: Ros2PublisherModule
+        log_level: INFO
+      - name: Ros2SubscriberModule
+        log_level: INFO

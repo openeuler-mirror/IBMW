@@ -1,0 +1,204 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <unordered_map>
+
+#include "c/util/function_base.h"
+#include "engine/transport/loaned_sample_handle.h"
+#include "engine/transport/transport_driver.h"
+#include "engine/transport/transport_framework_async_filter.h"
+#include "engine/transport/transport_catalog.h"
+#include "base/log_util.h"
+
+namespace ibmw::runtime::core::transport {
+
+struct RegisterSendTypeAccessInfoWrapper {
+  std::string_view pkg_path;
+  std::string_view module_name;
+  std::string_view topic_name;
+
+  const ibmw_type_support_base_t* msg_type_support;
+};
+
+struct SendAccessInfoWrapper {
+  std::string_view pkg_path;
+  std::string_view module_name;
+  std::string_view topic_name;
+
+  ibmw_string_view_t msg_type;
+  const ibmw_transport_context_base_t* ctx_ptr;
+  const void* msg_ptr;
+};
+
+// Phase 7 §7.3 §K-3.3: dispatcher-level Loan op input.
+//
+// Carries the same identification quad as SendAccessInfoWrapper plus the
+// requested loan size and wire-format mode. The dispatcher uses the quad
+// to look up the registered SendTypeWrapper (which in turn carries the
+// cached driver vector populated at RegisterSendType time), then asks
+// the first driver whose LoanSample() returns true to fill in the
+// returned handle. The hot path therefore intentionally bypasses the
+// per-message ctx-meta KV writes (pub_seq / pub_ts) and the publish
+// filter chain — Loan() is the user-level zero-copy fast lane and
+// trades observability hooks for raw throughput. See NOTES §7.3 §F.
+struct LoanAccessInfoWrapper {
+  std::string_view pkg_path;
+  std::string_view module_name;
+  std::string_view topic_name;
+
+  ibmw_string_view_t msg_type;
+  size_t requested_size;
+  LoanMode mode;
+};
+
+struct MessageHandlerAccessInfoWrapper {
+  std::string_view pkg_path;
+  std::string_view module_name;
+  std::string_view topic_name;
+
+  const ibmw_type_support_base_t* msg_type_support;
+  ibmw_function_base_t* callback;
+};
+
+class TransportDriverDispatcher {
+ public:
+  enum class State : uint32_t {
+    kPreInit,
+    kInit,
+    kStart,
+    kShutdown,
+  };
+
+ public:
+  TransportDriverDispatcher()
+      : logger_ptr_(std::make_shared<ibmw::common::util::LoggerWrapper>()) {}
+  ~TransportDriverDispatcher() = default;
+
+  TransportDriverDispatcher(const TransportDriverDispatcher&) = delete;
+  TransportDriverDispatcher& operator=(const TransportDriverDispatcher&) = delete;
+
+  void Initialize();
+  void Start();
+  void Shutdown();
+
+  State GetState() const { return state_.load(); }
+
+  void SetLogger(const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr) { logger_ptr_ = logger_ptr; }
+  const ibmw::common::util::LoggerWrapper& GetLogger() const { return *logger_ptr_; }
+
+  void SetTransportCatalog(TransportCatalog* transport_catalog_ptr);
+
+  void SetPublishFiltersRules(
+      const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+  void SetSubscribeFiltersRules(
+      const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+
+  void SetPublishFrameworkAsyncTransportFilterBus(FrameworkAsyncTransportFilterBus* ptr);
+  void SetSubscribeFrameworkAsyncTransportFilterBus(FrameworkAsyncTransportFilterBus* ptr);
+
+  void SetPubTopicsDriversRules(
+      const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+  void SetSubTopicsDriversRules(
+      const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+
+  void RegisterTransportDriver(TransportDriver* transport_driver_ptr);
+
+  // for access
+  bool OnMessage(MessageHandlerAccessInfoWrapper&& wrapper);
+  bool RegisterSendType(RegisterSendTypeAccessInfoWrapper&& wrapper);
+  void Send(SendAccessInfoWrapper&& wrapper);
+
+  // Phase 7 §7.3 §U: receiver-side zero-copy fast lane (counterpart of
+  // Loan() below). Iterates the sub-topic driver list and asks each
+  // driver's AttachLoaned() in turn until one returns true. Returns
+  // false if no driver supports zero-copy receive for this topic+type
+  // (e.g. only dds is bound to the topic). Caller (typically
+  // LoanedSubscriber<T>) is expected to fall back to OnMessage() in
+  // that case.
+  bool AttachLoaned(MessageHandlerAccessInfoWrapper&& wrapper);
+
+  // Phase 7 §7.3 §K-3.3: user-level zero-copy fast lane.
+  //
+  // Loan() returns an empty handle (user_payload_ptr == nullptr) on any
+  // failure: state mismatch, unregistered type, no driver supports loan
+  // for this (topic, mode). Callers MUST check user_payload_ptr before
+  // writing.
+  //
+  // PublishLoaned() / ReleaseLoaned() route through handle.source_driver
+  // populated by the issuing driver. Both clear source_driver on
+  // completion so a double-publish/release becomes an obvious null
+  // dereference rather than silent UB. Both are no-ops on an empty
+  // handle (source_driver == nullptr).
+  LoanedSampleHandle Loan(LoanAccessInfoWrapper&& wrapper);
+  void PublishLoaned(LoanedSampleHandle& handle);
+  void ReleaseLoaned(LoanedSampleHandle& handle);
+
+  // for framework
+  bool OnMessage(MessageHandlerWrapper&& wrapper);
+  bool RegisterSendType(SendTypeWrapper&& wrapper);
+  void Send(MessageFrame&& wrapper);
+
+  using TopicDriverInfoMap = std::unordered_map<std::string_view, std::vector<std::string_view>>;
+  TopicDriverInfoMap GetPubTopicDriverInfo() const;
+  TopicDriverInfoMap GetSubTopicDriverInfo() const;
+
+ private:
+  std::vector<TransportDriver*> GetDriversByRules(
+      std::string_view topic_name,
+      const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+
+  std::vector<std::string> GetFilterRules(
+      std::string_view topic_name,
+      const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+
+ private:
+  std::atomic<State> state_ = State::kPreInit;
+  uint64_t sub_topic_index_ = 0;
+  uint64_t pub_topic_index_ = 0;
+
+  std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_;
+
+  TransportCatalog* transport_catalog_ptr_;
+
+  // filter
+  std::vector<std::pair<std::string, std::vector<std::string>>> publish_filters_rules_;
+  std::vector<std::pair<std::string, std::vector<std::string>>> subscribe_filters_rules_;
+
+  FrameworkAsyncTransportFilterBus* publish_filter_bus_ptr_ = nullptr;
+  FrameworkAsyncTransportFilterBus* subscribe_filter_bus_ptr_ = nullptr;
+
+  // driver
+  std::vector<TransportDriver*> transport_driver_index_vec_;
+
+  std::vector<std::pair<std::string, std::vector<std::string>>> pub_topics_drivers_rules_;
+  std::vector<std::pair<std::string, std::vector<std::string>>> sub_topics_drivers_rules_;
+
+  std::unordered_map<
+      std::string,
+      std::vector<TransportDriver*>,
+      ibmw::common::util::StringHash,
+      std::equal_to<>>
+      pub_topics_driver_index_map_;
+
+  std::unordered_map<
+      std::string,
+      std::vector<TransportDriver*>,
+      ibmw::common::util::StringHash,
+      std::equal_to<>>
+      sub_topics_driver_index_map_;
+
+  std::unordered_map<
+      std::string,
+      std::atomic<uint32_t>,
+      ibmw::common::util::StringHash,
+      std::equal_to<>>
+      pub_topic_seq_map_;
+};
+
+}  // namespace ibmw::runtime::core::transport

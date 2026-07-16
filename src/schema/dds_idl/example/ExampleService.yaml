@@ -1,0 +1,27 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# Service definition for DDS IDL RPC code generation.
+# This file defines RPC services based on DDS IDL message types.
+#
+# The dds_idl_gen_rpc tool reads this YAML file to generate C++ RPC
+# wrappers (service classes, proxy classes, etc.) that use DDS CDR
+# serialization via ibmw::dds::GetDdsMessageTypeSupport<>().
+
+# IDL file that contains the request/response struct definitions
+idl_file: ExampleRpc.idl
+
+# Module path (matches IDL module hierarchy)
+# This is used to construct the C++ namespace and the service name
+module: ibmw.protocols.example
+
+# List of services defined in this module
+services:
+  - name: ExampleService
+    methods:
+      - name: GetFooData
+        request: GetFooDataReq
+        response: GetFooDataRsp
+      - name: GetBarData
+        request: GetBarDataReq
+        response: GetBarDataRsp

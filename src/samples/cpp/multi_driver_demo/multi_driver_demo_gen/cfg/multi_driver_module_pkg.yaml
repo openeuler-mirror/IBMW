@@ -1,0 +1,17 @@
+# IBMW config for multi_driver_demo_gen_app (Pkg mode)
+#
+# Usage: ibmw run cfg/multi_driver_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  modules:
+    packages:
+      - path: libmulti_driver_module_pkg.so
+        enable_modules: [MultiDriverModule]
+    modules:
+      - name: MultiDriverModule
+        log_level: INFO

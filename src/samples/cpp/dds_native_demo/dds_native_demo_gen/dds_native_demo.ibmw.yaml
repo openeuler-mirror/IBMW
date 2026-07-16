@@ -1,0 +1,32 @@
+schema_version: 2
+project:
+  name: dds_native_demo
+  namespace: dds_native_demo
+
+messages:
+  HelloMsg: {}
+custom_dds_types:
+  namespace: "ibmw::examples::dds_native_demo"
+  messages:
+    - name: HelloMsg
+      constructor_args: true
+      fields:
+        - {name: id, type: uint64, default: "0"}
+        - {name: message, type: string}
+        - {name: timestamp, type: int64, default: "0"}
+
+modules:
+  - name: PublisherModule
+    type: publisher
+    transport: dds
+    topic: hello_topic
+    message: HelloMsg
+  - name: SubscriberModule
+    type: subscriber
+    transport: dds
+    topic: hello_topic
+    message: HelloMsg
+apps:
+  - name: dds_native_app
+    type: pubsub
+    modules: [PublisherModule, SubscriberModule]

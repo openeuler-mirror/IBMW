@@ -1,0 +1,18 @@
+# IBMW App-mode config for my_app
+#
+# Usage: ./my_app cfg/my_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+  modules:
+    modules:
+      - name: MyModule
+        log_level: INFO
+
+# Module custom configuration
+MyModule:
+  greeting: "Hello from IBMW App mode!"
+  count: 42

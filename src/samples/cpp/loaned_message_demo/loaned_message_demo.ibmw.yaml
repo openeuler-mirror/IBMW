@@ -1,0 +1,61 @@
+# ibmw-gen project definition for loaned_publisher + loaned_subscriber demo (DDS).
+#
+# Generates a publisher module that uses the DDS LoanedMessage zero-copy
+#      API (Ros2StylePublisher / borrow_loaned_message).
+# Also generates a subscriber module that consumes the same topic via
+#      ibmw::ros2::transport::OnMessage<T> — the user only fills in
+#      OnMessage(const std::shared_ptr<const T>&) override.
+#
+# Two apps are emitted so publisher and subscriber run as separate processes
+# (matches the standalone golden in
+# transport_benchmark/dds_loaned/standalone/{publisher_app,subscriber_app}/).
+#
+# Usage:
+#   cd ibmw/src/samples/cpp/loaned_message_demo
+#   python3 ../../../tools/ibmw_gen/ibmw_gen.py \
+#       loaned_message_demo.ibmw.yaml -o loaned_message_demo_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: loaned_message_demo_gen
+  namespace: ibmw::examples::loaned_message_demo_gen
+
+messages:
+  geometry_msgs::msg::Point: {}
+modules:
+  - name: PointLoanedPublisher
+    type: loaned_publisher
+    transport: dds
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+    # ros2_msg_include / ros2_package are auto-derived from
+    #   message = "geometry_msgs::msg::Point" →
+    #     ros2_package      = "geometry_msgs"
+    #     ros2_msg_include  = "geometry_msgs/msg/point.hpp"
+    # ros2_type_name auto-derived as "geometry_msgs/msg/Point".
+    # dds_type_name defaults to ros2_type_name.
+    zero_copy_config: auto
+
+  # Subscriber side. transport=dds → callback signature is
+  # OnMessage(const std::shared_ptr<const geometry_msgs::msg::Point>&).
+  - name: PointLoanedSubscriber
+    type: loaned_subscriber
+    transport: dds
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+    # subscriber_style defaults to "callback" (the only implemented style).
+    # ros2_msg_include / ros2_package are auto-derived.
+
+apps:
+  - name: loaned_pub_app
+    type: pubsub
+    modules:
+      - PointLoanedPublisher
+
+  - name: loaned_sub_app
+    type: pubsub
+    modules:
+      - PointLoanedSubscriber

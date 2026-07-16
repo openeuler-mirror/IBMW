@@ -1,0 +1,21 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+ibmw:
+  logging:
+    core_level: INFO # Trace/Debug/Info/Warn/Error/Fatal/Off
+    backends:
+      - type: console
+  scheduling:
+    executors:
+      - name: timer_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+  modules:
+    packages:
+      - path: ./libexecutor_pkg.so
+        enable_modules: [TimerModule]
+    modules:
+      - name: TimerModule
+        log_level: INFO

@@ -1,0 +1,106 @@
+# =============================================================================
+# IBMW (Intelligence Boom Middleware) public repository
+# =============================================================================
+
+# ---- CMake / build artifacts ------------------------------------------------
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.gch
+*.pch
+*.d
+
+# ---- FetchContent / external sources ---------------------------------------
+_deps/
+.deps/
+external/_build/
+
+# ---- Caches -----------------------------------------------------------------
+.cache/
+.ccache/
+.sccache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# ---- IDE / editor -----------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.clangd/
+.cache/clangd/
+.ccls-cache/
+
+# ---- ROS2 / colcon ----------------------------------------------------------
+log/
+install/
+.colcon/
+COLCON_IGNORE
+
+# ---- Logs / runtime ---------------------------------------------------------
+*.log
+*.log.*
+core
+core.*
+*.pid
+/cfg/
+
+# ---- Bench / report local artifacts -----------------------------------------
+bench_results/
+*.bench.json
+perf.data
+perf.data.old
+
+# ---- Python virtualenv ------------------------------------------------------
+venv/
+.venv/
+env/
+
+# ---- Local user overrides ---------------------------------------------------
+*.local
+local.cmake
+.envrc
+.omc/
+
+# ---- Generated regen tmp ----------------------------------------------------
+*.regen.tmp
+*.regen.bak
+
+# ---- Source allowlist exceptions --------------------------------------------
+# Source trees that collide with broad ignore rules above
+# (`core` matches src/core/ runtime engine; `core.*` matches src/api/cpp/core.h
+#  public header; `install/` matches CLI jinja templates dir).
+!src/core/
+!src/core/**
+!src/api/cpp/core.h
+!src/tools/ibmw_cli/ibmw_cli/templates/install/
+!src/tools/ibmw_cli/ibmw_cli/templates/install/**

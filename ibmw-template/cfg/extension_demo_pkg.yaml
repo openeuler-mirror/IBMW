@@ -1,0 +1,49 @@
+# IBMW Extension loading demo
+#
+# This config demonstrates how to load IBMW extensions (plugins) via YAML.
+# Extensions provide additional transport drivers, services, or features.
+#
+# In this example we load the echo_driver extension, which echoes published
+# messages back to subscribers on the same topic — useful for testing.
+#
+# Prerequisites:
+#   - IBMW must be installed with libibmw_echo_driver.so available
+#
+# Usage (pkg mode):
+#   ibmw run cfg/extension_demo_pkg.yaml
+#
+# NOTE: Adjust the `path` under extensions.items to point to your IBMW
+#       installation's extension .so files.
+
+ibmw:
+  # ── Extensions ─────────────────────────────────────────────────────────
+  # Extensions are loaded before any modules. Each extension must specify:
+  #   - name:    Must match the extension's internal Name() exactly
+  #   - path:    Path to the shared library (.so)
+  #   - options: Extension-specific configuration (can be empty {})
+  extensions:
+    items:
+      # Path to the extension .so — adjust based on your IBMW installation.
+      # If running from the IBMW build/bin/ directory, use: ./libibmw_echo_driver.so
+      - name: echo_extension
+        path: ./libibmw_echo_driver.so
+        options: {}
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: ./libmy_module_pkg.so
+    modules:
+      - name: MyModule
+        log_level: INFO

@@ -1,0 +1,49 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# ros2_point_demo — Demonstrates IBMW publishing/subscribing ROS2
+# geometry_msgs::msg::Point messages over DDS transport with
+# ros2_compatible_mode, enabling zero-copy optimized interop with
+# native ROS2 nodes.
+#
+# Uses the low-level ibmw::ros2::transport::* APIs (RegisterSendType, Send,
+# OnMessage) for direct ROS2 DDS wire-compatibility.
+
+schema_version: 2
+project:
+  name: ros2_point_demo
+  namespace: ros2_point_demo
+
+# DDS driver with ROS2 interoperability settings.
+messages:
+  geometry_msgs::msg::Point:
+    wire:
+      ros2:
+        include: "geometry_msgs/msg/point.hpp"
+        type: "geometry_msgs/msg/Point"
+        packages: [geometry_msgs]
+dds_driver:
+  domain_id: 0
+  ros2_compatible_mode: true
+  ros2_topic_prefix: "rt"
+
+executors:
+  - name: simple_thread_executor
+    type: dedicated
+    options:
+      thread_num: 4
+
+modules:
+  - name: PointPublisherModule
+    type: direct_ros2_publisher
+    topic: "point_topic"
+    message: "geometry_msgs::msg::Point"
+
+  - name: PointSubscriberModule
+    type: direct_ros2_subscriber
+    topic: "point_topic"
+    message: "geometry_msgs::msg::Point"
+
+apps:
+  - name: ros2_point_app
+    modules: [PointPublisherModule, PointSubscriberModule]

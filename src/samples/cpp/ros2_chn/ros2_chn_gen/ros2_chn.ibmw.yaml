@@ -1,0 +1,45 @@
+# ibmw-gen project definition for ros2_chn (ROS2 channel pub/sub demo).
+#
+# Generates the ROS2 pub/sub portion of the ros2_chn demo using
+# ibmw-gen's unified module model. Covers the "normal" publisher and
+# subscriber modules (NormalPublisherModule / NormalSubscriberModule).
+#
+# NOTE: The benchmark publisher/subscriber modules are NOT included
+# because they require heavy custom config parsing, dynamic executor
+# pools, and multi-topic benchmarking logic that ibmw-gen does not
+# model in its v1 schema.
+#
+# Usage:
+#   python3 <ibmw-gen>/ibmw_gen.py ros2_chn.ibmw.yaml -o ros2_chn_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: ros2_chn
+  namespace: ros2_chn_demo
+
+messages:
+  example_ros2::msg::RosTestMsg:
+    wire:
+      ros2:
+        include: "example_ros2/msg/ros_test_msg.hpp"
+        package: example_ros2
+modules:
+  - name: NormalPublisherModule
+    type: publisher
+    transport: ros2
+    topic: test_topic
+    message: "example_ros2::msg::RosTestMsg"
+  - name: NormalSubscriberModule
+    type: subscriber
+    transport: ros2
+    topic: test_topic
+    message: "example_ros2::msg::RosTestMsg"
+apps:
+  - name: ros2_chn_app
+    type: pubsub
+    modules:
+      - NormalPublisherModule
+      - NormalSubscriberModule

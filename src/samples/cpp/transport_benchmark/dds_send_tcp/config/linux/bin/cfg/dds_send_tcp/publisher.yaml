@@ -1,0 +1,74 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# dds_send_tcp publisher process configuration.
+#
+# Standard `ibmw::transport::Send()` over the dds extension. The driver
+# CDR-serializes the BenchSendPayload<N> via GenericDdsPubSubType<T>::
+# serialize (FastCDR free-function path), then FastDDS carries the
+# bytes over its TCPv4 transport. The publish path is NOT zero-copy --
+# CDR encode + transport-side copy + kernel TCP socket buffer copy.
+#
+# Differences vs cfg/dds_send_shm/publisher.yaml:
+#   - transport_policy: tcp_only forces the dds_extension to disable
+#     FastDDS builtin transports and register a single
+#     TCPv4TransportDescriptor with add_listener_port(tcp_port).
+#     initialPeers points back at 127.0.0.1:tcp_port so discovery
+#     stays inside the loopback adapter.
+#   - domain_id 44 (vs dds_send_shm's 43) keeps RTPS discovery from
+#     cross-talking with the SHM-only sample if both run.
+#   - topic "dds_bench_send_tcp_topic" so CSV labels and subscriber
+#     routing stay clean. The bench_send_payloads.h type bank is shared
+#     with dds_send_shm; isolation is provided by domain_id + topic, not
+#     by the DDS type-name (both samples advertise "..._NonPlain").
+#
+# The `messaging.publishers` routing rule is REQUIRED: without it the
+# default routing picks 'local' and Send() never reaches the dds
+# driver (see iox_loaned_ctx NOTES section 6.2.3 issue #5).
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 44
+          transport_policy: tcp_only
+          tcp_listen_port: 5100
+          tcp_peer_port: 5101
+          tcp_addr: "127.0.0.1"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 44
+          ros2_compatible: false
+    publishers:
+      - topic: "dds_bench_send_tcp_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: DdsSendPublisherModule
+        log_level: INFO
+
+DdsSendPublisherModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: dds_send_tcp_1KB
+    warmup_messages: 50

@@ -1,0 +1,35 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Benchmark message types for performance testing
+
+module ibmw {
+  module protocols {
+    module example {
+
+      enum BenchmarkStatus {
+        Begin,
+        End,
+        WarmUp
+      };
+
+      struct BenchmarkSignal {
+        ibmw::protocols::example::BenchmarkStatus status;
+        unsigned long bench_plan_id;
+        string mode;
+        unsigned long topic_number;
+        unsigned long parallel_number;
+        unsigned long send_num;
+        unsigned long message_size;
+        unsigned long send_frequency;
+      };
+
+      struct BenchmarkMessage {
+        unsigned long seq;
+        unsigned long long timestamp;
+        sequence<octet> data;
+      };
+
+    };
+  };
+};

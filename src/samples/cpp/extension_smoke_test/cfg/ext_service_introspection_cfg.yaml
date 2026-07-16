@@ -1,0 +1,34 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: service_introspection_extension
+# Loads service_introspection extension which registers client/server RPC filters
+# and transport publishers for introspection data.
+# Requires client_info_topic_name and server_info_topic_name (both mandatory).
+
+ibmw:
+  extensions:
+    items:
+      - name: service_introspection_extension
+        path: ./libibmw_service_introspection.so
+        options:
+          client_info_topic_name: /ibmw/service_introspection/client_info
+          server_info_topic_name: /ibmw/service_introspection/server_info
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

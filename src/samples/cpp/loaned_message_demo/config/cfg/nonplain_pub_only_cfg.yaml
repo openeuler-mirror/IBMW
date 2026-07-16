@@ -1,0 +1,52 @@
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: simple_thread_executor
+        type: dedicated
+        options:
+          thread_num: 2
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 0
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+
+    publishers:
+      - topic: "string_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: NonPlainPublisherModule
+        log_level: INFO
