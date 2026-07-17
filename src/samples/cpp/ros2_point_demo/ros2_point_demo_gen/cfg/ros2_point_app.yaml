@@ -1,0 +1,57 @@
+# IBMW config for ros2_point_app (App mode)
+#
+# Usage: ./ros2_point_app cfg/ros2_point_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: simple_thread_executor
+        type: dedicated
+        options:
+          thread_num: 4
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+    subscribers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: PointPublisherModule
+        log_level: INFO
+      - name: PointSubscriberModule
+        log_level: INFO

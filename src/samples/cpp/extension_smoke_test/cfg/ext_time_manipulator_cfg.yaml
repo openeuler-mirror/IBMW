@@ -1,0 +1,37 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: time_manipulator_extension
+# Loads time_manipulator extension which registers:
+#   - Executor type "time_manipulator"
+#   - RPC service for SetTimeRatio / Pause / GetTimeRatio
+# Also creates one time_manipulator executor instance bound to work_thread_pool
+
+ibmw:
+  extensions:
+    items:
+      - name: time_manipulator_extension
+        path: ./libibmw_time_manipulator.so
+        options: {}
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: time_manip
+        type: time_manipulator
+        options:
+          bind_executor: work_thread_pool
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

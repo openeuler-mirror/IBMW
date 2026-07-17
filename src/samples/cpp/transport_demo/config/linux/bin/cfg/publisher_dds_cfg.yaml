@@ -1,0 +1,44 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# pubsub_demo: Publisher with DDS driver (pkg mode)
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+          participant_name: ibmw_pubsub_demo_publisher_node
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: "hello_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: PublisherModule
+        log_level: INFO

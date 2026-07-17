@@ -1,0 +1,50 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+Backport upstream Fast-CDR fix: guard optional<T> copy/move constructors on engaged_.
+
+In Fast-CDR 2.2.6 the copy and move constructors of fastcdr::optional<T>
+unconditionally construct the contained T from the source storage union, even
+when the source optional is disengaged (has_value() == false). For a disengaged
+optional the union member is uninitialized; constructing a non-trivially-copyable
+T (e.g. RTPSEndpointQos, which owns LocatorList std::vector members) from that
+uninitialized storage reads a garbage vector size and aborts with
+std::length_error("vector").
+
+This surfaces on OHOS/musl during FastDDS create_participant(), where PDP copies a
+default-constructed SubscriptionBuiltinTopicData whose `endpoint` member is a
+disengaged optional<RTPSEndpointQos>.
+
+Upstream Fast-CDR master fixes this by guarding both constructors on
+val.storage_.engaged_ (the assignment operators in 2.2.6 are already guarded;
+only the two constructors are defective). This patch backports that guard.
+
+--- a/include/fastcdr/xcdr/optional.hpp
++++ b/include/fastcdr/xcdr/optional.hpp
+@@ -72,16 +72,22 @@
+     optional(
+             const optional<T>& val) noexcept
+     {
+-        ::new(&storage_.val_)T(val.storage_.val_);
+-        storage_.engaged_ = val.storage_.engaged_;
++        if (val.storage_.engaged_)
++        {
++            ::new(&storage_.val_)T(val.storage_.val_);
++            storage_.engaged_ = true;
++        }
+     }
+ 
+     //! Move constructor.
+     optional(
+             optional<T>&& val) noexcept
+     {
+-        ::new(&storage_.val_)T(std::move(val.storage_.val_));
+-        storage_.engaged_ = val.storage_.engaged_;
++        if (val.storage_.engaged_)
++        {
++            ::new(&storage_.val_)T(std::move(val.storage_.val_));
++            storage_.engaged_ = true;
++        }
+     }
+ 
+     //! Destructor

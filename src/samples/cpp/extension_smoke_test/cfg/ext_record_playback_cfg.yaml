@@ -1,0 +1,32 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: record_playback_extension
+# Loads record_playback extension with no record/playback actions.
+# The extension registers its RPC service (StartRecord, StopRecord,
+# StartPlayback, StopPlayback, etc.) but performs no actual recording.
+
+ibmw:
+  extensions:
+    items:
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options: {}
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

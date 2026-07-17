@@ -1,0 +1,31 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: parameter_extension
+# Loads parameter_extension which registers RPC service for
+# Set / Get / List / Dump / Load parameter operations (init/shutdown lifecycle only)
+
+ibmw:
+  extensions:
+    items:
+      - name: parameter_extension
+        path: ./libibmw_parameter_service.so
+        options: {}
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: ./libhelloworld_pkg.so
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

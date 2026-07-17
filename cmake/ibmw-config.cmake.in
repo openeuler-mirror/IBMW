@@ -1,0 +1,152 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# IBMW CMake Config File
+#
+# This file is loaded by find_package(ibmw). It locates all transitive
+# dependencies before including the generated ibmw-targets.cmake file.
+#
+# Exported targets:
+#   ibmw::base              - Base utilities (header-only, depends on fmt)
+#   ibmw::api::c            - C ABI API (header-only)
+#   ibmw::api::cpp          - C++ API (header-only, depends on unifex/stdexec)
+#   ibmw::api::pkg          - Pkg-mode entry point (header-only)
+#   ibmw::api::type_support - Type support plugin API (header-only)
+#   ibmw::core::extension_api - Extension development API (header-only)
+#   ibmw::core::engine      - Engine static library (App-mode, links asio/yaml-cpp/TBB/backward)
+#   ibmw::core::main        - The ibmw executable (Pkg-mode runner)
+#
+# Conditionally exported (when built with DDS/ROS2):
+#   ibmw::extensions::dds_types            - DDS type support
+#   ibmw::extensions::ros2_types           - ROS2 type support
+#   ibmw::schema::*_idl_gencode            - IDL-generated schema code
+#   ibmw::schema::*_rpc_gencode            - RPC-generated schema code
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Snapshot the package prefix immediately. Some transitive dependency config
+# files also use PACKAGE_PREFIX_DIR and may overwrite it in the caller scope.
+set(_IBMW_PACKAGE_PREFIX_DIR "${PACKAGE_PREFIX_DIR}")
+
+# --------------------------------------------------------------------------
+# Include convenience helpers early.
+# --------------------------------------------------------------------------
+# Resolve helper/tool paths before find_dependency() calls can mutate
+# PACKAGE_PREFIX_DIR. External projects should be able to use helper macros
+# after find_package(ibmw) without manually including IBMW cmake files.
+set_and_check(IBMW_HELPERS_DIR "@PACKAGE_IBMW_HELPERS_DIR@")
+set_and_check(IBMW_DDS_IDL_RPC_GEN_TOOL_PATH "@PACKAGE_IBMW_DDS_IDL_RPC_GEN_TOOL_PATH@")
+
+if(EXISTS "${IBMW_HELPERS_DIR}")
+  list(APPEND CMAKE_MODULE_PATH "${IBMW_HELPERS_DIR}")
+  list(REMOVE_DUPLICATES CMAKE_MODULE_PATH)
+endif()
+
+include("${IBMW_HELPERS_DIR}/IbmwHelpers.cmake" OPTIONAL)
+
+if(EXISTS "${IBMW_DDS_IDL_RPC_GEN_TOOL_PATH}/dds_idl_gen_rpc.py")
+  set_property(GLOBAL PROPERTY DDS_IDL_RPC_GEN_CODE_TOOL_PATH_PROPERTY
+    "${IBMW_DDS_IDL_RPC_GEN_TOOL_PATH}")
+endif()
+
+# --------------------------------------------------------------------------
+# Core dependencies (always required)
+# --------------------------------------------------------------------------
+
+# fmt (header-only) — required by ibmw::base
+find_dependency(fmt)
+
+# Executor implementation — required by ibmw::api::cpp
+if(@IBMW_EXECUTOR_USE_STDEXEC@)
+  find_dependency(stdexec)
+else()
+  # unifex requires std::coroutines target (from FindCoroutines.cmake, not
+  # installed by unifex). Create it if missing — on C++20/GCC11+ coroutine
+  # support is built-in, so no special flags are needed.
+  if(NOT TARGET std::coroutines)
+    add_library(std::coroutines INTERFACE IMPORTED)
+  endif()
+  find_dependency(unifex)
+endif()
+
+# --------------------------------------------------------------------------
+# Runtime dependencies (required by ibmw::core::engine)
+# --------------------------------------------------------------------------
+if(@IBMW_BUILD_RUNTIME@)
+  find_package(Threads QUIET)
+
+  # asio — custom INTERFACE library installed alongside ibmw
+  find_dependency(asio)
+
+  # yaml-cpp
+  find_dependency(yaml-cpp)
+
+  # TBB
+  find_dependency(TBB)
+
+  # Backward::Backward — custom INTERFACE library installed alongside ibmw
+  find_dependency(backward)
+endif()
+
+# --------------------------------------------------------------------------
+# DDS dependencies (FastCDR / FastDDS)
+# --------------------------------------------------------------------------
+# FastCDR and FastDDS are always needed when the project was built with
+# DDS/protocol support, as they underpin the type system and schema targets.
+if(@IBMW_BUILD_PROTOCOLS@ OR @IBMW_BUILD_DDS_EXTENSION@)
+  find_dependency(fastcdr)
+  if("@IBMW_TARGET_ROS2_TIER@" STREQUAL "rosidl")
+    find_dependency(fastrtps)
+  else()
+    # FastDDS may be found under either package name depending on version.
+    find_package(fastdds 3 QUIET CONFIG)
+    if(NOT fastdds_FOUND)
+      find_dependency(fastrtps)
+    endif()
+  endif()
+
+  if("@IBMW_TARGET_ROS2_TIER@" STREQUAL "rosidl")
+    # Route-B rosidl builds export canonical names for their explicit target-
+    # prefix providers. Recreate those names downstream using the packages
+    # resolved above, without affecting native providers or embedding paths.
+    if(NOT TARGET ibmw_target_fastcdr)
+      add_library(ibmw_target_fastcdr INTERFACE IMPORTED)
+      set_property(TARGET ibmw_target_fastcdr PROPERTY
+        INTERFACE_LINK_LIBRARIES fastcdr)
+    endif()
+    if(NOT TARGET ibmw_target_fastrtps)
+      add_library(ibmw_target_fastrtps INTERFACE IMPORTED)
+      set_property(TARGET ibmw_target_fastrtps PROPERTY
+        INTERFACE_LINK_LIBRARIES fastrtps)
+    endif()
+  endif()
+endif()
+
+# --------------------------------------------------------------------------
+# ROS2 type support dependencies (rosidl build-time only, no rcl runtime)
+# --------------------------------------------------------------------------
+if(@IBMW_BUILD_ROS2_TYPES@)
+  find_dependency(std_msgs)
+  find_package(geometry_msgs QUIET)
+  find_package(sensor_msgs QUIET)
+endif()
+
+# --------------------------------------------------------------------------
+# ROS2 rcl dependencies (conditional — full ROS2 runtime)
+# --------------------------------------------------------------------------
+if(@IBMW_BUILD_WITH_ROS2@)
+  find_dependency(rclcpp)
+
+  # example_ros2 / ros2_ext_proto — only needed if example schemas were built
+  find_package(example_ros2 QUIET)
+  find_package(ros2_ext_proto QUIET)
+endif()
+
+# --------------------------------------------------------------------------
+# Include the generated targets file
+# --------------------------------------------------------------------------
+include("${CMAKE_CURRENT_LIST_DIR}/ibmw-targets.cmake")
+
+check_required_components(ibmw)

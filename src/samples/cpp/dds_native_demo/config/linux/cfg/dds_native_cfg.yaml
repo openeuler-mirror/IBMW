@@ -1,0 +1,58 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# DDS Native Demo configuration
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: work_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+
+    publishers:
+      - topic: "hello_topic"
+        enable_drivers: [dds]
+
+    subscribers:
+      - topic: "hello_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: DdsPublisherModule
+        log_level: INFO
+      - name: DdsSubscriberModule
+        log_level: INFO

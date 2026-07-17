@@ -1,0 +1,43 @@
+# Ibmw Subscriber Only Configuration (for ROS2 interop testing)
+# This config only enables subscription, no publishing
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: main_executor
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          # ROS2 compatible mode - CRITICAL for ROS2 interop
+          ros2_compatible_mode: true
+          ros2_topic_prefix: "rt"
+
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+
+    # Only enable subscription, NO publishing
+    subscribers:
+      - topic: "chatter"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: SubscriberModule
+        log_level: INFO

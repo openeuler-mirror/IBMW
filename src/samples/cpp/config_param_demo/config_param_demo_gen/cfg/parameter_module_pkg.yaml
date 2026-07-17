@@ -1,0 +1,24 @@
+# IBMW config for config_param_app (Pkg mode)
+#
+# Usage: ibmw run cfg/parameter_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  modules:
+    packages:
+      - path: libparameter_module_pkg.so
+        enable_modules: [ParameterModule]
+    modules:
+      - name: ParameterModule
+        log_level: INFO

@@ -1,0 +1,55 @@
+# IBMW config for loaned_sub_app (Pkg mode)
+#
+# Usage: ibmw run cfg/point_loaned_subscriber_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    subscribers:
+      - topic: "point_topic"
+        enable_drivers: [dds]
+
+  modules:
+    packages:
+      - path: libpoint_loaned_subscriber_pkg.so
+        enable_modules: [PointLoanedSubscriber]
+    modules:
+      - name: PointLoanedSubscriber
+        log_level: INFO

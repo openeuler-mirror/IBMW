@@ -1,0 +1,38 @@
+# IBMW config for executor_real_time_app (App mode)
+#
+# Usage: ./executor_real_time_app cfg/executor_real_time_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: sched_fifo_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: "SCHED_FIFO:80"
+          thread_bind_cpu: [0, 1]
+          timeout_alarm_threshold_us: 100
+      - name: sched_other_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: SCHED_OTHER
+          thread_bind_cpu: [2, 3]
+          timeout_alarm_threshold_us: 100
+      - name: sched_rr_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: "SCHED_RR:80"
+          thread_bind_cpu: [4, 5, 6]
+          timeout_alarm_threshold_us: 100
+
+  modules:
+    modules:
+      - name: RealTimeModule
+        log_level: INFO

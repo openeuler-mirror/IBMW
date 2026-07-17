@@ -1,0 +1,20 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Demo 8 — bring-your-own DDS IDL.
+//
+// This IDL belongs to the EXTERNAL project (not to ibmw::schema), so its
+// CDR symbols are NOT pre-shipped via the ibmw install. The companion
+// my_msg_cdr_impl.cc is the single TU that materializes the inline FastCDR
+// specializations once per process.
+
+module my_project {
+  module my_msg {
+
+    struct MyMsg {
+      string content;
+      unsigned long long seq;
+    };
+
+  };
+};

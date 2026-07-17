@@ -1,0 +1,229 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "IBMW_BUILD_TESTS": "OFF",
+        "IBMW_BUILD_RUNTIME": "ON",
+        "IBMW_BUILD_PROTOCOLS": "ON",
+        "IBMW_BUILD_CLI_TOOLS": "OFF",
+        "IBMW_BUILD_WITH_ROS2": "OFF",
+        "IBMW_BUILD_EXAMPLES": "OFF",
+        "IBMW_USE_FMT_LIB": "ON",
+        "IBMW_ENABLE_DLOPEN_DEEPBIND": "ON",
+        "IBMW_CONTEXT_DEFINE_GLOBAL_LOGGER_HANDLE": "ON",
+        "IBMW_BUILD_WITH_WERROR": "ON"
+      }
+    },
+    {
+      "name": "minimal",
+      "displayName": "Minimal — core runtime only",
+      "description": "Builds only the core runtime with no extensions or examples. Fastest build for development iteration.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Development — core + common extensions + examples",
+      "description": "Development build with commonly used extensions and examples enabled. Suitable for daily development.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IBMW_BUILD_EXAMPLES": "ON",
+        "IBMW_BUILD_ECHO_EXTENSION": "ON",
+        "IBMW_BUILD_PROXY_EXTENSION": "ON",
+        "IBMW_BUILD_LOG_CONTROL_EXTENSION": "ON",
+        "IBMW_BUILD_PARAMETER_EXTENSION": "ON",
+        "IBMW_BUILD_SERVICE_INTROSPECTION_EXTENSION": "ON",
+        "IBMW_BUILD_TIME_MANIPULATOR_EXTENSION": "ON",
+        "IBMW_BUILD_TOPIC_LOGGER_EXTENSION": "ON"
+      }
+    },
+    {
+      "name": "full",
+      "displayName": "Full — all buildable extensions + examples",
+      "description": "Builds everything that can be built without special system dependencies (excludes zenoh, opentelemetry). Includes the iceoryx shared-memory transport, which extends configure/build time noticeably.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IBMW_BUILD_EXAMPLES": "ON",
+        "IBMW_BUILD_NET_EXTENSION": "ON",
+        "IBMW_BUILD_GRPC_EXTENSION": "ON",
+        "IBMW_BUILD_MQTT_EXTENSION": "ON",
+        "IBMW_BUILD_ECHO_EXTENSION": "ON",
+        "IBMW_BUILD_PROXY_EXTENSION": "ON",
+        "IBMW_BUILD_LOG_CONTROL_EXTENSION": "ON",
+        "IBMW_BUILD_PARAMETER_EXTENSION": "ON",
+        "IBMW_BUILD_SERVICE_INTROSPECTION_EXTENSION": "ON",
+        "IBMW_BUILD_TIME_MANIPULATOR_EXTENSION": "ON",
+        "IBMW_BUILD_TOPIC_LOGGER_EXTENSION": "ON",
+        "IBMW_BUILD_RECORD_PLAYBACK_EXTENSION": "ON",
+        "IBMW_BUILD_DDS_EXTENSION": "ON",
+        "IBMW_BUILD_ICEORYX_EXTENSION": "ON",
+        "IBMW_BUILD_ROS2_TYPES": "ON"
+      }
+    },
+    {
+      "name": "iceoryx",
+      "displayName": "Iceoryx — dev build focused on the iceoryx transport",
+      "description": "Development build with examples and only the iceoryx shared-memory transport extension enabled. Useful for iterating on iceoryx demos and tests without paying the full-preset compile cost.",
+      "inherits": "dev",
+      "cacheVariables": {
+        "IBMW_BUILD_ICEORYX_EXTENSION": "ON"
+      }
+    },
+    {
+      "name": "ros2",
+      "displayName": "ROS 2 (DEPRECATED) — full build with ROS 2 rcl integration",
+      "description": "DEPRECATED: Full build with ROS 2 rcl support. Use 'full' preset instead — IBMW now provides pure-DDS alternatives for all ROS2 interop (pub/sub and RPC/Service). Requires ROS 2 (Humble or Jazzy) to be sourced.",
+      "inherits": "full",
+      "cacheVariables": {
+        "IBMW_BUILD_WITH_ROS2": "ON",
+        "IBMW_BUILD_ROS2_EXTENSION": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release — optimized build, no examples",
+      "description": "Optimized release build of the core runtime and all extensions, without examples or tests.",
+      "inherits": "full",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IBMW_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "test",
+      "displayName": "Test — dev build with tests enabled",
+      "description": "Development build with tests enabled for CI/CD pipelines.",
+      "inherits": "dev",
+      "cacheVariables": {
+        "IBMW_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "cross-aarch64-minimal",
+      "displayName": "Cross AArch64 — minimal runtime scaffolding",
+      "description": "Configures a minimal AArch64 cross build with direct ROS2 feature tiers disabled by default.",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-aarch64",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IBMW_BUILD_WITH_ROS2": "OFF",
+        "IBMW_BUILD_ROS2_TYPES": "OFF",
+        "IBMW_TARGET_ROS2_TIER": "none"
+      }
+    },
+    {
+      "name": "cross-aarch64-dds-source-deps",
+      "displayName": "Cross AArch64 — DDS with source-built target deps",
+      "description": "Configures an AArch64 DDS build lane with ExternalProject source-prefix targets for TinyXML2, foonathan_memory, FastCDR, and FastDDS. Build target ibmw_third_party_source_prefix first, then reconfigure/build against that prefix.",
+      "inherits": "cross-aarch64-minimal",
+      "binaryDir": "${sourceDir}/build-aarch64-dds-source-deps",
+      "cacheVariables": {
+        "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD": "ON",
+        "IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY": "ON",
+        "IBMW_THIRD_PARTY_SOURCE_PREFIX": "${sourceDir}/build-aarch64-dds-source-deps/third_party/install",
+        "IBMW_THIRD_PARTY_SOURCE_BASE_DIR": "${sourceDir}/build-aarch64-dds-source-deps/third_party/build",
+        "IBMW_BUILD_PROTOCOLS": "ON",
+        "IBMW_BUILD_DDS_EXTENSION": "ON",
+        "IBMW_BUILD_WITH_ROS2": "OFF",
+        "IBMW_BUILD_ROS2_TYPES": "OFF",
+        "IBMW_BUILD_ROS2_EXTENSION": "OFF",
+        "IBMW_TARGET_ROS2_TIER": "none"
+      }
+    },
+    {
+      "name": "cross-ohos-arm64-minimal",
+      "displayName": "Cross OHOS ARM64 — minimal runtime scaffolding",
+      "description": "Configures a minimal OHOS arm64-v8a cross build with ROS2-related feature tiers disabled by default.",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-ohos-arm64-minimal",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/ohos-arm64-v8a.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IBMW_BUILD_PROTOCOLS": "OFF",
+        "IBMW_BUILD_WITH_ROS2": "OFF",
+        "IBMW_BUILD_ROS2_TYPES": "OFF",
+        "IBMW_BUILD_ROS2_EXTENSION": "OFF",
+        "IBMW_TARGET_ROS2_TIER": "none"
+      }
+    },
+    {
+      "name": "cross-ohos-arm64-dds-source-deps",
+      "displayName": "Cross OHOS ARM64 — DDS with source-built target deps",
+      "description": "Configures an OHOS ARM64 DDS build lane with ExternalProject source-prefix targets for TinyXML2, foonathan_memory, FastCDR, and FastDDS. Build target ibmw_third_party_source_prefix first, then reconfigure/build against that prefix.",
+      "inherits": "cross-ohos-arm64-minimal",
+      "binaryDir": "${sourceDir}/build-ohos-arm64-dds-source-deps",
+      "cacheVariables": {
+        "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD": "ON",
+        "IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY": "ON",
+        "IBMW_THIRD_PARTY_SOURCE_PREFIX": "${sourceDir}/build-ohos-arm64-dds-source-deps/third_party/install",
+        "IBMW_THIRD_PARTY_SOURCE_BASE_DIR": "${sourceDir}/build-ohos-arm64-dds-source-deps/third_party/build",
+        "IBMW_BUILD_PROTOCOLS": "OFF",
+        "IBMW_BUILD_DDS_EXTENSION": "ON",
+        "IBMW_BUILD_WITH_ROS2": "OFF",
+        "IBMW_BUILD_ROS2_TYPES": "OFF",
+        "IBMW_BUILD_ROS2_EXTENSION": "OFF",
+        "IBMW_TARGET_ROS2_TIER": "none"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "minimal",
+      "configurePreset": "minimal"
+    },
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "full",
+      "configurePreset": "full"
+    },
+    {
+      "name": "iceoryx",
+      "configurePreset": "iceoryx"
+    },
+    {
+      "name": "ros2",
+      "configurePreset": "ros2"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "test",
+      "configurePreset": "test"
+    },
+    {
+      "name": "cross-aarch64-minimal",
+      "configurePreset": "cross-aarch64-minimal"
+    },
+    {
+      "name": "cross-aarch64-dds-source-deps",
+      "configurePreset": "cross-aarch64-dds-source-deps"
+    },
+    {
+      "name": "cross-ohos-arm64-minimal",
+      "configurePreset": "cross-ohos-arm64-minimal"
+    },
+    {
+      "name": "cross-ohos-arm64-dds-source-deps",
+      "configurePreset": "cross-ohos-arm64-dds-source-deps"
+    }
+  ]
+}

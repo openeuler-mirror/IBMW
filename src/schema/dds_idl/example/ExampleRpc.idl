@@ -1,0 +1,40 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Example RPC request/response messages and service definition
+//
+// Note: DDS IDL does not have a native "service" keyword like protobuf.
+// The ExampleService RPC interface is defined by convention:
+//   - GetFooData: GetFooDataReq -> GetFooDataRsp
+//   - GetBarData: GetBarDataReq -> GetBarDataRsp
+// RPC code generation is handled by dds_idl_gen_rpc tool (Phase 9).
+
+#include "ExampleCommon.idl"
+
+module ibmw {
+  module protocols {
+    module example {
+
+      struct GetFooDataReq {
+        string msg;
+      };
+
+      struct GetFooDataRsp {
+        unsigned long long code;
+        string msg;
+        ibmw::protocols::example::ExampleFoo data;
+      };
+
+      struct GetBarDataReq {
+        string msg;
+        ibmw::protocols::example::ExampleBar data;
+      };
+
+      struct GetBarDataRsp {
+        unsigned long long code;
+        string msg;
+      };
+
+    };
+  };
+};

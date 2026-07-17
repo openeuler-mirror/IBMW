@@ -1,0 +1,17 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// DDS Generic Message - used by the DDS plugin for generic message transport
+// This replaces the original ibmw::dds::GenericMsg
+
+module ibmw {
+  module dds {
+
+    struct GenericMsg {
+      string serialization_type;
+      sequence<octet> data;
+      sequence<string> msg_context;
+    };
+
+  };
+};

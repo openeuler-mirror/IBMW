@@ -1,0 +1,24 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Touch sensor state messages
+
+#include "Header.idl"
+
+module ibmw {
+  module protocols {
+    module sensor {
+
+      struct TouchSensorState {
+        sequence<long> pressure;
+      };
+
+      struct TouchSensorStateArray {
+        ibmw::protocols::common::Header header;
+        sequence<string> names;
+        sequence<TouchSensorState> states;
+      };
+
+    };
+  };
+};

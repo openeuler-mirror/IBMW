@@ -1,0 +1,21 @@
+{# This is the template file, do not Edit it! -#}
+include(FetchContent)
+
+message(STATUS "get ibmw ...")
+
+FetchContent_Declare(
+  ibmw #
+  GIT_REPOSITORY https://gitcode.com/openeuler/IB_Robot.git #
+  GIT_TAG v0.1.0)
+
+FetchContent_GetProperties(ibmw)
+if(NOT ibmw_POPULATED)
+{%- for import_option in workspace.ibmw_import_options %}
+  set({{ import_option.name }}
+    {{ import_option.status }}
+    CACHE BOOL "")
+{%- endfor %}
+
+  FetchContent_MakeAvailable(ibmw)
+endif()
+{# blank line #}

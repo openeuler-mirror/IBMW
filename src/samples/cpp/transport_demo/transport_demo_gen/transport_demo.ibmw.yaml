@@ -1,0 +1,50 @@
+# ibmw-gen project definition for transport_demo (DDS pub/sub demo).
+#
+# Generates a DDS pub/sub demo using IDL-generated types from the main
+# IBMW build (ibmw::schema::example_idl_gencode). Supports both local
+# and DDS transport drivers depending on configuration.
+#
+# Usage:
+#   python3 <ibmw-gen>/ibmw_gen.py transport_demo.ibmw.yaml -o transport_demo_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: transport_demo
+  namespace: pubsub_demo
+
+messages:
+  ExampleEventMsg: {}
+dds_types:
+  namespace: ibmw::protocols::example
+  groups:
+    - name: ExampleEvent
+      idl_gencode_target: ibmw::schema::example_idl_gencode
+      messages:
+        - name: ExampleEventMsg
+          fields:
+            - name: msg
+              type: string
+            - name: num
+              type: int32
+
+apps:
+  - name: pubsub_app
+    type: pubsub
+    modules:
+      - PublisherModule
+      - SubscriberModule
+
+modules:
+  - name: PublisherModule
+    type: publisher
+    transport: dds
+    topic: hello_topic
+    message: ExampleEventMsg
+  - name: SubscriberModule
+    type: subscriber
+    transport: dds
+    topic: hello_topic
+    message: ExampleEventMsg

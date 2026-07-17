@@ -1,0 +1,75 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# Multi-transport end-to-end benchmark suite. Seven pairs of publisher/
+# subscriber samples whose CSV outputs feed the
+# docs/transport-benchmark.{md,zh.md} comparison matrix:
+#
+#   iox_loaned_pod  - iceoryx: zero-copy POD path (extension-only API)
+#   iox_loaned_ctx  - iceoryx: zero-copy ctx-meta path (standard receive stack)
+#   iox_send        - iceoryx: standard Send() (with serialization)
+#   dds_loaned      - DDS:     LoanedMessage path (zero-copy via DataSharing/SHM)
+#   dds_send_shm    - DDS:     standard Send() over SHM transport (no DataSharing)
+#   dds_send_tcp    - DDS:     standard Send() over TCP-only transport
+#   net_send_tcp    - net_ext: standard Send() over native net_extension (raw TCP)
+#
+# Gated by IBMW_BUILD_BENCHMARKS (declared in top-level CMakeLists). The
+# samples are added in stages 6.2.2..6.2.7.
+
+if(NOT IBMW_BUILD_BENCHMARKS)
+  message(STATUS "Skip transport_benchmark because IBMW_BUILD_BENCHMARKS is OFF")
+  return()
+endif()
+
+set_namespace()
+
+add_subdirectory(bench_payload)
+add_subdirectory(bench_common)
+
+# Sample sub-directories are added in stages 6.2.2 .. 6.2.7.
+add_subdirectory(iox_loaned_pod)
+add_subdirectory(iox_loaned_ctx)
+add_subdirectory(iox_send)
+add_subdirectory(dds_loaned)
+add_subdirectory(dds_send_shm)
+add_subdirectory(dds_send_tcp)
+# # add_subdirectory(net_send_tcp)  # 6.2.7 in progress  # 6.2.7 in progress
+add_subdirectory(net_send_tcp)
+# Phase 7 §7.3 Step 3.8: encapsulated user-level loan path benchmark.
+add_subdirectory(iox_loan_v2)
+
+add_custom_target(
+  ibmw_samples_cpp_transport_benchmark_strict_matrix_scripts ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/validate_transport_bench_matrix.sh
+          ${CMAKE_BINARY_DIR}/validate_transport_bench_matrix.sh
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/dds_loaned/validate_dds_loaned_e2e.sh
+          ${CMAKE_BINARY_DIR}/validate_dds_loaned_e2e.sh
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/dds_send_shm/validate_dds_send_shm_executor_e2e.sh
+          ${CMAKE_BINARY_DIR}/validate_dds_send_shm_executor_e2e.sh
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/dds_send_tcp/validate_dds_send_tcp_executor_e2e.sh
+          ${CMAKE_BINARY_DIR}/validate_dds_send_tcp_executor_e2e.sh)
+
+foreach(_matrix_dep
+        dds_loaned_publisher_app
+        dds_loaned_subscriber_app
+        dds_send_shm_publisher_app
+        dds_send_shm_subscriber_app
+        dds_send_tcp_publisher_app
+        dds_send_tcp_subscriber_app
+        iox_loaned_pod_publisher_app
+        iox_loaned_pod_subscriber_app
+        iox_loaned_ctx_publisher_app
+        iox_loaned_ctx_subscriber_app
+        iox_send_publisher_app
+        iox_send_subscriber_app
+        net_send_tcp_publisher_app
+        net_send_tcp_subscriber_app)
+  if(TARGET ${_matrix_dep})
+    add_dependencies(ibmw_samples_cpp_transport_benchmark_strict_matrix_scripts
+                     ${_matrix_dep})
+  endif()
+endforeach()

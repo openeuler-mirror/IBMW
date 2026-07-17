@@ -1,0 +1,14 @@
+  // IBMW_PUBSUB_LOANED_SUBSCRIBER_BODY_BEGIN
+  // IBMW: user code begin (on_message_body)
+  // Default impl: log every 5th message. Override in a subclass or
+  // edit in place to do real work. The reference points into the
+  // iceoryx SHM chunk -- true zero-copy. Do NOT retain `msg` past
+  // return; the chunk is released when this callback exits.
+  uint64_t count = received_.load();
+  if (count <= 3 || (count % 5 == 0)) {
+    MW_INFO("[RECV] {} #{} size={} ptr={}",
+            "point_topic", count, size,
+            static_cast<const void*>(&msg));
+  }
+  // IBMW: user code end (on_message_body)
+  // IBMW_PUBSUB_LOANED_SUBSCRIBER_BODY_END

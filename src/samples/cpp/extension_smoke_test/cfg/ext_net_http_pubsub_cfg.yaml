@@ -1,0 +1,51 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# Extension smoke test: net_extension with HTTP server
+# Creates an HTTP listener on localhost for pub/sub over HTTP
+
+ibmw:
+  extensions:
+    items:
+      - name: net_extension
+        path: ./libibmw_net_transport.so
+        options:
+          thread_num: 2
+          http_options:
+            listen_ip: "127.0.0.1"
+            listen_port: 50080
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: http
+        options:
+          publishers:
+            - topic: "hello_topic"
+              server_url_list: ["127.0.0.1:50080"]
+    publishers:
+      - topic: "hello_topic"
+        enable_drivers: [http]
+    subscribers:
+      - topic: "hello_topic"
+        enable_drivers: [http]
+
+  modules:
+    packages:
+      - path: ./libpubsub_demo_publisher_pkg.so
+      - path: ./libpubsub_demo_subscriber_pkg.so
+    modules:
+      - name: PublisherModule
+        log_level: INFO
+      - name: SubscriberModule
+        log_level: INFO

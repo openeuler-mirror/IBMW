@@ -1,0 +1,244 @@
+# ibmw-gen project definition equivalent to ibmw-template
+#
+# This YAML drives ibmw-gen to produce code structurally identical to the
+# hand-written ibmw-template demos.  It exercises all 7 demo categories:
+#
+#   1. Bare module          (MyModule)
+#   2. DDS Pub/Sub          (PublisherModule + SubscriberModule)
+#   3. DDS RPC              (RpcServerModule + RpcClientModule)
+#   4. ROS2 Pub/Sub         (Ros2PublisherModule + Ros2SubscriberModule)
+#   5. ROS2 RPC             (Ros2RpcServerModule + Ros2RpcClientModule)
+#   6. JSON Pub/Sub         (JsonPublisherModule + JsonSubscriberModule)
+#   7. JSON RPC             (JsonRpcServerModule + JsonRpcClientModule)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Project metadata
+# ═══════════════════════════════════════════════════════════════════════════
+
+project:
+  name: my_ibmw_project
+  namespace: my_project
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DDS types — maps to ibmw::protocols::example namespace (pre-built in IBMW)
+# ═══════════════════════════════════════════════════════════════════════════
+
+dds_types:
+  namespace: ibmw.protocols.example
+
+  groups:
+    # Group "ExampleEvent": contains the pub/sub message type
+    - name: ExampleEvent
+      idl_gencode_target: "ibmw::schema::example_idl_gencode"
+      messages:
+        - name: ExampleEventMsg
+          fields:
+            - { name: msg,  type: string }
+            - { name: num,  type: uint32 }
+
+    # Group "ExampleRpc": contains all RPC request/response types
+    # (imports ExampleEvent because some types reference ExampleFoo, etc.)
+    - name: ExampleRpc
+      idl_gencode_target: "ibmw::schema::example_idl_gencode"
+      imports: [ExampleEvent]
+      messages:
+        - name: ExampleFoo
+          fields:
+            - { name: code, type: uint32 }
+            - { name: data, type: string }
+        - name: ExampleBar
+          fields:
+            - { name: num,  type: int32 }
+            - { name: msg,  type: string }
+        - name: GetFooDataReq
+          fields:
+            - { name: msg,  type: string }
+        - name: GetFooDataRsp
+          fields:
+            - { name: code, type: uint32 }
+            - { name: msg,  type: string }
+            - { name: data, type: ExampleFoo }
+        - name: GetBarDataReq
+          fields:
+            - { name: msg,  type: string }
+            - { name: data, type: ExampleBar }
+        - name: GetBarDataRsp
+          fields:
+            - { name: code, type: uint32 }
+            - { name: msg,  type: string }
+
+  rpc_services:
+    - name: ExampleService
+      group: ExampleRpc
+      rpc_gencode_target: "ibmw::schema::example_rpc_gencode"
+      methods:
+        - name: GetFooData
+          request: GetFooDataReq
+          response: GetFooDataRsp
+        - name: GetBarData
+          request: GetBarDataReq
+          response: GetBarDataRsp
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JSON types — plain C++ structs with nlohmann_json serialization
+# ═══════════════════════════════════════════════════════════════════════════
+
+json_types:
+  messages:
+    # Pub/Sub message
+    - name: SensorReading
+      fields:
+        - { name: sensor_id,     type: string }
+        - { name: temperature,   type: double,   default: "0.0" }
+        - { name: humidity,      type: double,   default: "0.0" }
+        - { name: timestamp_ms,  type: uint64_t, default: "0" }
+        - { name: extra_values,  type: "vector<double>" }
+
+    # RPC request
+    - name: ComputeRequest
+      fields:
+        - { name: operation,  type: string }
+        - { name: operand_a,  type: double, default: "0.0" }
+        - { name: operand_b,  type: double, default: "0.0" }
+
+    # RPC response
+    - name: ComputeResponse
+      fields:
+        - { name: code,    type: uint32_t, default: "0" }
+        - { name: msg,     type: string }
+        - { name: result,  type: double,   default: "0.0" }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Modules
+# ═══════════════════════════════════════════════════════════════════════════
+
+modules:
+  # 1. Bare module
+  - name: MyModule
+    type: bare
+
+  # 2. DDS Pub/Sub
+  - name: PublisherModule
+    type: publisher
+    transport: dds
+    topic: example_topic
+    message_type: ExampleEventMsg
+
+  - name: SubscriberModule
+    type: subscriber
+    transport: dds
+    topic: example_topic
+    message_type: ExampleEventMsg
+
+  # 3. DDS RPC
+  - name: RpcServerModule
+    type: rpc_server
+    transport: dds
+    dds_service: ExampleService
+
+  - name: RpcClientModule
+    type: rpc_client
+    transport: dds
+    dds_service: ExampleService
+
+  # 4. ROS2 Pub/Sub
+  - name: Ros2PublisherModule
+    type: publisher
+    transport: ros2
+    topic: ros2_topic
+    message_type: "example_ros2::msg::RosTestMsg"
+    ros2_package: example_ros2
+    ros2_msg_include: "example_ros2/msg/ros_test_msg.hpp"
+
+  - name: Ros2SubscriberModule
+    type: subscriber
+    transport: ros2
+    topic: ros2_topic
+    message_type: "example_ros2::msg::RosTestMsg"
+    ros2_package: example_ros2
+    ros2_msg_include: "example_ros2/msg/ros_test_msg.hpp"
+
+  # 5. ROS2 RPC (skeleton only — requires external ROS2 service packages)
+  - name: Ros2RpcServerModule
+    type: rpc_server
+    transport: ros2
+    ros2_package: example_ros2
+    ros2_rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
+
+  - name: Ros2RpcClientModule
+    type: rpc_client
+    transport: ros2
+    ros2_package: example_ros2
+    ros2_rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
+
+  # 6. JSON Pub/Sub
+  - name: JsonPublisherModule
+    type: publisher
+    transport: json
+    topic: json_topic
+    message_type: SensorReading
+
+  - name: JsonSubscriberModule
+    type: subscriber
+    transport: json
+    topic: json_topic
+    message_type: SensorReading
+
+  # 7. JSON RPC
+  - name: JsonRpcServerModule
+    type: rpc_server
+    transport: json
+    service_name: ComputeService
+    methods:
+      - name: Compute
+        request: ComputeRequest
+        response: ComputeResponse
+
+  - name: JsonRpcClientModule
+    type: rpc_client
+    transport: json
+    service_name: ComputeService
+    methods:
+      - name: Compute
+        request: ComputeRequest
+        response: ComputeResponse
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Apps — each app defines both App and Pkg modes
+# ═══════════════════════════════════════════════════════════════════════════
+
+apps:
+  # 1. Bare (uses CreateModule + AsyncStart pattern)
+  - name: my_app
+    type: bare
+    modules: [MyModule]
+
+  # 2. DDS Pub/Sub
+  - name: pubsub_app
+    type: pubsub
+    modules: [PublisherModule, SubscriberModule]
+
+  # 3. DDS RPC
+  - name: rpc_app
+    type: rpc
+    modules: [RpcServerModule, RpcClientModule]
+
+  # 4. ROS2 Pub/Sub
+  - name: ros2_pubsub_app
+    type: pubsub
+    modules: [Ros2PublisherModule, Ros2SubscriberModule]
+
+  # 5. ROS2 RPC
+  - name: ros2_rpc_app
+    type: rpc
+    modules: [Ros2RpcServerModule, Ros2RpcClientModule]
+
+  # 6. JSON Pub/Sub
+  - name: json_pubsub_app
+    type: pubsub
+    modules: [JsonPublisherModule, JsonSubscriberModule]
+
+  # 7. JSON RPC
+  - name: json_rpc_app
+    type: rpc
+    modules: [JsonRpcServerModule, JsonRpcClientModule]

@@ -1,0 +1,24 @@
+# IBMW config for executor_timer_app (Pkg mode)
+#
+# Usage: ibmw run cfg/timer_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: timer_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+
+  modules:
+    packages:
+      - path: libtimer_module_pkg.so
+        enable_modules: [TimerModule]
+    modules:
+      - name: TimerModule
+        log_level: INFO

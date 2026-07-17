@@ -1,0 +1,7 @@
+        // IBMW_PUBSUB_SUBSCRIBER_BODY_BEGIN
+        // IBMW: user code begin (on_message_body)
+        MW_INFO("Received message.");
+        // TODO: process msg fields here
+        (void)msg;
+        // IBMW: user code end (on_message_body)
+        // IBMW_PUBSUB_SUBSCRIBER_BODY_END

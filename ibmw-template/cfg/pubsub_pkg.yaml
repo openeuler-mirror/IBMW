@@ -1,0 +1,35 @@
+# IBMW Pub/Sub demo: Pkg mode with local transport
+#
+# Usage: ibmw run cfg/pubsub_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "example_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "example_topic"
+        enable_drivers: [local]
+
+  modules:
+    packages:
+      - path: ./libpubsub_pkg.so
+    modules:
+      - name: PublisherModule
+        log_level: INFO
+      - name: SubscriberModule
+        log_level: INFO

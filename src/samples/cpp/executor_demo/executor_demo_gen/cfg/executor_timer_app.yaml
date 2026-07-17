@@ -1,0 +1,21 @@
+# IBMW config for executor_timer_app (App mode)
+#
+# Usage: ./executor_timer_app cfg/executor_timer_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: timer_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+
+  modules:
+    modules:
+      - name: TimerModule
+        log_level: INFO

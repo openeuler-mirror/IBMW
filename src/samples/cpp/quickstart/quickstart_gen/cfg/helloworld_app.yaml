@@ -1,0 +1,14 @@
+# IBMW config for helloworld_app (App mode)
+#
+# Usage: ./helloworld_app cfg/helloworld_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  modules:
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO

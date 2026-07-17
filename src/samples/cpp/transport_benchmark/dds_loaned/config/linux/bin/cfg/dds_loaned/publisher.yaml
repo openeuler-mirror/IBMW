@@ -1,0 +1,79 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# dds_loaned publisher process configuration.
+#
+# - bench_options drives the publish loop (size/rate/duration/label).
+# - dds_extension is loaded via the extensions block; the dds driver is
+#   then declared in messaging.drivers and used for our bench topic.
+# - ros2_compatible:false keeps DDS topic names native (the driver
+#   suffixes "_native_<sanitized_msg_type>"), giving us 5 distinct
+#   FastDDS DataWriters under the same IBMW topic, one per Plain bench
+#   type. The publisher_module.cc ResolveDdsTopicName() helper mirrors
+#   this exact suffix rule so create_publisher<T>() finds each
+#   DataWriter.
+# - enable_data_sharing:true engages FastDDS DataSharing on the writer
+#   QoS (dds_transport_driver.cc gates this independently of
+#   ros2_compatible since 6.2.7.5). Combined with the Plain CDR
+#   PubSubType (is_plain()==true, fixed type_size) FastDDS allocates a
+#   /dev/shm/fast_datasharing_* segment and the reader maps the same
+#   payload pages -- true intra-host zero-copy on the wire.
+# - domain_id MUST match subscriber.yaml.
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 42
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 42
+          ros2_compatible: false
+          enable_data_sharing: true
+          publishers:
+            - topic: ".*BenchPlainPayload4KB"
+              qos:
+                history: keep_last
+                depth: 8192
+                reliability: reliable
+                durability: volatile
+    publishers:
+      # Route the dds_loaned topic explicitly to the dds driver. Without
+      # this rule the default routing picks 'local' and our driver-side
+      # RegisterSendType callback (which builds the FastDDS DataWriter)
+      # never fires -- create_publisher<T>() then can't find the writer.
+      - topic: "dds_bench_loaned_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: DdsLoanedPublisherModule
+        log_level: INFO
+
+# Per-module configuration. Configurator surfaces this subtree to the
+# module via GetConfigFilePath() (config_subsystem.cc serialises just this
+# block into a temp file before handing the path back).
+DdsLoanedPublisherModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: dds_loaned_1KB
+    warmup_messages: 50

@@ -1,0 +1,44 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
+// transport_features.h — generated transport capability macros.
+//
+// Compile-time capability macros for transport availability. Generated
+// from cmake/transport_features.h.in by cmake/IbmwTransportFlags.cmake
+// and installed as <prefix>/include/ibmw/transport_features.h. Reach it
+// either by linking ibmw::config / ibmw::api::cpp or by adding
+// $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include> to your include path.
+//
+// Macros are integer-valued (always 0 or 1) so they are safe inside any
+// C/C++ constant expression: `#if`, ternary, `static_assert`, template
+// SFINAE. Do NOT use them as runtime predicates inside hot-path loaned
+// codepaths: runtime branches in LoanedSample / SenderAccess are forbidden.
+
+#pragma once
+
+#cmakedefine01 IBMW_HAS_DDS
+#cmakedefine01 IBMW_HAS_ROS2
+#cmakedefine01 IBMW_HAS_ICEORYX
+#cmakedefine01 IBMW_HAS_ZENOH
+#cmakedefine01 IBMW_HAS_MQTT
+#cmakedefine01 IBMW_HAS_NET
+
+// Local transport is always present (no IBMW_BUILD_LOCAL_EXTENSION flag).
+#define IBMW_HAS_LOCAL 1
+
+// Derived: shared-memory zero-copy is available when at least one
+// SHM-capable transport is built. Today only iceoryx qualifies; SHM-DDS
+// support is reserved for future implementation.
+#define IBMW_HAS_SHM (IBMW_HAS_ICEORYX || 0 /* IBMW_HAS_SHM_DDS reserved */)
+
+// Per-TU opt-out for the LoanedSample<T> SHM-presence assert. Exposed
+// as an integer-valued macro because the `defined` operator is illegal
+// inside C++ constant expressions per ISO C++ [cpp.cond]/1, so we
+// cannot write `static_assert(... || defined(IBMW_ALLOW_LOANED_WITHOUT_SHM))`.
+// Instead, the user defines IBMW_ALLOW_LOANED_WITHOUT_SHM (any value)
+// and the assert references IBMW_LOANED_SHM_OPT_OUT.
+#ifdef IBMW_ALLOW_LOANED_WITHOUT_SHM
+#  define IBMW_LOANED_SHM_OPT_OUT 1
+#else
+#  define IBMW_LOANED_SHM_OPT_OUT 0
+#endif

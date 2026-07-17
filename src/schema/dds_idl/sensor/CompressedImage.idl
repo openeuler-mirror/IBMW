@@ -1,0 +1,20 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Compressed image message
+
+#include "Header.idl"
+
+module ibmw {
+  module protocols {
+    module sensor {
+
+      struct CompressedImage {
+        ibmw::protocols::common::Header header;
+        string format;
+        sequence<octet> data;
+      };
+
+    };
+  };
+};

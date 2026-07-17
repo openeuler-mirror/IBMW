@@ -1,0 +1,35 @@
+# Demo 8 — bring-your-own IDL pub/sub (Pkg mode, local transport)
+#
+# Usage: ibmw run cfg/my_msg_pubsub_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "my_msg_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "my_msg_topic"
+        enable_drivers: [local]
+
+  modules:
+    packages:
+      - path: ./libmy_msg_pubsub_pkg.so
+    modules:
+      - name: MyMsgPublisherModule
+        log_level: INFO
+      - name: MyMsgSubscriberModule
+        log_level: INFO

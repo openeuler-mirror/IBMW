@@ -1,0 +1,23 @@
+# IBMW config for logging_app (App mode)
+#
+# Usage: ./logging_app cfg/logging_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_executor
+        type: dedicated
+      - name: sync_timer_executor
+        type: thread_pool
+      - name: log_executor
+        type: thread_pool
+
+  modules:
+    modules:
+      - name: LoggerModule
+        log_level: TRACE

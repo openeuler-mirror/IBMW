@@ -1,0 +1,35 @@
+# IBMW JSON Pub/Sub demo: Pkg mode with local transport
+#
+# Usage: ibmw run cfg/json_pubsub_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    publishers:
+      - topic: "json_topic"
+        enable_drivers: [local]
+    subscribers:
+      - topic: "json_topic"
+        enable_drivers: [local]
+
+  modules:
+    packages:
+      - path: ./libjson_pubsub_pkg.so
+    modules:
+      - name: JsonPublisherModule
+        log_level: INFO
+      - name: JsonSubscriberModule
+        log_level: INFO

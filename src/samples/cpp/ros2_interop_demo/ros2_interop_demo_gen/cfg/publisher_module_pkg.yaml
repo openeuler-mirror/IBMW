@@ -1,0 +1,55 @@
+# IBMW config for ros2_pub_only_app (Pkg mode)
+#
+# Usage: ibmw run cfg/publisher_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: "chatter"
+        enable_drivers: [dds]
+
+  modules:
+    packages:
+      - path: libpublisher_module_pkg.so
+        enable_modules: [PublisherModule]
+    modules:
+      - name: PublisherModule
+        log_level: INFO

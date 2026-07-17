@@ -1,0 +1,14 @@
+# IBMW config for multi_driver_demo_gen_app (App mode)
+#
+# Usage: ./multi_driver_demo_gen_app cfg/multi_driver_demo_gen_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  modules:
+    modules:
+      - name: MultiDriverModule
+        log_level: INFO

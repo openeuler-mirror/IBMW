@@ -1,0 +1,43 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# iceoryx_interproc_demo - subscriber process configuration.
+#
+# Subscriber side does not allocate publisher SHM, so shm_init_size is
+# largely cosmetic here, but we keep it explicit to mirror the publisher
+# config.
+
+ibmw:
+  extensions:
+    items:
+      - name: iceoryx_extension
+        path: ./libibmw_iceoryx_transport.so
+        options:
+          shm_init_size: 256
+          runtime_id: "iceoryx_demo_sub"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: iceoryx
+        options:
+          listener_thread_name: "iox_sub_listen"
+    subscribers:
+      - topic: "compressed_image_topic"
+        enable_drivers: [iceoryx]
+
+  modules:
+    modules:
+      - name: SubscriberModule
+        log_level: INFO

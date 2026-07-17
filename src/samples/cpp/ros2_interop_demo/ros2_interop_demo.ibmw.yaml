@@ -1,0 +1,47 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# ros2_interop_demo — Demonstrates IBMW publishing/subscribing ROS2 messages
+# over DDS transport with ros2_compatible_mode, enabling direct interop with
+# native ROS2 nodes.
+#
+# Uses the low-level ibmw::ros2::transport::* APIs (RegisterSendType, Send,
+# OnMessage) instead of SenderAccess/ReceiverAccess wrappers.
+
+schema_version: 2
+project:
+  name: ros2_interop_demo
+  namespace: ros2_interop_demo
+
+# DDS driver with ROS2 interoperability settings.
+# ros2_compatible_mode and ros2_topic_prefix are emitted into
+# ibmw.messaging.drivers[].options in the generated config.
+messages:
+  std_msgs::msg::String:
+    wire:
+      ros2:
+        include: "std_msgs/msg/string.hpp"
+        type: "std_msgs/msg/String"
+dds_driver:
+  domain_id: 0
+  ros2_compatible_mode: true
+  ros2_topic_prefix: "rt"
+
+modules:
+  - name: PublisherModule
+    type: direct_ros2_publisher
+    topic: "chatter"
+    message: "std_msgs::msg::String"
+  - name: SubscriberModule
+    type: direct_ros2_subscriber
+    topic: "chatter"
+    message: "std_msgs::msg::String"
+apps:
+  - name: ros2_interop_app
+    modules: [PublisherModule, SubscriberModule]
+
+  - name: ros2_pub_only_app
+    modules: [PublisherModule]
+
+  - name: ros2_sub_only_app
+    modules: [SubscriberModule]

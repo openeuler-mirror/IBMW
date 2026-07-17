@@ -1,0 +1,46 @@
+{# This is the template file, do not Edit it! -#}
+#include "{{ container_name }}/{{ container_name }}.h"
+
+#include "yaml-cpp/yaml.h"
+
+namespace {{ project_name }}::{{ container_name }} {
+
+bool {{ class_name }}::Setup(ibmw::Runtime core) {
+  // Save ibmw framework handle
+  core_ = core;
+
+  try {
+    // Read cfg
+    auto file_path = core_.GetConfigurator().GetConfigFilePath();
+    if (!file_path.empty()) {
+      YAML::Node cfg_node = YAML::LoadFile(std::string(file_path));
+      for (const auto& itr : cfg_node) {
+{%- raw %}
+        std::string k = itr.first.as<std::string>();
+        std::string v = itr.second.as<std::string>();
+{%- endraw %}
+        MW_INFO("cfg [{} : {}]", k, v);
+      }
+    }
+
+  } catch (const std::exception& e) {
+    MW_ERROR("Init failed, {}", e.what());
+    return false;
+  }
+
+  MW_INFO("Setup succeeded.");
+
+  return true;
+}
+
+bool {{ class_name }}::Run() {
+  MW_INFO("{{ container_name }} Run succeeded.");
+  return true;
+}
+
+void {{ class_name }}::Stop() {
+  MW_INFO("{{ container_name }} Stop succeeded.");
+}
+
+}  // namespace {{ project_name }}::{{ container_name }}
+{# blank line #}

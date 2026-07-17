@@ -1,0 +1,21 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+  modules:
+    packages:
+      - path: ./parameter_pkg.dll
+        enable_modules: [ParameterModule]
+    modules:
+      - name: ParameterModule
+        log_level: INFO

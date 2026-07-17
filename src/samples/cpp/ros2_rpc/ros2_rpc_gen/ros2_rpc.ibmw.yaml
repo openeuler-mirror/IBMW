@@ -1,0 +1,49 @@
+# ibmw-gen project definition for ros2_rpc (ROS2 RPC demo).
+#
+# Generates real, compilable ROS2 RPC server and client modules that use
+# the IBMW ROS2 RPC framework.  The generated code includes:
+#   - A sync RPC server with service registration
+#   - A sync RPC client with request/response loop
+#   - Config YAML with ros2_extension and ros2 service driver
+#   - CMake integration with ros2_gen_rpc codegen
+#
+# The ROS2 service type (RosTestRpc) is defined in the example_ros2 package.
+# The IBMW RPC wrapper code is generated at build time from the .srv file
+# via the ros2_gen_ibmw_cpp_rpc.py tool.
+#
+# Usage:
+#   python3 <ibmw-gen>/ibmw_gen.py ros2_rpc.ibmw.yaml -o ros2_rpc_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: ros2_rpc
+  namespace: ros2_rpc_demo
+
+messages:
+  RosTestRpc:
+    wire:
+      ros2:
+        package: example_ros2
+        service: RosTestRpc
+        rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
+modules:
+  - name: RpcServerModule
+    type: rpc_server
+    transport: ros2
+    message: RosTestRpc
+  - name: RpcClientModule
+    type: rpc_client
+    transport: ros2
+    custom_config:
+      rpc_frq: 1.0
+
+    message: RosTestRpc
+apps:
+  - name: ros2_rpc_app
+    type: rpc
+    modules:
+      - RpcServerModule
+      - RpcClientModule

@@ -1,0 +1,38 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+ibmw:
+  logging:
+    core_level: INFO # Trace/Debug/Info/Warn/Error/Fatal/Off
+    backends:
+      - type: console
+  scheduling:
+    executors:
+      - name: sched_fifo_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: SCHED_FIFO:80 # SCHED_OTHER | SCHED_FIFO:xx | SCHED_RR:xx
+          thread_bind_cpu: [0, 1] # cpu index
+          timeout_alarm_threshold_us: 100
+      - name: sched_other_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: SCHED_OTHER # SCHED_OTHER | SCHED_FIFO:xx | SCHED_RR:xx
+          thread_bind_cpu: [2, 3] # cpu index
+          timeout_alarm_threshold_us: 100
+      - name: sched_rr_thread
+        type: thread_pool
+        options:
+          thread_num: 1
+          thread_sched_policy: SCHED_RR:80 # SCHED_OTHER | SCHED_FIFO:xx | SCHED_RR:xx
+          thread_bind_cpu: [4, 5, 6] # cpu index
+          timeout_alarm_threshold_us: 100
+  modules:
+    packages:
+      - path: ./libexecutor_pkg.so
+        enable_modules: [RealTimeModule]
+    modules:
+      - name: RealTimeModule
+        log_level: INFO

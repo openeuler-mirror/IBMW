@@ -1,0 +1,60 @@
+# IBMW config for ros2_interop_app (Pkg mode)
+#
+# Usage: ibmw run cfg/ros2_interop_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: "chatter"
+        enable_drivers: [dds]
+    subscribers:
+      - topic: "chatter"
+        enable_drivers: [dds]
+
+  modules:
+    packages:
+      - path: libros2_interop_pkg.so
+        enable_modules: [PublisherModule, SubscriberModule]
+    modules:
+      - name: PublisherModule
+        log_level: INFO
+      - name: SubscriberModule
+        log_level: INFO

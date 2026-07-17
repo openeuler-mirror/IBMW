@@ -1,0 +1,17 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Error message - common error code and description
+
+module ibmw {
+  module protocols {
+    module common {
+
+      struct Error {
+        long long code;
+        string msg;
+      };
+
+    };
+  };
+};

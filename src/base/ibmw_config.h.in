@@ -1,0 +1,46 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+//
+// Generated from ibmw_config.h.in by CMake — do not edit manually.
+
+#pragma once
+
+// ============================================================================
+// Version
+// ============================================================================
+#define IBMW_RUNTIME_VERSION "@IBMW_RUNTIME_VERSION@"
+
+// ============================================================================
+// Feature toggles (set via CMake options)
+// ============================================================================
+
+/// Use the fmt library for formatting instead of std::format
+#cmakedefine IBMW_USE_FMT_LIB
+
+/// Use stdexec as the executor implementation (experimental)
+#cmakedefine IBMW_EXECUTOR_USE_STDEXEC
+
+/// Define a global GetLogger() free function in context.h
+#cmakedefine IBMW_CONTEXT_DEFINE_GLOBAL_LOGGER_HANDLE
+
+/// Pass RTLD_DEEPBIND to dlopen for plugin isolation
+#cmakedefine IBMW_ENABLE_DLOPEN_DEEPBIND
+
+/// std::source_location is available
+#cmakedefine01 IBMW_HAS_STD_SOURCE_LOCATION
+
+/// std::memory_resource / std::pmr are available
+#cmakedefine01 IBMW_HAS_STD_MEMORY_RESOURCE
+
+/// std_msgs::msg::String is instantiable with the active ROS 2 headers/toolchain
+#cmakedefine01 IBMW_ROS2_TYPES_HAS_STD_MSGS_STRING
+
+// ============================================================================
+// Tuning constants
+// ============================================================================
+
+/// Small-buffer size for ibmw_function_base_t (bytes).
+/// Default: 6 * sizeof(void*) = 48 bytes on 64-bit.
+#ifndef IBMW_FUNCTION_LOCAL_BUF_SIZE
+  #define IBMW_FUNCTION_LOCAL_BUF_SIZE (6 * sizeof(void*))
+#endif

@@ -1,0 +1,1 @@
+recursive-include ibmw_cli/templates *.jinja2

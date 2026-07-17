@@ -1,0 +1,28 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+# pubsub_demo: Subscriber only with local driver (pkg mode)
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: local
+    subscribers:
+      - topic: "hello_topic"
+        enable_drivers: [local]
+
+  modules:
+    modules:
+      - name: SubscriberModule
+        log_level: INFO

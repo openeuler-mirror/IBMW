@@ -1,0 +1,58 @@
+# IBMW config for pubsub_app (Pkg mode)
+#
+# Usage: ibmw run cfg/pubsub_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: libibmw_dds_transport.so
+        options:
+          domain_id: 0
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          publishers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+          subscribers:
+            - topic: "(.*)"
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: "example_topic"
+        enable_drivers: [dds]
+    subscribers:
+      - topic: "example_topic"
+        enable_drivers: [dds]
+
+  modules:
+    packages:
+      - path: libpubsub_pkg.so
+        enable_modules: [PublisherModule, SubscriberModule]
+    modules:
+      - name: PublisherModule
+        log_level: INFO
+      - name: SubscriberModule
+        log_level: INFO

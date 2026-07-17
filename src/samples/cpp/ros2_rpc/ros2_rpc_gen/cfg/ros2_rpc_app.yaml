@@ -1,0 +1,52 @@
+# IBMW config for ros2_rpc_app (App mode)
+#
+# Usage: ./ros2_rpc_app cfg/ros2_rpc_app.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: ros2_extension
+        path: libibmw_ros2_transport.so
+        options:
+          node_name: "ros2_rpc_demo"
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 4
+      - name: timeout_handle
+        type: timer
+        options:
+          bind_executor: work_thread_pool
+
+  service:
+    drivers:
+      - type: ros2
+        options:
+          timeout_executor: timeout_handle
+      - type: local
+        options:
+          timeout_executor: timeout_handle
+    clients:
+      - func_name: "(.*)"
+        enable_drivers: [ros2, local]
+    servers:
+      - func_name: "(.*)"
+        enable_drivers: [ros2, local]
+
+  modules:
+    modules:
+      - name: RpcServerModule
+        log_level: INFO
+      - name: RpcClientModule
+        log_level: INFO
+
+RpcClientModule:
+  rpc_frq: 1.0

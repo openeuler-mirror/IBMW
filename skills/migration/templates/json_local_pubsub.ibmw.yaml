@@ -1,0 +1,31 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+
+# JSON/local pub/sub skeleton using an IBMW-owned JSON type.
+schema_version: 2
+project:
+  name: json_local_pubsub
+  namespace: migration_practice
+
+json_types:
+  messages:
+    - name: TextMsg
+      fields:
+        - name: data
+          type: string
+          default: '"hello from a local application"'
+
+modules:
+  - name: PublisherModule
+    type: publisher
+    transport: json
+    topic: "chatter"
+    message_type: TextMsg
+  - name: SubscriberModule
+    type: subscriber
+    transport: json
+    topic: "chatter"
+    message_type: TextMsg
+
+apps:
+  - name: json_local_pubsub_app
+    modules: [PublisherModule, SubscriberModule]

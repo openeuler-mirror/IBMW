@@ -1,0 +1,62 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# dds_send_tcp subscriber process configuration.
+#
+# Mirror of dds_send_tcp/publisher.yaml with swapped TCP listen/peer
+# ports: subscriber listens on 5101, connects out to publisher on 5100.
+# Both sides use the same domain_id 44 and same topic
+# "dds_bench_send_tcp_topic".
+#
+# bench_options.payload_bytes / hz / duration_sec MUST match
+# publisher.yaml (subscriber uses them to pre-size LatencyStats and
+# label CSV rows). csv_path receives one summary row per run; multiple
+# runs append.
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 44
+          transport_policy: tcp_only
+          tcp_listen_port: 5101
+          tcp_peer_port: 5100
+          tcp_addr: "127.0.0.1"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 44
+          ros2_compatible: false
+    subscribers:
+      - topic: "dds_bench_send_tcp_topic"
+        enable_drivers: [dds]
+
+  modules:
+    modules:
+      - name: DdsSendSubscriberModule
+        log_level: INFO
+
+DdsSendSubscriberModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: dds_send_tcp_1KB
+    warmup_messages: 50
+    csv_path: /tmp/ibmw_bench/iox_bench_lat.csv

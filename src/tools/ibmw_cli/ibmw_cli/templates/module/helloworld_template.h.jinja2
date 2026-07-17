@@ -1,0 +1,31 @@
+{# This is the template file, do not Edit it! -#}
+#pragma once
+
+#include "ibmw_module_cpp_interface/module_base.h"
+
+namespace {{ project_name }}::{{ container_name }} {
+
+class {{ class_name }} : public ibmw::Module {
+ public:
+  {{ class_name }}() = default;
+  ~{{ class_name }}() override = default;
+
+  ibmw::ModuleDescriptor Info() const override {
+    return ibmw::ModuleDescriptor{.module_name = "{{ class_name }}"};
+  }
+
+  bool Setup(ibmw::Runtime core) override;
+
+  bool Run() override;
+
+  void Stop() override;
+
+ private:
+  auto GetLogger() { return core_.GetLogger(); }
+
+ private:
+  ibmw::Runtime core_;
+};
+
+}  // namespace {{ project_name }}::{{ container_name }}
+{# blank line #}

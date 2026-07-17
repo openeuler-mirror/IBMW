@@ -1,0 +1,45 @@
+# IBMW JSON RPC demo: Pkg mode with local RPC driver
+#
+# Usage: ibmw run cfg/json_rpc_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: time_schedule_executor
+        type: thread_pool
+        options:
+          thread_num: 1
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+      - name: timeout_handle
+        type: timer
+        options:
+          bind_executor: work_thread_pool
+
+  service:
+    drivers:
+      - type: local
+        options:
+          timeout_executor: timeout_handle
+    clients:
+      - func_name: "(.*)"
+        enable_drivers: [local]
+    servers:
+      - func_name: "(.*)"
+        enable_drivers: [local]
+
+  modules:
+    packages:
+      - path: ./libjson_rpc_pkg.so
+    modules:
+      - name: JsonRpcServerModule
+        log_level: INFO
+      - name: JsonRpcClientModule
+        log_level: INFO

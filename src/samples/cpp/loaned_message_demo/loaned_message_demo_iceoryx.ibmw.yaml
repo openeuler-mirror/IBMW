@@ -1,0 +1,69 @@
+# ibmw-gen project definition for loaned_publisher + loaned_subscriber demo
+# (iceoryx variant).
+#
+# The publisher uses the iceoryx zero-copy API via the ibmw
+#      IceoryxTransportDriver. Requires trivially_copyable message type
+#      (geometry_msgs::msg::Point qualifies — 3 doubles, no std::string).
+# The subscriber uses ibmw::transport::LoanedSubscriber<T>::AttachBytes
+#      (ReceiverRef vtable; dispatcher routes incoming SHM samples).
+#      The generated header static_asserts is_trivially_copyable<T>; the
+#      callback signature is OnMessage(const T& msg, std::size_t bytes) so
+#      the user receives the loaned shared-memory sample directly.
+#
+# Two apps are emitted so publisher and subscriber run as separate processes
+# (matches transport_benchmark/iox_loan_v2/standalone/).
+#
+# Prerequisites for running:
+#   - RouDi must be running:
+#       nohup iox-roudi > /tmp/roudi.log 2>&1 &
+#       ROUDI_PID=$!
+#       # ... run apps ...
+#       kill -9 "$ROUDI_PID"; wait
+#   - libibmw_iceoryx_transport.so must be alongside the executable.
+#
+# Usage:
+#   cd ibmw/src/samples/cpp/loaned_message_demo
+#   python3 ../../../tools/ibmw_gen/ibmw_gen.py \
+#       loaned_message_demo_iceoryx.ibmw.yaml -o loaned_message_demo_iceoryx_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: loaned_message_demo_iceoryx_gen
+  namespace: ibmw::examples::loaned_message_demo_iceoryx_gen
+
+messages:
+  geometry_msgs::msg::Point: {}
+  # wire.iceoryx.msg_type is optional; when omitted the
+  # iceoryx plugin derives it from the message key (see schema.py L118-125
+  # and transports/iceoryx.py fallback). Override here only if you need a
+  # different wire-format type name.
+modules:
+  - name: PointIceoryxLoanedPublisher
+    type: loaned_publisher
+    transport: iceoryx
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+    # ros2_msg_include / ros2_package are auto-derived from message.
+    zero_copy_config: strict
+
+  # Subscriber side, iceoryx transport. Callback receives the loaned
+  # SHM sample by const-ref (true zero-copy borrow).
+  - name: PointIceoryxLoanedSubscriber
+    type: loaned_subscriber
+    transport: iceoryx
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+    # ros2_msg_include / ros2_package are auto-derived.
+apps:
+  - name: loaned_pub_iox_app
+    type: pubsub
+    modules:
+      - PointIceoryxLoanedPublisher
+
+  - name: loaned_sub_iox_app
+    type: pubsub
+    modules:
+      - PointIceoryxLoanedSubscriber

@@ -1,0 +1,17 @@
+# IBMW config for helloworld_app (Pkg mode)
+#
+# Usage: ibmw run cfg/hello_world_module_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  modules:
+    packages:
+      - path: libhello_world_module_pkg.so
+        enable_modules: [HelloWorldModule]
+    modules:
+      - name: HelloWorldModule
+        log_level: INFO
