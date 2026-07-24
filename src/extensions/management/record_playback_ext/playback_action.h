@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -51,7 +52,7 @@ class PlaybackAction {
 
  public:
   PlaybackAction() = default;
-  ~PlaybackAction() = default;
+  ~PlaybackAction() noexcept;
 
   PlaybackAction(const PlaybackAction&) = delete;
   PlaybackAction& operator=(const PlaybackAction&) = delete;
@@ -77,9 +78,57 @@ class PlaybackAction {
   void StopSignalPlayback();
 
  private:
+  struct TaskState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    PlaybackAction* owner = nullptr;
+    bool stopping = false;
+    size_t active = 0;
+    inline static thread_local TaskState* current_state = nullptr;
+    inline static thread_local size_t current_depth = 0;
+
+    bool Enter(PlaybackAction*& action) {
+      std::lock_guard lock(mutex);
+      if (stopping || owner == nullptr) {
+        return false;
+      }
+      ++active;
+      if (current_state == this) {
+        ++current_depth;
+      } else {
+        current_state = this;
+        current_depth = 1;
+      }
+      action = owner;
+      return true;
+    }
+
+    void Leave() {
+      std::lock_guard lock(mutex);
+      MW_ASSERT(active > 0, "Playback task accounting underflow.");
+      --active;
+      if (current_state == this) {
+        MW_ASSERT(current_depth > 0, "Playback task depth accounting underflow.");
+        --current_depth;
+        if (current_depth == 0) {
+          current_state = nullptr;
+        }
+      }
+      cv.notify_all();
+    }
+
+    void StopAndWait() {
+      std::unique_lock lock(mutex);
+      stopping = true;
+      owner = nullptr;
+      const size_t own_depth = current_state == this ? current_depth : 0;
+      cv.wait(lock, [this, own_depth] { return active <= own_depth; });
+    }
+  };
+
   void StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_duration_s);
 
-  void AddPlaybackTasks(const std::shared_ptr<void>& task_counter_ptr);
+  void AddPlaybackTasks(const std::shared_ptr<TaskState>& task_state);
 
   bool OpenNewMcaptoPlayBack();
 
@@ -122,6 +171,7 @@ class PlaybackAction {
 
   std::string select_msg_sql_topic_id_range_;
   std::mutex db_mutex_;
+  std::shared_ptr<TaskState> task_state_;
 
   enum class PlayBackState {
     kReadyToPlay,
