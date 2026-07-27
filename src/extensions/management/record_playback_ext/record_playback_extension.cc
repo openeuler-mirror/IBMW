@@ -151,6 +151,10 @@ bool RecordPlaybackExtension::OnInit(runtime::core::Engine* core_ptr) {
             return finditr->second.type_support_ref;
           return {};
         });
+    action_ptr->RegisterGetSchemaSupportFunc(
+        [this](std::string_view msg_type, std::string_view serialization_type) {
+          return schema_registry_.Find(msg_type, serialization_type);
+        });
     action_ptr->Initialize(record_action_options.options);
 
     record_action_map_.emplace(record_action_options.name, std::move(action_ptr));
@@ -256,6 +260,7 @@ void RecordPlaybackExtension::InitTypeSupport(Options::TypeSupportPkg& options) 
   options.path = loader_ptr->GetDynamicLib().GetLibFullPath();
 
   auto type_support_array = loader_ptr->GetTypeSupportArray();
+  auto schema_support_array = loader_ptr->GetSchemaSupportArray();
 
   for (const auto* item : type_support_array) {
     ibmw::util::TypeSupportRef type_support_ref(item);
@@ -275,6 +280,10 @@ void RecordPlaybackExtension::InitTypeSupport(Options::TypeSupportPkg& options) 
             .options = options,
             .type_support_ref = type_support_ref,
             .loader_ptr = loader_ptr.get()});
+  }
+
+  for (const auto* item : schema_support_array) {
+    schema_registry_.Register(ibmw::util::SchemaSupportRef(item));
   }
 
   type_support_pkg_loader_vec_.emplace_back(std::move(loader_ptr));

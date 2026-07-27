@@ -51,6 +51,12 @@ rosidl_generate_interfaces(${CUR_PACKAGE_NAME}
 # cmake-format: on
 set(BUILD_SHARED_LIBS ${CUR_BUILD_SHARED_LIBS})
 
+# Mirror the installed ROS interface layout for build-tree sidecar loading.
+file(MAKE_DIRECTORY
+  ${CMAKE_BINARY_DIR}/ament_cmake_index/share/${CUR_PACKAGE_NAME})
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/msg
+  DESTINATION ${CMAKE_BINARY_DIR}/ament_cmake_index/share/${CUR_PACKAGE_NAME})
+
 if(NOT TARGET ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
   add_library(${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp ALIAS ${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
 endif()
@@ -107,6 +113,8 @@ ament_package()
 # Type support pkg
 add_library(${CUR_TARGET_NAME}_ts SHARED ${CMAKE_CURRENT_SOURCE_DIR}/type_support_pkg_main.cc)
 add_library(${CUR_TARGET_ALIAS_NAME}_ts ALIAS ${CUR_TARGET_NAME}_ts)
+target_include_directories(${CUR_TARGET_NAME}_ts
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set(_ibmw_ros2_fastcdr fastcdr)
 if(CMAKE_CROSSCOMPILING)
   ibmw_resolve_target_ros2_library(_ibmw_ros2_fastcdr fastcdr)
@@ -119,13 +127,22 @@ if(CMAKE_CROSSCOMPILING AND IBMW_TARGET_ROS2_TIER STREQUAL "rosidl")
 endif()
 target_link_libraries(
   ${CUR_TARGET_NAME}_ts
-  PRIVATE ibmw::api::type_support
-          ibmw::extensions::ros2_types
+  PRIVATE ibmw::api::ros2_type_support
           ${_ibmw_ros2_fastcdr}
           ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_generator_cpp
-          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
+          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp
+          ${CUR_PACKAGE_NAME}__rosidl_typesupport_introspection_cpp)
 set_target_properties(${CUR_TARGET_NAME}_ts PROPERTIES OUTPUT_NAME ${CUR_DIR}_ros2_ts)
 
+if(IBMW_BUILD_TESTS)
+  add_gtest_target(
+    TEST_TARGET ${CUR_TARGET_NAME}_ts
+    TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/ros2_schema_support_test.cc)
+  set_tests_properties(${CUR_TARGET_NAME}_ts_test PROPERTIES
+    ENVIRONMENT
+      "AMENT_PREFIX_PATH=${CMAKE_BINARY_DIR}/ament_cmake_index:$ENV{AMENT_PREFIX_PATH}")
+endif()
+
 if(IBMW_INSTALL)
-  install(TARGETS ${CUR_TARGET_NAME}_ts LIBRARY DESTINATION bin)
+  install(TARGETS ${CUR_TARGET_NAME}_ts LIBRARY DESTINATION lib)
 endif()

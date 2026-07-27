@@ -7,7 +7,7 @@ set_namespace()
 # Legacy FastCDR v1 CDR helpers for fastddsgen-generated wrapper TUs (WRAP_IDLS).
 #
 # WRAP_IDLS compiles the auto-generated *CdrAuxImpl.cc wrapper TUs that pull in
-# `dds_types/util/fastcdr_v1_compat.h` (CDR-only, no FastDDS / no ibmw API
+# `type_support/dds/fastcdr_v1_compat.h` (CDR-only, no FastDDS / no ibmw API
 # dependency). Previously this target linked `ibmw::extensions::dds_types`
 # directly, which created a reverse dependency: the schema layer (always built
 # when IBMW_BUILD_PROTOCOLS=ON) required the dds_extension layer (gated by
@@ -25,7 +25,7 @@ add_library(ibmw_schema_dds_cdr_helpers INTERFACE)
 add_library(ibmw::schema::dds_cdr_helpers ALIAS ibmw_schema_dds_cdr_helpers)
 target_include_directories(ibmw_schema_dds_cdr_helpers
   INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/extensions/transport>
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/api>
     $<INSTALL_INTERFACE:include/ibmw>)
 target_link_libraries(ibmw_schema_dds_cdr_helpers INTERFACE fastcdr)
 if(IBMW_INSTALL)
@@ -34,9 +34,6 @@ if(IBMW_INSTALL)
   install(
     TARGETS ibmw_schema_dds_cdr_helpers
     EXPORT ${INSTALL_CONFIG_NAME})
-  install(
-    FILES ${CMAKE_SOURCE_DIR}/src/extensions/transport/dds_types/util/fastcdr_v1_compat.h
-    DESTINATION include/ibmw/dds_types/util)
 endif()
 
 # DDS IDL protocols (primary type system)

@@ -1,0 +1,3 @@
+// Internal forwarding header; not an installed public API.
+#pragma once
+#include "type_support/ros2/ros2_schema_support.h"

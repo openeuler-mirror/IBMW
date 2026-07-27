@@ -10,9 +10,28 @@
 #include <nlohmann/json.hpp>
 
 #include "c/util/type_support_base.h"
+#include "cpp/util/schema_support.h"
 #include "cpp/util/string.h"
 
 namespace ibmw::json {
+
+template <typename JsonType>
+const ibmw_schema_support_base_t* GetJsonMessageSchemaSupport() {
+  static_assert(
+      requires { JsonType::kJsonSchema; },
+      "JSON Schema is missing. Generate this type with ibmw-gen or provide "
+      "a static constexpr kJsonSchema member.");
+
+  static const ibmw::util::SchemaSupport kSchema(
+      ibmw::util::SchemaDescriptor{
+          .type_name = "json:" + std::string(JsonType::kTypeName),
+          .serialization_type = "json",
+          .schema_name = JsonType::kTypeName,
+          .schema_encoding = "jsonschema",
+          .schema_data = JsonType::kJsonSchema,
+          .schema_hash = {}});
+  return kSchema.NativeHandle();
+}
 
 /**
  * @brief Get TypeSupport for JSON-serializable structs (management extension types)

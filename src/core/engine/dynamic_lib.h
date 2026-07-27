@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #if defined(_WIN32)
   #include <windows.h>
@@ -33,6 +34,13 @@ class DynamicLib {
 
   DynamicLib(const DynamicLib&) = delete;
   DynamicLib& operator=(const DynamicLib&) = delete;
+
+  void Swap(DynamicLib& other) noexcept {
+    using std::swap;
+    swap(handle_, other.handle_);
+    swap(lib_name_, other.lib_name_);
+    swap(lib_full_path_, other.lib_full_path_);
+  }
 
   bool Load(const std::string& lib_name) {
     Unload();

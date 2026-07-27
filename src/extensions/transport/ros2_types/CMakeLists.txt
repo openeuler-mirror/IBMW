@@ -50,10 +50,13 @@ set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 
 # Set file collection
 file(GLOB_RECURSE head_files ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
+list(FILTER head_files EXCLUDE REGEX "/util/")
 
 # Add interface library
 add_library(${CUR_TARGET_NAME} INTERFACE)
 add_library(${CUR_TARGET_ALIAS_NAME} ALIAS ${CUR_TARGET_NAME})
+
+# Framework-owned TypeSupport adapter consumed by generated package DSOs.
 
 # Set include path
 target_include_directories(
@@ -75,7 +78,7 @@ target_link_libraries(
   ${CUR_TARGET_NAME}
   INTERFACE ibmw::api::c
             ibmw::api::cpp
-            ibmw::internal)
+            ibmw::api::ros2_type_support)
 
 # Link ROS2 message definitions (only message classes, not TypeSupport)
 target_link_libraries(

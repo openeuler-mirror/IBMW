@@ -24,7 +24,12 @@ else:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from schema import load_and_validate
-from generators.json_types_gen import generate_json_types, needs_json_custom_types_header
+from generators.json_types_gen import (
+    generate_json_type_support_package,
+    generate_json_types,
+    has_generated_json_types,
+    needs_json_custom_types_header,
+)
 from generators.dds_idl_gen import generate_dds_idl_files
 from generators.dds_types_gen import generate_dds_type_bridges
 from generators.dds_rpc_yaml_gen import generate_dds_rpc_yamls
@@ -52,7 +57,12 @@ ALWAYS_OVERWRITE_PATTERNS = {
 
 def _is_always_overwrite(rel_path: str) -> bool:
     """Return True if the file should always be overwritten."""
-    if rel_path in ("CMakeLists.txt", "src/json_types.h", "src/json_custom_types.h"):
+    if rel_path in (
+        "CMakeLists.txt",
+        "src/json_types.h",
+        "src/json_custom_types.h",
+        "src/json_type_support_pkg_main.cc",
+    ):
         return True
     if rel_path.startswith("cfg/") or rel_path.startswith("schema/") or rel_path.startswith("protocol/"):
         return True
@@ -607,6 +617,9 @@ def main():
         if needs_json_custom_types_header(project):
             content = generate_json_types(project)
             emit("src/json_custom_types.h", content)
+        if has_generated_json_types(project):
+            content = generate_json_type_support_package(project)
+            emit("src/json_type_support_pkg_main.cc", content)
 
         # DDS IDL files
         if project.get("dds_types"):

@@ -25,11 +25,16 @@ set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 
 # Set file collection
 file(GLOB_RECURSE head_files ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
+list(FILTER head_files EXCLUDE REGEX "/util/")
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 
 # Add target
 add_library(${CUR_TARGET_NAME} INTERFACE)
 add_library(${CUR_TARGET_ALIAS_NAME} ALIAS ${CUR_TARGET_NAME})
+
+# Framework-owned TypeSupport adapter consumed by generated package DSOs.  The
+# transport target remains the implementation detail; generated code depends
+# only on this stable API target.
 
 # Set include path of target
 target_include_directories(
@@ -47,7 +52,7 @@ target_link_libraries(
   ${CUR_TARGET_NAME}
   INTERFACE ${IBMW_FASTCDR_PROVIDER_TARGET}
             ibmw::api::cpp
-            ibmw::internal)
+            ibmw::api::dds_type_support)
 
 # Add FastDDS dependency if available (needed for GenericDdsPubSubType)
 target_link_libraries(${CUR_TARGET_NAME} INTERFACE ${IBMW_FASTDDS_PROVIDER_TARGET})

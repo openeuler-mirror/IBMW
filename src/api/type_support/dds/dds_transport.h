@@ -1,8 +1,8 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-// INTERNAL: alias-forwarding only. Not public API. Scheduled for removal
-// after the compatibility window (see docs/reference/support-matrix.md).
+// Public DDS TypeSupport adapter used by generated modules. It depends on the
+// framework-owned TypeSupport API, not on the DDS transport extension.
 
 #pragma once
 
@@ -13,7 +13,7 @@
 
 #include "cpp/transport/loaned_sample.h"
 #include "cpp/transport/transport_handle.h"
-#include "dds_types/util/dds_type_support.h"
+#include "type_support/dds/dds_type_support.h"
 
 namespace ibmw::transport {
 

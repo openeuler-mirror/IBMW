@@ -13,6 +13,7 @@ try:
     from typing import Any
 
     from .. import config as _ibmw_gen_config
+    from .type_support_pkg_gen import collect_package_type_support
 except ImportError:  # pragma: no cover — direct-script invocation fallback
     from typing import Any
 
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover — direct-script invocation fallback
     import os as _os
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     import config as _ibmw_gen_config  # type: ignore
+    from generators.type_support_pkg_gen import collect_package_type_support
 
 
 def _snake(name: str) -> str:
@@ -142,12 +144,14 @@ def generate_cmake(project: dict) -> str:
     apps = project.get("apps", [])
     dds = project.get("dds_types")
     json_types = project.get("json_types")
+    json_messages = (json_types or {}).get("messages", [])
     cdt = project.get("custom_dds_types")
     experimental_actions = project.get("experimental_actions", [])
 
     # Determine what features are used
     has_dds = any(m.get("transport") == "dds" for m in modules)
-    has_json = any(m.get("transport") == "json" for m in modules)
+    has_json = (any(m.get("transport") == "json" for m in modules)
+                or bool(json_messages))
     has_ros2 = any(m.get("transport") == "ros2" for m in modules)
     imported_srv_adapter_packages = sorted({
         str(m.get("ros2_package"))
@@ -492,6 +496,27 @@ def generate_cmake(project: dict) -> str:
                         not mod.get("ros2_rpc_gencode_target")):
                     mod["_auto_ros2_rpc_gencode_target"] = target
 
+    json_ts_target = None
+    if json_messages:
+        json_ts_target = f"{_snake(proj_name)}_json_ts"
+        lines.append("# --------------------------------------------------------------------------")
+        lines.append("# JSON TypeSupport Package for Bag schema discovery and playback.")
+        lines.append("# --------------------------------------------------------------------------")
+        lines.append(f"add_library({json_ts_target} SHARED")
+        lines.append("  src/json_type_support_pkg_main.cc)")
+        lines.append(f"target_include_directories({json_ts_target} PRIVATE")
+        lines.append("  ${CMAKE_CURRENT_SOURCE_DIR}/src)")
+        lines.append(f"target_link_libraries({json_ts_target} PRIVATE")
+        lines.append("  ibmw::api::type_support")
+        lines.append("  ibmw::api::cpp")
+        lines.append("  nlohmann_json::nlohmann_json)")
+        lines.append(f"set_target_properties({json_ts_target} PROPERTIES")
+        lines.append(f"  OUTPUT_NAME \"{_snake(proj_name)}_json_ts\")")
+        lines.append(f"install(TARGETS {json_ts_target}")
+        lines.append("  LIBRARY DESTINATION lib")
+        lines.append("  RUNTIME DESTINATION bin)")
+        lines.append("")
+
     for action in experimental_actions:
         if action.get("name") == "fibonacci":
             _emit_experimental_fibonacci_action(lines, action)
@@ -701,11 +726,33 @@ def generate_cmake(project: dict) -> str:
         app_type = app.get("type", "pubsub")
 
         module_targets = [module_cmake_targets.get(m, _snake(m)) for m in mod_names]
+        package_type_support = collect_package_type_support(project, mod_names)
 
         # Pkg
         lines.append(f"ibmw_add_pkg({pkg_name}")
-        lines.append(f"  SRCS src/{pkg_name}/pkg_main.cc")
-        lines.append(f"  MODULES {' '.join(module_targets)})")
+        pkg_sources = [f"src/{pkg_name}/pkg_main.cc"]
+        lines.append(f"  SRCS {' '.join(pkg_sources)}")
+        lines.append(f"  MODULES {' '.join(module_targets)}")
+        lines[-1] += ")"
+
+        if package_type_support.entries:
+            # Keep TypeSupport discovery separate from the single-entry module
+            # package ABI.
+            ts_target = f"{pkg_name}_ts"
+            lines.append("")
+            lines.append(f"add_library({ts_target} SHARED")
+            lines.append(f"  src/{pkg_name}/type_support_pkg_main.cc)")
+            lines.append(f"target_include_directories({ts_target} PRIVATE")
+            lines.append("  ${CMAKE_CURRENT_SOURCE_DIR}")
+            lines.append("  ${CMAKE_CURRENT_SOURCE_DIR}/src)")
+            lines.append(f"target_link_libraries({ts_target} PRIVATE")
+            lines.append(
+                "  " + "\n  ".join(package_type_support.cmake_dependencies()) + ")")
+            lines.append(f"set_target_properties({ts_target} PROPERTIES")
+            lines.append(f"  OUTPUT_NAME \"{ts_target}\")")
+            lines.append(f"install(TARGETS {ts_target}")
+            lines.append("  LIBRARY DESTINATION lib")
+            lines.append("  RUNTIME DESTINATION bin)")
         lines.append("")
 
         # App

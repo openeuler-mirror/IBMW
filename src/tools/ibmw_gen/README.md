@@ -771,7 +771,11 @@ logging:
 
 ### json_types (optional)
 
-Define JSON-serializable types (generates header with nlohmann/json).
+Define JSON-serializable types. The generator emits:
+
+- `src/json_custom_types.h`: C++ types, JSON serialization, and JSON Schema.
+- `src/json_type_support_pkg_main.cc`: TypeSupport/SchemaSupport package entrypoint.
+- `<project>_json_ts`: shared library target loadable by the Bag TypeSupportPkgLoader.
 
 ```yaml
 json_types:
@@ -797,6 +801,8 @@ my_project_gen/
   protocol/
     my_message.h                 # Custom type header (struct + CDR)
   src/
+    json_custom_types.h            # JSON types with embedded JSON Schema
+    json_type_support_pkg_main.cc  # JSON TypeSupport/SchemaSupport package entrypoint
     my_app/
       main.cc                    # App entry point (auto-generated)
     publisher_module/

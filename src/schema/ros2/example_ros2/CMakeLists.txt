@@ -35,6 +35,12 @@ rosidl_generate_interfaces(${CUR_PACKAGE_NAME}
 # cmake-format: on
 set(BUILD_SHARED_LIBS ${CUR_BUILD_SHARED_LIBS})
 
+# Mirror the installed ROS interface layout for build-tree sidecar loading.
+file(MAKE_DIRECTORY
+  ${CMAKE_BINARY_DIR}/ament_cmake_index/share/${CUR_PACKAGE_NAME})
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/msg ${CMAKE_CURRENT_SOURCE_DIR}/srv
+  DESTINATION ${CMAKE_BINARY_DIR}/ament_cmake_index/share/${CUR_PACKAGE_NAME})
+
 if(NOT TARGET ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
   add_library(${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp ALIAS ${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
 endif()
@@ -68,11 +74,11 @@ if(CMAKE_CROSSCOMPILING)
 endif()
 target_link_libraries(
   ${CUR_TARGET_NAME}_ts
-  PRIVATE ibmw::api::type_support
-          ibmw::extensions::ros2_types
+  PRIVATE ibmw::api::ros2_type_support
           ${_ibmw_ros2_fastcdr}
           ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_generator_cpp
-          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
+          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp
+          ${CUR_PACKAGE_NAME}__rosidl_typesupport_introspection_cpp)
 set_target_properties(${CUR_TARGET_NAME}_ts PROPERTIES OUTPUT_NAME ${CUR_DIR}_ros2_ts)
 
 if(IBMW_INSTALL)
@@ -82,5 +88,5 @@ if(IBMW_INSTALL)
     EXPORT ${INSTALL_CONFIG_NAME}
     FILE_SET HEADERS
     DESTINATION include/${CUR_TARGET_NAME}_ibmw_rpc_gencode)
-  install(TARGETS ${CUR_TARGET_NAME}_ts LIBRARY DESTINATION bin)
+  install(TARGETS ${CUR_TARGET_NAME}_ts LIBRARY DESTINATION lib)
 endif()

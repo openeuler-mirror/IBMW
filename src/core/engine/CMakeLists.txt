@@ -23,8 +23,11 @@ set(LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER
     ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1/transport_driver.h)
 set(EXTENSION_V2_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/test/extension_v2_fixture.cc)
+set(TYPE_SUPPORT_V1_FIXTURE_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/type_support/test/type_support_pkg_v1_fixture.cc)
 list(REMOVE_ITEM src ${LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC}
-                     ${EXTENSION_V2_FIXTURE_SRC})
+                     ${EXTENSION_V2_FIXTURE_SRC}
+                     ${TYPE_SUPPORT_V1_FIXTURE_SRC})
 list(REMOVE_ITEM src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_query.cc)
 if(NOT IBMW_ENABLE_CORE_METRICS)
   list(REMOVE_ITEM test_files ${CMAKE_CURRENT_SOURCE_DIR}/core_metrics_test.cc)
@@ -149,6 +152,26 @@ if(IBMW_BUILD_TESTS AND test_files)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
   endforeach()
+  add_library(type_support_v1_fixture MODULE ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  add_library(type_support_bad_v1_fixture MODULE ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  add_library(type_support_bad_size_v1_fixture MODULE
+              ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  add_library(type_support_bad_package_size_v1_fixture MODULE
+              ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  target_compile_definitions(type_support_bad_v1_fixture
+                              PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_VERSION)
+  target_compile_definitions(type_support_bad_size_v1_fixture
+                              PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_SIZE)
+  target_compile_definitions(
+    type_support_bad_package_size_v1_fixture
+    PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_PACKAGE_SIZE)
+  foreach(fixture IN ITEMS type_support_v1_fixture type_support_bad_v1_fixture
+                           type_support_bad_size_v1_fixture
+                           type_support_bad_package_size_v1_fixture)
+    target_link_libraries(${fixture} PRIVATE ibmw::api::type_support)
+    set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
+                                                VISIBILITY_INLINES_HIDDEN ON)
+  endforeach()
   target_compile_definitions(extension_legacy_fixture
                              PRIVATE IBMW_EXT_FIXTURE_LEGACY)
   target_compile_definitions(extension_v2_bad_version_fixture
@@ -165,7 +188,11 @@ if(IBMW_BUILD_TESTS AND test_files)
                    extension_v2_fixture
                    extension_v2_bad_version_fixture
                    extension_v2_bad_size_fixture
-                   extension_v2_destroy_throws_fixture)
+                   extension_v2_destroy_throws_fixture
+                   type_support_v1_fixture
+                   type_support_bad_v1_fixture
+                   type_support_bad_size_v1_fixture
+                   type_support_bad_package_size_v1_fixture)
   target_compile_definitions(
     ${CUR_TARGET_NAME}_test
     PRIVATE
@@ -177,5 +204,9 @@ if(IBMW_BUILD_TESTS AND test_files)
       "EXTENSION_V2_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_fixture>\""
       "EXTENSION_V2_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_version_fixture>\""
       "EXTENSION_V2_BAD_SIZE_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_size_fixture>\""
-      "EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_destroy_throws_fixture>\"")
+      "EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_destroy_throws_fixture>\""
+      "TYPE_SUPPORT_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_v1_fixture>\""
+      "TYPE_SUPPORT_BAD_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_v1_fixture>\""
+      "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""
+      "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\"")
 endif()

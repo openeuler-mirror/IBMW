@@ -163,6 +163,13 @@ struct convert<ibmw::extensions::record_playback_extension::RecordAction::Option
 
 namespace ibmw::extensions::record_playback_extension {
 
+RecordAction::~RecordAction() noexcept {
+  try {
+    Shutdown();
+  } catch (...) {
+  }
+}
+
 void RecordAction::Initialize(YAML::Node options) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
@@ -174,6 +181,11 @@ void RecordAction::Initialize(YAML::Node options) {
   MW_REQUIRE(
       get_type_support_func_,
       "Get type support function is not set before initialize.");
+  MW_REQUIRE(
+      get_schema_support_func_,
+      "Get schema support function is not set before initialize.");
+  task_state_ = std::make_shared<TaskState>();
+  task_state_->owner = this;
 
   // check topic meta
   for (auto& topic_meta : options_.topic_meta_list) {
@@ -185,10 +197,19 @@ void RecordAction::Initialize(YAML::Node options) {
     // check serialization type
     if (!topic_meta.serialization_type.empty()) {
       bool check_ret = type_support_ref.CheckSerializationTypeSupported(topic_meta.serialization_type);
-      MW_REQUIRE(check_ret,
-                              "Msg type '{}' does not support serialization type '{}'.",
-                              topic_meta.msg_type, topic_meta.serialization_type);
+      const bool has_native_schema = get_schema_support_func_(
+          topic_meta.msg_type, topic_meta.serialization_type).has_value();
+      MW_REQUIRE(
+          check_ret || has_native_schema,
+          "Msg type '{}' does not support serialization type '{}' and has "
+          "no native Schema Support for it.",
+          topic_meta.msg_type, topic_meta.serialization_type);
     } else {
+      MW_REQUIRE(
+          type_support_ref.SerializationTypesSupportedNum() > 0,
+          "Msg type '{}' has no default serialization type; configure one "
+          "explicitly.",
+          topic_meta.msg_type);
       topic_meta.serialization_type = type_support_ref.DefaultSerializationType();
     }
     // check sample freq
@@ -232,28 +253,39 @@ void RecordAction::Initialize(YAML::Node options) {
 
   SetMcapOptions();
   for (auto& topic_meta : metadata_.topics) {
-    auto type_support_ref = get_type_support_func_(topic_meta.msg_type);
-    if (topic_meta.serialization_type == "ros2") {
-      auto ts_ptr = reinterpret_cast<const rosidl_message_type_support_t*>(type_support_ref.CustomTypeSupportPtr());
-      const rosidl_message_type_support_t* specific_support = ts_ptr->func(ts_ptr, "rosidl_typesupport_introspection_cpp");
-      if (!specific_support) {
-        MW_WARN("Failed to get specific support for type support {} , maybe need to source specific topic msg_type", topic_meta.msg_type);
-      }
-      const auto* type_data = static_cast<const MessageMembers*>(
-          specific_support->data);
-      std::string schema_name = std::string(type_data->message_namespace_).replace(std::string(type_data->message_namespace_).find("::"), 2, "/") + "/" + type_data->message_name_;
-      std::string schema_format = "ros2msg";
-      mcap_info_map_.emplace(
-          topic_meta.id,
-          McapStruct{
-              .schema_name = schema_name,
-              .schema_format = "ros2msg",
-              .schema_data = BuildROS2Schema(type_data, 0),
-              .transport_name = topic_meta.topic_name,
-              .transport_format = "cdr"});
-    } else {
-      MW_WARN("Unsupported serialization type in mcap format: {}", topic_meta.serialization_type);
-    }
+    auto schema = get_schema_support_func_(
+        topic_meta.msg_type, topic_meta.serialization_type);
+    MW_REQUIRE(
+        schema.has_value(),
+        "Cannot record topic '{}': Schema Support is missing for type '{}' "
+        "and serialization '{}'.",
+        topic_meta.topic_name, topic_meta.msg_type,
+        topic_meta.serialization_type);
+    MW_REQUIRE(
+        !schema->schema_name.empty() && !schema->schema_encoding.empty() &&
+            !schema->schema_data.empty() && !schema->schema_hash.empty(),
+        "Cannot record topic '{}': Schema Support for type '{}' contains an "
+        "empty required field.",
+        topic_meta.topic_name, topic_meta.msg_type);
+    MW_REQUIRE(
+        schema->schema_hash ==
+            ibmw::util::ComputeSchemaHash(schema->schema_data),
+        "Cannot record topic '{}': Schema hash mismatch for type '{}'.",
+        topic_meta.topic_name, topic_meta.msg_type);
+
+    const std::string channel_encoding =
+        topic_meta.serialization_type == "ros2"
+            ? "cdr"
+            : topic_meta.serialization_type;
+    mcap_info_map_.emplace(
+        topic_meta.id,
+        McapStruct{
+            .schema_name = schema->schema_name,
+            .schema_format = schema->schema_encoding,
+            .schema_data = schema->schema_data,
+            .schema_hash = schema->schema_hash,
+            .transport_name = topic_meta.topic_name,
+            .transport_format = channel_encoding});
     // init topic runtime info for sample_freq
     topic_runtime_map_[topic_meta.id].last_timestamp = 0;
     topic_runtime_map_[topic_meta.id].sample_interval = (topic_meta.sample_freq > 0) ? static_cast<uint64_t>(1.0 / topic_meta.sample_freq * 1000000000) : 0;
@@ -284,15 +316,16 @@ void RecordAction::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
-  std::promise<void> stop_promise;
-  executor_.Dispatch([this, &stop_promise]() {
-    CloseRecord();
-    stop_promise.set_value();
-  });
-
-  sync_timer_->Cancel();
-
-  stop_promise.get_future().wait();
+  if (sync_timer_) {
+    sync_timer_->Cancel();
+  }
+  if (task_state_) {
+    task_state_->StopAndWait();
+  }
+  // All tracked executor work has drained.  Queued work that has not entered
+  // TaskState is rejected by Enter(), so closing directly is safe even when
+  // the executor has already been stopped.
+  CloseRecord();
 }
 
 void RecordAction::InitExecutor(ibmw::executor::ExecutorHandle timer_executor) {
@@ -310,9 +343,22 @@ void RecordAction::InitExecutor(ibmw::executor::ExecutorHandle timer_executor) {
   MW_REQUIRE(
       executor_.ThreadSafe(), "Record executor {} is not thread safe!", options_.executor);
 
-  auto timer_task = [this]() {
-    executor_.Dispatch([this]() {
-      FlushToDisk();
+  auto task_state = task_state_;
+  auto timer_task = [task_state]() {
+    RecordAction* action = nullptr;
+    if (!task_state || !task_state->Enter(action)) {
+      return;
+    }
+    struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+    action->executor_.Dispatch([task_state]() {
+      RecordAction* action = nullptr;
+      if (!task_state || !task_state->Enter(action)) {
+        return;
+      }
+      struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+      if (action->state_.load() == State::kStart) {
+        action->FlushToDisk();
+      }
     });
   };
   executor_for_async_ = timer_executor;
@@ -345,61 +391,85 @@ void RecordAction::RegisterGetTypeSupportFunc(
   get_type_support_func_ = get_type_support_func;
 }
 
+void RecordAction::RegisterGetSchemaSupportFunc(
+    const std::function<std::optional<ibmw::util::SchemaDescriptor>(
+        std::string_view, std::string_view)>& get_schema_support_func) {
+  MW_REQUIRE(
+      state_.load() == State::kPreInit,
+      "Method can only be called when state is 'PreInit'.");
+
+  get_schema_support_func_ = get_schema_support_func;
+}
+
 void RecordAction::AddRecord(OneRecord&& record) {
   if (state_.load() != State::kStart) [[unlikely]] {
     return;
   }
 
-  auto& runtime_info = topic_runtime_map_[record.topic_index];
-
-  // skip record if record is not enabled
-  if (!options_.record_enabled || !runtime_info.record_enabled) {
-    return;
-  }
-
-  // skip record if sample_interval is set and the record is too frequent
-  if (runtime_info.sample_interval > 0 && record.log_timestamp - runtime_info.last_timestamp < runtime_info.sample_interval) {
-    return;
-  }
-  runtime_info.last_timestamp = record.log_timestamp;
-
-  if (runtime_info.cache_last_msg) {
-    runtime_info.last_msg = record;
-  }
-
   if (options_.mode == Options::Mode::kImd) {
-    executor_.Dispatch([this, record{std::move(record)}]() mutable {
-      if (state_.load() != State::kStart) [[unlikely]] {
+    auto task_state = task_state_;
+    executor_.Dispatch([task_state, record{std::move(record)}]() mutable {
+      RecordAction* action = nullptr;
+      if (!task_state || !task_state->Enter(action)) {
         return;
       }
+      struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+      if (action->state_.load() != State::kStart) return;
+      auto& runtime_info = action->topic_runtime_map_[record.topic_index];
+      if (!action->options_.record_enabled || !runtime_info.record_enabled) return;
+      if (runtime_info.sample_interval > 0 && record.log_timestamp >= runtime_info.last_timestamp &&
+          record.log_timestamp - runtime_info.last_timestamp < runtime_info.sample_interval) return;
+      runtime_info.last_timestamp = record.log_timestamp;
+      if (runtime_info.cache_last_msg) runtime_info.last_msg = record;
 
-      AddRecordImpl(std::move(record));
+      action->AddRecordImpl(std::move(record));
     });
   } else if (options_.mode == Options::Mode::kSignal) {
-    executor_.Dispatch([this, record{std::move(record)}]() mutable {
-      if (state_.load() != State::kStart) [[unlikely]] {
+    auto task_state = task_state_;
+    executor_.Dispatch([task_state, record{std::move(record)}]() mutable {
+      RecordAction* action = nullptr;
+      if (!task_state || !task_state->Enter(action)) {
         return;
+      }
+      struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+      if (action->state_.load() != State::kStart) return;
+
+      auto& runtime_info = action->topic_runtime_map_[record.topic_index];
+      if (!action->options_.record_enabled || !runtime_info.record_enabled) {
+        return;
+      }
+      if (runtime_info.sample_interval > 0 &&
+          record.log_timestamp >= runtime_info.last_timestamp &&
+          record.log_timestamp - runtime_info.last_timestamp <
+              runtime_info.sample_interval) {
+        return;
+      }
+      runtime_info.last_timestamp = record.log_timestamp;
+      if (runtime_info.cache_last_msg) {
+        runtime_info.last_msg = record;
       }
 
       uint64_t cur_timestamp = record.log_timestamp;
 
-      if (recording_flag_) {
-        if (stop_record_timestamp_ != 0 && cur_timestamp > stop_record_timestamp_) {
-          recording_flag_ = false;
-          CloseRecord();
+      if (action->recording_flag_) {
+        if (action->stop_record_timestamp_ != 0 && cur_timestamp > action->stop_record_timestamp_) {
+          action->recording_flag_ = false;
+          action->CloseRecord();
         }
       }
 
-      if (recording_flag_) {
-        AddRecordImpl(std::move(record));
+      if (action->recording_flag_) {
+        action->AddRecordImpl(std::move(record));
       } else {
-        cur_cache_.emplace_back(std::move(record));
+        action->cur_cache_.emplace_back(std::move(record));
 
-        auto cur_cache_begin_timestamp = cur_cache_.begin()->log_timestamp;
+        auto cur_cache_begin_timestamp = action->cur_cache_.begin()->log_timestamp;
 
-        if ((cur_timestamp - cur_cache_begin_timestamp) > max_preparation_duration_ns_) {
-          cur_cache_.swap(last_cache_);
-          cur_cache_.clear();
+        if (cur_timestamp >= cur_cache_begin_timestamp &&
+            (cur_timestamp - cur_cache_begin_timestamp) >
+                action->max_preparation_duration_ns_) {
+          action->cur_cache_.swap(action->last_cache_);
+          action->cur_cache_.clear();
         }
       }
     });
@@ -416,47 +486,58 @@ bool RecordAction::StartSignalRecord(uint64_t preparation_duration_s, uint64_t r
     return false;
   }
 
-  if (recording_flag_) [[unlikely]] {
-    MW_WARN("Recording is already running.");
-    return false;
-  }
-
   util::DynamicLatch latch;
-  executor_.TryDispatch(
-      latch,
-      [this, preparation_duration_s, record_duration_s, &filefolder]() {
-        if (state_.load() != State::kStart) [[unlikely]] {
-          return;
-        }
+  auto error = std::make_shared<std::exception_ptr>();
+  auto task_state = task_state_;
+  auto task = [task_state, preparation_duration_s, record_duration_s,
+               &filefolder, error, &latch]() {
+    RecordAction* action = nullptr;
+    if (!task_state || !task_state->Enter(action)) {
+      latch.CountDown();
+      return;
+    }
+    struct Guard {
+      std::shared_ptr<TaskState> state;
+      ~Guard() { state->Leave(); }
+    } guard{task_state};
+    try {
+      if (action->state_.load() != State::kStart) [[unlikely]] {
+        latch.CountDown();
+        return;
+      }
 
-        if (recording_flag_) {
-          MW_WARN("Recording is already in progress");
-          return;
-        }
+      if (action->recording_flag_) {
+        MW_WARN("Recording is already in progress");
+        latch.CountDown();
+        return;
+      }
 
-        recording_flag_ = true;
+      action->recording_flag_ = true;
 
-        bool ret = OpenNewFolderToRecord();
-        MW_REQUIRE(ret, "Open new folder to record failed.");
-        filefolder = real_bag_path_.string();
+      bool ret = action->OpenNewFolderToRecord();
+      MW_REQUIRE(ret, "Open new folder to record failed.");
+      filefolder = action->real_bag_path_.string();
 
-        uint64_t now = ibmw::common::util::GetCurTimestampNs();
+      uint64_t now = ibmw::common::util::GetCurTimestampNs();
 
-        stop_record_timestamp_ = now + record_duration_s * 1000000000;
+      action->stop_record_timestamp_ = now + record_duration_s * 1000000000;
 
-        uint64_t start_record_timestamp = now - preparation_duration_s * 1000000000;
+      uint64_t start_record_timestamp = now - preparation_duration_s * 1000000000;
 
         // Use binary search to locate the starting point for recording in the cache
-        size_t last_cache_size = last_cache_.size();
-        size_t cur_cache_size = cur_cache_.size();
-        size_t all_cache_size = last_cache_size + cur_cache_size;
+      size_t last_cache_size = action->last_cache_.size();
+      size_t cur_cache_size = action->cur_cache_.size();
+      size_t all_cache_size = last_cache_size + cur_cache_size;
 
-        if (all_cache_size == 0) return;
+      if (all_cache_size == 0) {
+        latch.CountDown();
+        return;
+      }
 
         auto get_cahce_timestamp = [&](size_t idx) {
-          return (idx < last_cache_size)
-                     ? last_cache_[idx].log_timestamp
-                     : cur_cache_[idx - last_cache_size].log_timestamp;
+        return (idx < last_cache_size)
+                   ? action->last_cache_[idx].log_timestamp
+                   : action->cur_cache_[idx - last_cache_size].log_timestamp;
         };
 
         size_t low = 0, high = all_cache_size - 1;
@@ -472,24 +553,30 @@ bool RecordAction::StartSignalRecord(uint64_t preparation_duration_s, uint64_t r
         // Write cache to db
         if (low < last_cache_size) {
           for (size_t ii = low; ii < last_cache_size; ++ii) {
-            AddRecordImpl(std::move(last_cache_[ii]));
+            action->AddRecordImpl(std::move(action->last_cache_[ii]));
           }
 
           for (size_t ii = 0; ii < cur_cache_size; ++ii) {
-            AddRecordImpl(std::move(cur_cache_[ii]));
+            action->AddRecordImpl(std::move(action->cur_cache_[ii]));
           }
         } else {
           for (size_t ii = low - last_cache_size; ii < cur_cache_size; ++ii) {
-            AddRecordImpl(std::move(cur_cache_[ii]));
+            action->AddRecordImpl(std::move(action->cur_cache_[ii]));
           }
         }
 
         // Clear the cache
-        last_cache_.clear();
-        cur_cache_.clear();
-      });
-
+      action->last_cache_.clear();
+      action->cur_cache_.clear();
+    } catch (...) {
+      *error = std::current_exception();
+    }
+    latch.CountDown();
+  };
+  if (!latch.TryAdd()) return false;
+  executor_.DispatchOrRun(std::move(task));
   latch.CloseAndWait();
+  if (*error) std::rethrow_exception(*error);
   return true;
 }
 
@@ -502,79 +589,107 @@ bool RecordAction::StopSignalRecord() {
     MW_WARN("Cur action mode is not signal mode.");
     return false;
   }
-  executor_.Dispatch([this]() {
-    if (!recording_flag_) [[unlikely]] {
+  auto task_state = task_state_;
+  executor_.Dispatch([task_state]() {
+    RecordAction* action = nullptr;
+    if (!task_state || !task_state->Enter(action)) {
+      return;
+    }
+    struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+    if (action->state_.load() != State::kStart) return;
+    if (!action->recording_flag_) [[unlikely]] {
       MW_WARN("The action has not started yet, stop operation is not allowed.");
       return;
     }
-    recording_flag_ = false;
-    CloseRecord();
+    action->recording_flag_ = false;
+    action->CloseRecord();
   });
 
   return true;
 }
 
 void RecordAction::UpdateMetadata(std::unordered_map<std::string, std::string>&& kv_pairs) {
-  executor_.Dispatch([this, move_kv_pairs = std::move(kv_pairs)] {
-  if (!metadata_.extra_attributes.IsMap()) {
-    metadata_.extra_attributes = YAML::Node(YAML::NodeType::Map);
-  }
-  for (const auto& [key, value] : move_kv_pairs) {
-    try {
-      YAML::Node parsed_node = YAML::Load(value);
-      metadata_.extra_attributes[key] = parsed_node;
-    } catch (...) {
-      metadata_.extra_attributes[key] = value;
+  auto task_state = task_state_;
+  executor_.Dispatch([task_state, move_kv_pairs = std::move(kv_pairs)] {
+    RecordAction* action = nullptr;
+    if (!task_state || !task_state->Enter(action)) return;
+    struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+    if (action->state_.load() != State::kStart) return;
+    if (!action->metadata_.extra_attributes.IsMap()) {
+      action->metadata_.extra_attributes = YAML::Node(YAML::NodeType::Map);
     }
-  }
-  YAML::Node node;
-  node["ibmw_bagfile_information"] = metadata_;
+    for (const auto& [key, value] : move_kv_pairs) {
+      try {
+        YAML::Node parsed_node = YAML::Load(value);
+        action->metadata_.extra_attributes[key] = parsed_node;
+      } catch (...) {
+        action->metadata_.extra_attributes[key] = value;
+      }
+    }
+    YAML::Node node;
+    node["ibmw_bagfile_information"] = action->metadata_;
 
-  std::ofstream ofs(metadata_yaml_file_path_);
-  ofs << node;
-  ofs.close(); });
+    std::ofstream ofs(action->metadata_yaml_file_path_);
+    ofs << node;
+    ofs.close();
+  });
 }
 
 void RecordAction::UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled) {
   util::DynamicLatch latch;
-
-  // Suppressing cpp:S3584: The lambda is moved into a Task object which properly
-  // manages its lifetime. Memory is deallocated when the task completes execution
-  // in the executor thread, guaranteed by latch.CloseAndWait() below.
-  executor_.TryDispatch(latch, [this, move_topic_meta_list = std::move(topic_meta_list), action_record_enabled]() {  // NOSONAR cpp:S3584
-    if (action_record_enabled.has_value()) {
-      options_.record_enabled = action_record_enabled.value();
-    }
-
-    for (auto& topic_meta : move_topic_meta_list) {
-      runtime::core::util::TopicMetaKey key{
-          .topic_name = topic_meta.topic_name,
-          .msg_type = topic_meta.msg_type};
-      auto itr = topic_meta_map_.find(key);
-      if (itr == topic_meta_map_.end()) [[unlikely]] {
-        MW_WARN("Topic meta not found: {} {}", topic_meta.topic_name, topic_meta.msg_type);
-        continue;
+  auto task_state = task_state_;
+  if (!latch.TryAdd()) return;
+  executor_.DispatchOrRun([task_state, move_topic_meta_list = std::move(topic_meta_list),
+                            action_record_enabled, &latch]() mutable {
+    RecordAction* action = nullptr;
+    if (task_state && task_state->Enter(action)) {
+      struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+      if (action->state_.load() == State::kStart) {
+        if (action_record_enabled.has_value()) {
+          action->options_.record_enabled = action_record_enabled.value();
+        }
+        for (auto& topic_meta : move_topic_meta_list) {
+          runtime::core::util::TopicMetaKey key{
+              .topic_name = topic_meta.topic_name,
+              .msg_type = topic_meta.msg_type};
+          auto itr = action->topic_meta_map_.find(key);
+          if (itr == action->topic_meta_map_.end()) [[unlikely]] {
+            MW_WARN("Topic meta not found: {} {}", topic_meta.topic_name, topic_meta.msg_type);
+            continue;
+          }
+          action->topic_runtime_map_[itr->second.id].record_enabled = topic_meta.record_enabled;
+          action->topic_runtime_map_[itr->second.id].sample_interval =
+              topic_meta.sample_freq > 0
+                  ? static_cast<uint64_t>(1.0 / topic_meta.sample_freq * 1000000000)
+                  : 0;
+        }
       }
-      topic_runtime_map_[itr->second.id].record_enabled = topic_meta.record_enabled;
-      topic_runtime_map_[itr->second.id].sample_interval = (topic_meta.sample_freq > 0) ? static_cast<uint64_t>(1.0 / topic_meta.sample_freq * 1000000000) : 0;
     }
+    latch.CountDown();
   });
-  latch.CloseAndWait();  // NOSONAR cpp:S3584
+  latch.CloseAndWait();
 }
 
 void RecordAction::GetStatusSnapshot(StatusSnapshot& snapshot, ibmw::util::DynamicLatch& latch) {
-  auto fill_snapshot = [this, &snapshot]() {
-    snapshot.record_enabled = options_.record_enabled;
-    snapshot.topic_meta_list = metadata_.topics;
-    for (auto& topic_meta : snapshot.topic_meta_list) {
-      auto itr = topic_runtime_map_.find(topic_meta.id);
-      if (itr != topic_runtime_map_.end()) {
-        topic_meta.record_enabled = itr->second.record_enabled;
+  auto task_state = task_state_;
+  if (!latch.TryAdd()) return;
+  executor_.DispatchOrRun([task_state, &snapshot, &latch]() {
+    RecordAction* action = nullptr;
+    if (task_state && task_state->Enter(action)) {
+      struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+      if (action->state_.load() == State::kStart) {
+        snapshot.record_enabled = action->options_.record_enabled;
+        snapshot.topic_meta_list = action->metadata_.topics;
+        for (auto& topic_meta : snapshot.topic_meta_list) {
+          auto itr = action->topic_runtime_map_.find(topic_meta.id);
+          if (itr != action->topic_runtime_map_.end()) {
+            topic_meta.record_enabled = itr->second.record_enabled;
+          }
+        }
       }
     }
-  };
-
-  executor_.TryDispatch(latch, [fill_snapshot]() mutable { fill_snapshot(); });
+    latch.CountDown();
+  });
 }
 
 size_t RecordAction::GetFileSize() const {
@@ -734,8 +849,14 @@ bool RecordAction::OpenNewFolderToRecord() {
   if (state_.load() != State::kStart) {
     CopyExtraFilePathToNewFolder();
   } else {
-    executor_for_async_.Dispatch([this]() {
-      CopyExtraFilePathToNewFolder();
+    auto task_state = task_state_;
+    executor_for_async_.Dispatch([task_state]() {
+      RecordAction* action = nullptr;
+      if (!task_state || !task_state->Enter(action)) {
+        return;
+      }
+      struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+      action->CopyExtraFilePathToNewFolder();
     });
   }
 
@@ -774,17 +895,27 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
     return;
   }
 
+  std::unordered_map<std::string, mcap::SchemaId> schema_id_by_identity;
   for (auto& [idx, mcap_info] : mcap_info_map_) {
-    mcap::Schema schema(
-        mcap_info.schema_name,
-        mcap_info.schema_format,
-        mcap_info.schema_data);
-    writer_->addSchema(schema);
+    const std::string schema_identity =
+        mcap_info.schema_name + '\0' + mcap_info.schema_format + '\0' +
+        mcap_info.schema_hash;
+    auto schema_id_itr = schema_id_by_identity.find(schema_identity);
+    if (schema_id_itr == schema_id_by_identity.end()) {
+      mcap::Schema schema(
+          mcap_info.schema_name,
+          mcap_info.schema_format,
+          mcap_info.schema_data);
+      writer_->addSchema(schema);
+      schema_id_itr = schema_id_by_identity
+                          .emplace(schema_identity, schema.id)
+                          .first;
+    }
 
     mcap::Channel channel(
         mcap_info.transport_name,
         mcap_info.transport_format,
-        schema.id);
+        schema_id_itr->second);
     writer_->addChannel(channel);
     topic_runtime_map_[idx].transport_id = channel.id;
   }
@@ -817,122 +948,6 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
     }
   }
   writing_cached_messages_ = false;
-}
-
-std::string RecordAction::BuildROS2Schema(const MessageMembers* members, int indent = 0) {
-  std::stringstream schema;
-  std::queue<std::pair<const MessageMembers*, int>> queue;
-  std::unordered_set<const MessageMembers*> visited;
-
-  queue.push({members, indent});
-  visited.insert(members);
-
-  static auto appendArrayNotation = [](std::stringstream& ss, const MessageMember& member) {
-    if (member.is_array_) {
-      if (member.is_upper_bound_) {
-        ss << "[" << member.array_size_ << "] ";
-      } else {
-        if (member.array_size_ > 0) {
-          ss << "[" << member.array_size_ << "] ";
-        } else {
-          ss << "[] ";
-        }
-      }
-    } else {
-      ss << " ";
-    }
-  };
-
-  static auto RosSchemaFormat = [](const MessageMembers* members) {
-    std::string ns(members->message_namespace_);
-    if (auto pos = ns.find("::"); pos != std::string::npos)
-      ns.replace(pos, 2, "/");
-
-    std::string schema_string = ns + "/" + members->message_name_;
-    if (auto pos = schema_string.find("/msg"); pos != std::string::npos)
-      schema_string.replace(pos, 4, "");
-
-    return schema_string;
-  };
-
-  while (!queue.empty()) {
-    auto [current_members, current_indent] = queue.front();
-    queue.pop();
-
-    MW_REQUIRE(current_indent <= 50, "Reached max recursion depth to resolve the schema");
-
-    if (current_indent != 0) {
-      schema << "================================================================================\n";
-      schema << "MSG: " << RosSchemaFormat(current_members) << "\n";
-    }
-
-    for (size_t i = 0; i < current_members->member_count_; ++i) {
-      const auto& member = current_members->members_[i];
-
-      if (member.type_id_ == ROS_TYPE_MESSAGE) {
-        const auto* nested_members = static_cast<const MessageMembers*>(member.members_->data);
-        if (nested_members) {
-          schema << RosSchemaFormat(nested_members);
-          appendArrayNotation(schema, member);
-          schema << member.name_ << "\n";
-          if (visited.find(nested_members) == visited.end()) {
-            queue.push({nested_members, current_indent + 1});
-            visited.insert(nested_members);
-          }
-        }
-        continue;
-      }
-
-      switch (member.type_id_) {
-        case ROS_TYPE_FLOAT:
-          schema << "float32";
-          break;
-        case ROS_TYPE_DOUBLE:
-          schema << "float64";
-          break;
-        case ROS_TYPE_CHAR:
-          schema << "char";
-          break;
-        case ROS_TYPE_BOOL:
-          schema << "bool";
-          break;
-        case ROS_TYPE_BYTE:
-          schema << "byte";
-          break;
-        case ROS_TYPE_UINT8:
-          schema << "uint8";
-          break;
-        case ROS_TYPE_INT8:
-          schema << "int8";
-          break;
-        case ROS_TYPE_UINT16:
-          schema << "uint16";
-          break;
-        case ROS_TYPE_INT16:
-          schema << "int16";
-          break;
-        case ROS_TYPE_UINT32:
-          schema << "uint32";
-          break;
-        case ROS_TYPE_INT32:
-          schema << "int32";
-          break;
-        case ROS_TYPE_UINT64:
-          schema << "uint64";
-          break;
-        case ROS_TYPE_INT64:
-          schema << "int64";
-          break;
-        case ROS_TYPE_STRING:
-          schema << "string";
-          break;
-      }
-      appendArrayNotation(schema, member);
-      schema << member.name_ << "\n";
-    }
-  }
-
-  return schema.str();
 }
 
 }  // namespace ibmw::extensions::record_playback_extension

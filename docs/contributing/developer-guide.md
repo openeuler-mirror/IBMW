@@ -627,13 +627,15 @@ static const ibmw_type_support_base_t* kTypeSupportArray[] = {
 };
 
 IBMW_TYPE_SUPPORT_PKG_EXPORT
-size_t IbmwDynlibGetTypeSupportArrayLength() {
-  return sizeof(kTypeSupportArray) / sizeof(kTypeSupportArray[0]);
-}
-
-IBMW_TYPE_SUPPORT_PKG_EXPORT
-const ibmw_type_support_base_t** IbmwDynlibGetTypeSupportArray() {
-  return kTypeSupportArray;
+const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
+    static const ibmw_type_support_package_v1_t kPackage{
+        .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+        .struct_size = sizeof(ibmw_type_support_package_v1_t),
+        .entry_count = std::size(kTypeSupportArray),
+        .entries = kTypeSupportArray,
+        .schema_support = nullptr,
+        .reserved = {}};
+    return &kPackage;
 }
 ```
 

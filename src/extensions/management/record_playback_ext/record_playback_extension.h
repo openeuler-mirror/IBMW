@@ -11,6 +11,7 @@
 #include "engine/type_support_pkg_loader.h"
 #include "record_playback_ext/playback_action.h"
 #include "record_playback_ext/record_action.h"
+#include "record_playback_ext/schema/schema_registry.h"
 #include "record_playback_ext/service.h"
 
 namespace ibmw::extensions::record_playback_extension {
@@ -72,6 +73,7 @@ class RecordPlaybackExtension : public ExtensionBase {
     runtime::core::util::TypeSupportPkgLoader* loader_ptr;
   };
   std::unordered_map<std::string_view, TypeSupportWrapper> type_support_map_;
+  SchemaRegistry schema_registry_;
 
   std::unordered_map<std::string_view, std::unique_ptr<RecordAction>> record_action_map_;
   std::unordered_map<std::string_view, std::unique_ptr<PlaybackAction>> playback_action_map_;

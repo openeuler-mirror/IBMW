@@ -516,8 +516,8 @@ def _gen_header_file(msg: dict, enums: list, constants: list,
     parts.append("#include <fastcdr/FastBuffer.h>")
     parts.append("")
     parts.append("// v2-to-v1 compat: provides CdrSizeCalculator for size estimation")
-    parts.append('#include "dds_types/util/fastcdr_v1_compat.h"')
-    parts.append('#include "dds_types/util/dds_type_support.h"')
+    parts.append('#include "type_support/dds/fastcdr_v1_compat.h"')
+    parts.append('#include "type_support/dds/dds_type_support.h"')
 
     # Nested message includes
     if nested_includes:
