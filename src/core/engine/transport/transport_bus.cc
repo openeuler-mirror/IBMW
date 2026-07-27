@@ -7,6 +7,8 @@
 #include "engine/transport/internal/debug_log_format.h"
 #include "engine/core_types.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 
@@ -142,7 +144,8 @@ void TransportBus::Initialize(YAML::Node options_node) {
     (*finditr)->SetTransportCatalog(transport_catalog_ptr_.get());
     (*finditr)->Initialize(driver_options.options);
 
-    transport_driver_dispatcher_.RegisterTransportDriver(finditr->get());
+    transport_driver_dispatcher_.RegisterTransportDriver(
+        finditr->get(), transport_driver_capabilities_map_.at(finditr->get()));
 
     used_transport_driver_vec_.emplace_back(finditr->get());
     transport_driver_name_vec.emplace_back((*finditr)->Name());
@@ -201,8 +204,73 @@ void TransportBus::Start() {
 }
 
 void TransportBus::Shutdown() {
-  if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
-    return;
+  MW_REQUIRE(TryShutdown(),
+             "Transport shutdown was vetoed or did not prepare within its "
+             "timeout; resources remain intact for retry.");
+}
+
+bool TransportBus::CanShutdownFromCurrentThread() const noexcept {
+  std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
+  return CanShutdownFromCurrentThreadUnlocked();
+}
+
+bool TransportBus::CanShutdownFromCurrentThreadUnlocked() const noexcept {
+  if (state_.load() == State::kShutdown) return true;
+  for (const auto* driver : used_transport_driver_vec_) {
+    const auto capabilities = transport_driver_capabilities_map_.find(driver);
+    if (capabilities != transport_driver_capabilities_map_.end() &&
+        capabilities->second.shutdown_v1 != nullptr &&
+        !capabilities->second.shutdown_v1->CanShutdownFromCurrentThread()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TransportBus::TryPrepareShutdownUnlocked() {
+  if (state_.load() == State::kShutdown || shutdown_prepared_) return true;
+  if (!CanShutdownFromCurrentThreadUnlocked()) {
+    MW_ERROR("Transport shutdown rejected on the current thread; invoke "
+             "shutdown from the runtime lifecycle owner.");
+    return false;
+  }
+
+  const auto prepare_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  for (const auto* driver : used_transport_driver_vec_) {
+    if (prepared_shutdown_drivers_.contains(driver)) continue;
+    const auto capabilities = transport_driver_capabilities_map_.find(driver);
+    if (capabilities == transport_driver_capabilities_map_.end() ||
+        capabilities->second.shutdown_v1 == nullptr) {
+      continue;
+    }
+    const auto remaining = std::max(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            prepare_deadline - std::chrono::steady_clock::now()),
+        std::chrono::milliseconds(0));
+    if (!capabilities->second.shutdown_v1->TryPrepareShutdown(remaining)) {
+      MW_ERROR("Transport driver '{}' did not prepare for shutdown within "
+               "the shared shutdown budget; shutdown remains retryable.",
+               driver->Name());
+      return false;
+    }
+    prepared_shutdown_drivers_.insert(driver);
+  }
+  shutdown_prepared_ = true;
+  return true;
+}
+
+bool TransportBus::TryPrepareShutdown() {
+  std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
+  return TryPrepareShutdownUnlocked();
+}
+
+bool TransportBus::TryShutdown() {
+  std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
+  if (state_.load() == State::kShutdown) return true;
+  if (!TryPrepareShutdownUnlocked()) return false;
+
+  state_.store(State::kShutdown);
 
   MW_INFO("[Transport] stopped");
 
@@ -223,6 +291,9 @@ void TransportBus::Shutdown() {
   }
 
   transport_driver_vec_.clear();
+  used_transport_driver_vec_.clear();
+  transport_driver_capabilities_map_.clear();
+  prepared_shutdown_drivers_.clear();
 
   transport_catalog_ptr_.reset();
 
@@ -230,6 +301,7 @@ void TransportBus::Shutdown() {
   publish_filter_bus_.Clear();
 
   get_executor_func_ = nullptr;
+  return true;
 }
 
 std::list<std::pair<std::string, std::string>> TransportBus::GenInitializationReport() const {
@@ -351,10 +423,18 @@ std::list<std::pair<std::string, std::string>> TransportBus::GenInitializationRe
 
 void TransportBus::RegisterTransportDriver(
     std::unique_ptr<TransportDriver>&& transport_driver_ptr) {
+  RegisterTransportDriver(std::move(transport_driver_ptr), {});
+}
+
+void TransportBus::RegisterTransportDriver(
+    std::unique_ptr<TransportDriver>&& transport_driver_ptr,
+    TransportDriverCapabilitiesV1 capabilities) {
   MW_REQUIRE(
       state_.load() == State::kPreInit,
       "Method can only be called when state is 'PreInit'.");
 
+  transport_driver_capabilities_map_.emplace(transport_driver_ptr.get(),
+                                              capabilities);
   transport_driver_vec_.emplace_back(std::move(transport_driver_ptr));
 }
 

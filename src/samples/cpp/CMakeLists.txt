@@ -73,3 +73,7 @@ endif()
 if(IBMW_BUILD_EXAMPLES AND IBMW_BUILD_DDS_EXTENSION AND IBMW_BUILD_ICEORYX_EXTENSION)
   add_subdirectory(multi_driver_demo)
 endif()
+
+if(IBMW_BUILD_RETAINED_LOAN_E2E)
+  add_subdirectory(retained_loan_e2e)
+endif()

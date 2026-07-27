@@ -1,0 +1,9 @@
+{
+  global:
+    legacy_transport_driver_create;
+    legacy_transport_driver_destroy;
+    legacy_transport_driver_call_count;
+    legacy_transport_driver_result;
+  local:
+    *;
+};

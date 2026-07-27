@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <future>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -26,8 +27,281 @@
 #include "base/buffer_util.h"
 #include "engine/transport/loaned_sample_handle.h"
 #include "iceoryx_ext/iox_style_publisher.h"
+#include "iceoryx_ext/iceoryx_bus.h"
 
 namespace ibmw::extensions::iceoryx_extension {
+
+TEST(IceoryxShutdown, OrdinaryTestThreadIsNotAListenerCallback) {
+  EXPECT_FALSE(IsIceoryxListenerCallbackThread());
+}
+
+TEST(SubscriberOptions, LegacyUsesDefaultsAndRetainedIsBounded) {
+  const auto defaults = iox::popo::SubscriberOptions{};
+  const auto legacy = MakeSubscriberOptions(false);
+  EXPECT_EQ(legacy.queueCapacity, defaults.queueCapacity);
+  EXPECT_EQ(legacy.queueFullPolicy, defaults.queueFullPolicy);
+  EXPECT_EQ(legacy.historyRequest, defaults.historyRequest);
+
+  const auto retained = MakeSubscriberOptions(true);
+  EXPECT_EQ(retained.queueCapacity, 1u);
+  EXPECT_EQ(retained.queueFullPolicy,
+            iox::popo::QueueFullPolicy::DISCARD_OLDEST_DATA);
+  EXPECT_EQ(retained.historyRequest, 0u);
+}
+
+TEST(IoxReleaseToken, DestructorFallbackAndExplicitReleaseAreExactlyOnce) {
+  int releases = 0;
+  {
+    IoxReleaseToken token([&releases] { ++releases; });
+  }
+  EXPECT_EQ(releases, 1);
+
+  {
+    IoxReleaseToken token([&releases] { ++releases; });
+    token.Release();
+    token.Release();
+  }
+  EXPECT_EQ(releases, 2);
+}
+
+TEST(IoxLeaseLimiter, DropsAtLimitAndAcceptsFutureSampleAfterRelease) {
+  IoxLeaseLimiter limiter(1);
+  EXPECT_TRUE(limiter.TryAcquire());
+  EXPECT_FALSE(limiter.TryAcquire());
+  EXPECT_EQ(limiter.Dropped(), 1u);
+
+  limiter.Release();
+  EXPECT_TRUE(limiter.TryAcquire());
+  EXPECT_EQ(limiter.Outstanding(), 1u);
+  EXPECT_EQ(limiter.Dropped(), 1u);
+}
+
+TEST(IoxAcquiredPayload,
+     ThrowingSetupReleasesPayloadLimiterAndActiveCallbackExactlyOnce) {
+  int payload_releases = 0;
+  int limiter_releases = 0;
+  int active_callback_completions = 0;
+
+  internal::RunIoxAcquiredPayload(
+      [&]() noexcept {
+        ++payload_releases;
+        ++limiter_releases;
+      },
+      [&]() noexcept { ++active_callback_completions; },
+      [](bool&) { throw std::bad_alloc(); });
+
+  EXPECT_EQ(payload_releases, 1);
+  EXPECT_EQ(limiter_releases, 1);
+  EXPECT_EQ(active_callback_completions, 1);
+}
+
+TEST(IoxAcquiredPayload,
+     TransferredReleaseTokenPreservesRetainedOwnershipAndCompletesCallback) {
+  int releases = 0;
+  int active_callback_completions = 0;
+  std::shared_ptr<IoxReleaseToken> retained;
+
+  internal::RunIoxAcquiredPayload(
+      [&]() noexcept { ++releases; },
+      [&]() noexcept { ++active_callback_completions; },
+      [&](bool& release_on_exit) {
+        retained = std::make_shared<IoxReleaseToken>(
+            [&]() noexcept { ++releases; });
+        release_on_exit = false;
+      });
+
+  EXPECT_EQ(releases, 0);
+  EXPECT_EQ(active_callback_completions, 1);
+  retained->Release();
+  retained.reset();
+  EXPECT_EQ(releases, 1);
+}
+
+TEST(IoxAcquiredPayload,
+     ThrowingAfterTokenTransferReleasesAndCompletesExactlyOnce) {
+  int releases = 0;
+  int active_callback_completions = 0;
+
+  internal::RunIoxAcquiredPayload(
+      [&]() noexcept { ++releases; },
+      [&]() noexcept { ++active_callback_completions; },
+      [&](bool& release_on_exit) {
+        auto token = std::make_shared<IoxReleaseToken>(
+            [&]() noexcept { ++releases; });
+        release_on_exit = false;
+        throw std::bad_alloc();
+      });
+
+  EXPECT_EQ(releases, 1);
+  EXPECT_EQ(active_callback_completions, 1);
+}
+
+TEST(IoxRawLoanRequest, PreservesExactPayloadSizeAndAlignment) {
+  const auto request = MakeIoxRawLoanRequest(37, 64);
+  ASSERT_TRUE(request);
+  EXPECT_EQ(request->payload_size, 37u);
+  EXPECT_EQ(request->alignment, 64u);
+  EXPECT_FALSE(MakeIoxRawLoanRequest(37, 3));
+  if constexpr (sizeof(size_t) > sizeof(uint32_t)) {
+    EXPECT_FALSE(MakeIoxRawLoanRequest(
+        static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1, 8));
+  }
+}
+
+TEST(IoxAsyncStop, RequestIsNonBlockingRunsActionOnWorkerAndCloseCompletes) {
+  std::promise<void> unblock;
+  auto gate = unblock.get_future().share();
+  std::atomic_int calls{0};
+  std::thread::id action_thread;
+  const auto request_thread = std::this_thread::get_id();
+  IoxAsyncStop stop([&] {
+    action_thread = std::this_thread::get_id();
+    ++calls;
+    gate.wait();
+  });
+  const auto request_begin = std::chrono::steady_clock::now();
+  stop.Request();
+  EXPECT_LT(std::chrono::steady_clock::now() - request_begin,
+            std::chrono::milliseconds(100));
+  stop.Request();
+
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(stop.Close(std::chrono::milliseconds(20)));
+  EXPECT_LT(std::chrono::steady_clock::now() - begin,
+            std::chrono::milliseconds(200));
+  EXPECT_EQ(calls, 1);
+  unblock.set_value();
+  EXPECT_TRUE(stop.Close(std::chrono::seconds(1)));
+  EXPECT_TRUE(stop.Close(std::chrono::milliseconds(0)));
+  EXPECT_NE(action_thread, request_thread);
+}
+
+TEST(IoxAsyncStop, CallbackCloseReturnsPromptly) {
+  IoxAsyncStop stop([] {});
+  stop.Request();
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(stop.Close(std::chrono::seconds(1), true));
+  EXPECT_LT(std::chrono::steady_clock::now() - begin,
+            std::chrono::milliseconds(100));
+  EXPECT_TRUE(stop.Close(std::chrono::seconds(1)));
+}
+
+TEST(IoxAsyncStop, DestructorWithoutRequestStopsAndJoinsWorker) {
+  const auto begin = std::chrono::steady_clock::now();
+  { IoxAsyncStop stop([] { ADD_FAILURE() << "action must not run"; }); }
+  EXPECT_LT(std::chrono::steady_clock::now() - begin,
+            std::chrono::milliseconds(200));
+}
+
+TEST(IoxAsyncStop, ActionCanDestroyOwnerOnWorkerAndFinishSafely) {
+  struct StateDestructionProbe {
+    explicit StateDestructionProbe(std::promise<void>* destroyed_promise)
+        : destroyed_promise(destroyed_promise) {}
+    ~StateDestructionProbe() { destroyed_promise->set_value(); }
+
+    std::promise<void>* destroyed_promise;
+  };
+
+  std::promise<void> action_started_promise;
+  auto action_started = action_started_promise.get_future();
+  std::promise<void> allow_destroy_promise;
+  auto allow_destroy = allow_destroy_promise.get_future().share();
+  std::promise<void> action_finished_promise;
+  auto action_finished = action_finished_promise.get_future();
+  std::promise<void> state_destroyed_promise;
+  auto state_destroyed = state_destroyed_promise.get_future();
+  std::unique_ptr<IoxAsyncStop> stop;
+
+  stop = std::make_unique<IoxAsyncStop>(
+      [&, probe = std::make_shared<StateDestructionProbe>(
+              &state_destroyed_promise)] {
+        (void)probe;
+        action_started_promise.set_value();
+        allow_destroy.wait();
+        stop.reset();
+        action_finished_promise.set_value();
+      });
+  stop->Request();
+  const auto action_started_status =
+      action_started.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(action_started_status, std::future_status::ready);
+  allow_destroy_promise.set_value();
+
+  const auto action_finished_status =
+      action_finished.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(action_finished_status, std::future_status::ready);
+  if (action_finished_status == std::future_status::timeout) {
+    action_finished.wait();
+  }
+
+  const auto state_destroyed_status =
+      state_destroyed.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(state_destroyed_status, std::future_status::ready);
+  if (state_destroyed_status == std::future_status::timeout) {
+    state_destroyed.wait();
+  }
+  EXPECT_EQ(stop, nullptr);
+}
+
+TEST(IoxSubscriptionRegistry, RejectsDuplicateReservationAndCommit) {
+  IoxSubscriptionRegistry registry;
+  EXPECT_TRUE(registry.Reserve("/transport/topic/type"));
+  EXPECT_FALSE(registry.Reserve("/transport/topic/type"));
+  EXPECT_TRUE(registry.Commit("/transport/topic/type", nullptr));
+  EXPECT_FALSE(registry.Reserve("/transport/topic/type"));
+  EXPECT_FALSE(registry.Commit("/transport/topic/type", nullptr));
+}
+
+TEST(IoxSubscriptionRegistry, RollbackAllowsRetry) {
+  IoxSubscriptionRegistry registry;
+  EXPECT_TRUE(registry.Reserve("/transport/topic/type"));
+  registry.Rollback("/transport/topic/type");
+  EXPECT_TRUE(registry.Reserve("/transport/topic/type"));
+}
+
+TEST(IoxAsyncStop, DetachAndQuiescenceFinishBeforeDeregister) {
+  std::promise<void> detach_complete_promise;
+  auto detach_complete = detach_complete_promise.get_future().share();
+  std::promise<void> callback_quiescent_promise;
+  auto callback_quiescent = callback_quiescent_promise.get_future().share();
+  std::promise<void> deregistered_promise;
+  auto deregistered = deregistered_promise.get_future().share();
+  IoxAsyncStop stop([&] {
+    detach_complete_promise.set_value();
+    callback_quiescent.wait();
+    EXPECT_EQ(detach_complete.wait_for(std::chrono::seconds(0)),
+              std::future_status::ready);
+    deregistered_promise.set_value();
+  });
+
+  stop.Request();
+  const auto detach_status = detach_complete.wait_for(std::chrono::seconds(1));
+  EXPECT_EQ(detach_status, std::future_status::ready);
+  EXPECT_EQ(deregistered.wait_for(std::chrono::seconds(0)),
+            std::future_status::timeout);
+  callback_quiescent_promise.set_value();
+  EXPECT_TRUE(stop.Close(std::chrono::seconds(1)));
+  EXPECT_EQ(deregistered.wait_for(std::chrono::seconds(0)),
+            std::future_status::ready);
+}
+
+TEST(IoxNotificationGate, CloseRejectsNewEntrancesAndWaitsForActiveCallback) {
+  IoxNotificationGate gate;
+  ASSERT_TRUE(gate.TryEnter());
+  gate.Close();
+  EXPECT_FALSE(gate.TryEnter());
+  EXPECT_EQ(gate.Active(), 1u);
+
+  auto wait = std::async(std::launch::async, [&] {
+    gate.WaitForQuiescence();
+    return true;
+  });
+  EXPECT_EQ(wait.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+  gate.Exit();
+  EXPECT_TRUE(wait.get());
+  EXPECT_EQ(gate.Active(), 0u);
+}
 
 // -----------------------------------------------------------------
 // Compile-time checks: POD-only constraint on IoxStylePublisher / Sample.

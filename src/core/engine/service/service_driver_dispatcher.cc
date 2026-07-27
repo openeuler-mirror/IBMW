@@ -33,9 +33,27 @@ void ServiceDriverDispatcher::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
+  size_t error_count = 0;
+  std::string first_error;
   for (auto& driver : rpc_driver_index_vec_) {
     MW_TRACE("Shutdown service driver '{}'.", driver->Name());
-    driver->Shutdown();
+    try {
+      driver->Shutdown();
+    } catch (const std::exception& e) {
+      ++error_count;
+      if (first_error.empty()) first_error = e.what();
+      MW_ERROR("Shutdown service driver '{}' failed: {}", driver->Name(),
+               e.what());
+    } catch (...) {
+      ++error_count;
+      if (first_error.empty()) first_error = "unknown exception";
+      MW_ERROR("Shutdown service driver '{}' failed: unknown exception",
+               driver->Name());
+    }
+  }
+  if (error_count != 0) {
+    MW_ERROR("Service driver shutdown completed with {} error(s); first error: {}",
+             error_count, first_error);
   }
 }
 

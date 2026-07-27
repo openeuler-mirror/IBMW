@@ -3,6 +3,10 @@
 
 #pragma once
 
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
+
 #include "c/transport/transport_context_base.h"
 #include "c/util/function_base.h"
 #include "c/util/string.h"
@@ -77,6 +81,8 @@ typedef struct {
  * Input 1: Const pointer to transport message handler context
  * Input 2: Const pointer to msg
  * Input 3: Release callback, which ops type is 'ibmw_function_receiver_release_callback_ops_t'
+ * Raw C ABI callbacks must not throw across this function boundary. The public
+ * C++ subscriber wrappers contain user exceptions before they reach this ABI.
  */
 typedef struct {
   void (*invoker)(
@@ -110,6 +116,8 @@ typedef struct {
  * Input 3: Payload size in bytes
  * Input 4: Release callback, which ops type is
  *          'ibmw_function_receiver_release_callback_ops_t'
+ * Raw C ABI callbacks must not throw across this function boundary. The public
+ * C++ LoanedSubscriber bridge catches user exceptions before invoking this ABI.
  */
 typedef struct {
   void (*invoker)(
@@ -121,6 +129,36 @@ typedef struct {
   void (*relocator)(void* from, void* to);
   void (*destroyer)(void* object);
 } ibmw_function_loaned_receiver_callback_ops_t;
+
+/**
+ * Maximum retained receive loans per subscription. Samples arriving at the
+ * limit are dropped rather than deferred; later samples can be delivered once
+ * a loan is released.
+ */
+typedef struct {
+  size_t max_outstanding;
+} ibmw_retained_loan_options_t;
+
+/**
+ * @brief Opaque retained-loan subscription control.
+ *
+ * Ownership is transferred to the caller by attach_loaned_retained(). The
+ * caller must eventually invoke destroy(). stop() prevents new callbacks;
+ * close() also waits up to timeout_ms for callbacks and retained loans to
+ * quiesce. A false close result leaves the underlying subscription alive.
+ */
+typedef struct ibmw_loaned_subscription_base_t {
+  void (*stop)(void* ctx);
+  bool (*close)(void* ctx, uint64_t timeout_ms);
+  void (*destroy)(void* ctx);
+  void* ctx;
+} ibmw_loaned_subscription_base_t;
+
+/*
+ * Appended sender/receiver entries preserve old-client/new-provider layout
+ * only. These structs have no size/version field, so new APIs require matched
+ * IBMW versions; new-client/old-provider compatibility cannot be guaranteed.
+ */
 
 /**
  * @brief Publisher interface
@@ -218,6 +256,24 @@ typedef struct {
 
   /// Implement pointer
   void* ctx;
+
+  /**
+   * @brief Register a transport-selected raw POD loan topic.
+   * @note
+   * This entry is appended after the legacy fields. It is legal only during
+   * dispatcher Init. New callers require a provider built from the same IBMW
+   * version because this vtable has no size/version field.
+   * Input 1: Implement pointer to publisher handle
+   * Input 2: Msg type name
+   * Input 3: Nonzero initial payload size hint
+   * Input 4: Nonzero power-of-two payload alignment
+   * Return: Registration result
+   */
+  bool (*register_loaned_pod_topic)(
+      void* ctx,
+      ibmw_string_view_t msg_type,
+      size_t initial_size_hint,
+      size_t alignment);
 } ibmw_transport_sender_base_t;
 
 /**
@@ -245,7 +301,8 @@ typedef struct {
    * delivers the user-payload pointer of a borrowed sample directly to
    * the callback without deserialization. Drivers that cannot provide
    * zero-copy receive (e.g. dds, mqtt, tcp) MUST leave this function
-   * pointer NULL; the dispatcher checks for NULL and falls back / fails.
+   * pointer NULL; the dispatcher checks for NULL and returns failure. This
+   * zero-copy API does not silently subscribe through on_message instead.
    *
    * The callback ops type is 'ibmw_function_loaned_receiver_callback_ops_t'.
    * msg_type_support is passed for symmetry with on_message and lets the
@@ -273,6 +330,23 @@ typedef struct {
 
   /// Implement pointer
   void* ctx;
+
+  /**
+   * @brief Subscribe with transferable receive-loan ownership.
+   *
+   * This entry is appended after the legacy fields and preserves the
+   * old-client/new-provider layout only. Existing structs have no size/version
+   * field, so new-client/old-provider compatibility is not guaranteed and the
+   * retained API requires matched IBMW versions. On success,
+   * out_subscription receives an owned control handle. The callback receives
+   * a release callback whose ownership may be moved beyond callback return.
+   */
+  bool (*attach_loaned_retained)(
+      void* ctx,
+      const ibmw_type_support_base_t* msg_type_support,
+      ibmw_function_base_t* callback,
+      ibmw_retained_loan_options_t options,
+      ibmw_loaned_subscription_base_t** out_subscription);
 } ibmw_transport_receiver_base_t;
 
 /**

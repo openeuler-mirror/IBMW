@@ -4,12 +4,14 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "cpp/executor/executor.h"
 #include "engine/isubsystem.h"
 #include "engine/transport/transport_driver.h"
+#include "engine/transport/transport_driver_capabilities.h"
 #include "engine/transport/transport_access.h"
 #include "engine/core_types.h"
 
@@ -49,12 +51,18 @@ class TransportBus : public ISubsystem {
   void Initialize(YAML::Node options_node) override;
   void Start() override;
   void Shutdown() override;
+  bool CanShutdownFromCurrentThread() const noexcept;
+  bool TryPrepareShutdown();
+  bool TryShutdown();
 
   const Options& GetOptions() const { return options_; }
 
   std::list<std::pair<std::string, std::string>> GenInitializationReport() const override;
 
   void RegisterTransportDriver(std::unique_ptr<TransportDriver>&& transport_driver_ptr);
+  void RegisterTransportDriver(
+      std::unique_ptr<TransportDriver>&& transport_driver_ptr,
+      TransportDriverCapabilitiesV1 capabilities);
 
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);
@@ -89,6 +97,8 @@ class TransportBus : public ISubsystem {
  private:
   void RegisterInProcessTransport();
   void RegisterDebugLogFilter();
+  bool CanShutdownFromCurrentThreadUnlocked() const noexcept;
+  bool TryPrepareShutdownUnlocked();
 
  private:
   Options options_;
@@ -104,6 +114,8 @@ class TransportBus : public ISubsystem {
 
   std::vector<std::unique_ptr<TransportDriver>> transport_driver_vec_;
   std::vector<TransportDriver*> used_transport_driver_vec_;
+  std::unordered_map<const TransportDriver*, TransportDriverCapabilitiesV1>
+      transport_driver_capabilities_map_;
 
   TransportDriverDispatcher transport_driver_dispatcher_;
 
@@ -137,6 +149,9 @@ class TransportBus : public ISubsystem {
   };
 
   std::atomic_bool transport_access_start_flag_ = false;
+  mutable std::mutex shutdown_mutex_;
+  bool shutdown_prepared_ = false;
+  std::unordered_set<const TransportDriver*> prepared_shutdown_drivers_;
   std::unordered_map<std::string, std::unique_ptr<TransportAccessWrap>> transport_access_wrap_map_;
 };
 

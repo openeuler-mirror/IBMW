@@ -46,6 +46,21 @@ class Runtime {
                      base_ptr_->abi_version, (unsigned)IBMW_CORE_ABI_VERSION);
         std::abort();
       }
+      // A matching version is not sufficient if the provider supplied a
+      // truncated or otherwise malformed current-version function table.
+      // Validate the complete top-level table before invoking any accessor so
+      // failure is closed and has no partial accessor side effects.
+      if (base_ptr_->info == nullptr || base_ptr_->configurator == nullptr ||
+          base_ptr_->executor_bus == nullptr || base_ptr_->logger == nullptr ||
+          base_ptr_->memory_handle == nullptr ||
+          base_ptr_->service_handle == nullptr ||
+          base_ptr_->transport_handle == nullptr ||
+          base_ptr_->parameter_handle == nullptr) {
+        std::fprintf(stderr,
+                     "[IBMW FATAL] Malformed current-version core ABI: "
+                     "required accessor is null.\n");
+        std::abort();
+      }
       // Eagerly cache sub-handle pointers. These are stable after engine
       // initialization and never change for the lifetime of the module.
       // Caching eliminates repeated function-pointer indirection on every
@@ -57,6 +72,15 @@ class Runtime {
       cached_service_ = base_ptr_->service_handle(base_ptr_->ctx);
       cached_transport_ = base_ptr_->transport_handle(base_ptr_->ctx);
       cached_parameter_ = base_ptr_->parameter_handle(base_ptr_->ctx);
+      if (cached_configurator_ == nullptr || cached_executor_bus_ == nullptr ||
+          cached_logger_ == nullptr || cached_memory_ == nullptr ||
+          cached_service_ == nullptr || cached_transport_ == nullptr ||
+          cached_parameter_ == nullptr) {
+        std::fprintf(stderr,
+                     "[IBMW FATAL] Malformed current-version core ABI: "
+                     "required accessor returned null.\n");
+        std::abort();
+      }
     }
   }
   ~Runtime() = default;
@@ -67,6 +91,7 @@ class Runtime {
 
   ModuleDescriptor Info() const {
     MW_ASSERT(base_ptr_, "Reference is null.");
+    MW_ASSERT(base_ptr_->info, "Core info accessor is null.");
     ibmw_module_info_t module_info = base_ptr_->info(base_ptr_->ctx);
     return ModuleDescriptor{
         .module_name = util::ToStdStringView(module_info.module_name),

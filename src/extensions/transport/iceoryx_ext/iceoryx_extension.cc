@@ -82,12 +82,25 @@ void IceoryxExtension::OnShutdown() {
 }
 
 void IceoryxExtension::RegisterIceoryxTransportDriver() {
-  std::unique_ptr<runtime::core::transport::TransportDriver> iceoryx_transport_driver_ptr =
-      std::make_unique<IceoryxTransportDriver>(iceoryx_bus_);
+  auto concrete_driver = std::make_unique<IceoryxTransportDriver>(iceoryx_bus_);
+  auto* concrete_ptr = concrete_driver.get();
+  std::unique_ptr<runtime::core::transport::TransportDriver>
+      iceoryx_transport_driver_ptr = std::move(concrete_driver);
 
-  core_ptr_->GetTransportBus().RegisterTransportDriver(std::move(iceoryx_transport_driver_ptr));
+  core_ptr_->GetTransportBus().RegisterTransportDriver(
+      std::move(iceoryx_transport_driver_ptr),
+      runtime::core::transport::TransportDriverCapabilitiesV1{
+          .shutdown_v1 = static_cast<
+              runtime::core::transport::TransportShutdownCapabilityV1*>(
+              concrete_ptr),
+          .loaned_pod_registration_v1 = static_cast<
+              runtime::core::transport::LoanedPodRegistrationCapabilityV1*>(
+              concrete_ptr),
+          .retained_loan_v1 = static_cast<
+              runtime::core::transport::RetainedLoanCapabilityV1*>(
+              concrete_ptr)});
 }
 
 }  // namespace ibmw::extensions::iceoryx_extension
 
-IBMW_EXT_ENTRY(ibmw::extensions::iceoryx_extension::IceoryxExtension)
+IBMW_EXT_ENTRY_V2(ibmw::extensions::iceoryx_extension::IceoryxExtension)

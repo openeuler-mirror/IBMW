@@ -12,8 +12,13 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "base/url_encode.h"
 #include "iceoryx_ext/iceoryx_transport_driver.h"
@@ -145,6 +150,45 @@ TEST(IceoryxUrl2ServiceDescription, OversizedSegmentsAreTruncatedNotRejected) {
   EXPECT_LE(std::string(desc.getInstanceIDString().c_str()).size(),
             iox::MAX_RUNTIME_NAME_LENGTH);
   EXPECT_STREQ(desc.getEventIDString().c_str(), "/MsgType");
+}
+
+TEST(IceoryxRegistrationRollback, CallbackCanReenterBusGateWhileRollbackWaits) {
+  using namespace std::chrono_literals;
+
+  IoxNotificationGate callback_gate;
+  std::mutex bus_gate;
+  std::promise<void> callback_entered;
+  std::promise<void> detached;
+  auto callback_entered_future = callback_entered.get_future();
+  auto detached_future = detached.get_future().share();
+  std::atomic_bool callback_reentered{false};
+
+  std::thread callback([&] {
+    ASSERT_TRUE(callback_gate.TryEnter());
+    callback_entered.set_value();
+    detached_future.wait();
+    {
+      std::lock_guard<std::mutex> lock(bus_gate);
+      callback_reentered = true;
+    }
+    callback_gate.Exit();
+  });
+  ASSERT_EQ(callback_entered_future.wait_for(1s), std::future_status::ready);
+
+  auto rollback = std::async(std::launch::async, [&] {
+    internal::RunIoxRegistrationRollback(
+        [&] { callback_gate.Close(); }, [&] { detached.set_value(); },
+        [&] { callback_gate.WaitForQuiescence(); },
+        [&] {
+          std::lock_guard<std::mutex> lock(bus_gate);
+        });
+  });
+
+  EXPECT_EQ(rollback.wait_for(1s), std::future_status::ready);
+  rollback.get();
+  callback.join();
+  EXPECT_TRUE(callback_reentered.load());
+  EXPECT_FALSE(callback_gate.TryEnter());
 }
 
 // ---------------------------------------------------------------------------
