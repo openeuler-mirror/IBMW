@@ -69,6 +69,7 @@ target_include_directories(
           $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 
 # Set link libraries of target
+find_package(SQLite3 REQUIRED)
 target_link_libraries(
   ${CUR_TARGET_NAME}_cli_support
   PUBLIC ibmw::core::extension_api
@@ -81,7 +82,8 @@ target_link_libraries(
           TBB::tbb
           backward_iface
           nlohmann_json::nlohmann_json
-          mcap::mcap)
+          mcap::mcap
+          SQLite::SQLite3)
 target_link_libraries(
   ${CUR_TARGET_NAME}_runtime_support
   PUBLIC ibmw::core::extension_api
@@ -130,7 +132,8 @@ if(IBMW_BUILD_TESTS AND test_files)
   target_link_libraries(${CUR_TARGET_NAME}_test PRIVATE
                         ${CUR_TARGET_NAME}_runtime_support
                         ${CUR_TARGET_NAME}_cli_support
-                        ${CUR_TARGET_NAME}_cli_provider ibmw::core::engine)
+                        ${CUR_TARGET_NAME}_cli_provider ibmw::core::engine
+                        SQLite::SQLite3)
   add_dependencies(${CUR_TARGET_NAME}_test ${CUR_TARGET_NAME}_cli_provider)
 
   file(GENERATE
@@ -168,7 +171,8 @@ target_link_libraries(
           ibmw::api::cpp
           ibmw::base
           nlohmann_json::nlohmann_json
-          mcap::mcap)
+          mcap::mcap
+          SQLite::SQLite3)
 if(IBMW_BUILD_WITH_ROS2)
   target_link_libraries(${CUR_TARGET_NAME}_cli_provider PRIVATE rclcpp::rclcpp)
 endif()

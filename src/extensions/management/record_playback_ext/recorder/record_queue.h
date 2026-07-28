@@ -4,6 +4,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -54,8 +55,11 @@ class RecordQueue {
   PushResult Push(
       ibmw::transport::SerializedMessage message);
   std::optional<ibmw::transport::SerializedMessage> Pop();
+  std::optional<ibmw::transport::SerializedMessage> PopFor(
+      std::chrono::milliseconds timeout);
   std::optional<ibmw::transport::SerializedMessage> TryPop();
 
+  void WakeConsumer();
   void Close();
   Statistics GetStatistics() const;
 
@@ -73,6 +77,7 @@ class RecordQueue {
   uint64_t pushed_ = 0;
   uint64_t popped_ = 0;
   uint64_t dropped_ = 0;
+  uint64_t pending_wakes_ = 0;
   bool closed_ = false;
 };
 

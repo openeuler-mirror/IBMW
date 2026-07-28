@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "base/exception.h"
+#include "record_playback_ext/storage/compression_codec.h"
 #include "yaml-cpp/yaml.h"
 
 namespace ibmw::extensions::record_playback_extension {
@@ -32,6 +33,25 @@ void ValidateSchema(const ibmw::util::SchemaDescriptor& schema) {
       "Schema hash mismatch for '{}'.", schema.type_name);
 }
 
+int CompressionLevel(
+    std::string_view format,
+    std::string_view level) {
+  if (format == "zstd") {
+    if (level == "fastest") return 1;
+    if (level == "fast") return 2;
+    if (level == "default") return 0;
+    if (level == "slow") return 10;
+    if (level == "slowest") return 19;
+  } else if (format == "lz4") {
+    if (level == "fastest" || level == "fast" || level == "default") {
+      return 0;
+    }
+    if (level == "slow") return 9;
+    if (level == "slowest") return 12;
+  }
+  MW_ASSERT(false, "Invalid MCAP compression level '{}'.", level);
+  return 0;
+}
 }  // namespace
 
 McapStorage::~McapStorage() {
@@ -47,6 +67,21 @@ void McapStorage::Open(const StorageOptions& options) {
   MW_ASSERT(
       options.storage_id == "mcap",
       "McapStorage cannot open storage id '{}'.", options.storage_id);
+  MW_ASSERT(
+      options.compression_mode == "none" ||
+          options.compression_mode == "file" ||
+          options.compression_mode == "message",
+      "Unsupported MCAP compression mode '{}'.", options.compression_mode);
+  MW_ASSERT(
+      options.compression_mode == "none" ||
+          options.compression_format == "zstd" ||
+          options.compression_format == "lz4",
+      "MCAP compression requires zstd or lz4.");
+  MW_ASSERT(
+      options.compression_mode == "none" ||
+          (options.compression_queue_size > 0 &&
+           options.compression_threads > 0),
+      "MCAP compression requires a non-zero queue and worker count.");
 
   options_ = options;
   options_.output_path = std::filesystem::absolute(options.output_path);
@@ -62,18 +97,13 @@ void McapStorage::Open(const StorageOptions& options) {
     std::filesystem::create_directories(options_.output_path);
   }
 
-  mcap_path_ = options_.output_path / "data_0.mcap";
-  writer_ = std::make_unique<mcap::McapWriter>();
-  auto writer_options = mcap::McapWriterOptions("ibmw");
-  writer_options.compression = mcap::Compression::None;
-  const auto result = writer_->open(mcap_path_.string(), writer_options);
-  MW_ASSERT(
-      result.ok(), "Failed to open MCAP '{}': {}.", mcap_path_.string(),
-      result.message);
-
   summary_.output_path = options_.output_path;
-  summary_.relative_files = {mcap_path_.filename()};
+  if (options_.compression_mode != "none") {
+    compression_pool_ = std::make_unique<CompressionTaskPool>(
+        options_.compression_threads);
+  }
   state_ = State::kOpen;
+  OpenNewFile();
 }
 
 StorageSchemaId McapStorage::RegisterSchema(
@@ -94,15 +124,15 @@ StorageSchemaId McapStorage::RegisterSchema(
     return existing->second.id;
   }
 
+  const auto id = next_schema_id_++;
+  schemas_by_key_.emplace(
+      key, StoredSchema{.id = id, .descriptor = schema});
+  schemas_by_id_.emplace(id, schema);
   mcap::Schema mcap_schema(
       schema.schema_name, schema.schema_encoding, schema.schema_data);
   writer_->addSchema(mcap_schema);
   MW_ASSERT(mcap_schema.id != 0, "MCAP returned an invalid Schema ID.");
-
-  const auto id = static_cast<StorageSchemaId>(mcap_schema.id);
-  schemas_by_key_.emplace(
-      key, StoredSchema{.id = id, .descriptor = schema});
-  schemas_by_id_.emplace(id, schema);
+  current_schema_ids_.emplace(id, mcap_schema.id);
   return id;
 }
 
@@ -135,18 +165,29 @@ StorageChannelId McapStorage::RegisterChannel(
       {"ibmw_msg_type", channel.topic.msg_type},
       {"serialization_type", channel.topic.serialization_type},
       {"schema_hash", schema->second.schema_hash}};
+  if (options_.compression_mode == "message") {
+    metadata.emplace("ibmw_payload_compression", options_.compression_format);
+  }
+  for (const auto& [policy, value] : channel.topic.qos.policies) {
+    metadata.emplace("qos." + policy, value);
+  }
+  const auto current_schema = current_schema_ids_.find(schema_id);
+  MW_ASSERT(
+      current_schema != current_schema_ids_.end(),
+      "Schema ID {} is unavailable in the current MCAP file.", schema_id);
   mcap::Channel mcap_channel(
       channel.topic.topic,
       MessageEncoding(channel.topic.serialization_type),
-      static_cast<mcap::SchemaId>(schema_id), metadata);
+      current_schema->second, metadata);
   writer_->addChannel(mcap_channel);
   MW_ASSERT(mcap_channel.id != 0, "MCAP returned an invalid Channel ID.");
 
-  const auto id = static_cast<StorageChannelId>(mcap_channel.id);
+  const auto id = next_channel_id_++;
   StoredChannel stored{
       .id = id, .schema_id = schema_id, .descriptor = channel};
   channels_by_key_.emplace(key, stored);
   channels_by_id_.emplace(id, std::move(stored));
+  current_channel_ids_.emplace(id, mcap_channel.id);
   summary_.channel_message_counts.emplace(id, 0);
   return id;
 }
@@ -170,20 +211,71 @@ void McapStorage::Write(
                                      : message.publish_timestamp;
   const uint64_t publish_time =
       message.publish_timestamp != 0 ? message.publish_timestamp : log_time;
-  MW_ASSERT(log_time != 0, "Message timestamp cannot be zero.");
 
   const std::string payload = message.payload->JoinToString();
+  if (ShouldSplit(log_time, payload.size())) {
+    const std::string reason =
+        options_.max_bag_size > 0 &&
+                current_file_estimated_size_ + payload.size() + 64 >
+                    options_.max_bag_size
+            ? "size"
+            : "duration";
+    current_split_reason_ = reason;
+    CloseCurrentFile();
+    OpenNewFile();
+  }
+  const auto current_channel = current_channel_ids_.find(channel_id);
+  MW_ASSERT(
+      current_channel != current_channel_ids_.end(),
+      "Channel ID {} is unavailable in the current MCAP file.", channel_id);
+  MW_ASSERT(
+      message.identity.sequence <= std::numeric_limits<uint32_t>::max(),
+      "Message sequence {} exceeds MCAP uint32 range.",
+      message.identity.sequence);
+  const auto sequence = static_cast<uint32_t>(message.identity.sequence);
+  if (options_.compression_mode == "message") {
+    while (pending_messages_.size() >= options_.compression_queue_size) {
+      DrainPendingMessage();
+    }
+    const std::string format = options_.compression_format;
+    const int level = compression_level_;
+    pending_messages_.emplace_back(PendingMessage{
+        .channel_id = current_channel->second,
+        .sequence = sequence,
+        .log_time = log_time,
+        .publish_time = publish_time,
+        .payload = compression_pool_->Submit(
+            [payload, format, level] {
+              return CompressBuffer(payload, format, level);
+            })});
+  } else {
+    WriteMcapMessage(
+        current_channel->second, sequence, log_time, publish_time, payload);
+  }
+  AccountMessage(channel_id, log_time, payload.size());
+}
+
+void McapStorage::WriteMcapMessage(
+    mcap::ChannelId channel_id,
+    uint32_t sequence,
+    uint64_t log_time,
+    uint64_t publish_time,
+    const std::string& payload) {
   mcap::Message mcap_message{
-      .channelId = static_cast<mcap::ChannelId>(channel_id),
-      .sequence = static_cast<uint32_t>(
-          message.identity.sequence & std::numeric_limits<uint32_t>::max()),
+      .channelId = channel_id,
+      .sequence = sequence,
       .logTime = log_time,
       .publishTime = publish_time,
       .dataSize = static_cast<uint64_t>(payload.size()),
       .data = reinterpret_cast<const std::byte*>(payload.data())};
   const auto result = writer_->write(mcap_message);
   MW_ASSERT(result.ok(), "Failed to write MCAP message: {}.", result.message);
+}
 
+void McapStorage::AccountMessage(
+    StorageChannelId channel_id,
+    uint64_t log_time,
+    size_t payload_size) {
   if (summary_.message_count == 0) {
     summary_.start_timestamp = log_time;
     summary_.end_timestamp = log_time;
@@ -193,6 +285,42 @@ void McapStorage::Write(
   }
   ++summary_.message_count;
   ++summary_.channel_message_counts[channel_id];
+  if (current_file_message_count_ == 0) {
+    current_file_start_timestamp_ = log_time;
+    current_file_end_timestamp_ = log_time;
+  } else {
+    current_file_start_timestamp_ =
+        std::min(current_file_start_timestamp_, log_time);
+    current_file_end_timestamp_ =
+        std::max(current_file_end_timestamp_, log_time);
+  }
+  ++current_file_message_count_;
+  current_file_estimated_size_ += payload_size + 64;
+}
+
+void McapStorage::DrainPendingMessage() {
+  MW_ASSERT(!pending_messages_.empty(), "No pending message to drain.");
+  auto pending = std::move(pending_messages_.front());
+  pending_messages_.pop_front();
+  WriteMcapMessage(
+      pending.channel_id, pending.sequence, pending.log_time,
+      pending.publish_time, pending.payload.get());
+}
+
+void McapStorage::DrainPendingMessages() {
+  while (!pending_messages_.empty()) {
+    DrainPendingMessage();
+  }
+}
+
+void McapStorage::Flush() {
+  MW_ASSERT(state_ == State::kOpen, "Storage is not open.");
+  DrainPendingMessages();
+  DrainPendingFiles();
+  writer_->closeLastChunk();
+  auto* sink = writer_->dataSink();
+  MW_ASSERT(sink != nullptr, "MCAP writer has no output sink.");
+  sink->flush();
 }
 
 void McapStorage::Close() {
@@ -200,12 +328,21 @@ void McapStorage::Close() {
     return;
   }
 
-  writer_->close();
-  writer_.reset();
-  summary_.file_size = std::filesystem::file_size(mcap_path_);
+  CloseCurrentFile();
+  DrainPendingFiles();
+  if (compression_pool_) {
+    compression_pool_->Shutdown();
+  }
   summary_.closed_cleanly = requested_clean_close_;
   WriteMetadata();
   state_ = State::kClosed;
+}
+
+void McapStorage::SetMessageStatistics(
+    uint64_t dropped_message_count,
+    uint64_t duplicate_message_count) {
+  summary_.dropped_message_count = dropped_message_count;
+  summary_.duplicate_message_count = duplicate_message_count;
 }
 
 void McapStorage::SetCloseStatus(
@@ -214,6 +351,7 @@ void McapStorage::SetCloseStatus(
   requested_clean_close_ = clean;
   summary_.error_message = std::move(error_message);
 }
+
 std::string McapStorage::SchemaKey(
     const ibmw::util::SchemaDescriptor& schema) {
   return schema.type_name + '\0' + schema.serialization_type;
@@ -232,6 +370,186 @@ std::string McapStorage::MessageEncoding(
                                        : std::string(serialization_type);
 }
 
+void McapStorage::OpenNewFile(std::string split_reason) {
+  mcap_path_ = options_.output_path /
+               ("data_" + std::to_string(file_index_++) + ".mcap");
+  writer_ = std::make_unique<mcap::McapWriter>();
+  auto writer_options = mcap::McapWriterOptions("ibmw");
+  writer_options.compression = Compression();
+  compression_level_ = 0;
+  if (options_.storage_preset_profile == "fastwrite") {
+    writer_options.noChunkCRC = true;
+    writer_options.noSummaryCRC = true;
+    writer_options.compressionLevel = mcap::CompressionLevel::Fastest;
+    if (options_.compression_mode != "none") {
+      compression_level_ = CompressionLevel(
+          options_.compression_format, "fastest");
+    }
+  } else if (options_.storage_preset_profile == "small") {
+    writer_options.compressionLevel = mcap::CompressionLevel::Slow;
+    writer_options.forceCompression = true;
+    if (options_.compression_mode != "none") {
+      compression_level_ = CompressionLevel(
+          options_.compression_format, "slow");
+    }
+  }
+  if (!options_.storage_config_file.empty()) {
+    const auto config = YAML::LoadFile(options_.storage_config_file.string());
+    if (config["chunk_size"]) {
+      writer_options.chunkSize = config["chunk_size"].as<uint64_t>();
+    }
+    if (config["no_chunking"]) {
+      writer_options.noChunking = config["no_chunking"].as<bool>();
+    }
+    if (config["force_compression"]) {
+      writer_options.forceCompression =
+          config["force_compression"].as<bool>();
+    }
+    if (config["compression_level"]) {
+      const std::string level =
+          config["compression_level"].as<std::string>();
+      static const std::unordered_map<
+          std::string,
+          mcap::CompressionLevel>
+          levels{{"fastest", mcap::CompressionLevel::Fastest},
+                 {"fast", mcap::CompressionLevel::Fast},
+                 {"default", mcap::CompressionLevel::Default},
+                 {"slow", mcap::CompressionLevel::Slow},
+                 {"slowest", mcap::CompressionLevel::Slowest}};
+      const auto found = levels.find(level);
+      MW_ASSERT(found != levels.end(), "Invalid MCAP compression level.");
+      writer_options.compressionLevel = found->second;
+      if (options_.compression_mode != "none") {
+        compression_level_ = CompressionLevel(
+            options_.compression_format, level);
+      }
+    }
+  }
+  const auto result = writer_->open(mcap_path_.string(), writer_options);
+  MW_ASSERT(
+      result.ok(), "Failed to open MCAP '{}': {}.", mcap_path_.string(),
+      result.message);
+  current_file_start_timestamp_ = 0;
+  current_file_end_timestamp_ = 0;
+  current_file_message_count_ = 0;
+  current_file_estimated_size_ = 0;
+  current_split_reason_ = std::move(split_reason);
+  current_schema_ids_.clear();
+  current_channel_ids_.clear();
+
+  for (const auto& [id, schema] : schemas_by_id_) {
+    mcap::Schema mcap_schema(
+        schema.schema_name, schema.schema_encoding, schema.schema_data);
+    writer_->addSchema(mcap_schema);
+    current_schema_ids_.emplace(id, mcap_schema.id);
+  }
+  for (const auto& [id, channel] : channels_by_id_) {
+    const auto schema = schemas_by_id_.find(channel.schema_id);
+    const auto current_schema = current_schema_ids_.find(channel.schema_id);
+    MW_ASSERT(
+        schema != schemas_by_id_.end() &&
+            current_schema != current_schema_ids_.end(),
+        "Cannot restore Channel {} in a split MCAP file.", id);
+    mcap::KeyValueMap metadata{
+        {"ibmw_msg_type", channel.descriptor.topic.msg_type},
+        {"serialization_type", channel.descriptor.topic.serialization_type},
+        {"schema_hash", schema->second.schema_hash}};
+    if (options_.compression_mode == "message") {
+      metadata.emplace(
+          "ibmw_payload_compression", options_.compression_format);
+    }
+    for (const auto& [policy, value] :
+         channel.descriptor.topic.qos.policies) {
+      metadata.emplace("qos." + policy, value);
+    }
+    mcap::Channel mcap_channel(
+        channel.descriptor.topic.topic,
+        MessageEncoding(channel.descriptor.topic.serialization_type),
+        current_schema->second, metadata);
+    writer_->addChannel(mcap_channel);
+    current_channel_ids_.emplace(id, mcap_channel.id);
+  }
+}
+
+void McapStorage::CloseCurrentFile() {
+  if (!writer_) {
+    return;
+  }
+  DrainPendingMessages();
+  writer_->close();
+  writer_.reset();
+  StorageFileSummary file_summary{
+      .relative_path = mcap_path_.filename(),
+      .start_timestamp = current_file_start_timestamp_,
+      .end_timestamp = current_file_end_timestamp_,
+      .message_count = current_file_message_count_,
+      .file_size = 0,
+      .compression =
+          options_.compression_mode == "none"
+              ? "none"
+              : options_.compression_format,
+      .split_reason = current_split_reason_};
+  if (options_.compression_mode == "file") {
+    while (pending_files_.size() >= options_.compression_queue_size) {
+      DrainPendingFile();
+    }
+    const auto input_path = mcap_path_;
+    const std::string format = options_.compression_format;
+    const int level = compression_level_;
+    pending_files_.emplace_back(PendingFile{
+        .summary = std::move(file_summary),
+        .output_path = compression_pool_->Submit(
+            [input_path, format, level] {
+              return CompressFile(input_path, format, level).string();
+            })});
+    return;
+  }
+
+  file_summary.file_size = std::filesystem::file_size(mcap_path_);
+  summary_.file_size += file_summary.file_size;
+  summary_.relative_files.emplace_back(file_summary.relative_path);
+  summary_.files.emplace_back(std::move(file_summary));
+}
+
+void McapStorage::DrainPendingFile() {
+  MW_ASSERT(!pending_files_.empty(), "No pending file to drain.");
+  auto pending = std::move(pending_files_.front());
+  pending_files_.pop_front();
+  const std::filesystem::path output_path = pending.output_path.get();
+  pending.summary.relative_path = output_path.filename();
+  pending.summary.file_size = std::filesystem::file_size(output_path);
+  summary_.file_size += pending.summary.file_size;
+  summary_.relative_files.emplace_back(pending.summary.relative_path);
+  summary_.files.emplace_back(std::move(pending.summary));
+}
+
+void McapStorage::DrainPendingFiles() {
+  while (!pending_files_.empty()) {
+    DrainPendingFile();
+  }
+}
+
+bool McapStorage::ShouldSplit(
+    uint64_t log_time,
+    size_t payload_size) const {
+  if (current_file_message_count_ == 0) {
+    return false;
+  }
+  if (options_.max_bag_size > 0 &&
+      current_file_estimated_size_ + payload_size + 64 >
+          options_.max_bag_size) {
+    return true;
+  }
+  return options_.max_bag_duration_ns > 0 &&
+         log_time >= current_file_start_timestamp_ &&
+         log_time - current_file_start_timestamp_ >=
+             options_.max_bag_duration_ns;
+}
+
+mcap::Compression McapStorage::Compression() const {
+  return mcap::Compression::None;
+}
+
 void McapStorage::WriteMetadata() {
   YAML::Node information;
   information["version"] = kBagVersion;
@@ -245,13 +563,26 @@ void McapStorage::WriteMetadata() {
           : summary_.end_timestamp - summary_.start_timestamp;
   information["closed_cleanly"] = summary_.closed_cleanly;
   information["error_message"] = summary_.error_message;
+  information["dropped_message_count"] = summary_.dropped_message_count;
+  information["duplicate_message_count"] =
+      summary_.duplicate_message_count;
+  information["compression_mode"] = options_.compression_mode;
+  information["compression_format"] = options_.compression_format;
+  information["compression_queue_size"] = options_.compression_queue_size;
+  information["compression_threads"] = options_.compression_threads;
 
   YAML::Node files(YAML::NodeType::Sequence);
-  YAML::Node file;
-  file["path"] = mcap_path_.filename().string();
-  file["start_timestamp"] = summary_.start_timestamp;
-  file["size"] = summary_.file_size;
-  files.push_back(file);
+  for (const auto& summary_file : summary_.files) {
+    YAML::Node file;
+    file["path"] = summary_file.relative_path.string();
+    file["start_timestamp"] = summary_file.start_timestamp;
+    file["end_timestamp"] = summary_file.end_timestamp;
+    file["message_count"] = summary_file.message_count;
+    file["size"] = summary_file.file_size;
+    file["compression"] = summary_file.compression;
+    file["split_reason"] = summary_file.split_reason;
+    files.push_back(file);
+  }
   information["files"] = files;
 
   YAML::Node schemas(YAML::NodeType::Sequence);
@@ -286,7 +617,15 @@ void McapStorage::WriteMetadata() {
     item["msg_type"] = channel.descriptor.topic.msg_type;
     item["serialization_type"] =
         channel.descriptor.topic.serialization_type;
+    item["schema_hash"] =
+        channel.descriptor.topic.schema.schema_hash;
     item["message_count"] = summary_.channel_message_counts.at(id);
+    YAML::Node qos;
+    for (const auto& [policy, value] :
+         channel.descriptor.topic.qos.policies) {
+      qos[policy] = value;
+    }
+    item["qos"] = qos;
     channels.push_back(item);
   }
   information["topics"] = topics;

@@ -13,8 +13,7 @@ class TransportSubscriptionSource final : public CaptureSource {
  public:
   TransportSubscriptionSource(
       std::string driver_name,
-      const ibmw::runtime::core::transport::SerializedTransportCapabilityV1&
-          capability,
+      ibmw::runtime::core::transport::SerializedTransportDriver& driver,
       TopicAdvertisement advertisement,
       ibmw::transport::QosDescriptor requested_qos = {});
   ~TransportSubscriptionSource() override;
@@ -27,8 +26,7 @@ class TransportSubscriptionSource final : public CaptureSource {
 
  private:
   std::string driver_name_;
-  const ibmw::runtime::core::transport::SerializedTransportCapabilityV1&
-      capability_;
+  ibmw::runtime::core::transport::SerializedTransportDriver& driver_;
   TopicAdvertisement advertisement_;
   ibmw::transport::QosDescriptor requested_qos_;
   ibmw::runtime::core::transport::SerializedSubscriberHandle handle_;

@@ -161,6 +161,7 @@ CachedTransportSubscriptionRegistry::Attach(
     ibmw::runtime::core::transport::TransportDriver& driver,
     const TopicAdvertisement& advertisement,
     ibmw::util::TypeSupportRef type_support,
+    const ibmw::transport::QosDescriptor& requested_qos,
     ibmw::transport::SerializedMessageCallback callback) {
   MW_ASSERT(type_support, "Cached subscription requires TypeSupport.");
   MW_ASSERT(
@@ -201,6 +202,7 @@ CachedTransportSubscriptionRegistry::Attach(
       .pkg_path = advertisement.type_support_package,
       .module_name = "ibmw-bag-recorder",
       .msg_type_support_ref = type_support};
+  handler->requested_qos = requested_qos;
   handler->require_cache_serialization_types.emplace(
       advertisement.topic.serialization_type);
   handler->callback = [state](
@@ -246,12 +248,14 @@ CachedTransportSubscriptionSource::CachedTransportSubscriptionSource(
     ibmw::runtime::core::transport::TransportDriver& driver,
     TopicAdvertisement advertisement,
     ibmw::util::TypeSupportRef type_support,
-    CachedTransportSubscriptionRegistry& registry)
+    CachedTransportSubscriptionRegistry& registry,
+    ibmw::transport::QosDescriptor requested_qos)
     : driver_name_(std::move(driver_name)),
       driver_(driver),
       advertisement_(std::move(advertisement)),
       type_support_(type_support),
-      registry_(registry) {}
+      registry_(registry),
+      requested_qos_(std::move(requested_qos)) {}
 
 CachedTransportSubscriptionSource::~CachedTransportSubscriptionSource() {
   try {
@@ -264,6 +268,7 @@ void CachedTransportSubscriptionSource::Start(
     ibmw::transport::SerializedMessageCallback callback) {
   state_ = registry_.Attach(
       driver_name_, driver_, advertisement_, type_support_,
+      requested_qos_,
       std::move(callback));
 }
 

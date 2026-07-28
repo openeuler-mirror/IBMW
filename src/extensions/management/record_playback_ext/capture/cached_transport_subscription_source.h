@@ -38,6 +38,7 @@ class CachedTransportSubscriptionRegistry {
       ibmw::runtime::core::transport::TransportDriver& driver,
       const TopicAdvertisement& advertisement,
       ibmw::util::TypeSupportRef type_support,
+      const ibmw::transport::QosDescriptor& requested_qos,
       ibmw::transport::SerializedMessageCallback callback);
 
  private:
@@ -57,7 +58,8 @@ class CachedTransportSubscriptionSource final : public CaptureSource {
       ibmw::runtime::core::transport::TransportDriver& driver,
       TopicAdvertisement advertisement,
       ibmw::util::TypeSupportRef type_support,
-      CachedTransportSubscriptionRegistry& registry);
+      CachedTransportSubscriptionRegistry& registry,
+      ibmw::transport::QosDescriptor requested_qos = {});
   ~CachedTransportSubscriptionSource() override;
 
   void Start(
@@ -72,6 +74,7 @@ class CachedTransportSubscriptionSource final : public CaptureSource {
   TopicAdvertisement advertisement_;
   ibmw::util::TypeSupportRef type_support_;
   CachedTransportSubscriptionRegistry& registry_;
+  ibmw::transport::QosDescriptor requested_qos_;
   std::shared_ptr<CachedTransportSubscriptionRegistry::SubscriptionState>
       state_;
 };

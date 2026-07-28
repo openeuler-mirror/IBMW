@@ -33,9 +33,6 @@ struct BagChannelInfo {
   uint16_t id = 0;
   uint16_t schema_id = 0;
   ibmw::runtime::core::transport::TopicDescriptor topic;
-  std::string source_id;
-  std::string publisher_id;
-  std::string record_driver;
   uint64_t message_count = 0;
 };
 
@@ -52,6 +49,8 @@ struct BagInfo {
   uint64_t total_size = 0;
   uint64_t dropped_message_count = 0;
   uint64_t duplicate_message_count = 0;
+  std::string compression_mode = "none";
+  std::string compression_format;
   std::string error_message;
   bool closed_cleanly = false;
 
@@ -66,6 +65,11 @@ struct BagReadOptions {
   std::vector<std::string> topics;
 };
 
+struct ReaderOpenOptions {
+  std::string expected_storage_id;
+  std::filesystem::path storage_config_file;
+};
+
 struct BagMessage {
   BagChannelInfo channel;
   uint64_t log_time = 0;
@@ -74,18 +78,31 @@ struct BagMessage {
   std::shared_ptr<ibmw::util::BufferArrayView> payload;
 };
 
-class McapBagReader {
+class BagReader {
  public:
   using MessageCallback = std::function<bool(BagMessage&& message)>;
 
+  virtual ~BagReader() = default;
+  virtual void Open(
+      const std::filesystem::path& bag_path,
+      const ReaderOpenOptions& options = {}) = 0;
+  virtual void ReadMessages(
+      const BagReadOptions& options,
+      const MessageCallback& callback) const = 0;
+  virtual const BagInfo& Info() const noexcept = 0;
+};
+
+class McapBagReader final : public BagReader {
+ public:
+
   void Open(
       const std::filesystem::path& bag_path,
-      std::string_view expected_storage_id = {});
+      const ReaderOpenOptions& options = {}) override;
   void ReadMessages(
       const BagReadOptions& options,
-      const MessageCallback& callback) const;
+      const MessageCallback& callback) const override;
 
-  const BagInfo& Info() const noexcept { return info_; }
+  const BagInfo& Info() const noexcept override { return info_; }
 
  private:
   struct FileChannelKey {
@@ -102,8 +119,12 @@ class McapBagReader {
   };
 
   BagInfo info_;
+  std::string summary_method_ = "allow_fallback_scan";
+  std::string read_order_ = "auto";
   std::unordered_map<FileChannelKey, BagChannelInfo, FileChannelKeyHash>
       file_channels_;
+  std::unordered_map<FileChannelKey, std::string, FileChannelKeyHash>
+      file_payload_compressions_;
 };
 
 }  // namespace ibmw::extensions::record_playback_extension

@@ -20,6 +20,24 @@ using StorageChannelId = uint16_t;
 struct StorageOptions {
   std::filesystem::path output_path;
   std::string storage_id = "mcap";
+  uint64_t max_bag_size = 0;
+  uint64_t max_bag_duration_ns = 0;
+  std::string compression_mode = "none";
+  std::string compression_format;
+  size_t compression_queue_size = 1;
+  size_t compression_threads = 1;
+  std::string storage_preset_profile;
+  std::filesystem::path storage_config_file;
+};
+
+struct StorageFileSummary {
+  std::filesystem::path relative_path;
+  uint64_t start_timestamp = 0;
+  uint64_t end_timestamp = 0;
+  uint64_t message_count = 0;
+  uint64_t file_size = 0;
+  std::string compression = "none";
+  std::string split_reason;
 };
 
 struct StorageChannelDescriptor {
@@ -33,8 +51,11 @@ struct StorageSummary {
   uint64_t end_timestamp = 0;
   uint64_t message_count = 0;
   uint64_t file_size = 0;
+  uint64_t dropped_message_count = 0;
+  uint64_t duplicate_message_count = 0;
   std::string error_message;
   std::unordered_map<StorageChannelId, uint64_t> channel_message_counts;
+  std::vector<StorageFileSummary> files;
   bool closed_cleanly = false;
 };
 
@@ -55,6 +76,10 @@ class Storage {
   virtual void Write(
       StorageChannelId channel_id,
       const ibmw::transport::SerializedMessage& message) = 0;
+  virtual void Flush() = 0;
+  virtual void SetMessageStatistics(
+      uint64_t dropped_message_count,
+      uint64_t duplicate_message_count) = 0;
   virtual void SetCloseStatus(
       bool clean,
       std::string error_message) {

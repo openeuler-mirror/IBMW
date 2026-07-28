@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "engine/transport/message_frame.h"
+#include "engine/transport/topic_descriptor.h"
 #include "base/log_util.h"
 
 namespace ibmw::runtime::core::transport {
@@ -24,6 +25,7 @@ using MessageCallback = std::function<void(MessageFrame&, std::function<void()>&
 
 struct MessageHandlerWrapper {
   TransportInfo info;
+  QosDescriptor requested_qos;
   std::unordered_set<std::string> require_cache_serialization_types;
   MessageCallback callback;
 };

@@ -19,6 +19,7 @@ struct SerializedSubscriberHandle {
 
 struct SerializedSubscriberOptions {
   TopicDescriptor topic;
+  QosDescriptor requested_qos;
 };
 
 using ibmw::transport::SerializedMessageCallback;

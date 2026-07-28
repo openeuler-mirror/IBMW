@@ -23,9 +23,12 @@ bool ExtensionBase::Initialize(runtime::core::Engine* core_ptr) noexcept {
           }
         });
 
-    // Before shutdown: revert to simple logger to prevent dangling pointers.
+    // Keep the real logger while dependent subsystems shut down, then revert
+    // immediately before the logging subsystem itself is destroyed.
     core_ptr_->RegisterHook(
-        runtime::core::BeforePhase(runtime::core::Phase::kStopping),
+        runtime::core::Before(
+            runtime::core::Phase::kStopping,
+            runtime::core::Subsystem::kLogger),
         [this] {
           if (extension_logger_) {
             extension_logger_->Set(ibmw::logger::LoggerRef{});

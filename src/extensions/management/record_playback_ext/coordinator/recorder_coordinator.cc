@@ -74,6 +74,13 @@ RecordQueue::PushResult RecorderCoordinator::Accept(
       return RecordQueue::PushResult::kClosed;
     }
   }
+  message.identity.source_id.clear();
+  message.identity.publisher_id.clear();
+  message.source_driver.clear();
+  if (!options_.snapshot_mode) {
+    return queue_.Push(std::move(message));
+  }
+  std::lock_guard snapshot_input_lock(snapshot_input_mutex_);
   return queue_.Push(std::move(message));
 }
 
@@ -87,6 +94,42 @@ void RecorderCoordinator::RegisterChannel(
   static_cast<void>(FindOrRegisterChannel(channel, schema_id));
 }
 
+void RecorderCoordinator::TriggerSnapshot() {
+  MW_ASSERT(options_.snapshot_mode, "Recorder is not in snapshot mode.");
+  uint64_t request_id = 0;
+  {
+    std::lock_guard snapshot_input_lock(snapshot_input_mutex_);
+    MW_ASSERT(
+        state_.load() == State::kRunning,
+        "Recorder is not running.");
+    const uint64_t queue_target = queue_.GetStatistics().pushed;
+    std::lock_guard snapshot_lock(snapshot_mutex_);
+    request_id = next_snapshot_id_++;
+    snapshot_requests_.push_back(
+        SnapshotRequest{.id = request_id, .queue_target = queue_target});
+  }
+  queue_.WakeConsumer();
+
+  std::unique_lock snapshot_lock(snapshot_mutex_);
+  snapshot_cv_.wait(snapshot_lock, [this, request_id] {
+    return completed_snapshot_id_ >= request_id ||
+           snapshot_writer_finished_;
+  });
+  if (completed_snapshot_id_ >= request_id) {
+    return;
+  }
+  snapshot_lock.unlock();
+  std::exception_ptr error;
+  {
+    std::lock_guard error_lock(error_mutex_);
+    error = writer_error_;
+  }
+  if (error) {
+    std::rethrow_exception(error);
+  }
+  MW_ASSERT(false, "Recorder stopped before completing snapshot {}.", request_id);
+}
+
 void RecorderCoordinator::Close() {
   const State previous = state_.exchange(State::kClosed);
   if (previous == State::kClosed || previous == State::kCreated) {
@@ -97,13 +140,25 @@ void RecorderCoordinator::Close() {
   if (writer_thread_.joinable()) {
     writer_thread_.join();
   }
+  const auto statistics = QueueStatistics();
   std::exception_ptr error;
   {
     std::lock_guard lock(error_mutex_);
     error = writer_error_;
   }
+  uint64_t abandoned_messages = 0;
+  if (error) {
+    abandoned_messages = statistics.queued_messages;
+    abandoned_messages += options_.snapshot_mode
+                              ? snapshot_buffer_.size()
+                              : writer_failed_messages_.load();
+  }
   {
     std::lock_guard storage_lock(storage_mutex_);
+    storage_->SetMessageStatistics(
+        statistics.dropped + snapshot_dropped_ +
+            external_dropped_.load() + abandoned_messages,
+        0);
     storage_->SetCloseStatus(!error, DescribeException(error));
     storage_->Close();
   }
@@ -113,13 +168,31 @@ void RecorderCoordinator::Close() {
   }
 }
 
+RecordQueue::Statistics RecorderCoordinator::QueueStatistics() const {
+  return queue_.GetStatistics();
+}
+
 void RecorderCoordinator::RunWriter() {
   try {
-    while (auto message = queue_.Pop()) {
-      std::lock_guard storage_lock(storage_mutex_);
-      const auto schema_id = FindOrRegisterSchema(message->topic);
-      const auto channel_id = FindOrRegisterChannel(*message, schema_id);
-      storage_->Write(channel_id, *message);
+    while (true) {
+      auto message = options_.snapshot_mode
+                         ? queue_.PopFor(std::chrono::milliseconds(50))
+                         : queue_.Pop();
+      const auto statistics = queue_.GetStatistics();
+      if (options_.snapshot_mode) {
+        const uint64_t popped_before_message =
+            statistics.popped - (message ? 1 : 0);
+        FlushReadySnapshots(popped_before_message);
+        if (message) {
+          BufferSnapshot(std::move(*message), statistics.popped);
+        }
+        FlushReadySnapshots(statistics.popped);
+      } else if (message) {
+        WriteMessage(*message);
+      }
+      if (!message && statistics.closed && statistics.queued_messages == 0) {
+        break;
+      }
     }
   } catch (...) {
     {
@@ -128,7 +201,88 @@ void RecorderCoordinator::RunWriter() {
     }
     queue_.Close();
   }
+  {
+    std::lock_guard snapshot_lock(snapshot_mutex_);
+    snapshot_writer_finished_ = true;
+  }
+  snapshot_cv_.notify_all();
 }
+
+void RecorderCoordinator::WriteMessage(
+    const ibmw::transport::SerializedMessage& message) {
+  try {
+    std::lock_guard storage_lock(storage_mutex_);
+    const auto schema_id = FindOrRegisterSchema(message.topic);
+    const auto channel_id = FindOrRegisterChannel(message, schema_id);
+    storage_->Write(channel_id, message);
+  } catch (...) {
+    ++writer_failed_messages_;
+    throw;
+  }
+}
+
+void RecorderCoordinator::BufferSnapshot(
+    ibmw::transport::SerializedMessage message,
+    uint64_t queue_sequence) {
+  const size_t payload_size = message.PayloadSize();
+  const size_t max_bytes = options_.queue.max_bytes;
+  if (max_bytes > 0 && payload_size > max_bytes) {
+    ++snapshot_dropped_;
+    return;
+  }
+  snapshot_buffer_bytes_ += payload_size;
+  snapshot_buffer_.push_back(
+      SnapshotBufferedMessage{
+          .queue_sequence = queue_sequence,
+          .message = std::move(message)});
+  while (!snapshot_buffer_.empty() &&
+         ((options_.queue.max_messages > 0 &&
+           snapshot_buffer_.size() > options_.queue.max_messages) ||
+          (max_bytes > 0 && snapshot_buffer_bytes_ > max_bytes))) {
+    snapshot_buffer_bytes_ -=
+        snapshot_buffer_.front().message.PayloadSize();
+    snapshot_buffer_.pop_front();
+    ++snapshot_dropped_;
+  }
+}
+
+void RecorderCoordinator::FlushSnapshot(uint64_t queue_target) {
+  while (!snapshot_buffer_.empty() &&
+         snapshot_buffer_.front().queue_sequence <= queue_target) {
+    WriteMessage(snapshot_buffer_.front().message);
+    snapshot_buffer_bytes_ -=
+        snapshot_buffer_.front().message.PayloadSize();
+    snapshot_buffer_.pop_front();
+  }
+}
+
+void RecorderCoordinator::FlushReadySnapshots(uint64_t popped_messages) {
+  while (true) {
+    SnapshotRequest request;
+    {
+      std::lock_guard snapshot_lock(snapshot_mutex_);
+      if (snapshot_requests_.empty() ||
+          snapshot_requests_.front().queue_target > popped_messages) {
+        return;
+      }
+      request = snapshot_requests_.front();
+      snapshot_requests_.pop_front();
+    }
+
+    FlushSnapshot(request.queue_target);
+    {
+      std::lock_guard storage_lock(storage_mutex_);
+      storage_->Flush();
+    }
+
+    {
+      std::lock_guard snapshot_lock(snapshot_mutex_);
+      completed_snapshot_id_ = request.id;
+    }
+    snapshot_cv_.notify_all();
+  }
+}
+
 StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
     const ibmw::transport::TopicDescriptor& topic) {
   const std::string key = SchemaKey(topic);

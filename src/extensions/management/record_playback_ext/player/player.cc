@@ -5,10 +5,8 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <deque>
 #include <exception>
-#include <limits>
 #include <set>
 #include <thread>
 #include <unordered_map>
@@ -27,28 +25,8 @@ namespace {
 
 using SteadyClock = std::chrono::steady_clock;
 
-constexpr long double kNanosecondsPerSecond = 1000000000.0L;
-constexpr double kMaxPlaybackRate = 1.0e9;
-
-uint64_t SecondsToNanoseconds(double seconds, std::string_view name) {
-  MW_ASSERT(
-      std::isfinite(seconds) && seconds >= 0.0,
-      "Playback {} must be finite and non-negative.", name);
-  const long double nanoseconds =
-      static_cast<long double>(seconds) * kNanosecondsPerSecond;
-  MW_ASSERT(
-      nanoseconds <=
-          static_cast<long double>(std::numeric_limits<uint64_t>::max()),
-      "Playback {} is too large.", name);
-  return static_cast<uint64_t>(nanoseconds);
-}
-
-std::string TopicKey(
-    std::string_view topic,
-    std::string_view msg_type,
-    std::string_view serialization_type) {
-  return std::string(topic) + '\0' + std::string(msg_type) + '\0' +
-         std::string(serialization_type);
+std::string TopicKey(std::string_view topic, std::string_view msg_type) {
+  return std::string(topic) + '\0' + std::string(msg_type);
 }
 
 std::string PlaybackSessionId(uint64_t loop_index) {
@@ -68,7 +46,7 @@ bool IsLocalOnly(const TopicAdvertisement& advertisement) {
 struct Route {
   TopicAdvertisement advertisement;
   std::unique_ptr<UnixRuntimePlaybackClient> client;
-  bool player_owned = false;
+  bool direct = false;
 };
 
 using RouteMap = std::unordered_map<std::string, std::vector<Route>>;
@@ -98,11 +76,10 @@ void StopRoutes(RouteMap& routes) {
 std::vector<TopicAdvertisement> SelectAdvertisements(
     const std::vector<TopicAdvertisement>& advertisements,
     const BagChannelInfo& channel,
-    std::string_view runtime_id,
     const BagPlayer::RouteCompatibilityCallback& compatibility_callback) {
   std::vector<TopicAdvertisement> matching;
   for (const auto& advertisement : advertisements) {
-    if (advertisement.runtime_id != runtime_id || advertisement.published ||
+    if (advertisement.published ||
         advertisement.topic.msg_type != channel.topic.msg_type) {
       continue;
     }
@@ -123,7 +100,16 @@ std::vector<TopicAdvertisement> SelectAdvertisements(
   }
 
   std::vector<TopicAdvertisement> result;
+  const auto shared = std::find_if(
+      matching.begin(), matching.end(),
+      [](const auto& advertisement) { return !IsLocalOnly(advertisement); });
+  if (shared != matching.end()) {
+    result.emplace_back(*shared);
+  }
   std::set<std::string> runtimes;
+  for (const auto& advertisement : result) {
+    runtimes.emplace(advertisement.runtime_id);
+  }
   for (const auto& advertisement : matching) {
     if (IsLocalOnly(advertisement) &&
         runtimes.emplace(advertisement.runtime_id).second) {
@@ -137,15 +123,9 @@ bool InterruptibleDelay(PlayerControl& control, double seconds) {
   if (seconds <= 0.0) {
     return !control.IsStopped();
   }
-  const auto nanoseconds = SecondsToNanoseconds(seconds, "delay");
-  MW_ASSERT(
-      nanoseconds <=
-          static_cast<uint64_t>(SteadyClock::duration::max().count()),
-      "Playback delay exceeds the supported clock range.");
   const auto deadline = SteadyClock::now() +
-                        std::chrono::nanoseconds(
-                            static_cast<SteadyClock::duration::rep>(
-                                nanoseconds));
+                        std::chrono::duration_cast<SteadyClock::duration>(
+                            std::chrono::duration<double>(seconds));
   while (!control.IsStopped() && SteadyClock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
@@ -177,35 +157,25 @@ BagPlayer::BagPlayer(
     PlayerOptions options,
     PlayerControl& control,
     EventCallback event_callback,
-    PlayerPublisherSupportCallback player_publisher_support_callback,
-    PlayerPublishCallback player_publish_callback,
+    DirectSupportCallback direct_support_callback,
+    DirectPublishCallback direct_publish_callback,
     RouteCompatibilityCallback route_compatibility_callback,
     TranscodeCallback transcode_callback)
     : reader_(reader),
       options_(std::move(options)),
       control_(control),
       event_callback_(std::move(event_callback)),
-      player_publisher_support_callback_(
-          std::move(player_publisher_support_callback)),
-      player_publish_callback_(std::move(player_publish_callback)),
+      direct_support_callback_(std::move(direct_support_callback)),
+      direct_publish_callback_(std::move(direct_publish_callback)),
       route_compatibility_callback_(
           std::move(route_compatibility_callback)),
       transcode_callback_(std::move(transcode_callback)) {
   MW_ASSERT(options_.read_ahead_queue_size > 0, "Read-ahead queue cannot be zero.");
+  MW_ASSERT(options_.rate > 0.0, "Playback rate must be greater than zero.");
+  MW_ASSERT(options_.delay_seconds >= 0.0, "Playback delay cannot be negative.");
   MW_ASSERT(
-      std::isfinite(options_.rate) && options_.rate > 0.0 &&
-          options_.rate <= kMaxPlaybackRate,
-      "Playback rate must be finite, greater than zero, and no greater than {}.",
-      kMaxPlaybackRate);
-  MW_ASSERT(
-      std::isfinite(options_.delay_seconds) && options_.delay_seconds >= 0.0,
-      "Playback delay must be finite and non-negative.");
-  MW_ASSERT(
-      std::isfinite(options_.start_offset_seconds) &&
-          options_.start_offset_seconds >= 0.0,
-      "Playback start offset must be finite and non-negative.");
-  static_cast<void>(SecondsToNanoseconds(options_.delay_seconds, "delay"));
-  static_cast<void>(SecondsToNanoseconds(options_.start_offset_seconds, "start offset"));
+      options_.start_offset_seconds >= 0.0,
+      "Playback start offset cannot be negative.");
 }
 
 uint64_t BagPlayer::Play() {
@@ -235,21 +205,17 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
       channel.topic.topic = remap->second;
     }
     route_channels.try_emplace(
-        TopicKey(
-            channel.topic.topic, channel.topic.msg_type,
-            channel.topic.serialization_type),
+        TopicKey(channel.topic.topic, channel.topic.msg_type),
         std::move(channel));
   }
   MW_ASSERT(!route_channels.empty(), "No bag topics match the playback selection.");
 
   RouteMap routes;
-  RuntimeRegistry registry(options_.runtime_registry_path);
+  RuntimeRegistry registry;
   bool waiting_printed = false;
   while (!control_.IsStopped()) {
     BagTopicGraph graph;
-    if (!options_.runtime_routes.empty()) {
-      graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
-    }
+    graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
     bool complete = true;
     RouteMap candidate_routes;
     const auto add_routes =
@@ -257,6 +223,13 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
             std::vector<TopicAdvertisement> advertisements) {
           auto& entries = candidate_routes[key];
           for (auto advertisement : advertisements) {
+            if (!IsLocalOnly(advertisement) && direct_support_callback_ &&
+                direct_support_callback_(advertisement)) {
+              entries.emplace_back(Route{
+                  .advertisement = std::move(advertisement),
+                  .direct = true});
+              continue;
+            }
             auto client = std::make_unique<UnixRuntimePlaybackClient>(
                 advertisement.control_socket);
             try {
@@ -267,40 +240,20 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
             entries.emplace_back(Route{
                 .advertisement = std::move(advertisement),
                 .client = std::move(client),
-                .player_owned = false});
+                .direct = false});
           }
           return true;
         };
     for (const auto& [key, channel] : route_channels) {
-      bool player_owned = false;
-      if (player_publisher_support_callback_) {
-        TopicAdvertisement publisher{
-            .runtime_id = "bag-player",
-            .publisher_id = "player-owned",
-            .topic = channel.topic,
-            .published = false};
-        if (player_publisher_support_callback_(publisher)) {
-          candidate_routes[key].emplace_back(Route{
-              .advertisement = std::move(publisher),
-              .player_owned = true});
-          player_owned = true;
-        }
+      auto advertisements =
+          SelectAdvertisements(
+              graph.Find(channel.topic.topic), channel,
+              route_compatibility_callback_);
+      if (advertisements.empty() ||
+          !add_routes(key, std::move(advertisements))) {
+        complete = false;
+        break;
       }
-      const auto runtime_route = options_.runtime_routes.find(key);
-      if (runtime_route != options_.runtime_routes.end()) {
-        auto advertisements = SelectAdvertisements(
-            graph.Find(channel.topic.topic), channel,
-            runtime_route->second, route_compatibility_callback_);
-        if (advertisements.empty() ||
-            !add_routes(key, std::move(advertisements))) {
-          complete = false;
-          break;
-        }
-      }
-      MW_ASSERT(
-          player_owned || runtime_route != options_.runtime_routes.end(),
-          "No configured playback route for topic '{}'.",
-          channel.topic.topic);
     }
     if (complete) {
       routes = std::move(candidate_routes);
@@ -308,7 +261,7 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
     }
     StopRoutes(candidate_routes);
     if (!waiting_printed && event_callback_) {
-      event_callback_("Waiting for configured subscriber Runtime(s)...");
+      event_callback_("Waiting for compatible subscriber Runtime(s)...");
       waiting_printed = true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -321,15 +274,11 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
     for (const auto& [key, entries] : routes) {
       static_cast<void>(key);
       for (const auto& entry : entries) {
-        if (entry.player_owned) {
-          event_callback_(
-              "  " + entry.advertisement.topic.topic +
-              " -> Player-owned publisher");
-        } else {
-          event_callback_(
-              "  " + entry.advertisement.topic.topic + " -> Runtime " +
-              entry.advertisement.runtime_id + " embedded publisher");
-        }
+        event_callback_(
+            "  " + entry.advertisement.topic.topic + " -> Runtime " +
+            entry.advertisement.runtime_id +
+            (entry.direct ? " direct serialized publisher"
+                          : " embedded publisher"));
       }
     }
   }
@@ -344,11 +293,8 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
     std::exception_ptr error;
   } queue;
 
-  const uint64_t offset_ns =
-      SecondsToNanoseconds(options_.start_offset_seconds, "start offset");
-  MW_ASSERT(
-      offset_ns <= std::numeric_limits<uint64_t>::max() - info.start_timestamp,
-      "Playback start offset overflows the bag timestamp range.");
+  const uint64_t offset_ns = static_cast<uint64_t>(
+      options_.start_offset_seconds * 1000000000.0);
   const uint64_t playback_start_timestamp = info.start_timestamp + offset_ns;
   BagReadOptions read_options{
       .start_timestamp = playback_start_timestamp,
@@ -357,10 +303,10 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
     try {
       reader_.ReadMessages(read_options, [&](BagMessage&& message) {
         std::unique_lock lock(queue.mutex);
-        while (!queue.stopped && !control_.IsStopped() &&
-               queue.messages.size() >= options_.read_ahead_queue_size) {
-          queue.can_push.wait_for(lock, std::chrono::milliseconds(50));
-        }
+        queue.can_push.wait(lock, [&] {
+          return queue.stopped || control_.IsStopped() ||
+                 queue.messages.size() < options_.read_ahead_queue_size;
+        });
         if (queue.stopped || control_.IsStopped()) {
           return false;
         }
@@ -409,11 +355,11 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
           } else {
             copy.topic = target.topic;
           }
-          if (route[index].player_owned) {
+          if (route[index].direct) {
             MW_ASSERT(
-                player_publish_callback_,
-                "Player publisher callback is unavailable.");
-            player_publish_callback_(target, copy);
+                direct_publish_callback_,
+                "Direct playback publisher callback is unavailable.");
+            direct_publish_callback_(target, copy);
           } else {
             route[index].client->Publish(copy);
           }
@@ -424,14 +370,10 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
       BagMessage message;
       {
         std::unique_lock lock(queue.mutex);
-        while (!control_.IsStopped() && queue.messages.empty() &&
-               !queue.finished) {
-          queue.can_pop.wait_for(lock, std::chrono::milliseconds(50));
-        }
-        if (control_.IsStopped()) {
-          queue.stopped = true;
-          queue.can_push.notify_all();
-        }
+        queue.can_pop.wait(lock, [&] {
+          return control_.IsStopped() || !queue.messages.empty() ||
+                 queue.finished;
+        });
         if (control_.IsStopped() ||
             (queue.messages.empty() && queue.finished)) {
           break;
@@ -441,20 +383,9 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
         queue.can_push.notify_one();
       }
 
-      MW_ASSERT(
-          message.log_time >= playback_start_timestamp,
-          "Bag message timestamp precedes the playback start timestamp.");
-      const long double relative_nanoseconds =
-          static_cast<long double>(message.log_time - playback_start_timestamp) /
-          static_cast<long double>(options_.rate);
-      MW_ASSERT(
-          std::isfinite(static_cast<double>(relative_nanoseconds)) &&
-              relative_nanoseconds >= 0.0L &&
-              relative_nanoseconds <=
-                  static_cast<long double>(
-                      SteadyClock::duration::max().count()),
-          "Playback message delay is outside the supported clock range.");
-      const auto relative_ns = static_cast<uint64_t>(relative_nanoseconds);
+      const auto relative_ns = static_cast<uint64_t>(
+          static_cast<double>(message.log_time - playback_start_timestamp) /
+          options_.rate);
       while (!control_.IsStopped()) {
         std::unique_lock control_lock(control_.mutex_);
         if (control_.paused_) {
@@ -469,9 +400,7 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
           pause_started = {};
         }
         const auto message_target =
-            wall_origin + std::chrono::nanoseconds(
-                               static_cast<SteadyClock::duration::rep>(
-                                   relative_ns));
+            wall_origin + std::chrono::nanoseconds(relative_ns);
         if (SteadyClock::now() < message_target) {
           control_.cv_.wait_until(control_lock, message_target);
           continue;
@@ -487,8 +416,7 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
         message.channel.topic.topic = remap->second;
       }
       const auto route = routes.find(TopicKey(
-          message.channel.topic.topic, message.channel.topic.msg_type,
-          message.channel.topic.serialization_type));
+          message.channel.topic.topic, message.channel.topic.msg_type));
       MW_ASSERT(
           route != routes.end(), "No playback route for topic '{}'.",
           message.channel.topic.topic);

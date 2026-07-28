@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "dds_ext/dds_transport_driver.h"
+#include "dds_ext/detail/dds_qos_descriptor.h"
 #include "dds_ext/global.h"
 #include "dds_ext/ros2_type_helper.h"
 
@@ -1150,6 +1151,7 @@ bool DdsTransportDriver::OnMessage(
 
     // Get QoS
     auto reader_qos = GetReaderQos(info.topic_name, dds_topic_name);
+    detail::ApplyQosDescriptor(message_handler.requested_qos, reader_qos);
 
     // Reader-side DataSharing gate -- mirror the writer-side decision.
     if (options_.enable_data_sharing) {
@@ -1255,6 +1257,10 @@ DdsTransportDriver::AttachSerializedSubscriber(
     auto listener = std::make_unique<SerializedDataReaderListener>(
         descriptor, std::move(callback));
     auto reader_qos = GetReaderQos(descriptor.topic, dds_topic_name);
+    detail::ApplyQosDescriptor(
+        options.requested_qos.Empty() ? descriptor.qos
+                                      : options.requested_qos,
+        reader_qos);
     auto* reader = subscriber_->create_datareader(
         topic, reader_qos, listener.get());
     MW_REQUIRE(
@@ -1346,6 +1352,7 @@ DdsTransportDriver::RegisterSerializedPublisher(
         topic_map_);
     MW_REQUIRE(topic != nullptr, "Failed to create DDS topic '{}'.", dds_topic_name);
     auto writer_qos = GetWriterQos(descriptor.topic, dds_topic_name);
+    detail::ApplyQosDescriptor(descriptor.qos, writer_qos);
     auto* writer = publisher_->create_datawriter(topic, writer_qos);
     MW_REQUIRE(
         writer != nullptr,
@@ -1397,6 +1404,39 @@ bool DdsTransportDriver::SendSerialized(
     return COMPAT_WRITE_SUCCESS(result);
   } catch (const std::exception& error) {
     MW_ERROR("SendSerialized failed: {}", error.what());
+    return false;
+  }
+}
+
+bool DdsTransportDriver::WaitForSerializedAcknowledgments(
+    std::chrono::milliseconds timeout) noexcept {
+  try {
+    std::lock_guard lock(serialized_publisher_mutex_);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (const auto& [handle, publisher] : serialized_publisher_map_) {
+      static_cast<void>(handle);
+      const auto now = std::chrono::steady_clock::now();
+      const auto remaining =
+          now >= deadline
+              ? std::chrono::milliseconds::zero()
+              : std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now);
+      const auto seconds =
+          std::chrono::duration_cast<std::chrono::seconds>(remaining);
+      const auto nanoseconds =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              remaining - seconds);
+      const eprosima::fastrtps::Duration_t duration(
+          static_cast<int32_t>(seconds.count()),
+          static_cast<uint32_t>(nanoseconds.count()));
+      if (!CompatWriteSuccess(
+              publisher.writer->wait_for_acknowledgments(duration))) {
+        return false;
+      }
+    }
+    return true;
+  } catch (const std::exception& error) {
+    MW_ERROR("WaitForSerializedAcknowledgments failed: {}", error.what());
     return false;
   }
 }

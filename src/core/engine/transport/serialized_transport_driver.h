@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include "engine/transport/serialized_publisher.h"
 #include "engine/transport/serialized_subscriber.h"
 
@@ -37,6 +39,12 @@ class __attribute__((visibility("default"))) SerializedTransportDriver {
   virtual bool SendSerialized(
       SerializedPublisherHandle handle,
       const SerializedMessage& message) noexcept = 0;
+
+  virtual bool WaitForSerializedAcknowledgments(
+      std::chrono::milliseconds timeout) noexcept {
+    static_cast<void>(timeout);
+    return true;
+  }
 };
 
 }  // namespace ibmw::runtime::core::transport

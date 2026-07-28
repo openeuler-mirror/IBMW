@@ -157,6 +157,8 @@ class __attribute__((visibility("default"))) DdsTransportDriver
       runtime::core::transport::SerializedPublisherHandle handle,
       const runtime::core::transport::SerializedMessage& message)
       noexcept override;
+  bool WaitForSerializedAcknowledgments(
+      std::chrono::milliseconds timeout) noexcept override;
 
   // ----- Phase 7 §7.3 §K-3.6: user-level zero-copy loan fast lane -----
   //

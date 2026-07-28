@@ -8,7 +8,6 @@
 #include <cctype>
 #include <chrono>
 #include <csignal>
-#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <exception>
@@ -241,8 +240,6 @@ struct ConvertCliOptions {
   bool help_requested = false;
 };
 
-uint64_t ParseDurationNanoseconds(double seconds, std::string_view option);
-
 uint32_t CliLogLevel(std::string_view level) {
   if (level == "debug") {
     return ibmw::common::util::kLogLevelDebug;
@@ -443,8 +440,9 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
       options.compression_queue_size > 0,
       "Compression queue size must be greater than zero.");
   MW_ASSERT(
-      !options.snapshot_mode || options.max_cache_size > 0,
-      "Snapshot mode requires a non-zero max cache size.");
+      options.max_cache_size > 0,
+      "Max cache size must be greater than zero; synchronous recording is "
+      "unsupported.");
   static const std::set<std::string> log_levels{
       "debug", "info", "warn", "error", "fatal"};
   MW_ASSERT(log_levels.contains(options.log_level), "Invalid log level.");
@@ -485,30 +483,10 @@ InfoCliOptions ParseInfoOptions(int argc, const char* const* argv) {
 
 double ParseDouble(std::string_view value, std::string_view option) {
   size_t consumed = 0;
-  double result = 0.0;
-  try {
-    result = std::stod(std::string(value), &consumed);
-  } catch (const std::invalid_argument&) {
-    MW_ASSERT(false, "{} requires a numeric value.", option);
-  } catch (const std::out_of_range&) {
-    MW_ASSERT(false, "{} value is outside the supported range.", option);
-  }
+  const double result = std::stod(std::string(value), &consumed);
   MW_ASSERT(
-      consumed == value.size() && std::isfinite(result),
-      "{} requires a finite numeric value.", option);
+      consumed == value.size(), "{} requires a numeric value.", option);
   return result;
-}
-
-uint64_t ParseDurationNanoseconds(double seconds, std::string_view option) {
-  MW_ASSERT(
-      std::isfinite(seconds) && seconds >= 0.0,
-      "{} must be finite and non-negative.", option);
-  const long double nanoseconds = static_cast<long double>(seconds) * 1.0e9L;
-  MW_ASSERT(
-      nanoseconds <=
-          static_cast<long double>(std::numeric_limits<uint64_t>::max()),
-      "{} is too large.", option);
-  return static_cast<uint64_t>(nanoseconds);
 }
 
 size_t ParseSize(std::string_view value, std::string_view option) {
@@ -628,17 +606,11 @@ PlayCliOptions ParsePlayOptions(int argc, const char* const* argv) {
   }
   MW_ASSERT(!options.bag_path.empty(), "bag play requires a bag path.");
   MW_ASSERT(options.read_ahead_queue_size > 0, "Read-ahead queue cannot be zero.");
+  MW_ASSERT(options.rate > 0.0, "Playback rate must be greater than zero.");
+  MW_ASSERT(options.delay_seconds >= 0.0, "Playback delay cannot be negative.");
   MW_ASSERT(
-      std::isfinite(options.rate) && options.rate > 0.0 &&
-          options.rate <= 1.0e9,
-      "Playback rate must be finite, greater than zero, and no greater than 1e9.");
-  MW_ASSERT(
-      std::isfinite(options.delay_seconds) && options.delay_seconds >= 0.0,
-      "Playback delay must be finite and non-negative.");
-  MW_ASSERT(
-      std::isfinite(options.start_offset_seconds) &&
-          options.start_offset_seconds >= 0.0,
-      "Playback start offset must be finite and non-negative.");
+      options.start_offset_seconds >= 0.0,
+      "Playback start offset cannot be negative.");
   MW_ASSERT(
       options.wait_for_all_acked_seconds >= -1.0,
       "Acknowledgment timeout cannot be less than -1.");
@@ -787,9 +759,8 @@ ConvertCliOptions ParseConvertOptions(int argc, const char* const* argv) {
           options.input_storage_id == "sqlite3",
       "Input storage must be mcap or sqlite3.");
   MW_ASSERT(
-      std::isfinite(options.max_bag_duration_seconds) &&
-          options.max_bag_duration_seconds >= 0.0,
-      "Max bag duration must be finite and non-negative.");
+      options.max_bag_duration_seconds >= 0.0,
+      "Max bag duration cannot be negative.");
   MW_ASSERT(
       options.compression_mode == "none" ||
           options.compression_mode == "file" ||
@@ -925,13 +896,18 @@ std::string CanonicalDriverOptions(std::string_view yaml) {
 }
 
 std::string CanonicalExtensionOptions(
-    const TransportCaptureCapability& capability) {
-  auto options = ParseOptionsYaml(capability.extension_options_yaml);
-  if (!capability.provider_instance_option.empty()) {
-    options.remove(capability.provider_instance_option);
-  }
-  if (!capability.provider_clear_option.empty()) {
-    options.remove(capability.provider_clear_option);
+    std::string_view extension_name,
+    std::string_view yaml) {
+  auto options = ParseOptionsYaml(yaml);
+  if (extension_name == "dds_extension") {
+    options.remove("participant_name");
+  } else if (extension_name == "mqtt_extension") {
+    options.remove("client_id");
+    options.remove("callback_executor_name");
+  } else if (extension_name == "iceoryx_extension") {
+    options.remove("runtime_id");
+  } else if (extension_name == "ros2_extension") {
+    options.remove("node_name");
   }
   return CanonicalYamlValue(options).dump();
 }
@@ -939,14 +915,12 @@ std::string CanonicalExtensionOptions(
 bool CompatibleRecorderConnection(
     const TransportCaptureCapability& lhs,
     const TransportCaptureCapability& rhs) {
-  return lhs.mode == rhs.mode && lhs.priority == rhs.priority &&
-         lhs.extension_name == rhs.extension_name &&
+  return lhs.extension_name == rhs.extension_name &&
          lhs.extension_path == rhs.extension_path &&
-         lhs.provider_instance_option == rhs.provider_instance_option &&
-         lhs.provider_clear_option == rhs.provider_clear_option &&
-         lhs.provider_strip_leading_slash_option ==
-             rhs.provider_strip_leading_slash_option &&
-         CanonicalExtensionOptions(lhs) == CanonicalExtensionOptions(rhs) &&
+         CanonicalExtensionOptions(
+             lhs.extension_name, lhs.extension_options_yaml) ==
+             CanonicalExtensionOptions(
+                 rhs.extension_name, rhs.extension_options_yaml) &&
          CanonicalDriverOptions(lhs.driver_options_yaml) ==
              CanonicalDriverOptions(rhs.driver_options_yaml);
 }
@@ -964,11 +938,6 @@ RecorderRuntimeSpec BuildRecorderRuntimeSpec(
         if (capability.mode != "native_serialized" &&
             (!include_cached_serialized ||
              capability.mode != "cached_serialized")) {
-          continue;
-        }
-        if (capability.abi_version !=
-            runtime::core::transport::SerializedTransportCapabilityV1::
-                kAbiVersion) {
           continue;
         }
         if (incompatible_direct_drivers.contains(driver)) {
@@ -1018,14 +987,12 @@ std::filesystem::path WriteRecorderConfig(
     if (!inserted) {
       MW_ASSERT(
           found->second.extension_path == capability.extension_path &&
-              found->second.provider_instance_option ==
-                  capability.provider_instance_option &&
-              found->second.provider_clear_option ==
-                  capability.provider_clear_option &&
-              found->second.provider_strip_leading_slash_option ==
-                  capability.provider_strip_leading_slash_option &&
-              CanonicalExtensionOptions(found->second) ==
-                  CanonicalExtensionOptions(capability),
+              CanonicalExtensionOptions(
+                  found->second.extension_name,
+                  found->second.extension_options_yaml) ==
+                  CanonicalExtensionOptions(
+                      capability.extension_name,
+                      capability.extension_options_yaml),
           "Conflicting Recorder extension configuration for '{}'.",
           capability.extension_name);
     }
@@ -1038,23 +1005,26 @@ std::filesystem::path WriteRecorderConfig(
       options = YAML::Node(YAML::NodeType::Map);
     }
     const std::string unique = std::to_string(::getpid());
-    if (!capability.provider_instance_option.empty()) {
-      const auto key = capability.provider_instance_option;
-      options[std::string(key)] =
+    if (extension_name == "dds_extension") {
+      options["participant_name"] =
           "ibmw_bag_" + std::string(role) + "_" + unique;
-    }
-    if (!capability.provider_clear_option.empty()) {
-      options[capability.provider_clear_option] = "";
-    }
-    if (!capability.provider_strip_leading_slash_option.empty() &&
-        options[capability.provider_strip_leading_slash_option]) {
-      std::string domain =
-          options[capability.provider_strip_leading_slash_option]
-              .as<std::string>();
+    } else if (extension_name == "mqtt_extension") {
+      options["client_id"] =
+          "ibmw_bag_" + std::string(role) + "_" + unique;
+      options["callback_executor_name"] = "";
+    } else if (extension_name == "iceoryx_extension") {
+      options["runtime_id"] =
+          "ibmw_bag_" + std::string(role) + "_" + unique;
+    } else if (extension_name == "zenoh_extension" &&
+               options["limit_domain"]) {
+      std::string domain = options["limit_domain"].as<std::string>();
       while (!domain.empty() && domain.front() == '/') {
         domain.erase(domain.begin());
       }
-      options[capability.provider_strip_leading_slash_option] = domain;
+      options["limit_domain"] = domain;
+    } else if (extension_name == "ros2_extension") {
+      options["node_name"] =
+          "ibmw_bag_" + std::string(role) + "_" + unique;
     }
     YAML::Node extension;
     extension["name"] = extension_name;
@@ -1093,6 +1063,7 @@ using PlaybackDriverSet = std::set<std::string>;
 struct PlaybackRoute {
   PlaybackDriverSet drivers;
   std::optional<std::string> runtime_id;
+  ibmw::transport::QosDescriptor configured_qos;
 };
 
 using PlaybackRouteMap = std::unordered_map<std::string, PlaybackRoute>;
@@ -1175,6 +1146,70 @@ std::optional<std::string> ResolvePlaybackRuntime(
   return std::nullopt;
 }
 
+ibmw::transport::QosDescriptor ResolveConfiguredDdsQos(
+    const YAML::Node& drivers,
+    std::string_view topic) {
+  ibmw::transport::QosDescriptor result;
+  if (!drivers || drivers.IsNull()) {
+    return result;
+  }
+  MW_ASSERT(
+      drivers.IsSequence(), "ibmw.messaging.drivers must be a sequence.");
+  for (const auto& driver : drivers) {
+    if (!driver["type"] || driver["type"].as<std::string>() != "dds") {
+      continue;
+    }
+    const YAML::Node options = driver["options"];
+    MW_ASSERT(
+        !options.IsDefined() || options.IsNull() || options.IsMap(),
+        "DDS playback options must be a map.");
+    const YAML::Node publishers =
+        options.IsDefined() && !options.IsNull()
+            ? options["publishers"]
+            : YAML::Node{};
+    if (!publishers || publishers.IsNull()) {
+      return result;
+    }
+    MW_ASSERT(
+        publishers.IsSequence(),
+        "DDS playback publishers must be a sequence.");
+    for (const auto& publisher : publishers) {
+      MW_ASSERT(
+          publisher.IsMap() && publisher["topic"],
+          "Each DDS playback publisher requires a topic.");
+      const std::string expression = publisher["topic"].as<std::string>();
+      bool matches = false;
+      try {
+        matches = std::regex_match(
+            topic.begin(), topic.end(),
+            std::regex(expression, std::regex::ECMAScript));
+      } catch (const std::exception& error) {
+        MW_ASSERT(
+            false, "Invalid DDS playback publisher regex '{}': {}.",
+            expression, error.what());
+      }
+      const YAML::Node qos = publisher["qos"];
+      if (!matches || !qos.IsDefined() || qos.IsNull()) {
+        continue;
+      }
+      MW_ASSERT(
+          qos.IsMap(),
+          "DDS playback QoS for '{}' must be a map.", expression);
+      for (const auto& policy : qos) {
+        MW_ASSERT(
+            policy.second.IsScalar(),
+            "DDS playback QoS policy '{}' must be a scalar.",
+            policy.first.as<std::string>());
+        result.policies[policy.first.as<std::string>()] =
+            policy.second.as<std::string>();
+      }
+      return result;
+    }
+    return result;
+  }
+  return result;
+}
+
 ibmw::transport::QosDescriptor MergePlaybackQos(
     ibmw::transport::QosDescriptor recorded,
     const ibmw::transport::QosDescriptor& configured) {
@@ -1238,9 +1273,21 @@ ResolvedPlaybackConfig ResolvePlaybackConfig(
         PlaybackTopicKey(channel.topic),
         PlaybackRoute{
             .drivers = std::move(drivers),
-            .runtime_id = std::move(runtime_id)});
+            .runtime_id = std::move(runtime_id),
+            .configured_qos = ResolveConfiguredDdsQos(
+                has_messaging ? messaging["drivers"] : YAML::Node{},
+                channel.topic.topic)});
   }
   return result;
+}
+
+bool SupportsDdsSerializedPlayback(const BagChannelInfo& channel) {
+  const bool native_type = channel.topic.msg_type.starts_with("dds:") ||
+                           channel.topic.msg_type.starts_with("ros2:");
+  return native_type &&
+         (channel.topic.serialization_type == "cdr" ||
+          (channel.topic.msg_type.starts_with("ros2:") &&
+           channel.topic.serialization_type == "ros2"));
 }
 
 std::string ExactTopicRegex(std::string_view topic) {
@@ -1296,12 +1343,19 @@ std::filesystem::path WritePlayerConfig(
   YAML::Node messaging = YAML::Clone(source_ibmw["messaging"]);
   messaging.remove("subscribers");
   messaging["publishers"] = YAML::Node(YAML::NodeType::Sequence);
+  std::set<std::string> ros2_topics;
   for (const auto& channel : channels) {
     const auto route = routes.find(PlaybackTopicKey(channel.topic));
     if (route == routes.end()) {
       continue;
     }
     PlaybackDriverSet bus_drivers = route->second.drivers;
+    if (SupportsDdsSerializedPlayback(channel)) {
+      bus_drivers.erase("dds");
+    }
+    if (route->second.drivers.contains("ros2")) {
+      ros2_topics.emplace(channel.topic.topic);
+    }
     if (bus_drivers.empty()) {
       continue;
     }
@@ -1315,6 +1369,32 @@ std::filesystem::path WritePlayerConfig(
     messaging.remove("publishers");
   }
 
+  if (!ros2_topics.empty() && messaging["drivers"] &&
+      messaging["drivers"].IsSequence()) {
+    for (auto driver : messaging["drivers"]) {
+      if (!driver["type"] ||
+          driver["type"].as<std::string>() != "ros2") {
+        continue;
+      }
+      YAML::Node options = driver["options"]
+                               ? driver["options"]
+                               : YAML::Node(YAML::NodeType::Map);
+      YAML::Node publishers(YAML::NodeType::Sequence);
+      for (const auto& topic : ros2_topics) {
+        YAML::Node publisher;
+        publisher["topic"] = ExactTopicRegex(topic);
+        publisher["use_serialized"] = true;
+        publishers.push_back(publisher);
+      }
+      if (options["publishers"] && options["publishers"].IsSequence()) {
+        for (const auto& publisher : options["publishers"]) {
+          publishers.push_back(YAML::Clone(publisher));
+        }
+      }
+      options["publishers"] = publishers;
+      driver["options"] = options;
+    }
+  }
   ibmw["messaging"] = messaging;
 
   const auto config_path = std::filesystem::temp_directory_path() /
@@ -1553,14 +1633,14 @@ class PlayerOwnedPublisherRegistry {
 
   void Register(
       const BagChannelInfo& channel,
-      const PlaybackDriverSet& requested_drivers) {
+      const PlaybackDriverSet& requested_drivers,
+      const ibmw::transport::QosDescriptor& configured_qos) {
     const std::string key = PlaybackTopicKey(channel.topic);
     if (entries_.contains(key)) {
       return;
     }
 
     Entry entry;
-    std::vector<runtime::core::transport::TransportDriver*> bus_drivers;
     for (const auto& driver : requested_drivers) {
       MW_ASSERT(
           driver != "local" && drivers_.contains(driver),
@@ -1568,41 +1648,36 @@ class PlayerOwnedPublisherRegistry {
           driver, channel.topic.topic);
     }
 
-    for (const auto& driver : requested_drivers) {
-      auto* transport_driver = drivers_.at(driver);
-      const auto* capability =
-          transport_bus_.GetSerializedTransportCapability(*transport_driver);
-      const bool direct =
-          capability != nullptr && capability->HasValidContract() &&
-          capability->publish_mode ==
-              runtime::core::transport::SerializedPublishMode::kNativeSerialized &&
-          capability->operations.supports_topic != nullptr &&
-          capability->operations.supports_topic(
-              capability->operations.context, channel.topic);
-      if (!direct) {
-        entry.bus_publish = true;
-        bus_drivers.emplace_back(transport_driver);
-        continue;
-      }
-      auto topic = channel.topic;
-      if (capability->operations.publisher_qos != nullptr) {
-        topic.qos = MergePlaybackQos(
-            std::move(topic.qos),
-            capability->operations.publisher_qos(
-                capability->operations.context, channel.topic.topic,
-                channel.topic.msg_type));
-      }
+    if (requested_drivers.contains("dds")) {
       MW_ASSERT(
-          capability->operations.register_publisher != nullptr,
-          "Driver '{}' native publisher capability is incomplete.", driver);
-      const auto handle = capability->operations.register_publisher(
-          capability->operations.context, {.topic = std::move(topic)});
+          SupportsDdsSerializedPlayback(channel),
+          "DDS cannot publish stored type '{}' with serialization '{}' for "
+          "topic '{}' without a native serialized publisher.",
+          channel.topic.msg_type, channel.topic.serialization_type,
+          channel.topic.topic);
+      auto* serialized_driver = dynamic_cast<
+          runtime::core::transport::SerializedTransportDriver*>(
+          drivers_.at("dds"));
+      MW_ASSERT(
+          serialized_driver != nullptr,
+          "Configured DDS driver has no serialized playback capability.");
+      auto topic = channel.topic;
+      topic.qos = MergePlaybackQos(
+          std::move(topic.qos), configured_qos);
+      const auto handle = serialized_driver->RegisterSerializedPublisher(
+          {.topic = std::move(topic)});
       MW_ASSERT(
           handle,
-          "Driver '{}' serialized publisher registration failed for topic '{}'.",
-          driver, channel.topic.topic);
+          "DDS serialized publisher registration failed for topic '{}'.",
+          channel.topic.topic);
       entry.direct_publishers.emplace_back(DirectPublisher{
-          .capability = capability, .handle = handle});
+          .driver = serialized_driver, .handle = handle});
+    }
+
+    for (const auto& driver : requested_drivers) {
+      if (driver != "dds") {
+        entry.bus_publish = true;
+      }
     }
     if (entry.bus_publish) {
       const auto type_support =
@@ -1622,8 +1697,7 @@ class PlayerOwnedPublisherRegistry {
           .module_name = module_name,
           .msg_type_support_ref = type_support};
       MW_ASSERT(
-          transport_bus_.RegisterSendType(
-              std::move(wrapper), bus_drivers),
+          transport_bus_.RegisterSendType(std::move(wrapper)),
           "Player publisher registration failed for topic '{}'.",
           channel.topic.topic);
       const auto* registered =
@@ -1663,10 +1737,7 @@ class PlayerOwnedPublisherRegistry {
         advertisement.topic.topic);
     for (const auto& publisher : entry->second.direct_publishers) {
       MW_ASSERT(
-          publisher.capability->operations.send != nullptr &&
-              publisher.capability->operations.send(
-                  publisher.capability->operations.context, publisher.handle,
-                  message),
+          publisher.driver->SendSerialized(publisher.handle, message),
           "Serialized playback publish failed for topic '{}'.",
           advertisement.topic.topic);
     }
@@ -1686,52 +1757,31 @@ class PlayerOwnedPublisherRegistry {
   }
 
   bool WaitForAcknowledgments(std::chrono::milliseconds timeout) const {
-    std::set<const runtime::core::transport::SerializedTransportCapabilityV1*>
-        capabilities;
+    std::set<runtime::core::transport::SerializedTransportDriver*> drivers;
     for (const auto& [key, entry] : entries_) {
       static_cast<void>(key);
       for (const auto& publisher : entry.direct_publishers) {
-        capabilities.emplace(publisher.capability);
+        drivers.emplace(publisher.driver);
       }
     }
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    for (const auto* capability : capabilities) {
+    for (auto* driver : drivers) {
       const auto now = std::chrono::steady_clock::now();
       const auto remaining =
           now >= deadline
               ? std::chrono::milliseconds::zero()
               : std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - now);
-      if (capability->operations.wait_for_acknowledgments == nullptr ||
-          !capability->operations.wait_for_acknowledgments(
-              capability->operations.context, remaining)) {
+      if (!driver->WaitForSerializedAcknowledgments(remaining)) {
         return false;
       }
     }
     return true;
   }
 
-  bool SupportsAcknowledgments() const noexcept {
-    bool has_direct_publisher = false;
-    for (const auto& [key, entry] : entries_) {
-      static_cast<void>(key);
-      for (const auto& publisher : entry.direct_publishers) {
-        has_direct_publisher = true;
-        if (publisher.capability == nullptr ||
-            !publisher.capability->supports_ack ||
-            publisher.capability->operations.wait_for_acknowledgments ==
-                nullptr) {
-          return false;
-        }
-      }
-    }
-    return has_direct_publisher;
-  }
-
  private:
   struct DirectPublisher {
-    const runtime::core::transport::SerializedTransportCapabilityV1* capability =
-        nullptr;
+    runtime::core::transport::SerializedTransportDriver* driver = nullptr;
     runtime::core::transport::SerializedPublisherHandle handle;
   };
 
@@ -1899,8 +1949,8 @@ int RunConvert(int argc, const char* const* argv) {
           {.output_path = options.output,
            .storage_id = options.storage_id,
            .max_bag_size = options.max_bag_size,
-           .max_bag_duration_ns = ParseDurationNanoseconds(
-               options.max_bag_duration_seconds, "Max bag duration"),
+           .max_bag_duration_ns = static_cast<uint64_t>(
+               options.max_bag_duration_seconds * 1000000000.0),
            .compression_mode = options.compression_mode,
            .compression_format = options.compression_format,
            .compression_queue_size = options.compression_queue_size,
@@ -2044,6 +2094,14 @@ int RunPlay(int argc, const char* const* argv) {
       runtime_routes.emplace(key, *route.runtime_id);
     }
   }
+  MW_ASSERT(
+      options.wait_for_all_acked_seconds < 0.0 ||
+          std::any_of(
+              playback_routes.begin(), playback_routes.end(),
+              [](const auto& route) {
+                return route.second.drivers.contains("dds");
+              }),
+      "--wait-for-all-acked requires a configured DDS playback route.");
   std::optional<TemporaryFileGuard> player_config_guard;
   std::unique_ptr<EngineGuard> player_engine_guard;
   std::unique_ptr<PlayerOwnedPublisherRegistry> player_publishers;
@@ -2067,13 +2125,8 @@ int RunPlay(int argc, const char* const* argv) {
         continue;
       }
       player_publishers->Register(
-          channel, route->second.drivers);
+          channel, route->second.drivers, route->second.configured_qos);
     }
-    MW_ASSERT(
-        options.wait_for_all_acked_seconds < 0.0 ||
-            player_publishers->SupportsAcknowledgments(),
-        "--wait-for-all-acked requires a configured playback capability "
-        "that supports acknowledgments.");
     player_engine_guard->SetFuture(
         player_engine_guard->Get().AsyncStart());
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -2254,18 +2307,16 @@ int RunRecord(int argc, const char* const* argv) {
   const auto configure_planner =
       [&](BagCapturePlanner& planner, bool allow_cached_subscription) {
         for (const auto& [driver_name, driver] : recorder_drivers) {
-          const auto* capability = engine_guard->Get().GetTransportBus()
-                                       .GetSerializedTransportCapability(*driver);
-          if (capability != nullptr && capability->HasValidContract() &&
-              capability->capture_mode ==
-                  runtime::core::transport::SerializedCaptureMode::kNativeSerialized) {
+          if (auto* serialized_driver = dynamic_cast<
+                  runtime::core::transport::SerializedTransportDriver*>(
+                  driver)) {
             planner.RegisterTransportSourceFactory(
                 driver_name,
-                [capability](
+                [serialized_driver](
                     const TopicAdvertisement& advertisement,
                     std::string_view source_name) {
                   return std::make_unique<TransportSubscriptionSource>(
-                      std::string(source_name), *capability,
+                      std::string(source_name), *serialized_driver,
                       advertisement, advertisement.topic.qos);
                 });
             continue;
@@ -2336,8 +2387,8 @@ int RunRecord(int argc, const char* const* argv) {
               {.output_path = options.output,
                .storage_id = options.storage_id,
                .max_bag_size = options.max_bag_size,
-               .max_bag_duration_ns = ParseDurationNanoseconds(
-                   options.max_bag_duration_seconds, "Max bag duration"),
+               .max_bag_duration_ns = static_cast<uint64_t>(
+                   options.max_bag_duration_seconds * 1000000000.0),
                .compression_mode = options.compression_mode,
                .compression_format = options.compression_format,
                .compression_queue_size = options.compression_queue_size,
@@ -2349,18 +2400,10 @@ int RunRecord(int argc, const char* const* argv) {
                .storage_preset_profile = options.storage_preset_profile,
                .storage_config_file = options.storage_config_file},
           .queue =
-              {.max_messages =
-                   options.max_cache_size == 0 ? size_t{1} : size_t{0},
+              {.max_messages = 0,
                .max_bytes = options.max_cache_size,
-               // Never let storage backpressure block a transport callback.
-               // A bounded queue drops the newest message and the drop count
-               // is persisted in bag metadata by RecorderCoordinator.
                .full_policy = RecordQueue::FullPolicy::kDropNewest},
-          .snapshot_mode = options.snapshot_mode,
-          // A zero cache size still uses a one-message bounded queue.  Direct
-          // synchronous storage writes would put disk latency on the
-          // transport callback path.
-          .synchronous_write = false},
+          .snapshot_mode = options.snapshot_mode},
       CreateStorage(options.storage_id));
   coordinator.Initialize();
   coordinator.Start();

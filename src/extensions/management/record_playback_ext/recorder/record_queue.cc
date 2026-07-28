@@ -66,9 +66,30 @@ RecordQueue::Pop() {
 }
 
 std::optional<ibmw::transport::SerializedMessage>
+RecordQueue::PopFor(std::chrono::milliseconds timeout) {
+  std::unique_lock lock(mutex_);
+  static_cast<void>(not_empty_cv_.wait_for(
+      lock, timeout, [this] {
+        return closed_ || !queue_.empty() || pending_wakes_ > 0;
+      }));
+  if (pending_wakes_ > 0) {
+    --pending_wakes_;
+  }
+  return PopLocked();
+}
+
+std::optional<ibmw::transport::SerializedMessage>
 RecordQueue::TryPop() {
   std::lock_guard lock(mutex_);
   return PopLocked();
+}
+
+void RecordQueue::WakeConsumer() {
+  {
+    std::lock_guard lock(mutex_);
+    ++pending_wakes_;
+  }
+  not_empty_cv_.notify_one();
 }
 
 void RecordQueue::Close() {

@@ -64,7 +64,7 @@ class BagPlayer {
           const ibmw::transport::SerializedMessage& message)>;
 
   BagPlayer(
-      const McapBagReader& reader,
+      const BagReader& reader,
       PlayerOptions options,
       PlayerControl& control,
       EventCallback event_callback = {},
@@ -78,7 +78,7 @@ class BagPlayer {
  private:
   uint64_t PlayOnce(uint64_t loop_index);
 
-  const McapBagReader& reader_;
+  const BagReader& reader_;
   PlayerOptions options_;
   PlayerControl& control_;
   EventCallback event_callback_;

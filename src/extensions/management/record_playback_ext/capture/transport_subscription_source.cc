@@ -11,12 +11,11 @@ namespace ibmw::extensions::record_playback_extension {
 
 TransportSubscriptionSource::TransportSubscriptionSource(
     std::string driver_name,
-    const ibmw::runtime::core::transport::SerializedTransportCapabilityV1&
-        capability,
+    ibmw::runtime::core::transport::SerializedTransportDriver& driver,
     TopicAdvertisement advertisement,
     ibmw::transport::QosDescriptor requested_qos)
     : driver_name_(std::move(driver_name)),
-      capability_(capability),
+      driver_(driver),
       advertisement_(std::move(advertisement)),
       requested_qos_(std::move(requested_qos)) {}
 
@@ -40,12 +39,7 @@ void TransportSubscriptionSource::Start(
     ibmw::transport::SerializedMessageCallback callback) {
   MW_ASSERT(!handle_, "Capture source is already started.");
   const auto observed_topic = advertisement_.topic;
-  MW_ASSERT(
-      capability_.operations.attach_subscriber != nullptr,
-      "Serialized capability for '{}' cannot attach subscribers.",
-      driver_name_);
-  handle_ = capability_.operations.attach_subscriber(
-      capability_.operations.context,
+  handle_ = driver_.AttachSerializedSubscriber(
       ibmw::runtime::core::transport::SerializedSubscriberOptions{
           .topic = observed_topic,
           .requested_qos = requested_qos_},
@@ -65,9 +59,7 @@ void TransportSubscriptionSource::Stop() {
   }
   const auto handle = handle_;
   MW_ASSERT(
-      capability_.operations.detach_subscriber != nullptr &&
-          capability_.operations.detach_subscriber(
-              capability_.operations.context, handle),
+      driver_.DetachSerializedSubscriber(handle),
       "Driver '{}' failed to detach serialized subscription for '{}'.",
       driver_name_, advertisement_.topic.topic);
   handle_ = {};

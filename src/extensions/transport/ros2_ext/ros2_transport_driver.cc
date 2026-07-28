@@ -150,6 +150,82 @@ Ros2TypeSupportHandle LoadRos2TypeSupport(std::string_view ibmw_type_name) {
   return {.library = std::move(library), .handle = handle};
 }
 
+void ApplyQosDescriptor(
+    const runtime::core::transport::QosDescriptor& descriptor,
+    Ros2TransportDriver::Options::QosOptions& qos) {
+  const auto apply_string = [&](std::string_view name, std::string& value) {
+    const auto found = descriptor.policies.find(std::string(name));
+    if (found != descriptor.policies.end()) {
+      value = found->second;
+    }
+  };
+  const auto apply_int32 = [&](std::string_view name, int32_t& value) {
+    const auto found = descriptor.policies.find(std::string(name));
+    if (found != descriptor.policies.end()) {
+      value = std::stoi(found->second);
+    }
+  };
+  const auto apply_duration = [&descriptor](
+                                  std::string_view canonical_name,
+                                  std::string_view legacy_name,
+                                  int64_t& value) {
+    auto found = descriptor.policies.find(std::string(canonical_name));
+    if (found == descriptor.policies.end()) {
+      found = descriptor.policies.find(std::string(legacy_name));
+    }
+    if (found != descriptor.policies.end()) {
+      value = std::stoll(found->second);
+    }
+  };
+  apply_string("history", qos.history);
+  apply_int32("depth", qos.depth);
+  apply_string("reliability", qos.reliability);
+  apply_string("durability", qos.durability);
+  apply_string("liveliness", qos.liveliness);
+  apply_duration("deadline_ms", "deadline", qos.deadline);
+  apply_duration("lifespan_ms", "lifespan", qos.lifespan);
+  apply_duration(
+      "liveliness_lease_duration_ms", "liveliness_lease_duration",
+      qos.liveliness_lease_duration);
+}
+
+void ApplyQosProfileDescriptor(
+    const runtime::core::transport::QosDescriptor& descriptor,
+    rclcpp::QoS& qos) {
+  const auto apply_duration = [&descriptor](
+                                  std::string_view name,
+                                  const auto& setter) {
+    const auto found = descriptor.policies.find(std::string(name));
+    if (found == descriptor.policies.end()) {
+      return;
+    }
+    const int64_t nanoseconds = std::stoll(found->second);
+    MW_ASSERT(
+        nanoseconds >= 0, "ROS2 QoS duration '{}' cannot be negative.",
+        name);
+    setter(rclcpp::Duration::from_nanoseconds(nanoseconds));
+  };
+  apply_duration(
+      "deadline_ns", [&qos](const auto& value) { qos.deadline(value); });
+  apply_duration(
+      "lifespan_ns", [&qos](const auto& value) { qos.lifespan(value); });
+  apply_duration(
+      "liveliness_lease_duration_ns",
+      [&qos](const auto& value) {
+        qos.liveliness_lease_duration(value);
+      });
+  const auto avoid =
+      descriptor.policies.find("avoid_ros_namespace_conventions");
+  if (avoid != descriptor.policies.end()) {
+    MW_ASSERT(
+        avoid->second == "true" || avoid->second == "false" ||
+            avoid->second == "1" || avoid->second == "0",
+        "avoid_ros_namespace_conventions must be true or false.");
+    qos.avoid_ros_namespace_conventions(
+        avoid->second == "true" || avoid->second == "1");
+  }
+}
+
 }  // namespace
 
 void Ros2TransportDriver::Initialize(YAML::Node options_node) {
@@ -299,7 +375,7 @@ bool Ros2TransportDriver::OnMessage(
 
     const auto& info = message_handler.info;
 
-    rclcpp::QoS qos(GetQos(Options::QosOptions()));
+    Options::QosOptions requested_qos;
     bool use_serialized = false;
 
     auto find_option = std::find_if(
@@ -316,9 +392,12 @@ bool Ros2TransportDriver::OnMessage(
         });
 
     if (find_option != options_.sub_topics_options.end()) {
-      qos = GetQos(find_option->qos);
+      requested_qos = find_option->qos;
       use_serialized = find_option->use_serialized;
     }
+    ApplyQosDescriptor(message_handler.requested_qos, requested_qos);
+    rclcpp::QoS qos(GetQos(requested_qos));
+    ApplyQosProfileDescriptor(message_handler.requested_qos, qos);
 
     if (CheckRosMsg(info.msg_type)) {
       Key key{

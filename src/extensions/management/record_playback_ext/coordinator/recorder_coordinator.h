@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -21,6 +23,7 @@ class RecorderCoordinator {
   struct Options {
     StorageOptions storage;
     RecordQueue::Options queue;
+    bool snapshot_mode = false;
   };
 
   explicit RecorderCoordinator(
@@ -36,15 +39,14 @@ class RecorderCoordinator {
   RecordQueue::PushResult Accept(
       ibmw::transport::SerializedMessage message);
   void RegisterChannel(StorageChannelDescriptor channel);
+  void TriggerSnapshot();
   void AddDroppedMessages(uint64_t count = 1) {
     external_dropped_.fetch_add(count);
   }
   void Close();
 
   const StorageSummary& Summary() const noexcept { return storage_->Summary(); }
-  RecordQueue::Statistics QueueStatistics() const {
-    return queue_.GetStatistics();
-  }
+  RecordQueue::Statistics QueueStatistics() const;
 
  private:
   enum class State {
@@ -55,6 +57,13 @@ class RecorderCoordinator {
   };
 
   void RunWriter();
+  void WriteMessage(
+      const ibmw::transport::SerializedMessage& message);
+  void BufferSnapshot(
+      ibmw::transport::SerializedMessage message,
+      uint64_t queue_sequence);
+  void FlushSnapshot(uint64_t queue_target);
+  void FlushReadySnapshots(uint64_t popped_messages);
   StorageSchemaId FindOrRegisterSchema(
       const ibmw::transport::TopicDescriptor& topic);
   StorageChannelId FindOrRegisterChannel(
@@ -79,6 +88,25 @@ class RecorderCoordinator {
   std::unordered_map<std::string, StorageChannelId> channel_ids_;
   mutable std::mutex error_mutex_;
   std::exception_ptr writer_error_;
+  std::atomic<uint64_t> writer_failed_messages_{0};
+  struct SnapshotBufferedMessage {
+    uint64_t queue_sequence;
+    ibmw::transport::SerializedMessage message;
+  };
+  std::deque<SnapshotBufferedMessage> snapshot_buffer_;
+  size_t snapshot_buffer_bytes_ = 0;
+  uint64_t snapshot_dropped_ = 0;
+  struct SnapshotRequest {
+    uint64_t id;
+    uint64_t queue_target;
+  };
+  std::mutex snapshot_input_mutex_;
+  std::mutex snapshot_mutex_;
+  std::condition_variable snapshot_cv_;
+  std::deque<SnapshotRequest> snapshot_requests_;
+  uint64_t next_snapshot_id_ = 1;
+  uint64_t completed_snapshot_id_ = 0;
+  bool snapshot_writer_finished_ = false;
   std::atomic<uint64_t> external_dropped_{0};
   std::mutex storage_mutex_;
 };
