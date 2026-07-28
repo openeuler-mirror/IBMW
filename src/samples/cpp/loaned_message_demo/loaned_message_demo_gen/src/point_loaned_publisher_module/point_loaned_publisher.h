@@ -2,11 +2,9 @@
 // All rights reserved.
 
 //
-// Loaned Publisher (transport-agnostic) — driver-aware zero-copy
-// publish. The actual transport mechanics (Ros2StylePublisher /
-// LoanedSample / driver pointer / hot-loop borrow+publish) live in
-// the generated <name>_typesupport.inc.{h,cc} alongside; user-facing
-// .h/.cc only references those via the IBMW_TS_LOANED_PUB_* macros.
+// Loaned Publisher (transport-agnostic). The generated TypeSupport fragment
+// binds the stable SenderAccess<T> / LoanedSample<T> API to the message type;
+// concrete transport selection remains in runtime configuration.
 //
 // The user-facing template remains transport-agnostic.
 
@@ -19,12 +17,8 @@
 
 #include "cpp/module_base.h"
 
-// Transport-specific typesupport lives in the generated inc.h. It
-// MUST #define all 8 IBMW_TS_LOANED_PUB_* macros referenced below.
-// See <name>_typesupport.inc.h for the full hot-loop body and
-// driver-injection details (the macros expand to multi-line code on
-// purpose; reading the inc.h is the canonical way to understand the
-// publish path).
+// Message TypeSupport binding lives in the generated inc.h. It defines the
+// seven IBMW_TS_LOANED_PUB_* macros referenced below using only public APIs.
 #include "point_loaned_publisher_typesupport.inc.h"
 
 namespace ibmw::examples::loaned_message_demo_gen {
@@ -34,8 +28,7 @@ class PointLoanedPublisher : public ibmw::Module {
   PointLoanedPublisher() = default;
   ~PointLoanedPublisher() override = default;
 
-  // Plugin-injected: iceoryx asserts trivially-copyable; dds expands
-  // to a no-op (compile-time plain-type detection happens in Setup).
+  // The public loaned API requires an in-place-safe message type.
   IBMW_TS_LOANED_PUB_STATIC_ASSERT;
 
   ibmw::ModuleDescriptor Info() const override {
@@ -46,13 +39,6 @@ class PointLoanedPublisher : public ibmw::Module {
   bool Run() override;
   void Stop() override;
 
-  // Plugin-injected: provides BOTH the named setter (preserves existing
-  // app `main.cc` call sites — SetDdsDriver / SetIceoryxDriver) and the
-  // engine-contract typed-slot override `SetDriverSlot(slot_id, void*)`.
-  // The override matches the driver's stable slot id at compile time
-  // and forwards via static_cast.
-  IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL;
-
  private:
   void PublishLoop();
   void PrintStatistics();
@@ -60,8 +46,7 @@ class PointLoanedPublisher : public ibmw::Module {
 
   ibmw::Runtime core_;
 
-  // Plugin-injected: declares the publisher handle (Ros2StylePublisher
-  // shared_ptr / SenderRef) plus the cached driver pointer.
+  // Plugin-injected stable publisher access for the selected message type.
   IBMW_TS_LOANED_PUB_MEMBER;
 
   std::thread publish_thread_;

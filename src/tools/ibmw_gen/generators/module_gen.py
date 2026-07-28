@@ -468,23 +468,13 @@ def _gen_loaned_subscriber_unified(mod: dict, ns: str, mod_dir: str,
 
 # ── Unified loaned_publisher skeleton ─────────────────────────────────────
 #
-# Mirrors the unified loaned_subscriber with publisher-side concerns:
-#   * Driver injection (typed-slot SetDriverSlot override + a named
-#     setter SetDdsDriver / SetIceoryxDriver — the named setter MUST be
-#     preserved because existing generated app `main.cc` call sites
-#     reference it directly; see plan §7 R-4 risk).
-#   * Hot publish thread (PublishLoop + PrintStatistics on Stop).
-#   * Hot-loop control flow diverges between dds (borrow / is_zero_copy
-#     three-counter) and iceoryx (Borrow / strict mode), so the entire
-#     while-body is captured in a single macro
-#     IBMW_TS_LOANED_PUB_HOT_LOOP_BODY rather than a 3-macro split (see
-#     plan §3.a decision rationale).
+# Both transports use the stable SenderAccess<T> / LoanedSample<T> API. The
+# plugin fragment supplies type registration and, where required, capability
+# setup without exposing a concrete transport driver to the module.
 #
-# 8-macro contract from inc.h (plugin emits every one):
+# 7-macro contract from inc.h (plugin emits every one):
 #   IBMW_TS_LOANED_PUB_MSG_TYPE                — alias
 #   IBMW_TS_LOANED_PUB_STATIC_ASSERT           — class-body top
-#   IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL      — public:
-#   IBMW_TS_LOANED_PUB_DRIVER_SETTER_IMPL(n,p) — used inside DECL macro
 #   IBMW_TS_LOANED_PUB_MEMBER                  — private:
 #   IBMW_TS_LOANED_PUB_SETUP(core_expr)        — Setup body
 #   IBMW_TS_LOANED_PUB_RUN_INIT(core_expr)     — Run body, pre-thread
@@ -502,11 +492,9 @@ def _gen_loaned_publisher_unified_header(mod: dict, ns: str) -> str:
     snake = _snake(name)
     return f"""{_COPYRIGHT}
 //
-// Loaned Publisher (transport-agnostic) — driver-aware zero-copy
-// publish. The actual transport mechanics (Ros2StylePublisher /
-// LoanedSample / driver pointer / hot-loop borrow+publish) live in
-// the generated <name>_typesupport.inc.{{h,cc}} alongside; user-facing
-// .h/.cc only references those via the IBMW_TS_LOANED_PUB_* macros.
+// Loaned Publisher (transport-agnostic). The generated TypeSupport fragment
+// binds the stable SenderAccess<T> / LoanedSample<T> API to the message type;
+// concrete transport selection remains in runtime configuration.
 //
 // The user-facing template remains transport-agnostic.
 
@@ -519,12 +507,8 @@ def _gen_loaned_publisher_unified_header(mod: dict, ns: str) -> str:
 
 #include "cpp/module_base.h"
 
-// Transport-specific typesupport lives in the generated inc.h. It
-// MUST #define all 8 IBMW_TS_LOANED_PUB_* macros referenced below.
-// See <name>_typesupport.inc.h for the full hot-loop body and
-// driver-injection details (the macros expand to multi-line code on
-// purpose; reading the inc.h is the canonical way to understand the
-// publish path).
+// Message TypeSupport binding lives in the generated inc.h. It defines the
+// seven IBMW_TS_LOANED_PUB_* macros referenced below using only public APIs.
 #include "{snake}_typesupport.inc.h"
 
 namespace {ns} {{
@@ -534,8 +518,7 @@ class {name} : public ibmw::Module {{
   {name}() = default;
   ~{name}() override = default;
 
-  // Plugin-injected: iceoryx asserts trivially-copyable; dds expands
-  // to a no-op (compile-time plain-type detection happens in Setup).
+  // The public loaned API requires an in-place-safe message type.
   IBMW_TS_LOANED_PUB_STATIC_ASSERT;
 
   ibmw::ModuleDescriptor Info() const override {{
@@ -546,13 +529,6 @@ class {name} : public ibmw::Module {{
   bool Run() override;
   void Stop() override;
 
-  // Plugin-injected: provides BOTH the named setter (preserves existing
-  // app `main.cc` call sites — SetDdsDriver / SetIceoryxDriver) and the
-  // engine-contract typed-slot override `SetDriverSlot(slot_id, void*)`.
-  // The override matches the driver's stable slot id at compile time
-  // and forwards via static_cast.
-  IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL;
-
  private:
   void PublishLoop();
   void PrintStatistics();
@@ -560,8 +536,7 @@ class {name} : public ibmw::Module {{
 
   ibmw::Runtime core_;
 
-  // Plugin-injected: declares the publisher handle (Ros2StylePublisher
-  // shared_ptr / SenderRef) plus the cached driver pointer.
+  // Plugin-injected stable publisher access for the selected message type.
   IBMW_TS_LOANED_PUB_MEMBER;
 
   std::thread publish_thread_;
@@ -611,11 +586,7 @@ bool {name}::Setup(ibmw::Runtime core) {{
 }}
 
 bool {name}::Run() {{
-  // Plugin-injected: validates the cached driver pointer was injected
-  // (SetDriverSlot / SetXxxDriver must have been called between
-  // Initialize() and Start()) and performs driver-aware publisher
-  // construction. Returns false on missing driver / construction
-  // failure.
+  // Plugin-injected validation of the stable publisher access.
   IBMW_TS_LOANED_PUB_RUN_INIT(core_);
 
   running_ = true;
@@ -634,21 +605,14 @@ void {name}::Stop() {{
 }}
 
 void {name}::PublishLoop() {{
-  // Plugin-injected: WHOLE while-body. dds expands to borrow +
-  // is_zero_copy three-counter + populate marker + publish + sleep;
-  // iceoryx expands to LoanedSample::Borrow + strict mode +
-  // populate marker + Publish + sleep. See plan §3.a decision —
-  // single-macro hot loop is the only way to keep this user-facing
-  // .cc transport-agnostic without forcing divergent control flow.
+  // Plugin-injected strict loan / populate / publish loop.
   while (running_) {{
     IBMW_TS_LOANED_PUB_HOT_LOOP_BODY(loop_iter);
   }}
 }}
 
 void {name}::PrintStatistics() {{
-  // Plugin-injected: dds emits 4 stat lines + 4 driver
-  // GetZeroCopyStats lines + separator; iceoryx emits 4 stat lines
-  // + strict-mode comment + separator.
+  // Plugin-injected transport-neutral counters.
   IBMW_TS_LOANED_PUB_PRINT_STATS;
 }}
 

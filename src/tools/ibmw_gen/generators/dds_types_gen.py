@@ -80,7 +80,7 @@ def generate_dds_type_bridges(project: dict) -> list[tuple[str, str]]:
             hdr_lines.append("")
             hdr_lines.append("#pragma once")
             hdr_lines.append("")
-            hdr_lines.append('#include "internal/typesupport/dds/dds_transport.h"')
+            hdr_lines.append('#include "type_support/dds/dds_transport.h"')
             hdr_lines.append("")
             hdr_lines.append(f'#include "{group_name}.hpp"')
             hdr_lines.append(f'#include "{group_name}CdrAux.ipp"')

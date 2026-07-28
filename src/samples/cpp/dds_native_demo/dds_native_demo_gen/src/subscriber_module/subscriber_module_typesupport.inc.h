@@ -9,7 +9,7 @@
 // <module>.h and <module>.cc; it defines the transport-coupled symbols
 // the unified subscriber template depends on.
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "protocol/hello_msg.h"
 
 // Message C++ type used by the unified template's OnMessage lambda.

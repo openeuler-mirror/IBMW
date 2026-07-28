@@ -6,7 +6,7 @@
 #include <atomic>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 
 namespace iceoryx_interproc_demo {
 

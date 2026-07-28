@@ -2,7 +2,7 @@
 // All rights reserved.
 
 #include "normal_subscriber_module/normal_subscriber_module.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 
 #include "yaml-cpp/yaml.h"
 

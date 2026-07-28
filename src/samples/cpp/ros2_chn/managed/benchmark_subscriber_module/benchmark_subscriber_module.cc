@@ -7,7 +7,7 @@
 #include <limits>
 #include <numeric>
 
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include "benchmark_subscriber_module/benchmark_subscriber_module.h"
 #include "base/format.h"
 #include "base/string_util.h"

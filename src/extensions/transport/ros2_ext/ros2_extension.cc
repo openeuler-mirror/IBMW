@@ -197,7 +197,17 @@ void Ros2Extension::RegisterRos2TransportDriver() {
       ->SetNodePtr(ros2_node_ptr_);
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
-      std::move(ros2_transport_driver_ptr));
+      std::move(ros2_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,
+          .schema = runtime::core::transport::SerializedSchemaSupport::kTypeSupportPackage,
+          .loan = runtime::core::transport::SerializedLoanSupport::kSharedPayload,
+          .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
+          .capture_priority = 4,
+          .provider_name = Name(),
+          .provider_instance_option = "node_name"});
 }
 
 }  // namespace ibmw::extensions::ros2_extension

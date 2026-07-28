@@ -7,6 +7,7 @@
 #include <mutex>
 
 #include "base/exception.h"
+#include "record_playback_ext/storage/mcap_bag_reader.h"
 #include "record_playback_ext/storage/sqlite_bag_reader.h"
 #include "yaml-cpp/yaml.h"
 

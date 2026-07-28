@@ -10,7 +10,7 @@
 #include <optional>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/json/json_transport.h"
+#include "cpp/util/json_transport.h"
 #include "json_custom_types.h"
 
 namespace my_project {

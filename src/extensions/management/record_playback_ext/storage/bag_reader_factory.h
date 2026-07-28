@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "record_playback_ext/storage/mcap_bag_reader.h"
+#include "record_playback_ext/storage/bag_reader.h"
 
 namespace ibmw::extensions::record_playback_extension {
 

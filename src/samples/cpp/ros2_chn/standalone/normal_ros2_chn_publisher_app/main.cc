@@ -7,7 +7,7 @@
 #include "engine/engine.h"
 
 #include "cpp/core.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 
 #include "example_ros2/msg/ros_test_msg.hpp"
 

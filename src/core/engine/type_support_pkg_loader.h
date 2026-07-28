@@ -27,6 +27,7 @@ class TypeSupportPkgLoader {
   TypeSupportPkgLoader& operator=(const TypeSupportPkgLoader&) = delete;
 
   void LoadTypeSupportPkg(std::string_view path);
+  bool TryLoadTypeSupportPkg(std::string_view path);
 
   void UnLoadTypeSupportPkg();
 

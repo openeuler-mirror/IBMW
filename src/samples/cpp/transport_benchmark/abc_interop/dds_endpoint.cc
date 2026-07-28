@@ -19,7 +19,7 @@
 #include "cpp/module_base.h"
 #include "engine/engine.h"
 #include "uint8_multi_array_serializer.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 
 namespace {
 constexpr size_t kPayloadBytes = 4096;

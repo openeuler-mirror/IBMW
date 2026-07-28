@@ -1,8 +1,8 @@
 # ibmw-gen project definition for loaned_publisher + loaned_subscriber demo
 # (iceoryx variant).
 #
-# The publisher uses the iceoryx zero-copy API via the ibmw
-#      IceoryxTransportDriver. Requires trivially_copyable message type
+# The publisher uses the public strict loan API. The runtime configuration
+#      selects iceoryx. Requires trivially_copyable message type
 #      (geometry_msgs::msg::Point qualifies — 3 doubles, no std::string).
 # The subscriber uses ibmw::transport::LoanedSubscriber<T>::AttachBytes
 #      (ReceiverRef vtable; dispatcher routes incoming SHM samples).
@@ -47,8 +47,6 @@ modules:
     topic: point_topic
     message: geometry_msgs::msg::Point
     # ros2_msg_include / ros2_package are auto-derived from message.
-    zero_copy_config: strict
-
   # Subscriber side, iceoryx transport. Callback receives the loaned
   # SHM sample by const-ref (true zero-copy borrow).
   - name: PointIceoryxLoanedSubscriber

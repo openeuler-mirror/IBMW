@@ -54,6 +54,22 @@ ibmw_add_pkg(ros2_interop_pkg
   SRCS src/ros2_interop_pkg/pkg_main.cc
   MODULES publisher_module subscriber_module)
 
+add_library(ros2_interop_pkg_ts SHARED
+  src/ros2_interop_pkg/type_support_pkg_main.cc)
+target_include_directories(ros2_interop_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ros2_interop_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  std_msgs::std_msgs__rosidl_generator_cpp
+  std_msgs::std_msgs__rosidl_typesupport_introspection_cpp)
+set_target_properties(ros2_interop_pkg_ts PROPERTIES
+  OUTPUT_NAME "ros2_interop_pkg_ts")
+install(TARGETS ros2_interop_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(ros2_interop_app
   SRCS src/ros2_interop_app/main.cc
   MODULES publisher_module subscriber_module)
@@ -62,6 +78,22 @@ ibmw_add_pkg(publisher_module_pkg
   SRCS src/publisher_module_pkg/pkg_main.cc
   MODULES publisher_module)
 
+add_library(publisher_module_pkg_ts SHARED
+  src/publisher_module_pkg/type_support_pkg_main.cc)
+target_include_directories(publisher_module_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(publisher_module_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  std_msgs::std_msgs__rosidl_generator_cpp
+  std_msgs::std_msgs__rosidl_typesupport_introspection_cpp)
+set_target_properties(publisher_module_pkg_ts PROPERTIES
+  OUTPUT_NAME "publisher_module_pkg_ts")
+install(TARGETS publisher_module_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(ros2_pub_only_app
   SRCS src/ros2_pub_only_app/main.cc
   MODULES publisher_module)
@@ -69,6 +101,22 @@ ibmw_add_app(ros2_pub_only_app
 ibmw_add_pkg(subscriber_module_pkg
   SRCS src/subscriber_module_pkg/pkg_main.cc
   MODULES subscriber_module)
+
+add_library(subscriber_module_pkg_ts SHARED
+  src/subscriber_module_pkg/type_support_pkg_main.cc)
+target_include_directories(subscriber_module_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(subscriber_module_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  std_msgs::std_msgs__rosidl_generator_cpp
+  std_msgs::std_msgs__rosidl_typesupport_introspection_cpp)
+set_target_properties(subscriber_module_pkg_ts PROPERTIES
+  OUTPUT_NAME "subscriber_module_pkg_ts")
+install(TARGETS subscriber_module_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(ros2_sub_only_app
   SRCS src/ros2_sub_only_app/main.cc

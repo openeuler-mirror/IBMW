@@ -158,6 +158,8 @@ if(IBMW_BUILD_TESTS AND test_files)
               ${TYPE_SUPPORT_V1_FIXTURE_SRC})
   add_library(type_support_bad_package_size_v1_fixture MODULE
               ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  add_library(type_support_null_type_v1_fixture MODULE
+              ${TYPE_SUPPORT_V1_FIXTURE_SRC})
   target_compile_definitions(type_support_bad_v1_fixture
                               PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_VERSION)
   target_compile_definitions(type_support_bad_size_v1_fixture
@@ -165,9 +167,12 @@ if(IBMW_BUILD_TESTS AND test_files)
   target_compile_definitions(
     type_support_bad_package_size_v1_fixture
     PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_PACKAGE_SIZE)
+  target_compile_definitions(type_support_null_type_v1_fixture
+                             PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_NULL_TYPE)
   foreach(fixture IN ITEMS type_support_v1_fixture type_support_bad_v1_fixture
                            type_support_bad_size_v1_fixture
-                           type_support_bad_package_size_v1_fixture)
+                           type_support_bad_package_size_v1_fixture
+                           type_support_null_type_v1_fixture)
     target_link_libraries(${fixture} PRIVATE ibmw::api::type_support)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
@@ -192,7 +197,8 @@ if(IBMW_BUILD_TESTS AND test_files)
                    type_support_v1_fixture
                    type_support_bad_v1_fixture
                    type_support_bad_size_v1_fixture
-                   type_support_bad_package_size_v1_fixture)
+                   type_support_bad_package_size_v1_fixture
+                   type_support_null_type_v1_fixture)
   target_compile_definitions(
     ${CUR_TARGET_NAME}_test
     PRIVATE
@@ -208,5 +214,6 @@ if(IBMW_BUILD_TESTS AND test_files)
       "TYPE_SUPPORT_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_v1_fixture>\""
       "TYPE_SUPPORT_BAD_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_v1_fixture>\""
       "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""
-      "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\"")
+      "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\""
+      "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\"")
 endif()

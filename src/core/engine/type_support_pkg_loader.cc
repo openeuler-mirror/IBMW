@@ -24,6 +24,33 @@ bool ValidString(ibmw_string_view_t value) noexcept {
   return value.str != nullptr && value.len != 0;
 }
 
+bool ValidTypeSupport(const ibmw_type_support_base_t* type_support) {
+  if (type_support == nullptr || type_support->type_name == nullptr ||
+      type_support->create == nullptr || type_support->destroy == nullptr ||
+      type_support->copy == nullptr || type_support->move == nullptr ||
+      type_support->serialize == nullptr ||
+      type_support->deserialize == nullptr ||
+      type_support->serialization_types_supported_num == nullptr ||
+      type_support->serialization_types_supported_list == nullptr ||
+      type_support->custom_type_support_ptr == nullptr ||
+      !ValidString(type_support->type_name(type_support->ctx))) {
+    return false;
+  }
+  const size_t count =
+      type_support->serialization_types_supported_num(type_support->ctx);
+  const auto* serialization_types =
+      type_support->serialization_types_supported_list(type_support->ctx);
+  if (count == 0 || serialization_types == nullptr) {
+    return false;
+  }
+  for (size_t index = 0; index < count; ++index) {
+    if (!ValidString(serialization_types[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool ValidSchema(const ibmw_schema_support_base_t* schema) noexcept {
   if (schema == nullptr ||
       schema->abi_version != IBMW_SCHEMA_SUPPORT_ABI_VERSION_V1 ||
@@ -83,6 +110,12 @@ bool TypeSupportPkgLoader::TryLoadTypeSupportPkg(std::string_view path) {
 
   const std::span<const ibmw_type_support_base_t*> candidate_types(
       package->entries, package->entry_count);
+  for (size_t index = 0; index < candidate_types.size(); ++index) {
+    MW_ASSERT(
+        ValidTypeSupport(candidate_types[index]),
+        "Type support package {} exports invalid TypeSupport entry {}.",
+        candidate_path, index);
+  }
 
   std::span<const ibmw_schema_support_base_t* const> candidate_schemas;
   if (package->schema_support == nullptr) {

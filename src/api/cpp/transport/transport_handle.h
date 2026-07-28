@@ -410,6 +410,13 @@ class SenderAccessBase {
     return publisher_.GetTopic();
   }
 
+  bool RegisterLoanedPodTopic(
+      size_t initial_size_hint,
+      size_t alignment = alignof(std::max_align_t)) {
+    return publisher_.RegisterLoanedPodTopic(
+        msg_type_name_, initial_size_hint, alignment);
+  }
+
  protected:
   void SendImpl(ContextRef ctx_ref, const void* msg_ptr) {
     publisher_.Send(msg_type_name_, ctx_ref, msg_ptr);

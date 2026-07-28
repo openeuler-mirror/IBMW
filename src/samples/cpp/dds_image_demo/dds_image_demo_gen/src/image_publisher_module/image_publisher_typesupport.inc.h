@@ -11,7 +11,7 @@
 
 #include <optional>
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "protocol/image_msg.h"
 
 // Fully-qualified message type used by the unified template's

@@ -145,7 +145,7 @@ class TestDdsPluginEmit(unittest.TestCase):
         self.assertEqual(ts_info["msg_type_cpp"],
                          "ibmw::protocols::demo::DemoMsg")
         self.assertIn("demo_dds_types.h", ts_info["inc_h_content"])
-        self.assertIn("internal/typesupport/dds/dds_transport.h",
+        self.assertIn("type_support/dds/dds_transport.h",
                       ts_info["inc_h_content"])
         self.assertIn("IBMW_TS_SENDER_ACCESS_MEMBER",
                       ts_info["inc_h_content"])
@@ -212,7 +212,7 @@ class TestDdsPluginEmit(unittest.TestCase):
         self.assertEqual(ts_info["msg_type_cpp"],
                          "ibmw::protocols::demo::DemoMsg")
         self.assertIn("demo_dds_types.h", ts_info["inc_h_content"])
-        self.assertIn("internal/typesupport/dds/dds_transport.h",
+        self.assertIn("type_support/dds/dds_transport.h",
                       ts_info["inc_h_content"])
         self.assertIn("IBMW_TS_RECEIVER_MSG_TYPE",
                       ts_info["inc_h_content"])
@@ -288,7 +288,7 @@ class TestDdsPluginEmit(unittest.TestCase):
         inc_h = ts_info["inc_h_content"]
         inc_cc = ts_info["inc_cc_content"]
         # inc.h carries the transport-specific includes and macro contract.
-        self.assertIn("internal/typesupport/ros2/ros2_transport.h", inc_h)
+        self.assertIn("type_support/ros2/ros2_transport.h", inc_h)
         self.assertIn("geometry_msgs/msg/point.hpp", inc_h)
         self.assertIn("IBMW_TS_LOANED_SUB_MSG_TYPE", inc_h)
         self.assertIn("IBMW_TS_LOANED_SUB_STATIC_ASSERT", inc_h)
@@ -345,7 +345,7 @@ class TestDdsPluginEmit(unittest.TestCase):
             "ros2_msg_include": "geometry_msgs/msg/point.hpp",
             "topic": "/demo_loan",
             "dds_type_name": "geometry_msgs/msg/Point",
-            "zero_copy_config": "auto",
+            "zero_copy_config": "strict",
         }
         ns = "ibmw::demo"
         mod_dir = "demo_loan_pub_module"
@@ -365,17 +365,13 @@ class TestDdsPluginEmit(unittest.TestCase):
         inc_h = ts_info["inc_h_content"]
         inc_cc = ts_info["inc_cc_content"]
 
-        # inc.h carries the transport-specific includes and the 8-macro
-        # contract.
-        self.assertIn("dds_ext/ros2_style_api.h", inc_h)
-        self.assertIn("dds_ext/dds_transport_driver.h", inc_h)
-        self.assertIn("internal/typesupport/ros2/ros2_transport.h", inc_h)
+        # The sidecar binds only to stable public APIs.
+        self.assertIn("cpp/transport/transport_factory.h", inc_h)
+        self.assertIn("type_support/ros2/ros2_transport.h", inc_h)
         self.assertIn("geometry_msgs/msg/point.hpp", inc_h)
         for macro in (
             "IBMW_TS_LOANED_PUB_MSG_TYPE",
             "IBMW_TS_LOANED_PUB_STATIC_ASSERT",
-            "IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL",
-            "IBMW_TS_LOANED_PUB_DRIVER_SETTER_IMPL",
             "IBMW_TS_LOANED_PUB_MEMBER",
             "IBMW_TS_LOANED_PUB_SETUP",
             "IBMW_TS_LOANED_PUB_RUN_INIT",
@@ -384,20 +380,19 @@ class TestDdsPluginEmit(unittest.TestCase):
         ):
             self.assertIn(f"#define {macro}", inc_h,
                           f"inc.h must define {macro}")
-        # Driver setter contract: named setter + v2 typed-slot override
-        # via DdsTransportDriver::kStableDriverId.
-        self.assertIn("SetDdsDriver", inc_h)
-        self.assertIn("SetDriverSlot(", inc_h)
-        self.assertIn("DdsTransportDriver::kStableDriverId", inc_h)
-        # dds-specific symbols stay in inc.h.
-        self.assertIn("Ros2StylePublisher<", inc_h)
-        self.assertIn("create_publisher_with_driver_config<", inc_h)
-        self.assertIn("DdsTransportDriver", inc_h)
+        self.assertIn("SenderAccess<", inc_h)
+        self.assertIn("publisher_->Loan()", inc_h)
+        self.assertIn("publisher_->Publish", inc_h)
+        self.assertNotIn("dds_ext/", inc_h)
+        self.assertNotIn("DdsTransportDriver", inc_h)
+        self.assertNotIn("SetDdsDriver", inc_h)
+        self.assertNotIn("SetDriverSlot(", inc_h)
+        self.assertNotIn("Ros2StylePublisher<", inc_h)
+        self.assertNotIn("create_publisher_with_driver_config<", inc_h)
         # Hot-loop user-code marker pair lives inside the macro.
         self.assertIn("populate_loaned_message", inc_h)
-        # Plain-type detection still present (compile-time).
+        # Strict public loans require in-place-safe message storage.
         self.assertIn("std::is_trivially_copyable_v<", inc_h)
-        self.assertIn("std::is_standard_layout_v<", inc_h)
 
         # Unified end-to-end: 4 files + R1/R2/R9 guards.
         project = {

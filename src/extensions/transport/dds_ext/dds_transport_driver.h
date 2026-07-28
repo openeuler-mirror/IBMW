@@ -145,20 +145,27 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   AttachSerializedSubscriber(
       const runtime::core::transport::SerializedSubscriberOptions& options,
       runtime::core::transport::SerializedMessageCallback callback)
-      noexcept override;
+      noexcept;
   bool DetachSerializedSubscriber(
       runtime::core::transport::SerializedSubscriberHandle handle)
-      noexcept override;
+      noexcept;
   runtime::core::transport::SerializedPublisherHandle
   RegisterSerializedPublisher(
       const runtime::core::transport::SerializedPublisherOptions& options)
-      noexcept override;
+      noexcept;
   bool SendSerialized(
       runtime::core::transport::SerializedPublisherHandle handle,
       const runtime::core::transport::SerializedMessage& message)
-      noexcept override;
+      noexcept;
   bool WaitForSerializedAcknowledgments(
-      std::chrono::milliseconds timeout) noexcept override;
+      std::chrono::milliseconds timeout) noexcept;
+
+  runtime::core::transport::QosDescriptor PublisherQos(
+      std::string_view topic,
+      std::string_view msg_type) const noexcept;
+  runtime::core::transport::QosDescriptor SubscriberQos(
+      std::string_view topic,
+      std::string_view msg_type) const noexcept;
 
   // ----- Phase 7 §7.3 §K-3.6: user-level zero-copy loan fast lane -----
   //

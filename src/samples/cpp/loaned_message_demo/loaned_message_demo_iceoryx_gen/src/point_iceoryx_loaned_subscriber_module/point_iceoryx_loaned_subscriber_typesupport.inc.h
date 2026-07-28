@@ -20,7 +20,7 @@
 #include <type_traits>
 
 #include "cpp/transport/loaned_subscriber.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <geometry_msgs/msg/point.hpp>
 
 // Convenience alias for use by the ATTACH macro and the default
@@ -44,8 +44,8 @@
                          std::size_t size)
 
 // Setup body: GetSubscriber + LoanedSubscriber<T>::AttachBytes. The
-// attach-key MUST exactly match what the iceoryx publisher side passes
-// to LoanedSample<T>::Borrow / EnsurePodTopic, since the iceoryx driver
+// attach-key MUST exactly match what the publisher side registers through
+// the public POD loan capability, since the selected transport
 // keys pod_pub_map_ / pod_sub_map_ on (topic, msg_type). We use the
 // same "ros2:<ros2_type_name>" identity the publisher template uses
 // (see _gen_loaned_publisher_iceoryx_cc). The yaml field

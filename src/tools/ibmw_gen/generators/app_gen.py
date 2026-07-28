@@ -110,12 +110,8 @@ def _gen_standard_app(app: dict, project: dict) -> str:
     """Generate main.cc for standard app (registers modules, Start blocking).
 
     Standalone main.cc emits no per-app driver-injection boilerplate. The
-    framework's ModuleBus::BroadcastDriverSlot runs after Engine::Initialize()
-    and dispatches every used transport driver into every directly-registered
-    module via Module::SetDriverSlot(slot_id, ptr). Loaned modules generated
-    by ibmw-gen use the IBMW_USE_DRIVER macro to opt in to the typed driver
-    they need — identical behaviour to pkg mode. No #include of
-    *_transport_driver.h is needed here.
+    Managed modules use the public Runtime and transport access APIs. Concrete
+    driver injection is reserved for explicitly direct transport modules.
     """
     app_name = app["_snake_name"]
     ns = project["project"]["_namespace_cpp"]
@@ -143,13 +139,8 @@ def _gen_standard_app(app: dict, project: dict) -> str:
     return f"""{_COPYRIGHT}//
 // App-mode entry point for {app_name}.
 //
-// This main.cc contains no driver-injection boilerplate even when
-// loaned_publisher modules are present. The framework's
-// ModuleBus::BroadcastDriverSlot() runs between Initialize() and Start()
-// and dispatches each used transport driver pointer into every registered
-// module via Module::SetDriverSlot(slot_id, ptr). Loaned modules use
-// IBMW_USE_DRIVER to capture the iceoryx / dds driver pointer they need
-// (compile-time typed slot match, no string compare).
+// Managed modules use public transport access handles. Concrete driver
+// injection is reserved for explicitly direct transport modules.
 
 #include <csignal>
 #include <iostream>
@@ -196,9 +187,7 @@ int32_t main(int32_t argc, char** argv) {{
 
     core.Initialize(options);
 
-    // Start (blocking). The framework auto-injects transport drivers into
-    // any module that overrides Module::SetDriverSlot (typically via the
-    // IBMW_USE_DRIVER macro) — no boilerplate needed.
+    // Start (blocking). Runtime configuration selects concrete transports.
     std::cout << "Starting engine..." << std::endl;
     core.Start();
 

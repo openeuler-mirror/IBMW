@@ -131,6 +131,7 @@ endfunction()
 # ibmw_add_pkg(<name>
 #   SRCS <source files...>
 #   MODULES <module targets...>
+#   [DEPS <link dependencies...>]
 #   [OUTPUT_NAME <output name>]
 # )
 #
@@ -143,7 +144,7 @@ endfunction()
 #     MODULES publisher_module subscriber_module)
 # --------------------------------------------------------------------------
 function(ibmw_add_pkg TARGET_NAME)
-  cmake_parse_arguments(ARG "" "OUTPUT_NAME" "SRCS;MODULES" ${ARGN})
+  cmake_parse_arguments(ARG "" "OUTPUT_NAME" "SRCS;MODULES;DEPS" ${ARGN})
 
   if(NOT ARG_SRCS)
     message(FATAL_ERROR "ibmw_add_pkg(${TARGET_NAME}): SRCS is required")
@@ -152,7 +153,7 @@ function(ibmw_add_pkg TARGET_NAME)
   add_library(${TARGET_NAME} SHARED ${ARG_SRCS})
 
   target_link_libraries(${TARGET_NAME}
-    PRIVATE ibmw::api::pkg ${ARG_MODULES})
+    PRIVATE ibmw::api::pkg ${ARG_MODULES} ${ARG_DEPS})
 
   if(ARG_OUTPUT_NAME)
     set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME ${ARG_OUTPUT_NAME})

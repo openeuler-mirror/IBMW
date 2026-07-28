@@ -37,6 +37,21 @@ ibmw_add_pkg(pubsub_pkg
   SRCS src/pubsub_pkg/pkg_main.cc
   MODULES publisher_module subscriber_module)
 
+add_library(pubsub_pkg_ts SHARED
+  src/pubsub_pkg/type_support_pkg_main.cc)
+target_include_directories(pubsub_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(pubsub_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::dds_type_support
+  ibmw::schema::example_idl_gencode)
+set_target_properties(pubsub_pkg_ts PROPERTIES
+  OUTPUT_NAME "pubsub_pkg_ts")
+install(TARGETS pubsub_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(pubsub_app
   SRCS src/pubsub_app/main.cc
   MODULES publisher_module subscriber_module)

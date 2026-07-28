@@ -2151,7 +2151,7 @@ string name
 #include <sensor_msgs/msg/detail/point_cloud2__rosidl_typesupport_fastrtps_cpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
-#include "ros2_types/util/ros2_cdr_serializer.h"
+#include "type_support/ros2/ros2_cdr_serializer.h"
 
 template <typename MsgT, typename Mutate, typename Verify>
 int RoundTrip(MsgT in, Mutate mutate, Verify verify) {
@@ -2258,7 +2258,7 @@ find_package(nav_msgs REQUIRED)
 find_package(rosidl_typesupport_fastrtps_cpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 add_executable(probe main.cc)
-target_include_directories(probe PRIVATE {repo_root / 'src' / 'extensions' / 'transport'})
+target_include_directories(probe PRIVATE {repo_root / 'src' / 'api'})
 target_link_libraries(probe PRIVATE
   builtin_interfaces::builtin_interfaces__rosidl_generator_cpp
   builtin_interfaces::builtin_interfaces__rosidl_typesupport_fastrtps_cpp

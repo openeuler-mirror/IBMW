@@ -582,7 +582,7 @@ If your IDL `#include`s other IDL files, add their directories to
 #pragma once
 
 // IBMW DDS transport utilities (provides IBMW_DDS_TYPE_NAME macro)
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 
 // Generated type header
 #include "RobotPose.hpp"
@@ -753,7 +753,7 @@ module ibmw { module protocols { module example {
 
 **Type bridge** (`src/example_event_dds_types.h`):
 ```cpp
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "ExampleEvent.hpp"
 #include "ExampleEventCdrAux.ipp"
 IBMW_DDS_TYPE_NAME(ibmw::protocols::example::ExampleEventMsg,
@@ -988,7 +988,7 @@ target_link_libraries(my_module
 
 ```cpp
 #include "my_robot_msgs/msg/wheel_speed.hpp"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 
 // Publisher:
 publisher_ = core_.GetTransport().GetPublisher("wheel_speed");
@@ -1333,7 +1333,7 @@ module my_project {
 
 ```cpp
 #pragma once
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "MyMsg.hpp"
 #include "MyMsgCdrAux.ipp"
 

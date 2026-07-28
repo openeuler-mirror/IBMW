@@ -310,7 +310,13 @@ void NetExtension::RegisterHttpTransportDriver() {
                                            http_cli_pool_ptr_,
                                            http_svr_ptr_);
 
-  core_ptr_->GetTransportBus().RegisterTransportDriver(std::move(http_transport_driver_ptr));
+  core_ptr_->GetTransportBus().RegisterTransportDriver(
+      std::move(http_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kRuntimeTap,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .capture_priority = 8,
+          .provider_name = Name()});
 }
 
 void NetExtension::RegisterTcpTransportDriver() {
@@ -320,7 +326,13 @@ void NetExtension::RegisterTcpTransportDriver() {
                                           tcp_svr_ptr_,
                                           tcp_msg_handle_catalog_ptr_);
 
-  core_ptr_->GetTransportBus().RegisterTransportDriver(std::move(tcp_transport_driver_ptr));
+  core_ptr_->GetTransportBus().RegisterTransportDriver(
+      std::move(tcp_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kRuntimeTap,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .capture_priority = 6,
+          .provider_name = Name()});
 }
 
 void NetExtension::RegisterUdpTransportDriver() {
@@ -330,7 +342,13 @@ void NetExtension::RegisterUdpTransportDriver() {
                                           udp_svr_ptr_,
                                           udp_msg_handle_catalog_ptr_);
 
-  core_ptr_->GetTransportBus().RegisterTransportDriver(std::move(udp_transport_driver_ptr));
+  core_ptr_->GetTransportBus().RegisterTransportDriver(
+      std::move(udp_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kRuntimeTap,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .capture_priority = 7,
+          .provider_name = Name()});
 }
 
 }  // namespace ibmw::extensions::net_extension

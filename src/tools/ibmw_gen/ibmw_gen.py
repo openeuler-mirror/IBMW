@@ -36,6 +36,7 @@ from generators.dds_rpc_yaml_gen import generate_dds_rpc_yamls
 from generators.module_gen import generate_modules
 from generators.app_gen import generate_app_mains
 from generators.pkg_gen import generate_pkg_mains
+from generators.type_support_pkg_gen import generate_type_support_package_sources
 from generators.config_gen import generate_configs
 from generators.cmake_gen import generate_cmake
 from generators.action_gen import generate_experimental_actions
@@ -73,7 +74,7 @@ def _is_always_overwrite(rel_path: str) -> bool:
     if base.endswith("_dds_types.h") or base.endswith("_cdr_impl.cc"):
         return True
     # main.cc, pkg_main.cc
-    if base in ("main.cc", "pkg_main.cc"):
+    if base in ("main.cc", "pkg_main.cc", "type_support_pkg_main.cc"):
         return True
     return False
 
@@ -649,6 +650,10 @@ def main():
         for rel_path, content in generate_app_mains(project):
             emit(rel_path, content)
         for rel_path, content in generate_pkg_mains(project):
+            emit(rel_path, content)
+
+    if categories & {"apps", "types", "schema"}:
+        for rel_path, content in generate_type_support_package_sources(project):
             emit(rel_path, content)
 
     if "configs" in categories:

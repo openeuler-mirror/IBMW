@@ -186,17 +186,19 @@ struct RawCdrSample {
   std::vector<uint8_t> bytes;
 };
 
+constexpr size_t kMaxRawPayloadSize = 64u * 1024u * 1024u;
+
 class RawCdrTopicDataType final
     : public eprosima::fastdds::dds::TopicDataType {
  public:
   explicit RawCdrTopicDataType(const std::string& type_name) {
 #if IBMW_FASTDDS_V3_PLUS
     set_name(type_name);
-    max_serialized_type_size = 64u * 1024u * 1024u;
+    max_serialized_type_size = kMaxRawPayloadSize;
     is_compute_key_provided = false;
 #else
     setName(type_name.c_str());
-    m_typeSize = 64u * 1024u * 1024u;
+    m_typeSize = kMaxRawPayloadSize;
     m_isGetKeyDefined = false;
     auto_fill_type_object(false);
     auto_fill_type_information(false);
@@ -295,6 +297,16 @@ class RawCdrTopicDataType final
 
   template <typename Payload>
   static bool CopyFromPayload(const Payload& payload, RawCdrSample& sample) {
+    if (payload.length > kMaxRawPayloadSize || payload.length > payload.max_size) {
+      return false;
+    }
+    if (payload.length == 0) {
+      sample.bytes.clear();
+      return true;
+    }
+    if (payload.data == nullptr) {
+      return false;
+    }
     sample.bytes.assign(payload.data, payload.data + payload.length);
     return true;
   }
@@ -877,6 +889,65 @@ eprosima::fastdds::dds::DataReaderQos DdsTransportDriver::GetReaderQos(
   }
 
   return qos;
+}
+
+namespace {
+
+template <typename Qos>
+runtime::core::transport::QosDescriptor DescribeDdsQos(const Qos& qos) {
+  runtime::core::transport::QosDescriptor descriptor;
+  descriptor.policies.emplace(
+      "history",
+      qos.history().kind == eprosima::fastdds::dds::KEEP_ALL_HISTORY_QOS
+          ? "keep_all"
+          : "keep_last");
+  descriptor.policies.emplace(
+      "depth", std::to_string(qos.history().depth));
+  descriptor.policies.emplace(
+      "reliability",
+      qos.reliability().kind ==
+              eprosima::fastdds::dds::BEST_EFFORT_RELIABILITY_QOS
+          ? "best_effort"
+          : "reliable");
+  descriptor.policies.emplace(
+      "durability",
+      qos.durability().kind ==
+              eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS
+          ? "transient_local"
+          : "volatile");
+  return descriptor;
+}
+
+}  // namespace
+
+runtime::core::transport::QosDescriptor
+DdsTransportDriver::PublisherQos(
+    std::string_view topic,
+    std::string_view msg_type) const noexcept {
+  try {
+    const std::string topic_name(topic);
+    const std::string type_name(msg_type);
+    return DescribeDdsQos(GetWriterQos(
+        topic_name, GetDdsTopicName(topic_name, type_name)));
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot describe DDS Publisher QoS: {}", error.what());
+    return {};
+  }
+}
+
+runtime::core::transport::QosDescriptor
+DdsTransportDriver::SubscriberQos(
+    std::string_view topic,
+    std::string_view msg_type) const noexcept {
+  try {
+    const std::string topic_name(topic);
+    const std::string type_name(msg_type);
+    return DescribeDdsQos(GetReaderQos(
+        topic_name, GetDdsTopicName(topic_name, type_name)));
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot describe DDS Subscriber QoS: {}", error.what());
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -10,8 +10,8 @@
 #include <fastcdr/FastBuffer.h>
 
 // v2-to-v1 compat: provides CdrSizeCalculator for size estimation
-#include "dds_types/util/fastcdr_v1_compat.h"
-#include "dds_types/util/dds_type_support.h"
+#include "type_support/dds/fastcdr_v1_compat.h"
+#include "type_support/dds/dds_type_support.h"
 
 namespace ibmw::examples::dds_native_demo {
 

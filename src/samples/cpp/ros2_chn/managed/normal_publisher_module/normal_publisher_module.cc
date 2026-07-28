@@ -2,7 +2,7 @@
 // All rights reserved.
 
 #include "normal_publisher_module/normal_publisher_module.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 
 #include "yaml-cpp/yaml.h"
 

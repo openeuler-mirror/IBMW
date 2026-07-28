@@ -12,7 +12,7 @@
 #pragma once
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <geometry_msgs/msg/point.hpp>
 
 namespace ros2_point_demo {

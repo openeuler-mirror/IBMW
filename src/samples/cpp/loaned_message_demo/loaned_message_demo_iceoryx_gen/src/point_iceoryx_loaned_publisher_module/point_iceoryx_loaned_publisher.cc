@@ -26,11 +26,7 @@ bool PointIceoryxLoanedPublisher::Setup(ibmw::Runtime core) {
 }
 
 bool PointIceoryxLoanedPublisher::Run() {
-  // Plugin-injected: validates the cached driver pointer was injected
-  // (SetDriverSlot / SetXxxDriver must have been called between
-  // Initialize() and Start()) and performs driver-aware publisher
-  // construction. Returns false on missing driver / construction
-  // failure.
+  // Plugin-injected validation of the stable publisher access.
   IBMW_TS_LOANED_PUB_RUN_INIT(core_);
 
   running_ = true;
@@ -49,21 +45,14 @@ void PointIceoryxLoanedPublisher::Stop() {
 }
 
 void PointIceoryxLoanedPublisher::PublishLoop() {
-  // Plugin-injected: WHOLE while-body. dds expands to borrow +
-  // is_zero_copy three-counter + populate marker + publish + sleep;
-  // iceoryx expands to LoanedSample::Borrow + strict mode +
-  // populate marker + Publish + sleep. See plan §3.a decision —
-  // single-macro hot loop is the only way to keep this user-facing
-  // .cc transport-agnostic without forcing divergent control flow.
+  // Plugin-injected strict loan / populate / publish loop.
   while (running_) {
     IBMW_TS_LOANED_PUB_HOT_LOOP_BODY(loop_iter);
   }
 }
 
 void PointIceoryxLoanedPublisher::PrintStatistics() {
-  // Plugin-injected: dds emits 4 stat lines + 4 driver
-  // GetZeroCopyStats lines + separator; iceoryx emits 4 stat lines
-  // + strict-mode comment + separator.
+  // Plugin-injected transport-neutral counters.
   IBMW_TS_LOANED_PUB_PRINT_STATS;
 }
 

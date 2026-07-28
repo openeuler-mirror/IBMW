@@ -567,7 +567,9 @@ void Ros2TransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
       rcl_publisher_t& publisher = *(finditr->second.publisher_ptr);
       bool use_serialized = finditr->second.use_serialized;
 
-      if (use_serialized) [[unlikely]] {
+      if (use_serialized ||
+          (msg_wrapper.msg_ptr == nullptr &&
+           !msg_wrapper.serialization_cache.empty())) [[unlikely]] {
         std::string_view serialization_type = msg_wrapper.ctx_ref.GetSerializationType();
         if (serialization_type.empty()) {
           serialization_type = info.msg_type_support_ref.DefaultSerializationType();

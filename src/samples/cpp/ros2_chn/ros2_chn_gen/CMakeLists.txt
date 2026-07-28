@@ -39,6 +39,22 @@ ibmw_add_pkg(ros2_chn_pkg
   SRCS src/ros2_chn_pkg/pkg_main.cc
   MODULES normal_publisher_module normal_subscriber_module)
 
+add_library(ros2_chn_pkg_ts SHARED
+  src/ros2_chn_pkg/type_support_pkg_main.cc)
+target_include_directories(ros2_chn_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ros2_chn_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  example_ros2::example_ros2__rosidl_generator_cpp
+  example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
+set_target_properties(ros2_chn_pkg_ts PROPERTIES
+  OUTPUT_NAME "ros2_chn_pkg_ts")
+install(TARGETS ros2_chn_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(ros2_chn_app
   SRCS src/ros2_chn_app/main.cc
   MODULES normal_publisher_module normal_subscriber_module)

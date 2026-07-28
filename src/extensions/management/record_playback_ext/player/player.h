@@ -14,7 +14,7 @@
 
 #include "cpp/transport/serialized_message.h"
 #include "record_playback_ext/discovery/topic_advertisement.h"
-#include "record_playback_ext/storage/mcap_bag_reader.h"
+#include "record_playback_ext/storage/bag_reader.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
