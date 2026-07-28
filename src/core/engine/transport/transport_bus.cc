@@ -293,6 +293,7 @@ bool TransportBus::TryShutdown() {
   transport_driver_vec_.clear();
   used_transport_driver_vec_.clear();
   transport_driver_capabilities_map_.clear();
+  serialized_transport_capabilities_map_.clear();
   prepared_shutdown_drivers_.clear();
 
   transport_catalog_ptr_.reset();
@@ -438,6 +439,39 @@ void TransportBus::RegisterTransportDriver(
   transport_driver_vec_.emplace_back(std::move(transport_driver_ptr));
 }
 
+void TransportBus::RegisterTransportDriver(
+    std::unique_ptr<TransportDriver>&& transport_driver_ptr,
+    TransportDriverCapabilitiesV1 capabilities,
+    const SerializedTransportCapabilityV1& serialized_capability) {
+  MW_REQUIRE(
+      state_.load() == State::kPreInit,
+      "Method can only be called when state is 'PreInit'.");
+  MW_REQUIRE(
+      transport_driver_ptr != nullptr,
+      "Cannot register a null transport driver.");
+  MW_REQUIRE(
+      serialized_capability.HasValidContract(),
+      "Transport driver '{}' registered an invalid serialized capability "
+      "contract (version {}, size {}).",
+      transport_driver_ptr->Name(), serialized_capability.abi_version,
+      serialized_capability.struct_size);
+
+  auto* driver = transport_driver_ptr.get();
+  const auto [capability, inserted] =
+      serialized_transport_capabilities_map_.emplace(
+          driver, serialized_capability);
+  MW_REQUIRE(
+      inserted,
+      "Transport driver '{}' registered its serialized capability twice.",
+      driver->Name());
+  try {
+    RegisterTransportDriver(std::move(transport_driver_ptr), capabilities);
+  } catch (...) {
+    serialized_transport_capabilities_map_.erase(capability);
+    throw;
+  }
+}
+
 void TransportBus::RegisterGetExecutorFunc(
     const std::function<executor::ExecutorHandle(std::string_view)>& get_executor_func) {
   MW_REQUIRE(
@@ -524,6 +558,15 @@ const std::vector<TransportDriver*>& TransportBus::GetUsedTransportDriver() cons
       state_.load() == State::kInit,
       "Method can only be called when state is 'Init'.");
   return used_transport_driver_vec_;
+}
+
+const SerializedTransportCapabilityV1*
+TransportBus::GetSerializedTransportCapability(
+    const TransportDriver& driver) const noexcept {
+  const auto found = serialized_transport_capabilities_map_.find(&driver);
+  return found == serialized_transport_capabilities_map_.end()
+             ? nullptr
+             : &found->second;
 }
 
 void TransportBus::RegisterInProcessTransport() {

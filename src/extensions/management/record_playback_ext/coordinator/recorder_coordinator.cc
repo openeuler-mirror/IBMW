@@ -64,7 +64,7 @@ void RecorderCoordinator::Start() {
 }
 
 RecordQueue::PushResult RecorderCoordinator::Accept(
-    ibmw::runtime::core::transport::SerializedMessage message) {
+    ibmw::transport::SerializedMessage message) {
   if (state_.load() != State::kRunning) {
     return RecordQueue::PushResult::kClosed;
   }
@@ -117,7 +117,7 @@ void RecorderCoordinator::RunWriter() {
 }
 
 StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
-    const ibmw::runtime::core::transport::TopicDescriptor& topic) {
+    const ibmw::transport::TopicDescriptor& topic) {
   const std::string key = SchemaKey(topic);
   const auto existing = schema_ids_.find(key);
   if (existing != schema_ids_.end()) {
@@ -152,7 +152,7 @@ StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
 }
 
 StorageChannelId RecorderCoordinator::FindOrRegisterChannel(
-    const ibmw::runtime::core::transport::SerializedMessage& message,
+    const ibmw::transport::SerializedMessage& message,
     StorageSchemaId schema_id) {
   const std::string key = ChannelKey(message.topic);
   const auto existing = channel_ids_.find(key);
@@ -168,12 +168,12 @@ StorageChannelId RecorderCoordinator::FindOrRegisterChannel(
 }
 
 std::string RecorderCoordinator::SchemaKey(
-    const ibmw::runtime::core::transport::TopicDescriptor& topic) {
+    const ibmw::transport::TopicDescriptor& topic) {
   return topic.msg_type + '\0' + topic.serialization_type;
 }
 
 std::string RecorderCoordinator::ChannelKey(
-    const ibmw::runtime::core::transport::TopicDescriptor& topic) {
+    const ibmw::transport::TopicDescriptor& topic) {
   return topic.topic + '\0' + topic.msg_type + '\0' +
          topic.serialization_type + '\0' + topic.schema.schema_hash;
 }

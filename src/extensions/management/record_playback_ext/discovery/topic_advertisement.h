@@ -6,7 +6,7 @@
 #include <map>
 #include <string>
 
-#include "engine/transport/topic_descriptor.h"
+#include "cpp/transport/topic_descriptor.h"
 #include "nlohmann/json.hpp"
 
 namespace ibmw::extensions::record_playback_extension {
@@ -28,7 +28,7 @@ struct TopicAdvertisement {
   std::string runtime_id;
   std::string control_socket;
   std::string publisher_id;
-  ibmw::runtime::core::transport::TopicDescriptor topic;
+  ibmw::transport::TopicDescriptor topic;
   std::string type_support_package;
   std::map<std::string, TransportCaptureCapability> capture_capabilities;
   bool published = true;

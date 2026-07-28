@@ -25,7 +25,7 @@ class McapStorage final : public Storage {
       StorageSchemaId schema_id) override;
   void Write(
       StorageChannelId channel_id,
-      const ibmw::runtime::core::transport::SerializedMessage& message)
+      const ibmw::transport::SerializedMessage& message)
       override;
   void SetCloseStatus(
       bool clean,

@@ -45,7 +45,7 @@ void CapturePlan::Add(CapturePlanEntry entry) {
 }
 
 void CapturePlan::StartAll(
-    ibmw::runtime::core::transport::SerializedMessageCallback callback) {
+    ibmw::transport::SerializedMessageCallback callback) {
   MW_ASSERT(started_count_ == 0, "CapturePlan is already started.");
   try {
     for (auto& entry : entries_) {

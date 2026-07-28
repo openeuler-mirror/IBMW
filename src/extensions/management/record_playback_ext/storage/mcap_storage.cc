@@ -153,7 +153,7 @@ StorageChannelId McapStorage::RegisterChannel(
 
 void McapStorage::Write(
     StorageChannelId channel_id,
-    const ibmw::runtime::core::transport::SerializedMessage& message) {
+    const ibmw::transport::SerializedMessage& message) {
   MW_ASSERT(state_ == State::kOpen, "Storage is not open.");
   const auto channel = channels_by_id_.find(channel_id);
   MW_ASSERT(channel != channels_by_id_.end(), "Channel ID {} is not registered.", channel_id);

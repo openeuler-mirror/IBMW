@@ -12,14 +12,14 @@
 namespace ibmw::extensions::record_playback_extension {
 namespace {
 
-using ibmw::runtime::core::transport::SerializedMessage;
+using ibmw::transport::SerializedMessage;
 
 SerializedMessage MakeMessage(size_t payload_size) {
   const std::string bytes(payload_size, 'x');
   const ibmw::util::BufferArrayView view(bytes.data(), bytes.size());
   SerializedMessage message;
   message.payload =
-      ibmw::runtime::core::transport::CopySerializedPayload(view);
+      ibmw::transport::CopySerializedPayload(view);
   return message;
 }
 

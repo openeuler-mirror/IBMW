@@ -17,6 +17,10 @@
 #include <unistd.h>
 
 #include "base/exception.h"
+#include "cpp/context/context.h"
+#include "engine/transport/message_frame.h"
+#include "engine/transport/transport_bus.h"
+#include "engine/transport/transport_driver_tools.h"
 #include "record_playback_ext/runtime/bag_runtime_agent.h"
 #include "record_playback_ext/runtime/bag_runtime_agent_client.h"
 #include "record_playback_ext/runtime/runtime_playback_stream.h"
@@ -48,6 +52,47 @@ class RuntimeTemporaryDirectory {
 
  private:
   std::filesystem::path path_;
+};
+
+class TestPublishTapCapability final : public PublishTapCapability {
+ public:
+  explicit TestPublishTapCapability(
+      ibmw::runtime::core::transport::TransportBus& transport_bus)
+      : transport_bus_(transport_bus) {}
+
+  uint64_t Register(Callback callback) override {
+    return transport_bus_.RegisterPublishTap(
+        [callback = std::move(callback)](
+            ibmw::runtime::core::transport::MessageFrame& frame) {
+          ibmw::extension::MessageView view{
+              .topic = frame.info.topic_name,
+              .msg_type = frame.info.msg_type,
+              .module_name = frame.info.module_name,
+              .endpoint_index = frame.info.index,
+              .context = frame.ctx_ref,
+              .has_typed_message = frame.msg_ptr != nullptr,
+              .available_serialization_types = [&] {
+                std::unordered_set<std::string> formats;
+                for (const auto& [format, payload] : frame.serialization_cache) {
+                  static_cast<void>(payload);
+                  formats.emplace(format);
+                }
+                return formats;
+              }(),
+              .acquire_serialized = [&frame](std::string_view format) {
+                return ibmw::runtime::core::transport::
+                    TrySerializeMsgWithCache(frame, format);
+              }};
+          callback(view);
+        });
+  }
+
+  bool Unregister(uint64_t handle) override {
+    return transport_bus_.UnregisterPublishTap(handle);
+  }
+
+ private:
+  ibmw::runtime::core::transport::TransportBus& transport_bus_;
 };
 
 int ConnectUnixSocket(const std::filesystem::path& path) {
@@ -370,7 +415,8 @@ publishers:
     enable_drivers: [local]
 )"));
   transport_bus.Start();
-  RuntimeTapServer server(transport_bus, "tap-runtime", temporary.Path());
+  TestPublishTapCapability publish_tap(transport_bus);
+  RuntimeTapServer server(publish_tap, "tap-runtime", temporary.Path());
   server.Start();
   const auto session = server.StartSession(TestAdvertisement("tap-runtime"));
   EXPECT_EQ(Permissions(session.stream_socket), 0600);

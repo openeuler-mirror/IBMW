@@ -16,7 +16,7 @@ RecordQueue::RecordQueue(Options options) : options_(options) {
 }
 
 RecordQueue::PushResult RecordQueue::Push(
-    ibmw::runtime::core::transport::SerializedMessage message) {
+    ibmw::transport::SerializedMessage message) {
   if (!message.payload) {
     std::lock_guard lock(mutex_);
     ++dropped_;
@@ -58,14 +58,14 @@ RecordQueue::PushResult RecordQueue::Push(
   return PushResult::kPushed;
 }
 
-std::optional<ibmw::runtime::core::transport::SerializedMessage>
+std::optional<ibmw::transport::SerializedMessage>
 RecordQueue::Pop() {
   std::unique_lock lock(mutex_);
   not_empty_cv_.wait(lock, [this] { return closed_ || !queue_.empty(); });
   return PopLocked();
 }
 
-std::optional<ibmw::runtime::core::transport::SerializedMessage>
+std::optional<ibmw::transport::SerializedMessage>
 RecordQueue::TryPop() {
   std::lock_guard lock(mutex_);
   return PopLocked();
@@ -103,7 +103,7 @@ bool RecordQueue::FitsLocked(size_t payload_size) const noexcept {
   return true;
 }
 
-std::optional<ibmw::runtime::core::transport::SerializedMessage>
+std::optional<ibmw::transport::SerializedMessage>
 RecordQueue::PopLocked() {
   if (queue_.empty()) {
     return std::nullopt;

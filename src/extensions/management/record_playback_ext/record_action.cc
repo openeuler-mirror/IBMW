@@ -217,7 +217,7 @@ void RecordAction::Initialize(YAML::Node options) {
   }
 
   for (auto& topic_meta_option : options_.topic_meta_list) {
-    runtime::core::util::TopicMetaKey key{
+    ibmw::transport::TopicMetaKey key{
         .topic_name = topic_meta_option.topic_name,
         .msg_type = topic_meta_option.msg_type};
 
@@ -649,7 +649,7 @@ void RecordAction::UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_lis
           action->options_.record_enabled = action_record_enabled.value();
         }
         for (auto& topic_meta : move_topic_meta_list) {
-          runtime::core::util::TopicMetaKey key{
+          ibmw::transport::TopicMetaKey key{
               .topic_name = topic_meta.topic_name,
               .msg_type = topic_meta.msg_type};
           auto itr = action->topic_meta_map_.find(key);

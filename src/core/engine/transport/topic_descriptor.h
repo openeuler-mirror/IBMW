@@ -3,27 +3,11 @@
 
 #pragma once
 
-#include <map>
-#include <string>
-#include <vector>
-
-#include "cpp/util/schema_support.h"
+#include "cpp/transport/topic_descriptor.h"
 
 namespace ibmw::runtime::core::transport {
 
-struct QosDescriptor {
-  std::map<std::string, std::string> policies;
-
-  bool Empty() const noexcept { return policies.empty(); }
-};
-
-struct TopicDescriptor {
-  std::string topic;
-  std::string msg_type;
-  std::string serialization_type;
-  ibmw::util::SchemaDescriptor schema;
-  QosDescriptor qos;
-  std::vector<std::string> available_drivers;
-};
+using ibmw::transport::QosDescriptor;
+using ibmw::transport::TopicDescriptor;
 
 }  // namespace ibmw::runtime::core::transport

@@ -34,7 +34,7 @@ class CapturePlan {
 
   void Add(CapturePlanEntry entry);
   void StartAll(
-      ibmw::runtime::core::transport::SerializedMessageCallback callback);
+      ibmw::transport::SerializedMessageCallback callback);
   void StopAll();
 
   const std::vector<CapturePlanEntry>& Entries() const noexcept {

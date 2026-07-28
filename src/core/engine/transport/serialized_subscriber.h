@@ -21,7 +21,6 @@ struct SerializedSubscriberOptions {
   TopicDescriptor topic;
 };
 
-using SerializedMessageCallback =
-    std::function<void(SerializedMessage&& message)>;
+using ibmw::transport::SerializedMessageCallback;
 
 }  // namespace ibmw::runtime::core::transport

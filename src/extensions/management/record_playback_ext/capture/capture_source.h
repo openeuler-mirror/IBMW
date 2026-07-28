@@ -18,7 +18,7 @@ class CaptureSource {
   CaptureSource& operator=(const CaptureSource&) = delete;
 
   virtual void Start(
-      ibmw::runtime::core::transport::SerializedMessageCallback callback) = 0;
+      ibmw::transport::SerializedMessageCallback callback) = 0;
   virtual void Stop() = 0;
   virtual std::string Description() const = 0;
 };

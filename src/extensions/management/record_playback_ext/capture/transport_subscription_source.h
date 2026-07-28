@@ -16,11 +16,11 @@ class TransportSubscriptionSource final : public CaptureSource {
       const ibmw::runtime::core::transport::SerializedTransportCapabilityV1&
           capability,
       TopicAdvertisement advertisement,
-      ibmw::runtime::core::transport::QosDescriptor requested_qos = {});
+      ibmw::transport::QosDescriptor requested_qos = {});
   ~TransportSubscriptionSource() override;
 
   void Start(
-      ibmw::runtime::core::transport::SerializedMessageCallback callback)
+      ibmw::transport::SerializedMessageCallback callback)
       override;
   void Stop() override;
   std::string Description() const override;
@@ -30,7 +30,7 @@ class TransportSubscriptionSource final : public CaptureSource {
   const ibmw::runtime::core::transport::SerializedTransportCapabilityV1&
       capability_;
   TopicAdvertisement advertisement_;
-  ibmw::runtime::core::transport::QosDescriptor requested_qos_;
+  ibmw::transport::QosDescriptor requested_qos_;
   ibmw::runtime::core::transport::SerializedSubscriberHandle handle_;
 };
 

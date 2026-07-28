@@ -9,6 +9,10 @@
 
 namespace ibmw {
 
+namespace extension {
+class RuntimeV1;
+}
+
 namespace runtime::core {
 class Engine;
 }
@@ -25,6 +29,13 @@ class EngineExtensionBase {
 
   virtual bool Initialize(runtime::core::Engine* core_ptr) noexcept = 0;
   virtual void Shutdown() noexcept = 0;
+
+  // New extensions can opt into the narrow extension-facing runtime contract.
+  // Legacy extensions continue to receive Engine until migrated.
+  virtual uint32_t RequiredRuntimeAbi() const noexcept { return 0; }
+  virtual bool InitializeRuntime(extension::RuntimeV1*) noexcept {
+    return false;
+  }
 
   virtual std::list<std::pair<std::string, std::string>> GenInitializationReport() const { return {}; }
 };

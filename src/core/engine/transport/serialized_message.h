@@ -3,28 +3,15 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <string>
-
-#include "cpp/util/buffer.h"
-#include "engine/transport/message_identity.h"
-#include "engine/transport/topic_descriptor.h"
+#include "cpp/transport/serialized_message.h"
 
 namespace ibmw::runtime::core::transport {
 
-struct SerializedMessage {
-  TopicDescriptor topic;
-  MessageIdentity identity;
-  uint64_t publish_timestamp = 0;
-  uint64_t receive_timestamp = 0;
-  std::string source_driver;
-  std::shared_ptr<ibmw::util::BufferArrayView> payload;
-
-  size_t PayloadSize() const noexcept {
-    return payload ? payload->BufferSize() : 0;
-  }
-};
+using ibmw::transport::MessageIdentity;
+using ibmw::transport::MessageIdentityHash;
+using ibmw::transport::QosDescriptor;
+using ibmw::transport::SerializedMessage;
+using ibmw::transport::TopicDescriptor;
 
 /**
  * @brief Copy a potentially short-lived buffer view into owned contiguous

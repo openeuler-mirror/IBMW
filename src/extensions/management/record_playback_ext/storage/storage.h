@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "cpp/util/schema_support.h"
-#include "engine/transport/serialized_message.h"
+#include "cpp/transport/serialized_message.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -23,7 +23,7 @@ struct StorageOptions {
 };
 
 struct StorageChannelDescriptor {
-  ibmw::runtime::core::transport::TopicDescriptor topic;
+  ibmw::transport::TopicDescriptor topic;
 };
 
 struct StorageSummary {
@@ -54,7 +54,7 @@ class Storage {
       StorageSchemaId schema_id) = 0;
   virtual void Write(
       StorageChannelId channel_id,
-      const ibmw::runtime::core::transport::SerializedMessage& message) = 0;
+      const ibmw::transport::SerializedMessage& message) = 0;
   virtual void SetCloseStatus(
       bool clean,
       std::string error_message) {

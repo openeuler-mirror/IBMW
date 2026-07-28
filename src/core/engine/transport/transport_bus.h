@@ -10,6 +10,7 @@
 
 #include "cpp/executor/executor.h"
 #include "engine/isubsystem.h"
+#include "engine/transport/serialized_transport_driver.h"
 #include "engine/transport/transport_driver.h"
 #include "engine/transport/transport_driver_capabilities.h"
 #include "engine/transport/transport_access.h"
@@ -63,6 +64,10 @@ class TransportBus : public ISubsystem {
   void RegisterTransportDriver(
       std::unique_ptr<TransportDriver>&& transport_driver_ptr,
       TransportDriverCapabilitiesV1 capabilities);
+  void RegisterTransportDriver(
+      std::unique_ptr<TransportDriver>&& transport_driver_ptr,
+      TransportDriverCapabilitiesV1 capabilities,
+      const SerializedTransportCapabilityV1& serialized_capability);
 
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);
@@ -83,12 +88,27 @@ class TransportBus : public ISubsystem {
   bool RegisterSendType(SendTypeWrapper&& wrapper) {
     return transport_driver_dispatcher_.RegisterSendType(std::move(wrapper));
   }
+  bool RegisterSendType(
+      SendTypeWrapper&& wrapper,
+      const std::vector<TransportDriver*>& drivers) {
+    return transport_driver_dispatcher_.RegisterSendType(
+        std::move(wrapper), drivers);
+  }
   void Send(MessageFrame&& wrapper) {
     transport_driver_dispatcher_.Send(std::move(wrapper));
   }
 
+  uint64_t RegisterPublishTap(TransportDriverDispatcher::PublishTap tap) {
+    return transport_driver_dispatcher_.RegisterPublishTap(std::move(tap));
+  }
+  bool UnregisterPublishTap(uint64_t handle) {
+    return transport_driver_dispatcher_.UnregisterPublishTap(handle);
+  }
+
   const TransportCatalog* GetTransportCatalog() const;
   const std::vector<TransportDriver*>& GetUsedTransportDriver() const;
+  const SerializedTransportCapabilityV1* GetSerializedTransportCapability(
+      const TransportDriver& driver) const noexcept;
   const TransportDriverDispatcher& GetTransportDriverDispatcher() const;
 
   const FrameworkAsyncTransportFilterBus& GetPublishFilterBus() const;
@@ -116,6 +136,8 @@ class TransportBus : public ISubsystem {
   std::vector<TransportDriver*> used_transport_driver_vec_;
   std::unordered_map<const TransportDriver*, TransportDriverCapabilitiesV1>
       transport_driver_capabilities_map_;
+  std::unordered_map<const TransportDriver*, SerializedTransportCapabilityV1>
+      serialized_transport_capabilities_map_;
 
   TransportDriverDispatcher transport_driver_dispatcher_;
 

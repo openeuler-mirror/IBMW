@@ -12,7 +12,6 @@
 #include "cpp/executor/executor.h"
 #include "cpp/util/buffer.h"
 #include "cpp/util/type_support.h"
-#include "engine/core_types.h"
 #include "record_playback_ext/metadata_yaml.h"
 #include "record_playback_ext/topic_meta.h"
 

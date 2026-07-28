@@ -10,7 +10,7 @@
 #include <mutex>
 #include <optional>
 
-#include "engine/transport/serialized_message.h"
+#include "cpp/transport/serialized_message.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -52,23 +52,23 @@ class RecordQueue {
   RecordQueue& operator=(const RecordQueue&) = delete;
 
   PushResult Push(
-      ibmw::runtime::core::transport::SerializedMessage message);
-  std::optional<ibmw::runtime::core::transport::SerializedMessage> Pop();
-  std::optional<ibmw::runtime::core::transport::SerializedMessage> TryPop();
+      ibmw::transport::SerializedMessage message);
+  std::optional<ibmw::transport::SerializedMessage> Pop();
+  std::optional<ibmw::transport::SerializedMessage> TryPop();
 
   void Close();
   Statistics GetStatistics() const;
 
  private:
   bool FitsLocked(size_t payload_size) const noexcept;
-  std::optional<ibmw::runtime::core::transport::SerializedMessage>
+  std::optional<ibmw::transport::SerializedMessage>
   PopLocked();
 
   const Options options_;
   mutable std::mutex mutex_;
   std::condition_variable not_empty_cv_;
   std::condition_variable not_full_cv_;
-  std::deque<ibmw::runtime::core::transport::SerializedMessage> queue_;
+  std::deque<ibmw::transport::SerializedMessage> queue_;
   size_t queued_bytes_ = 0;
   uint64_t pushed_ = 0;
   uint64_t popped_ = 0;

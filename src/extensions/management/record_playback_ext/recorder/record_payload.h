@@ -6,8 +6,7 @@
 #include <memory>
 #include <string_view>
 
-#include "cpp/util/buffer.h"
-#include "engine/transport/message_frame.h"
+#include "extension_api/ibmw_extension_runtime.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -25,7 +24,7 @@ enum class RecordTranscodePolicy {
  * unchanged. Transcoding is performed only when explicitly allowed.
  */
 std::shared_ptr<ibmw::util::BufferArrayView> AcquireRecordPayload(
-    ibmw::runtime::core::transport::MessageFrame& message,
+    ibmw::extension::MessageView& message,
     std::string_view target_serialization_type,
     RecordTranscodePolicy transcode_policy = RecordTranscodePolicy::kDisallow);
 

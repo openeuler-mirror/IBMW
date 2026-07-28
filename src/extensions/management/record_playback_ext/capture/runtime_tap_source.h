@@ -17,7 +17,7 @@ class RuntimeTapClient {
 
   virtual void StartTap(
       const TopicAdvertisement& advertisement,
-      ibmw::runtime::core::transport::SerializedMessageCallback callback) = 0;
+      ibmw::transport::SerializedMessageCallback callback) = 0;
   virtual void StopTap() = 0;
 };
 
@@ -29,7 +29,7 @@ class RuntimeTapSource final : public CaptureSource {
   ~RuntimeTapSource() override;
 
   void Start(
-      ibmw::runtime::core::transport::SerializedMessageCallback callback)
+      ibmw::transport::SerializedMessageCallback callback)
       override;
   void Stop() override;
   std::string Description() const override;

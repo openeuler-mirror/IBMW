@@ -15,7 +15,7 @@ namespace ibmw::runtime::core::transport {
  * does not change the existing transport plugin vtable ABI. Drivers implement
  * this interface when they gain generic serialized subscribe/publish support.
  */
-class SerializedTransportDriver {
+class __attribute__((visibility("default"))) SerializedTransportDriver {
  public:
   SerializedTransportDriver() = default;
   virtual ~SerializedTransportDriver() = default;

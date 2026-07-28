@@ -49,10 +49,30 @@ is not part of the source tree.
 |--------|------|
 | `bench_payload/` | X-macro driven payload registry: `bench_payload.h`, `bench_send_payloads.h`, `bench_plain_payloads.h` define the standard 6-size matrix (1KiB / 4KiB / 16KiB / 64KiB / 256KiB / 1MiB) and register them as DDS-typed templates so every sample can pick a payload by index |
 | `bench_common/` | `bench_options.h` — shared CLI option parsing + statistics aggregator (p50 / p90 / p99 / p99.9). Single source of truth for histogram math |
+| `publish_tap/` | In-process dispatcher microbenchmark for no tap, registered idle tap, and a bounded owned-copy recording-style tap; reports repeated p99 and per-Send allocation counts without a fixed cross-machine threshold |
 
-These two libraries are why bench numbers are comparable across rows: every
-sample loads the same payload sizes and computes percentiles with the same
-estimator.
+The shared payload and statistics libraries are why bench numbers are
+comparable across rows: every sample loads the same payload sizes and computes
+percentiles with the same estimator.
+
+### Publish-tap hot-path evidence
+
+With `IBMW_BUILD_BENCHMARKS=ON`, build and run the focused dispatcher
+benchmark from the build root:
+
+```bash
+cmake --build build --target ibmw_publish_tap_benchmark -j2
+./ibmw_publish_tap_benchmark --iterations 2000 --warmup 200 --repeats 3 \
+  --payload-bytes 4096 --queue-depth 256
+```
+
+The CSV output has one row per repeat and mode (`no_tap`, `idle_tap`, and
+`owned_copy_tap`) and includes p50/p90/p99/p99.9/max latency, allocation counts
+for the measured `Send()` loop, callback counts, and bounded-queue overwrites.
+The third mode models the production runtime tap's synchronous owned-copy
+boundary; it is not a substitute for the runtime socket/SQLite end-to-end
+validators. Results are host-local evidence and intentionally have no fixed
+cross-machine acceptance threshold.
 
 ## Run
 

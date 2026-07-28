@@ -14,7 +14,7 @@ TransportSubscriptionSource::TransportSubscriptionSource(
     const ibmw::runtime::core::transport::SerializedTransportCapabilityV1&
         capability,
     TopicAdvertisement advertisement,
-    ibmw::runtime::core::transport::QosDescriptor requested_qos)
+    ibmw::transport::QosDescriptor requested_qos)
     : driver_name_(std::move(driver_name)),
       capability_(capability),
       advertisement_(std::move(advertisement)),
@@ -37,7 +37,7 @@ TransportSubscriptionSource::~TransportSubscriptionSource() {
 }
 
 void TransportSubscriptionSource::Start(
-    ibmw::runtime::core::transport::SerializedMessageCallback callback) {
+    ibmw::transport::SerializedMessageCallback callback) {
   MW_ASSERT(!handle_, "Capture source is already started.");
   const auto observed_topic = advertisement_.topic;
   MW_ASSERT(
@@ -50,7 +50,7 @@ void TransportSubscriptionSource::Start(
           .topic = observed_topic,
           .requested_qos = requested_qos_},
       [callback = std::move(callback), observed_topic](
-          ibmw::runtime::core::transport::SerializedMessage&& message) {
+          ibmw::transport::SerializedMessage&& message) {
         message.topic = observed_topic;
         callback(std::move(message));
       });

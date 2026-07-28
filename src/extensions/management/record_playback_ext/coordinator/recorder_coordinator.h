@@ -34,7 +34,7 @@ class RecorderCoordinator {
   void Initialize();
   void Start();
   RecordQueue::PushResult Accept(
-      ibmw::runtime::core::transport::SerializedMessage message);
+      ibmw::transport::SerializedMessage message);
   void Close();
 
   const StorageSummary& Summary() const noexcept { return storage_->Summary(); }
@@ -52,14 +52,14 @@ class RecorderCoordinator {
 
   void RunWriter();
   StorageSchemaId FindOrRegisterSchema(
-      const ibmw::runtime::core::transport::TopicDescriptor& topic);
+      const ibmw::transport::TopicDescriptor& topic);
   StorageChannelId FindOrRegisterChannel(
-      const ibmw::runtime::core::transport::SerializedMessage& message,
+      const ibmw::transport::SerializedMessage& message,
       StorageSchemaId schema_id);
   static std::string SchemaKey(
-      const ibmw::runtime::core::transport::TopicDescriptor& topic);
+      const ibmw::transport::TopicDescriptor& topic);
   static std::string ChannelKey(
-      const ibmw::runtime::core::transport::TopicDescriptor& topic);
+      const ibmw::transport::TopicDescriptor& topic);
 
   const Options options_;
   std::unique_ptr<Storage> storage_;

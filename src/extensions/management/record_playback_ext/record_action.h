@@ -20,7 +20,7 @@
 #include "cpp/util/buffer.h"
 #include "cpp/util/schema_support.h"
 #include "cpp/util/type_support.h"
-#include "engine/core_types.h"
+#include "cpp/transport/topic_descriptor.h"
 #include "mcap/writer.hpp"
 #include "record_playback_ext/metadata_yaml.h"
 #include "record_playback_ext/topic_meta.h"
@@ -229,8 +229,8 @@ class RecordAction {
   std::function<ibmw::util::TypeSupportRef(std::string_view)> get_type_support_func_;
   std::function<std::optional<ibmw::util::SchemaDescriptor>(
       std::string_view, std::string_view)> get_schema_support_func_;
-  std::unordered_map<ibmw::runtime::core::util::TopicMetaKey, TopicMeta,
-                     ibmw::runtime::core::util::TopicMetaKey::Hash>
+  std::unordered_map<ibmw::transport::TopicMetaKey, TopicMeta,
+                     ibmw::transport::TopicMetaKey::Hash>
       topic_meta_map_;
 
   std::shared_ptr<ibmw::executor::TimerBase> sync_timer_;

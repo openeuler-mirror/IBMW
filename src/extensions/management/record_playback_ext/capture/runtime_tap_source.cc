@@ -22,7 +22,7 @@ RuntimeTapSource::~RuntimeTapSource() {
 }
 
 void RuntimeTapSource::Start(
-    ibmw::runtime::core::transport::SerializedMessageCallback callback) {
+    ibmw::transport::SerializedMessageCallback callback) {
   MW_ASSERT(!started_, "Runtime tap is already started.");
   client_->StartTap(advertisement_, std::move(callback));
   started_ = true;
