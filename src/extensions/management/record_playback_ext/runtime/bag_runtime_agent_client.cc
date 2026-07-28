@@ -62,6 +62,22 @@ bool BagRuntimeAgentClient::StopTap(std::string_view session_id) const {
       .get<bool>();
 }
 
+TapSessionDescriptor BagRuntimeAgentClient::StartPlayback(
+    std::string_view topic,
+    std::string_view subscriber_id) const {
+  const auto result = Call(
+      "StartPlayback", {{"topic", topic}, {"publisher_id", subscriber_id}});
+  return TapSessionDescriptor{
+      .session_id = result.at("session_id").get<std::string>(),
+      .stream_socket = result.at("stream_socket").get<std::string>()};
+}
+
+bool BagRuntimeAgentClient::StopPlayback(std::string_view session_id) const {
+  return Call("StopPlayback", {{"session_id", session_id}})
+      .at("stopped")
+      .get<bool>();
+}
+
 nlohmann::json BagRuntimeAgentClient::Call(
     std::string_view method,
     nlohmann::json params) const {

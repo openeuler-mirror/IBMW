@@ -23,6 +23,10 @@ class BagRuntimeAgentClient {
       std::string_view topic,
       std::string_view publisher_id = {}) const;
   bool StopTap(std::string_view session_id) const;
+  TapSessionDescriptor StartPlayback(
+      std::string_view topic,
+      std::string_view subscriber_id = {}) const;
+  bool StopPlayback(std::string_view session_id) const;
 
  private:
   nlohmann::json Call(

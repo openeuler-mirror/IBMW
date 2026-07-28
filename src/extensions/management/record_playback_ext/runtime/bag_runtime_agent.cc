@@ -133,6 +133,16 @@ void BagRuntimeAgent::SetStopTapHandler(StopTapHandler handler) {
   stop_tap_handler_ = std::move(handler);
 }
 
+void BagRuntimeAgent::SetStartPlaybackHandler(StartPlaybackHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated, "Set handlers before Initialize.");
+  start_playback_handler_ = std::move(handler);
+}
+
+void BagRuntimeAgent::SetStopPlaybackHandler(StopPlaybackHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated, "Set handlers before Initialize.");
+  stop_playback_handler_ = std::move(handler);
+}
+
 void BagRuntimeAgent::Initialize() {
   State expected = State::kCreated;
   MW_ASSERT(
@@ -346,6 +356,22 @@ nlohmann::json BagRuntimeAgent::HandleRequest(
     const std::string session_id = params.at("session_id").get<std::string>();
     result = nlohmann::json{
         {"stopped", stop_tap_handler_(session_id)}};
+  } else if (method == "StartPlayback") {
+    MW_ASSERT(
+        start_playback_handler_, "Runtime does not support StartPlayback.");
+    const auto session = start_playback_handler_(FindTopic(params));
+    MW_ASSERT(
+        !session.session_id.empty() && !session.stream_socket.empty(),
+        "StartPlayback returned an invalid session.");
+    result = nlohmann::json{
+        {"session_id", session.session_id},
+        {"stream_socket", session.stream_socket}};
+  } else if (method == "StopPlayback") {
+    MW_ASSERT(
+        stop_playback_handler_, "Runtime does not support StopPlayback.");
+    const std::string session_id = params.at("session_id").get<std::string>();
+    result = nlohmann::json{
+        {"stopped", stop_playback_handler_(session_id)}};
   } else {
     MW_ASSERT(false, "Unknown Runtime Agent method '{}'.", method);
   }

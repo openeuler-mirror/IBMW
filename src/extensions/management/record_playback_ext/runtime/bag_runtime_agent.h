@@ -29,6 +29,10 @@ class BagRuntimeAgent {
   using StartTapHandler =
       std::function<TapSessionDescriptor(const TopicAdvertisement&)>;
   using StopTapHandler = std::function<bool(std::string_view session_id)>;
+  using StartPlaybackHandler =
+      std::function<TapSessionDescriptor(const TopicAdvertisement&)>;
+  using StopPlaybackHandler =
+      std::function<bool(std::string_view session_id)>;
 
   explicit BagRuntimeAgent(Options options);
   ~BagRuntimeAgent();
@@ -38,6 +42,8 @@ class BagRuntimeAgent {
 
   void SetStartTapHandler(StartTapHandler handler);
   void SetStopTapHandler(StopTapHandler handler);
+  void SetStartPlaybackHandler(StartPlaybackHandler handler);
+  void SetStopPlaybackHandler(StopPlaybackHandler handler);
 
   void Initialize();
   void Start();
@@ -68,6 +74,8 @@ class BagRuntimeAgent {
   std::thread server_thread_;
   StartTapHandler start_tap_handler_;
   StopTapHandler stop_tap_handler_;
+  StartPlaybackHandler start_playback_handler_;
+  StopPlaybackHandler stop_playback_handler_;
 };
 
 }  // namespace ibmw::extensions::record_playback_extension

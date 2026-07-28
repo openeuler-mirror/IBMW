@@ -343,6 +343,13 @@ class __attribute__((visibility("default"))) DdsTransportDriver
     std::unique_ptr<eprosima::fastdds::dds::DataReaderListener> listener;
   };
 
+  struct SerializedPublisherInfo {
+    runtime::core::transport::TopicDescriptor descriptor;
+    eprosima::fastdds::dds::Topic* topic = nullptr;
+    eprosima::fastdds::dds::DataWriter* writer = nullptr;
+    eprosima::fastdds::dds::TypeSupport native_type_support;
+  };
+
  private:
   std::string GetDdsTopicName(
       const std::string& ibmw_topic,
@@ -389,6 +396,10 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   std::unordered_map<uint64_t, SerializedSubscriberInfo>
       serialized_subscriber_map_;
   std::atomic<uint64_t> next_serialized_subscriber_handle_{1};
+  std::mutex serialized_publisher_mutex_;
+  std::unordered_map<uint64_t, SerializedPublisherInfo>
+      serialized_publisher_map_;
+  std::atomic<uint64_t> next_serialized_publisher_handle_{1};
   // DDS topic_name -> ibmw topic_name (for reverse lookup)
   std::unordered_map<std::string, std::string> dds_topic_to_ibmw_topic_;
   // registered DDS topics

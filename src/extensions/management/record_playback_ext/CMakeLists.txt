@@ -30,6 +30,7 @@ set(runtime_support_src
     ${CMAKE_CURRENT_SOURCE_DIR}/recorder/record_payload.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/bag_runtime_agent.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/bag_runtime_agent_client.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_playback_stream.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_registration.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_registry.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_tap_stream.cc
