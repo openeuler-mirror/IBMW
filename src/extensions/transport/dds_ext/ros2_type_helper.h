@@ -40,21 +40,23 @@ class ROS2TypeHelper {
    * @return DDS type name (e.g., "std_msgs::msg::dds_::String_")
    */
   static std::string ConvertToDdsTypeName(const std::string& ros2_type) {
-    std::string dds_type = ros2_type;
-
-    // 1. Replace / with ::
-    std::replace(dds_type.begin(), dds_type.end(), '/', ':');
-
-    // 2. Insert dds_:: after the last ::
-    size_t last_sep = dds_type.rfind("::");
+    const size_t last_sep = ros2_type.rfind('/');
     if (last_sep != std::string::npos) {
-      dds_type.insert(last_sep + 2, "dds_::");
+      std::string dds_type;
+      dds_type.reserve(ros2_type.size() + 8);
+      for (size_t index = 0; index < last_sep; ++index) {
+        if (ros2_type[index] == '/') {
+          dds_type += "::";
+        } else {
+          dds_type += ros2_type[index];
+        }
+      }
+      dds_type += "::dds_::";
+      dds_type.append(ros2_type, last_sep + 1, std::string::npos);
+      dds_type += '_';
+      return dds_type;
     }
-
-    // 3. Add trailing underscore
-    dds_type += "_";
-
-    return dds_type;
+    return ros2_type;
   }
 
   /**

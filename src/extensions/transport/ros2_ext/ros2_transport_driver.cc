@@ -13,6 +13,7 @@
 
 #include "rcl/error_handling.h"
 #include "rclcpp/version.h"
+#include "rclcpp/typesupport_helpers.hpp"
 #include "rmw/serialized_message.h"
 
 namespace YAML {
@@ -124,6 +125,33 @@ struct convert<ibmw::extensions::ros2_extension::Ros2TransportDriver::Options> {
 
 namespace ibmw::extensions::ros2_extension {
 
+namespace {
+
+struct Ros2TypeSupportHandle {
+  std::shared_ptr<rcpputils::SharedLibrary> library;
+  const rosidl_message_type_support_t* handle = nullptr;
+};
+
+Ros2TypeSupportHandle LoadRos2TypeSupport(std::string_view ibmw_type_name) {
+  MW_ASSERT(
+      ibmw_type_name.starts_with("ros2:") && ibmw_type_name.size() > 5,
+      "Invalid ROS2 message type '{}'.", ibmw_type_name);
+  const std::string ros2_type_name(ibmw_type_name.substr(5));
+  auto library = rclcpp::get_typesupport_library(
+      ros2_type_name, "rosidl_typesupport_cpp");
+  MW_ASSERT(
+      library != nullptr, "Cannot load ROS2 TypeSupport library for '{}'.",
+      ros2_type_name);
+  const auto* handle = rclcpp::get_typesupport_handle(
+      ros2_type_name, "rosidl_typesupport_cpp", *library);
+  MW_ASSERT(
+      handle != nullptr, "Cannot load ROS2 TypeSupport handle for '{}'.",
+      ros2_type_name);
+  return {.library = std::move(library), .handle = handle};
+}
+
+}  // namespace
+
 void Ros2TransportDriver::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
@@ -210,9 +238,7 @@ bool Ros2TransportDriver::RegisterSendType(
       auto unique_ptr = std::make_unique<rcl_publisher_t>(rcl_get_zero_initialized_publisher());
 
       rcl_publisher_t* publisher_ptr = unique_ptr.get();
-      ros2_send_type_wrapper_map_.emplace(key, RosPubWrapper{
-                                                      .publisher_ptr = std::move(unique_ptr),
-                                                      .use_serialized = use_serialized});
+      auto type_support = LoadRos2TypeSupport(info.msg_type);
 
       std::string ros2_topic_name = rclcpp::extend_name_with_sub_namespace(
           info.topic_name,
@@ -224,7 +250,7 @@ bool Ros2TransportDriver::RegisterSendType(
       rcl_ret_t ret = rcl_publisher_init(
           publisher_ptr,
           ros2_node_ptr_->get_node_base_interface()->get_shared_rcl_node_handle().get(),
-          static_cast<const rosidl_message_type_support_t*>(info.msg_type_support_ref.CustomTypeSupportPtr()),
+          type_support.handle,
           ros2_topic_name.c_str(),
           &publisher_options);
 
@@ -234,6 +260,13 @@ bool Ros2TransportDriver::RegisterSendType(
         rcl_reset_error();
         return false;
       }
+
+      ros2_send_type_wrapper_map_.emplace(
+          std::move(key),
+          RosPubWrapper{
+              .publisher_ptr = std::move(unique_ptr),
+              .use_serialized = use_serialized,
+              .type_support_library = std::move(type_support.library)});
 
       MW_INFO("ros2 driver register publish type for topic '{}' success.", info.topic_name);
 
@@ -302,6 +335,8 @@ bool Ros2TransportDriver::OnMessage(
       msg_handler_tool_unique_ptr->AddMessageHandlerWrapper(&message_handler);
 
       auto* msg_handler_tool_ptr = msg_handler_tool_unique_ptr.get();
+      auto type_support = LoadRos2TypeSupport(info.msg_type);
+      const auto* ros2_type_support = type_support.handle;
 
       std::string ros2_topic_name = rclcpp::extend_name_with_sub_namespace(
           info.topic_name,
@@ -312,7 +347,8 @@ bool Ros2TransportDriver::OnMessage(
 
 #if RCLCPP_VERSION_MAJOR == 16
       rclcpp::SubscriptionFactory factory{
-          [&message_handler, msg_handler_tool_ptr, use_serialized](
+          [&message_handler, msg_handler_tool_ptr, use_serialized,
+           ros2_type_support](
               rclcpp::node_interfaces::NodeBaseInterface* node_base,
               const std::string& topic_name,
               const rclcpp::QoS& qos) -> rclcpp::SubscriptionBase::SharedPtr {
@@ -323,7 +359,7 @@ bool Ros2TransportDriver::OnMessage(
             std::shared_ptr<Ros2AdapterSubscription> subscriber =
                 std::make_shared<Ros2AdapterSubscription>(
                     node_base,
-                    *static_cast<const rosidl_message_type_support_t*>(message_handler.info.msg_type_support_ref.CustomTypeSupportPtr()),
+                    *ros2_type_support,
                     topic_name,
                     options.to_rcl_subscription_options<void>(qos),
                     message_handler,
@@ -333,7 +369,8 @@ bool Ros2TransportDriver::OnMessage(
           }};
 #elif RCLCPP_VERSION_MAJOR == 28
       rclcpp::SubscriptionFactory factory{
-          [&message_handler, msg_handler_tool_ptr, use_serialized](
+          [&message_handler, msg_handler_tool_ptr, use_serialized,
+           ros2_type_support](
               rclcpp::node_interfaces::NodeBaseInterface* node_base,
               const std::string& topic_name,
               const rclcpp::QoS& qos) -> rclcpp::SubscriptionBase::SharedPtr {
@@ -344,7 +381,7 @@ bool Ros2TransportDriver::OnMessage(
             std::shared_ptr<Ros2AdapterSubscription> subscriber =
                 std::make_shared<Ros2AdapterSubscription>(
                     node_base,
-                    *static_cast<const rosidl_message_type_support_t*>(message_handler.info.msg_type_support_ref.CustomTypeSupportPtr()),
+                    *ros2_type_support,
                     topic_name,
                     options.to_rcl_subscription_options(qos),
                     message_handler,
@@ -361,7 +398,8 @@ bool Ros2TransportDriver::OnMessage(
           key,
           RosSubWrapper{
               .msg_handler_tool_ptr = std::move(msg_handler_tool_unique_ptr),
-              .ros_sub_handle_ptr = std::move(subscriber)});
+              .ros_sub_handle_ptr = std::move(subscriber),
+              .type_support_library = std::move(type_support.library)});
 
       MW_INFO("subscribe topic '{}' success.", info.topic_name);
 

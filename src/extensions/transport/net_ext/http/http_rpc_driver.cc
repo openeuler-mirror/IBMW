@@ -171,8 +171,10 @@ bool HttpRpcDriver::RegisterServiceFunc(
       // Read other fields from http header into context
       for (auto const& field : req) {
         ctx_ptr->SetMetaValue(
-            ibmw::common::util::HttpHeaderDecode(field.name_string()),
-            ibmw::common::util::HttpHeaderDecode(field.value()));
+            ibmw::common::util::HttpHeaderDecode(
+                ibmw::common::net::ToStdStringView(field.name_string())),
+            ibmw::common::util::HttpHeaderDecode(
+                ibmw::common::net::ToStdStringView(field.value())));
       }
 
       ctx_ptr->SetFunctionName(info.func_name);
@@ -396,7 +398,8 @@ void HttpRpcDriver::Call(
             }
 
             http::request<http::dynamic_body> req{http::verb::post, url_path, 11};
-            req.set(http::field::host, url->host);
+            req.set(http::field::host,
+                    ibmw::common::net::ToBeastStringView(url->host));
             req.set(http::field::user_agent, "ibmw");
 
             auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();

@@ -92,9 +92,22 @@ class TypeSupportRef {
   }
 
   std::span<const ibmw_string_view_t> SerializationTypesSupportedListSpan() const {
-    return std::span<const ibmw_string_view_t>(
-        base_ptr_->serialization_types_supported_list(base_ptr_->ctx),
-        base_ptr_->serialization_types_supported_num(base_ptr_->ctx));
+    if (base_ptr_ == nullptr ||
+        base_ptr_->serialization_types_supported_num == nullptr ||
+        base_ptr_->serialization_types_supported_list == nullptr) {
+      return {};
+    }
+    const size_t count =
+        base_ptr_->serialization_types_supported_num(base_ptr_->ctx);
+    if (count == 0) {
+      return {};
+    }
+    const auto* serialization_types =
+        base_ptr_->serialization_types_supported_list(base_ptr_->ctx);
+    return serialization_types == nullptr
+               ? std::span<const ibmw_string_view_t>{}
+               : std::span<const ibmw_string_view_t>(
+                     serialization_types, count);
   }
 
   const void* CustomTypeSupportPtr() const {
@@ -102,7 +115,10 @@ class TypeSupportRef {
   }
 
   std::string_view DefaultSerializationType() const {
-    return ToStdStringView(base_ptr_->serialization_types_supported_list(base_ptr_->ctx)[0]);
+    const auto serialization_types = SerializationTypesSupportedListSpan();
+    return serialization_types.empty()
+               ? std::string_view{}
+               : ToStdStringView(serialization_types.front());
   }
 
   bool CheckSerializationTypeSupported(std::string_view serialization_type) const {

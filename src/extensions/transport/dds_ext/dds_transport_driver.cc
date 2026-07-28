@@ -1207,16 +1207,24 @@ DdsTransportDriver::AttachSerializedSubscriber(
     MW_REQUIRE(callback, "Serialized subscriber callback cannot be empty.");
     const auto& descriptor = options.topic;
     MW_REQUIRE(!descriptor.topic.empty(), "DDS topic cannot be empty.");
+    const bool is_ros2_type = ROS2TypeHelper::IsROS2Type(descriptor.msg_type);
     MW_REQUIRE(
-        descriptor.msg_type.starts_with("dds:"),
-        "Raw DDS subscription requires a 'dds:' message type, got '{}'.",
+        descriptor.msg_type.starts_with("dds:") || is_ros2_type,
+        "Raw DDS subscription requires a 'dds:' or 'ros2:' message type, got "
+        "'{}'.",
         descriptor.msg_type);
     MW_REQUIRE(
-        descriptor.serialization_type == "cdr",
-        "Raw DDS subscription only supports CDR, got '{}'.",
+        descriptor.serialization_type == "cdr" ||
+            (is_ros2_type && descriptor.serialization_type == "ros2"),
+        "Raw DDS subscription only supports 'cdr' for DDS or 'ros2' CDR for "
+        "ROS2, got '{}'.",
         descriptor.serialization_type);
 
-    const std::string dds_type_name = descriptor.msg_type.substr(4);
+    const std::string dds_type_name =
+        is_ros2_type
+            ? ROS2TypeHelper::ConvertToDdsTypeName(
+                  ROS2TypeHelper::ExtractROS2TypeName(descriptor.msg_type))
+            : descriptor.msg_type.substr(4);
     const std::string dds_topic_name =
         GetDdsTopicName(descriptor.topic, descriptor.msg_type);
     eprosima::fastdds::dds::TypeSupport type(

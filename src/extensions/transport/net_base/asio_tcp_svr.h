@@ -12,6 +12,7 @@
 
 #include <boost/asio.hpp>
 
+#include "net_base/asio_endpoint_hash.h"
 #include "base/buffer_util.h"
 #include "base/log_util.h"
 #include "base/string_util.h"
@@ -611,7 +612,8 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
   // Session management
   std::shared_ptr<const SessionOptions> session_options_ptr_;
-  std::unordered_map<Tcp::endpoint, std::shared_ptr<Session>> session_ptr_map_;
+  std::unordered_map<Tcp::endpoint, std::shared_ptr<Session>, AsioEndpointHash>
+      session_ptr_map_;
 };
 
 }  // namespace ibmw::common::net

@@ -14,6 +14,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
+#include "net_base/beast_compat.h"
 #include "net_base/http_dispatcher.h"
 #include "base/log_util.h"
 #include "base/string_util.h"
@@ -348,7 +349,8 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 }
 
                 // Check url
-                auto url_struct = ibmw::common::util::ParseUrl(req.target());
+                auto url_struct = ibmw::common::util::ParseUrl(
+                    ToStdStringView(req.target()));
                 if (!url_struct) {
                   const auto& rsp = BadRequestHandle(req, "Can not parse url");
                   close_connect_flag_ = rsp.need_eof();
@@ -366,7 +368,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 // Process handle-class requests
                 const auto& handle = http_dispatcher_ptr_->GetHttpHandle(url_struct->path);
                 if (handle) {
-                  req.set("Remote-Endpoint", RemoteAddr());  // To trace the request
+                  req.set("Remote-Endpoint", ToBeastStringView(RemoteAddr()));
                   co_await handle(self, req);
                   continue;
                 }
@@ -426,7 +428,8 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 // Process head-class requests
                 if (req.method() == http::verb::head) {
                   Response<http::empty_body> rsp{http::status::ok, req.version()};
-                  rsp.set(http::field::content_type, MimeType(path));
+                  rsp.set(http::field::content_type,
+                          ToBeastStringView(MimeType(path)));
                   rsp.content_length(size);
                   rsp.keep_alive(req.keep_alive());
 
@@ -447,7 +450,8 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                     std::piecewise_construct,
                     std::make_tuple(std::move(body)),
                     std::make_tuple(http::status::ok, req.version())};
-                rsp.set(http::field::content_type, MimeType(path));
+                rsp.set(http::field::content_type,
+                        ToBeastStringView(MimeType(path)));
                 rsp.content_length(size);
                 rsp.keep_alive(req.keep_alive());
 
@@ -592,7 +596,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
         auto req_timeout_itr = req.find(boost::beast::http::field::timeout);
         if (req_timeout_itr != req.end()) {
           auto timeout_str = req_timeout_itr->value();
-          if (ibmw::common::util::IsDigitStr(timeout_str))
+          if (ibmw::common::util::IsDigitStr(ToStdStringView(timeout_str)))
             handle_timeout = std::chrono::seconds(atoi(timeout_str.data()));
         }
 
@@ -651,7 +655,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
    private:
     static std::string_view MimeType(std::string_view path) {
-      using boost::beast::iequals;
       auto const ext = [&path] {
         auto const pos = path.rfind('.');
         if (pos == std::string_view::npos)
@@ -659,27 +662,31 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
         return path.substr(pos);
       }();
 
-      if (iequals(ext, ".htm")) return "text/html";
-      if (iequals(ext, ".html")) return "text/html";
-      if (iequals(ext, ".php")) return "text/html";
-      if (iequals(ext, ".css")) return "text/css";
-      if (iequals(ext, ".txt")) return "text/plain";
-      if (iequals(ext, ".js")) return "application/javascript";
-      if (iequals(ext, ".json")) return "application/json";
-      if (iequals(ext, ".xml")) return "application/xml";
-      if (iequals(ext, ".swf")) return "application/x-shockwave-flash";
-      if (iequals(ext, ".flv")) return "video/x-flv";
-      if (iequals(ext, ".png")) return "image/png";
-      if (iequals(ext, ".jpe")) return "image/jpeg";
-      if (iequals(ext, ".jpeg")) return "image/jpeg";
-      if (iequals(ext, ".jpg")) return "image/jpeg";
-      if (iequals(ext, ".gif")) return "image/gif";
-      if (iequals(ext, ".bmp")) return "image/bmp";
-      if (iequals(ext, ".ico")) return "image/vnd.microsoft.icon";
-      if (iequals(ext, ".tiff")) return "image/tiff";
-      if (iequals(ext, ".tif")) return "image/tiff";
-      if (iequals(ext, ".svg")) return "image/svg+xml";
-      if (iequals(ext, ".svgz")) return "image/svg+xml";
+      const auto beast_ext = ToBeastStringView(ext);
+      const auto iequals = [beast_ext](boost::beast::string_view rhs) {
+        return boost::beast::iequals(beast_ext, rhs);
+      };
+      if (iequals(".htm")) return "text/html";
+      if (iequals(".html")) return "text/html";
+      if (iequals(".php")) return "text/html";
+      if (iequals(".css")) return "text/css";
+      if (iequals(".txt")) return "text/plain";
+      if (iequals(".js")) return "application/javascript";
+      if (iequals(".json")) return "application/json";
+      if (iequals(".xml")) return "application/xml";
+      if (iequals(".swf")) return "application/x-shockwave-flash";
+      if (iequals(".flv")) return "video/x-flv";
+      if (iequals(".png")) return "image/png";
+      if (iequals(".jpe")) return "image/jpeg";
+      if (iequals(".jpeg")) return "image/jpeg";
+      if (iequals(".jpg")) return "image/jpeg";
+      if (iequals(".gif")) return "image/gif";
+      if (iequals(".bmp")) return "image/bmp";
+      if (iequals(".ico")) return "image/vnd.microsoft.icon";
+      if (iequals(".tiff")) return "image/tiff";
+      if (iequals(".tif")) return "image/tiff";
+      if (iequals(".svg")) return "image/svg+xml";
+      if (iequals(".svgz")) return "image/svg+xml";
       return "application/text";
     }
 
@@ -714,9 +721,9 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
       }
 
       // uri check
-      if (req.target().empty() ||
-          req.target()[0] != '/' ||
-          req.target().find("..") != std::string_view::npos) {
+      const auto target = ToStdStringView(req.target());
+      if (target.empty() || target[0] != '/' ||
+          target.find("..") != std::string_view::npos) {
         return "Illegal request-target";
       }
 

@@ -131,6 +131,7 @@ target_link_libraries(
           ${_ibmw_ros2_fastcdr}
           ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_generator_cpp
           ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp
+          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_fastrtps_cpp
           ${CUR_PACKAGE_NAME}__rosidl_typesupport_introspection_cpp)
 set_target_properties(${CUR_TARGET_NAME}_ts PROPERTIES OUTPUT_NAME ${CUR_DIR}_ros2_ts)
 

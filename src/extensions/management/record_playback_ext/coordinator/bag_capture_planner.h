@@ -18,6 +18,7 @@ namespace ibmw::extensions::record_playback_extension {
 struct CapturePlanEntry {
   TopicAdvertisement advertisement;
   std::string source_name;
+  std::string capture_mode;
   std::string description;
   std::unique_ptr<CaptureSource> source;
 };
@@ -66,6 +67,7 @@ class BagCapturePlanner {
   struct Candidate {
     int priority;
     std::string source_name;
+    std::string capture_mode;
     TopicAdvertisement advertisement;
     std::function<std::unique_ptr<CaptureSource>()> create;
   };
