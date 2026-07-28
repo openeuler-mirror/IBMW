@@ -62,9 +62,7 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
 
  private:
   void InitTypeSupport(Options::TypeSupportPkg& options);
-  bool TryInitTypeSupport(
-      std::string_view package_path,
-      std::string_view owner_package_path = {});
+  bool TryInitTypeSupport(std::string_view package_path);
   void RegisterTypeSupportPackage(
       std::string package_path,
       std::unique_ptr<ibmw::extension::TypeSupportPackageLoader> loader);
@@ -100,8 +98,6 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
   std::unordered_map<std::string, TypeSupportWrapper> type_support_map_;
   std::unordered_map<std::string, TypeSupportWrapper>
       package_type_support_map_;
-  std::unordered_map<std::string, std::string>
-      module_type_support_package_map_;
   std::unordered_set<std::string> loaded_type_support_packages_;
   SchemaRegistry schema_registry_;
   std::unique_ptr<RuntimeTapServer> runtime_tap_server_;
@@ -213,16 +209,6 @@ namespace ibmw::extensions::record_playback_extension {
 namespace {
 
 constexpr std::string_view kRuntimePlaybackModule = "ibmw-bag-agent";
-
-std::string TypeSupportCompanionPath(std::string_view package_path) {
-  std::filesystem::path path(package_path);
-  const auto stem = path.stem().string();
-  if (path.filename().empty() || stem.empty()) {
-    return {};
-  }
-  path.replace_filename(stem + "_ts" + path.extension().string());
-  return path.string();
-}
 
 class RuntimePublishTapCapability final : public PublishTapCapability {
  public:
@@ -678,13 +664,8 @@ void RecordPlaybackExtension::InitTypeSupport(Options::TypeSupportPkg& options) 
 }
 
 bool RecordPlaybackExtension::TryInitTypeSupport(
-    std::string_view package_path,
-    std::string_view owner_package_path) {
+    std::string_view package_path) {
   if (loaded_type_support_packages_.contains(std::string(package_path))) {
-    if (!owner_package_path.empty()) {
-      module_type_support_package_map_.insert_or_assign(
-          std::string(owner_package_path), std::string(package_path));
-    }
     return true;
   }
   auto loader =
@@ -695,17 +676,9 @@ bool RecordPlaybackExtension::TryInitTypeSupport(
   std::string resolved_path = loader->ResolvedPath();
   if (!loaded_type_support_packages_.emplace(resolved_path).second) {
     loader->Unload();
-    if (!owner_package_path.empty()) {
-      module_type_support_package_map_.insert_or_assign(
-          std::string(owner_package_path), resolved_path);
-    }
     return true;
   }
   RegisterTypeSupportPackage(resolved_path, std::move(loader));
-  if (!owner_package_path.empty()) {
-    module_type_support_package_map_.insert_or_assign(
-        std::string(owner_package_path), resolved_path);
-  }
   return true;
 }
 
@@ -754,18 +727,11 @@ void RecordPlaybackExtension::DiscoverTypeSupportPackagesFromCatalog() {
   }
 
   for (const auto& package_path : package_paths) {
-    bool loaded = TryInitTypeSupport(package_path);
-    if (!loaded) {
-      const auto companion_path = TypeSupportCompanionPath(package_path);
-      if (!companion_path.empty() && companion_path != package_path) {
-        loaded = TryInitTypeSupport(companion_path, package_path);
-      }
-    }
-    if (!loaded) {
+    if (!TryInitTypeSupport(package_path)) {
       MW_WARN(
-          "Module package '{}' has no discoverable TypeSupport DSO; Runtime "
-          "Agent cannot advertise its Topics unless a matching TypeSupport "
-          "package is configured.",
+          "Module package '{}' is not self-describing; Runtime Agent cannot "
+          "advertise its Topics unless a matching TypeSupport package is "
+          "configured.",
           package_path);
     }
   }
@@ -789,15 +755,6 @@ RecordPlaybackExtension::FindTypeSupport(
         PackageTypeKey(package_path, msg_type));
     if (exact != package_type_support_map_.end()) {
       return &exact->second;
-    }
-    const auto companion =
-        module_type_support_package_map_.find(std::string(package_path));
-    if (companion != module_type_support_package_map_.end()) {
-      exact = package_type_support_map_.find(
-          PackageTypeKey(companion->second, msg_type));
-      if (exact != package_type_support_map_.end()) {
-        return &exact->second;
-      }
     }
   }
   const auto fallback = type_support_map_.find(std::string(msg_type));

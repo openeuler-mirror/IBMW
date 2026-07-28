@@ -77,6 +77,16 @@ RecordQueue::PushResult RecorderCoordinator::Accept(
   return queue_.Push(std::move(message));
 }
 
+void RecorderCoordinator::RegisterChannel(
+    StorageChannelDescriptor channel) {
+  MW_ASSERT(
+      state_.load() == State::kRunning,
+      "Recorder must be running before registering a Channel.");
+  std::lock_guard storage_lock(storage_mutex_);
+  const auto schema_id = FindOrRegisterSchema(channel.topic);
+  static_cast<void>(FindOrRegisterChannel(channel, schema_id));
+}
+
 void RecorderCoordinator::Close() {
   const State previous = state_.exchange(State::kClosed);
   if (previous == State::kClosed || previous == State::kCreated) {
@@ -92,8 +102,11 @@ void RecorderCoordinator::Close() {
     std::lock_guard lock(error_mutex_);
     error = writer_error_;
   }
-  storage_->SetCloseStatus(!error, DescribeException(error));
-  storage_->Close();
+  {
+    std::lock_guard storage_lock(storage_mutex_);
+    storage_->SetCloseStatus(!error, DescribeException(error));
+    storage_->Close();
+  }
 
   if (error) {
     std::rethrow_exception(error);
@@ -103,6 +116,7 @@ void RecorderCoordinator::Close() {
 void RecorderCoordinator::RunWriter() {
   try {
     while (auto message = queue_.Pop()) {
+      std::lock_guard storage_lock(storage_mutex_);
       const auto schema_id = FindOrRegisterSchema(message->topic);
       const auto channel_id = FindOrRegisterChannel(*message, schema_id);
       storage_->Write(channel_id, *message);
@@ -115,7 +129,6 @@ void RecorderCoordinator::RunWriter() {
     queue_.Close();
   }
 }
-
 StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
     const ibmw::transport::TopicDescriptor& topic) {
   const std::string key = SchemaKey(topic);
@@ -154,14 +167,19 @@ StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
 StorageChannelId RecorderCoordinator::FindOrRegisterChannel(
     const ibmw::transport::SerializedMessage& message,
     StorageSchemaId schema_id) {
-  const std::string key = ChannelKey(message.topic);
+  return FindOrRegisterChannel(
+      StorageChannelDescriptor{.topic = message.topic}, schema_id);
+}
+
+StorageChannelId RecorderCoordinator::FindOrRegisterChannel(
+    const StorageChannelDescriptor& descriptor,
+    StorageSchemaId schema_id) {
+  const std::string key = ChannelKey(descriptor.topic);
   const auto existing = channel_ids_.find(key);
   if (existing != channel_ids_.end()) {
     return existing->second;
   }
 
-  StorageChannelDescriptor descriptor{
-      .topic = message.topic};
   const auto id = storage_->RegisterChannel(descriptor, schema_id);
   channel_ids_.emplace(key, id);
   return id;

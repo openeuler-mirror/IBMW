@@ -35,6 +35,10 @@ class RecorderCoordinator {
   void Start();
   RecordQueue::PushResult Accept(
       ibmw::transport::SerializedMessage message);
+  void RegisterChannel(StorageChannelDescriptor channel);
+  void AddDroppedMessages(uint64_t count = 1) {
+    external_dropped_.fetch_add(count);
+  }
   void Close();
 
   const StorageSummary& Summary() const noexcept { return storage_->Summary(); }
@@ -56,6 +60,9 @@ class RecorderCoordinator {
   StorageChannelId FindOrRegisterChannel(
       const ibmw::transport::SerializedMessage& message,
       StorageSchemaId schema_id);
+  StorageChannelId FindOrRegisterChannel(
+      const StorageChannelDescriptor& channel,
+      StorageSchemaId schema_id);
   static std::string SchemaKey(
       const ibmw::transport::TopicDescriptor& topic);
   static std::string ChannelKey(
@@ -72,6 +79,8 @@ class RecorderCoordinator {
   std::unordered_map<std::string, StorageChannelId> channel_ids_;
   mutable std::mutex error_mutex_;
   std::exception_ptr writer_error_;
+  std::atomic<uint64_t> external_dropped_{0};
+  std::mutex storage_mutex_;
 };
 
 }  // namespace ibmw::extensions::record_playback_extension

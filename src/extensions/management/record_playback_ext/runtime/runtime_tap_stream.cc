@@ -549,7 +549,8 @@ UnixRuntimeTapClient::UnixRuntimeTapClient(
     std::string control_socket,
     DroppedMessageCallback dropped_message_callback,
     StreamErrorCallback stream_error_callback)
-    : agent_client_(std::move(control_socket)),
+    : control_socket_(control_socket),
+      agent_client_(std::move(control_socket)),
       dropped_message_callback_(std::move(dropped_message_callback)),
       stream_error_callback_(std::move(stream_error_callback)) {}
 
@@ -571,6 +572,7 @@ void UnixRuntimeTapClient::StartTap(
     reported_dropped_total_ = 0;
     stop_requested_ = false;
     terminal_received_ = false;
+    remote_closed_ = false;
     {
       std::lock_guard lock(stream_error_mutex_);
       stream_error_.reset();
@@ -615,20 +617,29 @@ void UnixRuntimeTapClient::StopTap() {
     return;
   }
   stop_requested_ = true;
-  if (!session_id_.empty()) {
+  if (!session_id_.empty() && !remote_closed_.load()) {
     try {
       MW_ASSERT(
           agent_client_.StopTap(session_id_),
           "Runtime Agent did not recognize tap session '{}'.", session_id_);
     } catch (const std::exception& error) {
-      ReportStreamError(
-          "Runtime tap stop request failed: " + std::string(error.what()));
+      if (std::filesystem::exists(control_socket_)) {
+        ReportStreamError(
+            "Runtime tap stop request failed: " +
+            std::string(error.what()));
+      } else {
+        remote_closed_ = true;
+      }
       const int fd = stream_fd_.load();
       if (fd >= 0) {
         ::shutdown(fd, SHUT_RDWR);
       }
     } catch (...) {
-      ReportStreamError("Runtime tap stop request failed unexpectedly.");
+      if (std::filesystem::exists(control_socket_)) {
+        ReportStreamError("Runtime tap stop request failed unexpectedly.");
+      } else {
+        remote_closed_ = true;
+      }
       const int fd = stream_fd_.load();
       if (fd >= 0) {
         ::shutdown(fd, SHUT_RDWR);
@@ -660,14 +671,19 @@ void UnixRuntimeTapClient::ReadLoop(
       TapWireHeader wire{};
       const auto header_result = ReceiveAll(fd, &wire, sizeof(wire));
       if (header_result.status == ReceiveStatus::kEof) {
-        if (!terminal_received_.load()) {
-          ReportStreamError(
-              "Runtime tap stream for '" + advertisement.topic.topic +
-              "' closed before its terminal status.");
+        if (!stop_requested_.load() && !terminal_received_.load()) {
+          remote_closed_ = true;
+          MW_WARN(
+              "Runtime tap stream for '{}' closed at a frame boundary; "
+              "waiting for discovery to remove or replace the endpoint.",
+              advertisement.topic.topic);
         }
         break;
       }
       if (header_result.status != ReceiveStatus::kOk) {
+        if (stop_requested_.load()) {
+          break;
+        }
         if (header_result.status == ReceiveStatus::kTruncated) {
           ReportStreamError(
               "Runtime tap stream for '" + advertisement.topic.topic +
@@ -710,6 +726,9 @@ void UnixRuntimeTapClient::ReadLoop(
               : ReceiveResult{.status = ReceiveStatus::kTruncated};
       if (json_result.status != ReceiveStatus::kOk ||
           payload_result.status != ReceiveStatus::kOk) {
+        if (stop_requested_.load()) {
+          break;
+        }
         const auto& failure = json_result.status != ReceiveStatus::kOk
                                   ? json_result
                                   : payload_result;
@@ -746,9 +765,7 @@ void UnixRuntimeTapClient::ReadLoop(
                   ? "Runtime tap stream reported an unspecified failure."
                   : terminal_error);
         } else if (!stop_requested_.load()) {
-          ReportStreamError(
-              "Runtime tap stream for '" + advertisement.topic.topic +
-              "' ended before the recorder requested stop.");
+          remote_closed_ = true;
         }
         break;
       }

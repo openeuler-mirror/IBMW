@@ -88,12 +88,14 @@ class UnixRuntimeTapClient final : public RuntimeTapClient {
   void ReportDroppedTotal(uint64_t dropped_total);
   void ReportStreamError(std::string error);
 
+  const std::string control_socket_;
   BagRuntimeAgentClient agent_client_;
   DroppedMessageCallback dropped_message_callback_;
   StreamErrorCallback stream_error_callback_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> terminal_received_{false};
+  std::atomic<bool> remote_closed_{false};
   std::atomic<int> stream_fd_{-1};
   std::string session_id_;
   std::thread reader_thread_;
