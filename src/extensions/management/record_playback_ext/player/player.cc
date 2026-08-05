@@ -25,8 +25,12 @@ namespace {
 
 using SteadyClock = std::chrono::steady_clock;
 
-std::string TopicKey(std::string_view topic, std::string_view msg_type) {
-  return std::string(topic) + '\0' + std::string(msg_type);
+std::string TopicKey(
+    std::string_view topic,
+    std::string_view msg_type,
+    std::string_view serialization_type) {
+  return std::string(topic) + '\0' + std::string(msg_type) + '\0' +
+         std::string(serialization_type);
 }
 
 std::string PlaybackSessionId(uint64_t loop_index) {
@@ -46,7 +50,7 @@ bool IsLocalOnly(const TopicAdvertisement& advertisement) {
 struct Route {
   TopicAdvertisement advertisement;
   std::unique_ptr<UnixRuntimePlaybackClient> client;
-  bool direct = false;
+  bool player_owned = false;
 };
 
 using RouteMap = std::unordered_map<std::string, std::vector<Route>>;
@@ -76,10 +80,11 @@ void StopRoutes(RouteMap& routes) {
 std::vector<TopicAdvertisement> SelectAdvertisements(
     const std::vector<TopicAdvertisement>& advertisements,
     const BagChannelInfo& channel,
+    std::string_view runtime_id,
     const BagPlayer::RouteCompatibilityCallback& compatibility_callback) {
   std::vector<TopicAdvertisement> matching;
   for (const auto& advertisement : advertisements) {
-    if (advertisement.published ||
+    if (advertisement.runtime_id != runtime_id || advertisement.published ||
         advertisement.topic.msg_type != channel.topic.msg_type) {
       continue;
     }
@@ -100,16 +105,7 @@ std::vector<TopicAdvertisement> SelectAdvertisements(
   }
 
   std::vector<TopicAdvertisement> result;
-  const auto shared = std::find_if(
-      matching.begin(), matching.end(),
-      [](const auto& advertisement) { return !IsLocalOnly(advertisement); });
-  if (shared != matching.end()) {
-    result.emplace_back(*shared);
-  }
   std::set<std::string> runtimes;
-  for (const auto& advertisement : result) {
-    runtimes.emplace(advertisement.runtime_id);
-  }
   for (const auto& advertisement : matching) {
     if (IsLocalOnly(advertisement) &&
         runtimes.emplace(advertisement.runtime_id).second) {
@@ -157,16 +153,17 @@ BagPlayer::BagPlayer(
     PlayerOptions options,
     PlayerControl& control,
     EventCallback event_callback,
-    DirectSupportCallback direct_support_callback,
-    DirectPublishCallback direct_publish_callback,
+    PlayerPublisherSupportCallback player_publisher_support_callback,
+    PlayerPublishCallback player_publish_callback,
     RouteCompatibilityCallback route_compatibility_callback,
     TranscodeCallback transcode_callback)
     : reader_(reader),
       options_(std::move(options)),
       control_(control),
       event_callback_(std::move(event_callback)),
-      direct_support_callback_(std::move(direct_support_callback)),
-      direct_publish_callback_(std::move(direct_publish_callback)),
+      player_publisher_support_callback_(
+          std::move(player_publisher_support_callback)),
+      player_publish_callback_(std::move(player_publish_callback)),
       route_compatibility_callback_(
           std::move(route_compatibility_callback)),
       transcode_callback_(std::move(transcode_callback)) {
@@ -205,17 +202,21 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
       channel.topic.topic = remap->second;
     }
     route_channels.try_emplace(
-        TopicKey(channel.topic.topic, channel.topic.msg_type),
+        TopicKey(
+            channel.topic.topic, channel.topic.msg_type,
+            channel.topic.serialization_type),
         std::move(channel));
   }
   MW_ASSERT(!route_channels.empty(), "No bag topics match the playback selection.");
 
   RouteMap routes;
-  RuntimeRegistry registry;
+  RuntimeRegistry registry(options_.runtime_registry_path);
   bool waiting_printed = false;
   while (!control_.IsStopped()) {
     BagTopicGraph graph;
-    graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
+    if (!options_.runtime_routes.empty()) {
+      graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
+    }
     bool complete = true;
     RouteMap candidate_routes;
     const auto add_routes =
@@ -223,13 +224,6 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
             std::vector<TopicAdvertisement> advertisements) {
           auto& entries = candidate_routes[key];
           for (auto advertisement : advertisements) {
-            if (!IsLocalOnly(advertisement) && direct_support_callback_ &&
-                direct_support_callback_(advertisement)) {
-              entries.emplace_back(Route{
-                  .advertisement = std::move(advertisement),
-                  .direct = true});
-              continue;
-            }
             auto client = std::make_unique<UnixRuntimePlaybackClient>(
                 advertisement.control_socket);
             try {
@@ -240,20 +234,40 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
             entries.emplace_back(Route{
                 .advertisement = std::move(advertisement),
                 .client = std::move(client),
-                .direct = false});
+                .player_owned = false});
           }
           return true;
         };
     for (const auto& [key, channel] : route_channels) {
-      auto advertisements =
-          SelectAdvertisements(
-              graph.Find(channel.topic.topic), channel,
-              route_compatibility_callback_);
-      if (advertisements.empty() ||
-          !add_routes(key, std::move(advertisements))) {
-        complete = false;
-        break;
+      bool player_owned = false;
+      if (player_publisher_support_callback_) {
+        TopicAdvertisement publisher{
+            .runtime_id = "bag-player",
+            .publisher_id = "player-owned",
+            .topic = channel.topic,
+            .published = false};
+        if (player_publisher_support_callback_(publisher)) {
+          candidate_routes[key].emplace_back(Route{
+              .advertisement = std::move(publisher),
+              .player_owned = true});
+          player_owned = true;
+        }
       }
+      const auto runtime_route = options_.runtime_routes.find(key);
+      if (runtime_route != options_.runtime_routes.end()) {
+        auto advertisements = SelectAdvertisements(
+            graph.Find(channel.topic.topic), channel,
+            runtime_route->second, route_compatibility_callback_);
+        if (advertisements.empty() ||
+            !add_routes(key, std::move(advertisements))) {
+          complete = false;
+          break;
+        }
+      }
+      MW_ASSERT(
+          player_owned || runtime_route != options_.runtime_routes.end(),
+          "No configured playback route for topic '{}'.",
+          channel.topic.topic);
     }
     if (complete) {
       routes = std::move(candidate_routes);
@@ -261,7 +275,7 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
     }
     StopRoutes(candidate_routes);
     if (!waiting_printed && event_callback_) {
-      event_callback_("Waiting for compatible subscriber Runtime(s)...");
+      event_callback_("Waiting for configured subscriber Runtime(s)...");
       waiting_printed = true;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -274,11 +288,15 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
     for (const auto& [key, entries] : routes) {
       static_cast<void>(key);
       for (const auto& entry : entries) {
-        event_callback_(
-            "  " + entry.advertisement.topic.topic + " -> Runtime " +
-            entry.advertisement.runtime_id +
-            (entry.direct ? " direct serialized publisher"
-                          : " embedded publisher"));
+        if (entry.player_owned) {
+          event_callback_(
+              "  " + entry.advertisement.topic.topic +
+              " -> Player-owned publisher");
+        } else {
+          event_callback_(
+              "  " + entry.advertisement.topic.topic + " -> Runtime " +
+              entry.advertisement.runtime_id + " embedded publisher");
+        }
       }
     }
   }
@@ -355,11 +373,11 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
           } else {
             copy.topic = target.topic;
           }
-          if (route[index].direct) {
+          if (route[index].player_owned) {
             MW_ASSERT(
-                direct_publish_callback_,
-                "Direct playback publisher callback is unavailable.");
-            direct_publish_callback_(target, copy);
+                player_publish_callback_,
+                "Player publisher callback is unavailable.");
+            player_publish_callback_(target, copy);
           } else {
             route[index].client->Publish(copy);
           }
@@ -416,7 +434,8 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
         message.channel.topic.topic = remap->second;
       }
       const auto route = routes.find(TopicKey(
-          message.channel.topic.topic, message.channel.topic.msg_type));
+          message.channel.topic.topic, message.channel.topic.msg_type,
+          message.channel.topic.serialization_type));
       MW_ASSERT(
           route != routes.end(), "No playback route for topic '{}'.",
           message.channel.topic.topic);

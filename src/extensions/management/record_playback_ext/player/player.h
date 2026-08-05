@@ -12,7 +12,6 @@
 #include <string>
 #include <vector>
 
-#include "cpp/transport/serialized_message.h"
 #include "record_playback_ext/discovery/topic_advertisement.h"
 #include "record_playback_ext/storage/bag_reader.h"
 
@@ -27,6 +26,8 @@ struct PlayerOptions {
   double delay_seconds = 0.0;
   bool start_paused = false;
   double start_offset_seconds = 0.0;
+  std::map<std::string, std::string> runtime_routes;
+  std::filesystem::path runtime_registry_path = "/tmp/ibmw/runtimes";
 };
 
 class PlayerControl {
@@ -50,9 +51,9 @@ class PlayerControl {
 class BagPlayer {
  public:
   using EventCallback = std::function<void(std::string_view message)>;
-  using DirectSupportCallback =
+  using PlayerPublisherSupportCallback =
       std::function<bool(const TopicAdvertisement& advertisement)>;
-  using DirectPublishCallback = std::function<void(
+  using PlayerPublishCallback = std::function<void(
       const TopicAdvertisement& advertisement,
       const ibmw::transport::SerializedMessage& message)>;
   using RouteCompatibilityCallback = std::function<bool(
@@ -68,8 +69,8 @@ class BagPlayer {
       PlayerOptions options,
       PlayerControl& control,
       EventCallback event_callback = {},
-      DirectSupportCallback direct_support_callback = {},
-      DirectPublishCallback direct_publish_callback = {},
+      PlayerPublisherSupportCallback player_publisher_support_callback = {},
+      PlayerPublishCallback player_publish_callback = {},
       RouteCompatibilityCallback route_compatibility_callback = {},
       TranscodeCallback transcode_callback = {});
 
@@ -82,8 +83,8 @@ class BagPlayer {
   PlayerOptions options_;
   PlayerControl& control_;
   EventCallback event_callback_;
-  DirectSupportCallback direct_support_callback_;
-  DirectPublishCallback direct_publish_callback_;
+  PlayerPublisherSupportCallback player_publisher_support_callback_;
+  PlayerPublishCallback player_publish_callback_;
   RouteCompatibilityCallback route_compatibility_callback_;
   TranscodeCallback transcode_callback_;
 };
