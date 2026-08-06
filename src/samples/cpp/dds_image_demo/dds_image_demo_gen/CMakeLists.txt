@@ -25,19 +25,14 @@ endif()
 # --------------------------------------------------------------------------
 find_package(ibmw 0.1.0 REQUIRED)
 
-# --------------------------------------------------------------------------
-# FastCDR — required for custom DDS type serialization.
-# --------------------------------------------------------------------------
-find_package(fastcdr REQUIRED)
-
 ibmw_add_module(image_publisher
   SRCS src/image_publisher_module/image_publisher.cc
-  DEPS ibmw::extensions::dds_types fastcdr)
+  DEPS ibmw::extensions::dds_types)
 target_include_directories(image_publisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 ibmw_add_module(image_subscriber
   SRCS src/image_subscriber_module/image_subscriber.cc
-  DEPS ibmw::extensions::dds_types fastcdr)
+  DEPS ibmw::extensions::dds_types)
 target_include_directories(image_subscriber PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 ibmw_add_pkg(dds_image_pkg

@@ -13,8 +13,7 @@ string(REGEX REPLACE ".*/\(.*\)" "\\1" CUR_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 # Set namespace
 set_namespace()
 
-# Need FastCDR for the hand-written DDS type serialization
-find_package(fastcdr REQUIRED)
+# Use the provider resolved by the main IBMW build.
 
 # Publisher module
 add_library(image_publisher_module STATIC
@@ -29,7 +28,7 @@ target_include_directories(image_publisher_module PUBLIC
 target_link_libraries(image_publisher_module PUBLIC
   ibmw::api::cpp
   ibmw::extensions::dds_types
-  fastcdr
+  ${IBMW_FASTCDR_PROVIDER_TARGET}
 )
 
 # Subscriber module
@@ -45,7 +44,7 @@ target_include_directories(image_subscriber_module PUBLIC
 target_link_libraries(image_subscriber_module PUBLIC
   ibmw::api::cpp
   ibmw::extensions::dds_types
-  fastcdr
+  ${IBMW_FASTCDR_PROVIDER_TARGET}
 )
 
 # Main application

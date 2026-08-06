@@ -7,6 +7,22 @@ Extension 的中间件框架。它提供统一的运行时，并以 DDS IDL / Fa
 
 **版本：** 0.1.0
 
+## DDS 兼容性
+
+推荐 preset 为 `together-ros2-minimal-sdk`：
+```bash
+export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/path/to/dds-prefix
+cmake --preset together-ros2-minimal-sdk
+cmake --build --preset together-ros2-minimal-sdk
+```
+
+OpenCode 可使用 `/dds-compatibility`；新增或更新 skill 后若命令未出现，请重启 OpenCode。相邻仓库的可复制命令：
+```bash
+python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py doctor --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
+python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
+```
+`doctor` 与 `run` 必须传递相同参数。prefix 优先级是显式 `--dds-prefix`、有效的 `IBMW_ROS2_MINIMAL_SDK_PREFIX`、最后恰好一个规范候选；零个或多个候选必须显式指定。默认模式要求前缀包含完整消息支持（`std_msgs` 配置和生成头文件）；仅 DDS 基础层的 builder 输出必须添加 `--dds-only`。离线默认禁止网络，并要求 complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout；只有用户显式同意时使用 `--allow-network`。
+
 ## 特性
 
 - **Extension 架构** —— 通信后端、Logger 和服务以共享库 Extension 形式在运行时
@@ -102,6 +118,7 @@ rm -f ibmw-config.cmake ibmw-config-version.cmake
 | `minimal` | 仅核心运行时，开发时构建最快 |
 | `dev` | 核心 + 常用 Extension + Examples（Debug） |
 | `full` | **推荐。** 所有 Extension + Examples + ROS2 类型（Release） |
+| `together-ros2-minimal-sdk` | Humble DDS 兼容构建：DDS extension/types 开启，ROS2 runtime 与 examples 关闭 |
 | `ros2` | full + ROS2 rcl 集成（**已废弃**，见下文） |
 | `release` | 优化构建，不含 Examples |
 | `test` | dev 构建，启用 tests |

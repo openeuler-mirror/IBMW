@@ -11,6 +11,7 @@
       "hidden": true,
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
+        "IBMW_DDS_PROVIDER": "SYSTEM",
         "IBMW_BUILD_TESTS": "OFF",
         "IBMW_BUILD_RUNTIME": "ON",
         "IBMW_BUILD_PROTOCOLS": "ON",
@@ -83,6 +84,23 @@
       }
     },
     {
+      "name": "together-ros2-minimal-sdk",
+      "displayName": "Together — Humble minimal DDS SDK",
+      "description": "Compatibility-focused build using an explicit Humble Fast DDS 2.6.12/Fast CDR 1.0.29 prefix, without ROS2 runtime or examples.",
+      "binaryDir": "${sourceDir}/build-together-ros2-minimal-sdk",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IBMW_DDS_PROVIDER": "ROS2_MINIMAL_SDK",
+        "IBMW_ROS2_MINIMAL_SDK_PREFIX": "$env{IBMW_ROS2_MINIMAL_SDK_PREFIX}",
+        "IBMW_BUILD_DDS_EXTENSION": "ON",
+        "IBMW_BUILD_ROS2_TYPES": "ON",
+        "IBMW_BUILD_WITH_ROS2": "OFF",
+        "IBMW_BUILD_ROS2_EXTENSION": "OFF",
+        "IBMW_BUILD_EXAMPLES": "OFF",
+        "IBMW_BUILD_TESTS": "OFF"
+      }
+    },
+    {
       "name": "ros2",
       "displayName": "ROS 2 (DEPRECATED) — full build with ROS 2 rcl integration",
       "description": "DEPRECATED: Full build with ROS 2 rcl support. Use 'full' preset instead — IBMW now provides pure-DDS alternatives for all ROS2 interop (pub/sub and RPC/Service). Requires ROS 2 (Humble or Jazzy) to be sourced.",
@@ -133,6 +151,7 @@
       "binaryDir": "${sourceDir}/build-aarch64-dds-source-deps",
       "cacheVariables": {
         "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD": "ON",
+        "IBMW_DDS_PROVIDER": "SOURCE_FASTDDS3",
         "IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY": "ON",
         "IBMW_THIRD_PARTY_SOURCE_PREFIX": "${sourceDir}/build-aarch64-dds-source-deps/third_party/install",
         "IBMW_THIRD_PARTY_SOURCE_BASE_DIR": "${sourceDir}/build-aarch64-dds-source-deps/third_party/build",
@@ -142,6 +161,15 @@
         "IBMW_BUILD_ROS2_TYPES": "OFF",
         "IBMW_BUILD_ROS2_EXTENSION": "OFF",
         "IBMW_TARGET_ROS2_TIER": "none"
+      }
+    },
+    {
+      "name": "cross-aarch64-dds-source",
+      "displayName": "Cross AArch64 — DDS source-prefix second pass",
+      "description": "Second configure pass after building cross-aarch64-dds-source-deps/ibmw_third_party_source_prefix.",
+      "inherits": "cross-aarch64-dds-source-deps",
+      "cacheVariables": {
+        "IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY": "OFF"
       }
     },
     {
@@ -168,6 +196,7 @@
       "binaryDir": "${sourceDir}/build-ohos-arm64-dds-source-deps",
       "cacheVariables": {
         "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD": "ON",
+        "IBMW_DDS_PROVIDER": "SOURCE_FASTDDS3",
         "IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY": "ON",
         "IBMW_THIRD_PARTY_SOURCE_PREFIX": "${sourceDir}/build-ohos-arm64-dds-source-deps/third_party/install",
         "IBMW_THIRD_PARTY_SOURCE_BASE_DIR": "${sourceDir}/build-ohos-arm64-dds-source-deps/third_party/build",
@@ -177,6 +206,15 @@
         "IBMW_BUILD_ROS2_TYPES": "OFF",
         "IBMW_BUILD_ROS2_EXTENSION": "OFF",
         "IBMW_TARGET_ROS2_TIER": "none"
+      }
+    },
+    {
+      "name": "cross-ohos-arm64-dds-source",
+      "displayName": "Cross OHOS ARM64 — DDS source-prefix second pass",
+      "description": "Second configure pass after building cross-ohos-arm64-dds-source-deps/ibmw_third_party_source_prefix.",
+      "inherits": "cross-ohos-arm64-dds-source-deps",
+      "cacheVariables": {
+        "IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY": "OFF"
       }
     }
   ],
@@ -196,6 +234,10 @@
     {
       "name": "iceoryx",
       "configurePreset": "iceoryx"
+    },
+    {
+      "name": "together-ros2-minimal-sdk",
+      "configurePreset": "together-ros2-minimal-sdk"
     },
     {
       "name": "ros2",
@@ -218,12 +260,20 @@
       "configurePreset": "cross-aarch64-dds-source-deps"
     },
     {
+      "name": "cross-aarch64-dds-source",
+      "configurePreset": "cross-aarch64-dds-source"
+    },
+    {
       "name": "cross-ohos-arm64-minimal",
       "configurePreset": "cross-ohos-arm64-minimal"
     },
     {
       "name": "cross-ohos-arm64-dds-source-deps",
       "configurePreset": "cross-ohos-arm64-dds-source-deps"
+    },
+    {
+      "name": "cross-ohos-arm64-dds-source",
+      "configurePreset": "cross-ohos-arm64-dds-source"
     }
   ]
 }
