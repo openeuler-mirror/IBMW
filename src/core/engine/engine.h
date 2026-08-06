@@ -15,6 +15,7 @@
 #include <functional>
 #include <future>
 #include <map>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -35,6 +36,8 @@
 #include "base/log_util.h"
 
 namespace ibmw::runtime::core {
+
+class EngineShutdownFixture;
 
 // ---------------------------------------------------------------------------
 // Phase — the 7 lifecycle phases of the IBMW runtime.
@@ -111,6 +114,8 @@ constexpr HookPoint AfterPhase(Phase p)           { return {p, Subsystem::kCount
 // Engine — the runtime orchestrator.
 // ---------------------------------------------------------------------------
 class Engine {
+  friend class EngineShutdownFixture;
+
  public:
   struct Options {
     std::string cfg_file_path;
@@ -181,7 +186,7 @@ class Engine {
   void InitCoreAccess(const util::ModuleDetailInfo& info, module::CoreAccess& access);
   void CheckCfgFile() const;
   void StartImpl();
-  void ShutdownImpl();
+  bool ShutdownImpl();
   void PrintStartupInfo() const;
 
  private:
@@ -191,7 +196,9 @@ class Engine {
 
   std::atomic_bool shutdown_flag_ = false;
   std::promise<void> shutdown_promise_;
+  std::atomic_bool shutdown_impl_in_progress_ = false;
   std::atomic_bool shutdown_impl_flag_ = false;
+  std::mutex lifecycle_mutex_;
   std::thread async_shutdown_thread_;  // Stored to avoid dangling detached thread
 
   // Hook catalog — ordered map so hooks fire in deterministic order.

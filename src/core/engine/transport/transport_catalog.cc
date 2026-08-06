@@ -3,6 +3,8 @@
 
 #include "engine/transport/transport_catalog.h"
 
+#include <algorithm>
+
 namespace ibmw::runtime::core::transport {
 
 bool TransportCatalog::RegisterSendType(
@@ -67,6 +69,60 @@ bool TransportCatalog::OnMessage(
       "Msg type '{}' is successfully subscribed, topic '{}', module '{}', pkg path '{}'",
       key.msg_type, key.topic_name, key.module_name, key.pkg_path);
 
+  return true;
+}
+
+bool TransportCatalog::ContainsMessageHandler(
+    std::string_view msg_type,
+    std::string_view topic_name,
+    std::string_view pkg_path,
+    std::string_view module_name) const {
+  return message_handler_map_.contains(
+      Key{.msg_type = msg_type,
+          .topic_name = topic_name,
+          .pkg_path = pkg_path,
+          .module_name = module_name});
+}
+
+bool TransportCatalog::EraseMessageHandler(
+    std::string_view msg_type,
+    std::string_view topic_name,
+    std::string_view pkg_path,
+    std::string_view module_name) {
+  const Key key{.msg_type = msg_type,
+                .topic_name = topic_name,
+                .pkg_path = pkg_path,
+                .module_name = module_name};
+  const auto handler_itr = message_handler_map_.find(key);
+  if (handler_itr == message_handler_map_.end()) {
+    return false;
+  }
+
+  auto* handler = handler_itr->second.get();
+  if (auto topic_itr = sub_topic_index_map_.find(topic_name);
+      topic_itr != sub_topic_index_map_.end()) {
+    auto& handlers = topic_itr->second;
+    handlers.erase(std::remove(handlers.begin(), handlers.end(), handler),
+                   handlers.end());
+    if (handlers.empty()) {
+      sub_topic_index_map_.erase(topic_itr);
+    }
+  }
+
+  const MTPKey mtp_key{.msg_type = msg_type,
+                       .topic_name = topic_name,
+                       .pkg_path = pkg_path};
+  if (auto mtp_itr = sub_msg_topic_pkg_index_map_.find(mtp_key);
+      mtp_itr != sub_msg_topic_pkg_index_map_.end()) {
+    mtp_itr->second.erase(module_name);
+    if (mtp_itr->second.empty()) {
+      sub_msg_topic_pkg_index_map_.erase(mtp_itr);
+    }
+  }
+
+  // The index keys are string_views into the owned wrapper, so destroy the
+  // wrapper only after all secondary indexes have been removed.
+  message_handler_map_.erase(handler_itr);
   return true;
 }
 

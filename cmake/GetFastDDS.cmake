@@ -1,120 +1,295 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
-#
-# GetFastDDS.cmake - Find FastDDS and FastCDR
-#
-# FastCDR is the core serialization library used by the IBMW type system.
-# FastDDS is required for the DDS extension and optionally for the type system.
-#
-# Native/default builds use installed packages exactly as before. The optional
-# IBMW source-prefix lane may provide target-side packages under
-# IBMW_THIRD_PARTY_SOURCE_PREFIX; it is never enabled implicitly in native mode.
 
-message(STATUS "get FastDDS/FastCDR ...")
+message(STATUS "DDS provider: ${IBMW_DDS_PROVIDER}")
 
-# Route B cross builds must consume the target ROS 2 DDS provider first.  Use
-# explicit imported library targets from IBMW_TARGET_ROS2_DEPS_PREFIX instead of
-# package configs here: some ROS2 OHOS exports share eProsima_atomic across
-# fastcdr/fastrtps and fail if another dependency has already defined it.
-if(CMAKE_CROSSCOMPILING AND IBMW_TARGET_ROS2_TIER STREQUAL "rosidl")
+function(_ibmw_require_version package actual expected)
+  if(NOT actual OR NOT actual VERSION_EQUAL expected)
+    message(FATAL_ERROR
+      "IBMW_DDS_PROVIDER=${IBMW_DDS_PROVIDER} requires ${package} ${expected}, but found '${actual}'. Use one coherent DDS SDK/prefix; mixed ABIs are unsupported.")
+  endif()
+endfunction()
+
+function(_ibmw_clear_package_cache package)
+  unset(${package}_DIR CACHE)
+  unset(${package}_DIR PARENT_SCOPE)
+  unset(${package}_FOUND PARENT_SCOPE)
+endfunction()
+
+function(_ibmw_require_package_under_prefix package prefix)
+  file(REAL_PATH "${prefix}" _ibmw_prefix_real)
+  foreach(_ibmw_path_var IN ITEMS ${package}_DIR ${package}_CONFIG)
+    if(DEFINED ${_ibmw_path_var} AND NOT "${${_ibmw_path_var}}" STREQUAL "")
+      file(REAL_PATH "${${_ibmw_path_var}}" _ibmw_package_path_real)
+      string(FIND "${_ibmw_package_path_real}/" "${_ibmw_prefix_real}/" _ibmw_prefix_pos)
+      if(NOT _ibmw_prefix_pos EQUAL 0)
+        message(FATAL_ERROR
+          "Selected DDS package ${package} resolved outside '${prefix}': ${${_ibmw_path_var}}. Clear the build directory/cache when changing IBMW_DDS_PROVIDER or its prefix.")
+      endif()
+    endif()
+  endforeach()
+endfunction()
+
+function(_ibmw_require_path_under_prefix description path prefix)
+  file(REAL_PATH "${prefix}" _ibmw_prefix_real)
+  file(REAL_PATH "${path}" _ibmw_path_real)
+  string(FIND "${_ibmw_path_real}/" "${_ibmw_prefix_real}/" _ibmw_prefix_pos)
+  if(NOT _ibmw_prefix_pos EQUAL 0)
+    message(FATAL_ERROR "${description} '${path}' is outside selected prefix '${prefix}'")
+  endif()
+endfunction()
+
+function(_ibmw_validate_imported_target_under_prefix target prefix)
+  get_target_property(_ibmw_configs ${target} IMPORTED_CONFIGURATIONS)
+  set(_ibmw_props IMPORTED_LOCATION)
+  foreach(_ibmw_config IN LISTS _ibmw_configs)
+    list(APPEND _ibmw_props "IMPORTED_LOCATION_${_ibmw_config}")
+  endforeach()
+  foreach(_ibmw_prop IN LISTS _ibmw_props)
+    get_target_property(_ibmw_value ${target} ${_ibmw_prop})
+    if(_ibmw_value AND NOT _ibmw_value MATCHES "-NOTFOUND$")
+      _ibmw_require_path_under_prefix("${target} ${_ibmw_prop}" "${_ibmw_value}" "${prefix}")
+    endif()
+  endforeach()
+  get_target_property(_ibmw_includes ${target} INTERFACE_INCLUDE_DIRECTORIES)
+  foreach(_ibmw_include IN LISTS _ibmw_includes)
+    if(IS_ABSOLUTE "${_ibmw_include}")
+      _ibmw_require_path_under_prefix("${target} include" "${_ibmw_include}" "${prefix}")
+    endif()
+  endforeach()
+endfunction()
+
+function(_ibmw_require_library_machine library expected)
+  if(NOT CMAKE_READELF OR NOT EXISTS "${CMAKE_READELF}")
+    message(FATAL_ERROR "CMAKE_READELF is required to validate target DDS libraries")
+  endif()
+  execute_process(COMMAND "${CMAKE_READELF}" -h "${library}" RESULT_VARIABLE _ibmw_rc OUTPUT_VARIABLE _ibmw_elf ERROR_VARIABLE _ibmw_err)
+  if(NOT _ibmw_rc EQUAL 0 OR NOT _ibmw_elf MATCHES "(^|\n)[ \t]*Machine:[ \t]*([^\r\n]+)")
+    message(FATAL_ERROR "Cannot parse authoritative ELF Machine field for '${library}': ${_ibmw_err}")
+  endif()
+  string(STRIP "${CMAKE_MATCH_2}" _ibmw_machine)
+  if(NOT _ibmw_machine STREQUAL "${expected}")
+    message(FATAL_ERROR "DDS library '${library}' has ELF Machine '${_ibmw_machine}', expected exactly '${expected}'")
+  endif()
+endfunction()
+
+function(_ibmw_authenticate_prefix_package_version package expected prefix)
+  if(package STREQUAL "fastrtps")
+    set(_ibmw_package_dir "${prefix}/share/fastrtps/cmake")
+  elseif(package STREQUAL "fastcdr")
+    set(_ibmw_package_dir "${prefix}/lib/cmake/fastcdr")
+  elseif(package STREQUAL "foonathan_memory")
+    set(_ibmw_package_dir "${prefix}/lib/foonathan_memory/cmake")
+  else()
+    message(FATAL_ERROR "No deterministic metadata location is defined for ${package}")
+  endif()
+  set(_ibmw_config_file "")
+  set(_ibmw_version_file "")
+  foreach(_ibmw_name IN ITEMS "${package}Config.cmake" "${package}-config.cmake")
+    if(EXISTS "${_ibmw_package_dir}/${_ibmw_name}")
+      set(_ibmw_config_file "${_ibmw_package_dir}/${_ibmw_name}")
+      break()
+    endif()
+  endforeach()
+  foreach(_ibmw_name IN ITEMS "${package}ConfigVersion.cmake" "${package}-config-version.cmake")
+    if(EXISTS "${_ibmw_package_dir}/${_ibmw_name}")
+      set(_ibmw_version_file "${_ibmw_package_dir}/${_ibmw_name}")
+      break()
+    endif()
+  endforeach()
+  if(NOT _ibmw_config_file OR NOT _ibmw_version_file)
+    message(FATAL_ERROR "Missing colocated deterministic ${package} config/version metadata in '${_ibmw_package_dir}'")
+  endif()
+  _ibmw_require_path_under_prefix("${package} package metadata" "${_ibmw_package_dir}" "${prefix}")
+  file(READ "${_ibmw_version_file}" _ibmw_version_contents)
+  string(REGEX MATCH "set\\([ \t]*PACKAGE_VERSION[ \t]+[\"']?([0-9]+\\.[0-9]+\\.[0-9]+)" _ibmw_match "${_ibmw_version_contents}")
+  if(NOT CMAKE_MATCH_1 VERSION_EQUAL expected)
+    message(FATAL_ERROR "Deterministic ${package} PACKAGE_VERSION must be exactly ${expected}; found '${CMAKE_MATCH_1}'")
+  endif()
+  set(${package}_VERSION "${CMAKE_MATCH_1}" PARENT_SCOPE)
+endfunction()
+
+# Preserve the target-prefix-only ROSIDL/types route. It deliberately reconstructs
+# imported targets from target libraries instead of loading package configs;
+# this avoids duplicate eProsima_atomic definitions from already-loaded ROSIDL
+# packages and can never fall back to host packages.
+set(_ibmw_rosidl_target_prefix_route FALSE)
+set(_ibmw_use_raw_target_dds FALSE)
+if(CMAKE_CROSSCOMPILING
+   AND IBMW_TARGET_ROS2_DEPS_PREFIX
+   AND NOT IBMW_DDS_PROVIDER STREQUAL "SOURCE_FASTDDS3")
+  if(IBMW_TARGET_ROS2_TIER STREQUAL "rosidl"
+     OR (IBMW_DDS_PROVIDER STREQUAL "ROS2_MINIMAL_SDK"
+         AND IBMW_TARGET_ROS2_TIER STREQUAL "types"))
+    set(_ibmw_use_raw_target_dds TRUE)
+  endif()
+endif()
+if(_ibmw_use_raw_target_dds)
+  if(IBMW_DDS_PROVIDER STREQUAL "ROS2_MINIMAL_SDK" AND NOT IBMW_ROS2_MINIMAL_SDK_PREFIX)
+    message(FATAL_ERROR "ROS2_MINIMAL_SDK on the cross ROSIDL route still requires IBMW_ROS2_MINIMAL_SDK_PREFIX.")
+  endif()
+  if(IBMW_DDS_PROVIDER STREQUAL "ROS2_MINIMAL_SDK")
+    if(NOT IS_DIRECTORY "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+      message(FATAL_ERROR "IBMW_ROS2_MINIMAL_SDK_PREFIX must name an existing SDK prefix")
+    endif()
+    foreach(_ibmw_target_deps_prefix IN LISTS IBMW_TARGET_ROS2_DEPS_PREFIX)
+      _ibmw_require_path_under_prefix("Target ROS 2 dependency prefix"
+        "${_ibmw_target_deps_prefix}" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    endforeach()
+  endif()
   ibmw_resolve_target_ros2_library(_ibmw_target_fastcdr fastcdr)
   ibmw_resolve_target_ros2_library(_ibmw_target_fastrtps fastrtps)
+  ibmw_resolve_target_ros2_library(_ibmw_target_foonathan_memory foonathan_memory-0.7.1)
   ibmw_resolve_target_ros2_include_root(_ibmw_target_fastdds_include fastdds/dds/domain/DomainParticipant.hpp)
+  file(REAL_PATH "${_ibmw_target_fastdds_include}" _ibmw_target_fastdds_include)
 
-  if(NOT TARGET ibmw_target_fastcdr)
-    add_library(ibmw_target_fastcdr SHARED IMPORTED GLOBAL)
-    set_target_properties(ibmw_target_fastcdr PROPERTIES
-      IMPORTED_LOCATION "${_ibmw_target_fastcdr}"
-      INTERFACE_INCLUDE_DIRECTORIES "${_ibmw_target_fastdds_include}")
+  # Full-product message configs compare these canonical imported targets and
+  # their raw properties exactly.  Loading upstream exports here adds imported
+  # configurations and namespaced link entries, so construct the three targets
+  # directly and reject any target namespace contamination.
+  foreach(_ibmw_raw_target IN ITEMS foonathan_memory fastcdr fastrtps)
+    if(TARGET ${_ibmw_raw_target})
+      message(FATAL_ERROR
+        "Refusing preexisting target '${_ibmw_raw_target}' on the authenticated target-prefix DDS route. Use a clean build/environment; foreign package exports cannot satisfy full-product target assertions.")
+    endif()
+  endforeach()
+  add_library(foonathan_memory SHARED IMPORTED GLOBAL)
+  set_target_properties(foonathan_memory PROPERTIES
+    IMPORTED_LOCATION "${_ibmw_target_foonathan_memory}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_ibmw_target_fastdds_include}"
+    INTERFACE_LINK_LIBRARIES "")
+  add_library(fastcdr SHARED IMPORTED GLOBAL)
+  set_target_properties(fastcdr PROPERTIES
+    IMPORTED_LOCATION "${_ibmw_target_fastcdr}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_ibmw_target_fastdds_include}"
+    INTERFACE_LINK_LIBRARIES "")
+  add_library(fastrtps SHARED IMPORTED GLOBAL)
+  set_target_properties(fastrtps PROPERTIES
+    IMPORTED_LOCATION "${_ibmw_target_fastrtps}"
+    INTERFACE_INCLUDE_DIRECTORIES "${_ibmw_target_fastdds_include}"
+    INTERFACE_LINK_LIBRARIES "fastcdr;foonathan_memory")
+  set(IBMW_FASTCDR_PROVIDER_TARGET fastcdr)
+  set(IBMW_FASTDDS_PROVIDER_TARGET fastrtps)
+  if(NOT TARGET fastdds)
+    add_library(fastdds ALIAS fastrtps)
   endif()
-
-  if(NOT TARGET ibmw_target_fastrtps)
-    add_library(ibmw_target_fastrtps SHARED IMPORTED GLOBAL)
-    set_target_properties(ibmw_target_fastrtps PROPERTIES
-      IMPORTED_LOCATION "${_ibmw_target_fastrtps}"
-      INTERFACE_INCLUDE_DIRECTORIES "${_ibmw_target_fastdds_include}"
-      INTERFACE_LINK_LIBRARIES ibmw_target_fastcdr)
-  endif()
-
-  set(IBMW_FASTCDR_PROVIDER_TARGET ibmw_target_fastcdr)
-  set(IBMW_FASTDDS_PROVIDER_TARGET ibmw_target_fastrtps)
   set(fastcdr_FOUND TRUE)
   set(fastrtps_FOUND TRUE)
   set(fastdds_FOUND TRUE)
   get_filename_component(_ibmw_target_fastcdr_real "${_ibmw_target_fastcdr}" REALPATH)
   get_filename_component(_ibmw_target_fastrtps_real "${_ibmw_target_fastrtps}" REALPATH)
-  # If a provider has no versioned real filename, leave the version empty.
-  # DdsIdlGenCode.cmake intentionally treats an unknown FastCDR version as the
-  # conservative v1 compatibility lane used by ROS 2 Humble.
-  if(_ibmw_target_fastcdr_real MATCHES "libfastcdr\\.so\\.([0-9.]+)$")
-    set(fastcdr_VERSION "${CMAKE_MATCH_1}")
+  if(IBMW_DDS_PROVIDER STREQUAL "ROS2_MINIMAL_SDK")
+    _ibmw_require_path_under_prefix("Fast CDR library" "${_ibmw_target_fastcdr_real}" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    _ibmw_require_path_under_prefix("fastrtps library" "${_ibmw_target_fastrtps_real}" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    _ibmw_require_path_under_prefix("foonathan_memory library" "${_ibmw_target_foonathan_memory}" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    _ibmw_require_path_under_prefix("Fast DDS include root" "${_ibmw_target_fastdds_include}" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    foreach(_ibmw_library IN ITEMS "${_ibmw_target_fastcdr}" "${_ibmw_target_fastrtps}" "${_ibmw_target_foonathan_memory}")
+      _ibmw_require_library_machine("${_ibmw_library}" "AArch64")
+    endforeach()
+    _ibmw_authenticate_prefix_package_version(foonathan_memory "0.7.1" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    _ibmw_authenticate_prefix_package_version(fastcdr "1.0.29" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    _ibmw_authenticate_prefix_package_version(fastrtps "2.6.12" "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    set(fastdds_VERSION "${fastrtps_VERSION}")
+    _ibmw_require_version("Fast CDR" "${fastcdr_VERSION}" "1.0.29")
+    _ibmw_require_version("Fast DDS" "${fastrtps_VERSION}" "2.6.12")
+    _ibmw_require_version("foonathan_memory" "${foonathan_memory_VERSION}" "0.7.1")
   endif()
-  if(_ibmw_target_fastrtps_real MATCHES "libfastrtps\\.so\\.([0-9.]+)$")
-    set(fastrtps_VERSION "${CMAKE_MATCH_1}")
-    set(fastdds_VERSION "${CMAKE_MATCH_1}")
+  set(_ibmw_rosidl_target_prefix_route TRUE)
+endif()
+
+if(_ibmw_rosidl_target_prefix_route)
+  # Provider targets were resolved above without package-config side effects.
+elseif(IBMW_DDS_PROVIDER STREQUAL "ROS2_MINIMAL_SDK")
+  if(NOT IBMW_ROS2_MINIMAL_SDK_PREFIX OR NOT IS_DIRECTORY "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+    message(FATAL_ERROR
+      "IBMW_DDS_PROVIDER=ROS2_MINIMAL_SDK requires -DIBMW_ROS2_MINIMAL_SDK_PREFIX=<prefix> pointing to the SDK produced by sibling IBMW_together/ros2_minimal_deps. No /opt/ros fallback is used.")
   endif()
-  # Create alias for compatibility
-  if(NOT TARGET fastcdr)
-    add_library(fastcdr ALIAS ibmw_target_fastcdr)
+  _ibmw_clear_package_cache(fastcdr)
+  _ibmw_clear_package_cache(fastrtps)
+  find_package(fastcdr 1.0.29 EXACT CONFIG QUIET PATHS "${IBMW_ROS2_MINIMAL_SDK_PREFIX}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  # Fast DDS 2.6's exported config discovers foonathan_memory transitively.
+  # The locked SDK installs that config in its upstream nonstandard location,
+  # so resolve it explicitly from the same prefix before loading fastrtps.
+  unset(foonathan_memory_DIR CACHE)
+  find_package(foonathan_memory 0.7.1 EXACT CONFIG QUIET
+    PATHS "${IBMW_ROS2_MINIMAL_SDK_PREFIX}/lib/foonathan_memory/cmake"
+    NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  if(NOT foonathan_memory_FOUND)
+    message(FATAL_ERROR
+      "The ROS2 minimal SDK at '${IBMW_ROS2_MINIMAL_SDK_PREFIX}' is missing locked foonathan_memory 0.7.1 metadata.")
   endif()
-  if(NOT TARGET fastrtps)
-    add_library(fastrtps ALIAS ibmw_target_fastrtps)
+  _ibmw_require_package_under_prefix(foonathan_memory "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+  find_package(fastrtps 2.6.12 EXACT CONFIG QUIET PATHS "${IBMW_ROS2_MINIMAL_SDK_PREFIX}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  if(NOT fastcdr_FOUND OR NOT fastrtps_FOUND)
+    message(FATAL_ERROR
+      "The ROS2 minimal SDK at '${IBMW_ROS2_MINIMAL_SDK_PREFIX}' is incomplete or incompatible. Required: Fast CDR 1.0.29 and Fast DDS/fastrtps 2.6.12 (Humble ABI). No system fallback is permitted.")
   endif()
+  _ibmw_require_version("Fast CDR" "${fastcdr_VERSION}" "1.0.29")
+  _ibmw_require_version("Fast DDS" "${fastrtps_VERSION}" "2.6.12")
+  _ibmw_require_package_under_prefix(fastcdr "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+  _ibmw_require_package_under_prefix(fastrtps "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+  foreach(_ibmw_target IN ITEMS fastcdr fastrtps foonathan_memory)
+    _ibmw_validate_imported_target_under_prefix(${_ibmw_target} "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
+  endforeach()
+  set(fastdds_VERSION "${fastrtps_VERSION}")
+  set(fastdds_FOUND TRUE)
   if(NOT TARGET fastdds)
-    add_library(fastdds ALIAS ibmw_target_fastrtps)
+    add_library(fastdds ALIAS fastrtps)
   endif()
-  message(STATUS "Found FastDDS via explicit target ROS2 fastrtps provider: ${_ibmw_target_fastrtps}")
-endif()
-
-if(NOT fastcdr_FOUND)
-  ibmw_find_target_package(fastcdr QUIET FEATURE cdr-types
-    HINTS /opt/ros/$ENV{ROS_DISTRO}/lib/cmake /opt/ros/humble/lib/cmake)
-endif()
-if(NOT fastcdr_FOUND)
-  message(WARNING "FastCDR not found. CDR serialization (the primary type system) "
-                  "will not be available. Install FastCDR: "
-                  "apt install ros-humble-fastcdr or build from source.")
-endif()
-
-# FastDDS: try fastdds 3.x first, fallback to fastrtps for ROS2 compatibility
-# Note: When ROS2 is sourced, fastrtps 2.6 defines eProsima_atomic target.
-# Loading fastdds 3.x after that causes target conflict, so skip if already loaded.
-if(NOT fastdds_FOUND AND NOT TARGET eProsima_atomic)
-  ibmw_find_target_package(fastdds VERSION 3 QUIET FEATURE dds-extension)
-endif()
-
-if(NOT fastdds_FOUND)
-  ibmw_find_target_package(fastrtps QUIET FEATURE dds-extension
-    HINTS /opt/ros/$ENV{ROS_DISTRO}/share /opt/ros/humble/share)
-  if(fastrtps_FOUND)
+elseif(IBMW_DDS_PROVIDER STREQUAL "SOURCE_FASTDDS3")
+  _ibmw_clear_package_cache(fastcdr)
+  _ibmw_clear_package_cache(fastdds)
+  find_package(fastcdr 2.2.6 EXACT REQUIRED CONFIG PATHS "${IBMW_THIRD_PARTY_SOURCE_PREFIX}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  find_package(fastdds 3.2.2 EXACT REQUIRED CONFIG PATHS "${IBMW_THIRD_PARTY_SOURCE_PREFIX}" NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+  _ibmw_require_version("Fast CDR" "${fastcdr_VERSION}" "2.2.6")
+  _ibmw_require_version("Fast DDS" "${fastdds_VERSION}" "3.2.2")
+  _ibmw_require_package_under_prefix(fastcdr "${IBMW_THIRD_PARTY_SOURCE_PREFIX}")
+  _ibmw_require_package_under_prefix(fastdds "${IBMW_THIRD_PARTY_SOURCE_PREFIX}")
+elseif(IBMW_DDS_PROVIDER STREQUAL "SYSTEM")
+  # Ordinary CMake discovery only. A sourced environment can affect package
+  # selection; this route adds no /opt/ros hints and never changes provider class.
+  if(NOT TARGET fastcdr)
+    find_package(fastcdr REQUIRED CONFIG)
+  endif()
+  if(TARGET fastdds)
     set(fastdds_FOUND TRUE)
-    # Create alias for compatibility
+  elseif(TARGET fastrtps)
+    # A loaded fastrtps config commonly owns eProsima_atomic. Do not load a
+    # second Fast DDS config into the same target namespace.
+    set(fastrtps_FOUND TRUE)
+  elseif(TARGET eProsima_atomic)
+    message(FATAL_ERROR
+      "eProsima_atomic is already defined but neither fastdds nor fastrtps is loaded. Refusing to load another DDS package config into a conflicting target namespace.")
+  else()
+    find_package(fastdds 3 QUIET CONFIG)
+  endif()
+  if(NOT fastdds_FOUND AND NOT TARGET fastdds)
+    if(NOT TARGET fastrtps)
+      find_package(fastrtps REQUIRED CONFIG)
+    endif()
+    set(fastdds_FOUND TRUE)
+    set(fastdds_VERSION "${fastrtps_VERSION}")
     if(NOT TARGET fastdds)
       add_library(fastdds ALIAS fastrtps)
     endif()
-    message(STATUS "Found FastDDS via fastrtps: ${fastrtps_VERSION}")
-  else()
-    message(WARNING "FastDDS not found. DDS extension will not be available. "
-                    "CDR serialization in the type system requires at least FastCDR.")
   endif()
-endif()
-
-if(fastdds_FOUND AND fastdds_VERSION)
-  message(STATUS "Found FastDDS: ${fastdds_VERSION}")
-endif()
-
-if(fastcdr_FOUND)
-  message(STATUS "Found FastCDR: ${fastcdr_VERSION}")
+  if(fastdds_VERSION AND fastcdr_VERSION)
+    string(REGEX MATCH "^[0-9]+" _ibmw_fastdds_major "${fastdds_VERSION}")
+    string(REGEX MATCH "^[0-9]+" _ibmw_fastcdr_major "${fastcdr_VERSION}")
+    if(_ibmw_fastdds_major GREATER_EQUAL 3 AND _ibmw_fastcdr_major LESS 2)
+      message(FATAL_ERROR "Incompatible SYSTEM DDS ABI mix: Fast DDS ${fastdds_VERSION} with Fast CDR ${fastcdr_VERSION}")
+    endif()
+  else()
+    message(WARNING "DDS package versions are incomplete; major ABI compatibility could not be verified")
+  endif()
+else()
+  message(FATAL_ERROR "Unsupported IBMW_DDS_PROVIDER='${IBMW_DDS_PROVIDER}'")
 endif()
 
 if(NOT IBMW_FASTCDR_PROVIDER_TARGET)
   set(IBMW_FASTCDR_PROVIDER_TARGET fastcdr)
 endif()
-
 if(NOT IBMW_FASTDDS_PROVIDER_TARGET)
   set(IBMW_FASTDDS_PROVIDER_TARGET fastdds)
 endif()
-
-# import targets:
-# fastcdr        (always available - core CDR serialization, v1 from ROS Humble)
-# fastdds        (optional - for DDS extension)
+message(STATUS "Found Fast DDS ${fastdds_VERSION} and Fast CDR ${fastcdr_VERSION} (${IBMW_DDS_PROVIDER})")

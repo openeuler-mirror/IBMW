@@ -41,11 +41,11 @@ typedef struct {
 /**
  * @brief Current ABI version for ibmw_core_base_t.
  *
- * Increment this when the layout of ibmw_core_base_t changes. Plugins
- * compiled against a different ABI version can detect the mismatch at
- * load time instead of silently calling the wrong function pointer.
+ * Increment this when the core C ABI, including handles reachable from
+ * ibmw_core_base_t, changes. Plugins compiled against a different ABI version
+ * can detect the mismatch before calling an incompatible function pointer.
  */
-#define IBMW_CORE_ABI_VERSION 1
+#define IBMW_CORE_ABI_VERSION 2
 
 /**
  * @brief IBMW runtime framework interface

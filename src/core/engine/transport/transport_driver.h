@@ -86,8 +86,8 @@ class TransportDriver {
    * first-success-wins.
    *
    * Default implementation returns false (zero-copy receive not
-   * supported). The dispatcher will then surface false to the caller
-   * (LoanedSubscriber<T>), which is expected to fall back to OnMessage.
+   * supported). The dispatcher surfaces false to the caller; this API does
+   * not silently replace zero-copy delivery with OnMessage.
    *
    * The callback embedded in `message_handler.callback` is a
    * `LoanedMessageCallback` (see transport_catalog.h) — driver invokes

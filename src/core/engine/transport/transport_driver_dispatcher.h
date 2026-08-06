@@ -12,6 +12,7 @@
 #include "c/util/function_base.h"
 #include "engine/transport/loaned_sample_handle.h"
 #include "engine/transport/transport_driver.h"
+#include "engine/transport/transport_driver_capabilities.h"
 #include "engine/transport/transport_framework_async_filter.h"
 #include "engine/transport/transport_catalog.h"
 #include "base/log_util.h"
@@ -24,6 +25,15 @@ struct RegisterSendTypeAccessInfoWrapper {
   std::string_view topic_name;
 
   const ibmw_type_support_base_t* msg_type_support;
+};
+
+struct RegisterLoanedPodAccessInfoWrapper {
+  std::string_view pkg_path;
+  std::string_view module_name;
+  std::string_view topic_name;
+  ibmw_string_view_t msg_type;
+  size_t initial_size_hint;
+  size_t alignment;
 };
 
 struct SendAccessInfoWrapper {
@@ -62,6 +72,9 @@ struct MessageHandlerAccessInfoWrapper {
   std::string_view module_name;
   std::string_view topic_name;
 
+  // Non-owning. As with the framework's ordinary type registration APIs,
+  // type support must have static registration lifetime and outlive dispatcher
+  // teardown (including disabled legacy-driver tombstones).
   const ibmw_type_support_base_t* msg_type_support;
   ibmw_function_base_t* callback;
 };
@@ -108,20 +121,26 @@ class TransportDriverDispatcher {
       const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
 
   void RegisterTransportDriver(TransportDriver* transport_driver_ptr);
+  void RegisterTransportDriver(
+      TransportDriver* transport_driver_ptr,
+      TransportDriverCapabilitiesV1 capabilities);
 
   // for access
   bool OnMessage(MessageHandlerAccessInfoWrapper&& wrapper);
   bool RegisterSendType(RegisterSendTypeAccessInfoWrapper&& wrapper);
+  bool RegisterLoanedPodTopic(RegisterLoanedPodAccessInfoWrapper&& wrapper);
   void Send(SendAccessInfoWrapper&& wrapper);
 
   // Phase 7 §7.3 §U: receiver-side zero-copy fast lane (counterpart of
   // Loan() below). Iterates the sub-topic driver list and asks each
   // driver's AttachLoaned() in turn until one returns true. Returns
   // false if no driver supports zero-copy receive for this topic+type
-  // (e.g. only dds is bound to the topic). Caller (typically
-  // LoanedSubscriber<T>) is expected to fall back to OnMessage() in
-  // that case.
+  // (e.g. only dds is bound to the topic). This zero-copy API does not
+  // silently fall back to OnMessage().
   bool AttachLoaned(MessageHandlerAccessInfoWrapper&& wrapper);
+  std::unique_ptr<LoanedSubscriptionHandle> AttachLoanedRetained(
+      MessageHandlerAccessInfoWrapper&& wrapper,
+      RetainedLoanOptions options);
 
   // Phase 7 §7.3 §K-3.3: user-level zero-copy fast lane.
   //
@@ -175,6 +194,8 @@ class TransportDriverDispatcher {
 
   // driver
   std::vector<TransportDriver*> transport_driver_index_vec_;
+  std::unordered_map<TransportDriver*, TransportDriverCapabilitiesV1>
+      transport_driver_capabilities_map_;
 
   std::vector<std::pair<std::string, std::vector<std::string>>> pub_topics_drivers_rules_;
   std::vector<std::pair<std::string, std::vector<std::string>>> sub_topics_drivers_rules_;
@@ -199,6 +220,21 @@ class TransportDriverDispatcher {
       ibmw::common::util::StringHash,
       std::equal_to<>>
       pub_topic_seq_map_;
+
+  struct PodRegistration {
+    TransportInfo info;
+    size_t initial_size_hint;
+    size_t alignment;
+    TransportDriver* driver;
+  };
+  std::unordered_map<std::string, std::unique_ptr<PodRegistration>>
+      pod_registration_map_;
+
+  // Legacy OnMessage has no unregister operation. Drivers may retain wrapper
+  // addresses even when registration fails, so release these only after every
+  // driver has completed Shutdown().
+  std::vector<std::unique_ptr<MessageHandlerWrapper>>
+      owned_legacy_message_handler_pool_;
 };
 
 }  // namespace ibmw::runtime::core::transport

@@ -96,6 +96,19 @@ class SenderAccess {
             .msg_ptr = msg_ptr});
   }
 
+  bool RegisterLoanedPodTopic(ibmw_string_view_t msg_type,
+                              size_t initial_size_hint,
+                              size_t alignment) {
+    return transport_driver_dispatcher_.RegisterLoanedPodTopic(
+        RegisterLoanedPodAccessInfoWrapper{
+            .pkg_path = pkg_path_,
+            .module_name = module_name_,
+            .topic_name = topic_name_,
+            .msg_type = msg_type,
+            .initial_size_hint = initial_size_hint,
+            .alignment = alignment});
+  }
+
   void MergeSubscribeContextToPublishContext(
       const ibmw_transport_context_base_t* subscribe_ctx_ptr, const ibmw_transport_context_base_t* publish_ctx_ptr) {
     ibmw::transport::ContextRef subscribe_ctx_ref(subscribe_ctx_ptr);
@@ -146,36 +159,71 @@ class SenderAccess {
   static ibmw_transport_sender_base_t GenBase(void* ctx) {
     return ibmw_transport_sender_base_t{
         .register_send_type = [](void* ctx, const ibmw_type_support_base_t* msg_type_support) -> bool {
-          return static_cast<SenderAccess*>(ctx)->RegisterSendType(msg_type_support);
+          try {
+            return static_cast<SenderAccess*>(ctx)->RegisterSendType(msg_type_support);
+          } catch (...) {
+            return false;
+          }
         },
         .send = [](void* ctx,
                       ibmw_string_view_t msg_type,
                       const ibmw_transport_context_base_t* ctx_ptr,
                       const void* msg_ptr) {
-          static_cast<SenderAccess*>(ctx)->Send(msg_type, ctx_ptr, msg_ptr);  //
+          try {
+            static_cast<SenderAccess*>(ctx)->Send(msg_type, ctx_ptr, msg_ptr);
+          } catch (...) {
+          }
         },
         .get_topic = [](void* ctx) -> ibmw_string_view_t {
-          return ibmw::util::ToIbmwStringView(static_cast<SenderAccess*>(ctx)->topic_name_);
+          try {
+            return ibmw::util::ToIbmwStringView(static_cast<SenderAccess*>(ctx)->topic_name_);
+          } catch (...) {
+            return {};
+          }
         },
         .merge_subscribe_context_to_publish_context = [](void* ctx,                                             //
                                                          const ibmw_transport_context_base_t* subscribe_ctx_ptr,  //
                                                          const ibmw_transport_context_base_t* publish_ctx_ptr) {  //
-          static_cast<SenderAccess*>(ctx)->MergeSubscribeContextToPublishContext(subscribe_ctx_ptr, publish_ctx_ptr);
+          try {
+            static_cast<SenderAccess*>(ctx)->MergeSubscribeContextToPublishContext(subscribe_ctx_ptr, publish_ctx_ptr);
+          } catch (...) {
+          }
         },
         .loan = [](void* ctx,
                    ibmw_string_view_t msg_type,
                    size_t requested_size,
                    ibmw_loan_mode_t mode,
                    ibmw_loaned_sample_handle_t* out_handle) {
-          static_cast<SenderAccess*>(ctx)->Loan(msg_type, requested_size, mode, out_handle);
+          if (out_handle == nullptr) return;
+          *out_handle = {};
+          try {
+            static_cast<SenderAccess*>(ctx)->Loan(msg_type, requested_size, mode, out_handle);
+          } catch (...) {
+          }
         },
         .publish_loaned = [](void* ctx, ibmw_loaned_sample_handle_t* handle) {
-          static_cast<SenderAccess*>(ctx)->PublishLoaned(handle);
+          try {
+            static_cast<SenderAccess*>(ctx)->PublishLoaned(handle);
+          } catch (...) {
+          }
         },
         .release_loaned = [](void* ctx, ibmw_loaned_sample_handle_t* handle) {
-          static_cast<SenderAccess*>(ctx)->ReleaseLoaned(handle);
+          try {
+            static_cast<SenderAccess*>(ctx)->ReleaseLoaned(handle);
+          } catch (...) {
+          }
         },
-        .ctx = ctx};
+        .ctx = ctx,
+        .register_loaned_pod_topic = [](
+            void* ctx, ibmw_string_view_t msg_type,
+            size_t initial_size_hint, size_t alignment) -> bool {
+          try {
+            return static_cast<SenderAccess*>(ctx)->RegisterLoanedPodTopic(
+                msg_type, initial_size_hint, alignment);
+          } catch (...) {
+            return false;
+          }
+        }};
   }
 
  private:
@@ -237,22 +285,114 @@ class ReceiverAccess {
             .callback = callback});
   }
 
+  class SubscriptionBase {
+   public:
+    explicit SubscriptionBase(
+        std::unique_ptr<LoanedSubscriptionHandle> subscription)
+        : subscription_(std::move(subscription)), base_(GenBase(this)) {}
+
+    ibmw_loaned_subscription_base_t* NativeHandle() noexcept { return &base_; }
+
+   private:
+    static ibmw_loaned_subscription_base_t GenBase(void* ctx) {
+      return ibmw_loaned_subscription_base_t{
+          .stop = [](void* ctx) {
+            try {
+              static_cast<SubscriptionBase*>(ctx)->subscription_->Stop();
+            } catch (...) {
+            }
+          },
+          .close = [](void* ctx, uint64_t timeout_ms) -> bool {
+            try {
+              return static_cast<SubscriptionBase*>(ctx)->subscription_->Close(
+                  std::chrono::milliseconds(timeout_ms));
+            } catch (...) {
+              return false;
+            }
+          },
+          .destroy = [](void* ctx) {
+            auto* self = static_cast<SubscriptionBase*>(ctx);
+            try {
+              self->subscription_->Stop();
+              self->subscription_->Close(std::chrono::milliseconds(0));
+            } catch (...) {
+            }
+            delete self;
+          },
+          .ctx = ctx};
+    }
+
+    std::unique_ptr<LoanedSubscriptionHandle> subscription_;
+    ibmw_loaned_subscription_base_t base_;
+  };
+
+  bool AttachLoanedRetained(
+      const ibmw_type_support_base_t* msg_type_support,
+      ibmw_function_base_t* callback,
+      ibmw_retained_loan_options_t options,
+      ibmw_loaned_subscription_base_t** out_subscription) {
+    if (options.max_outstanding == 0 || out_subscription == nullptr) {
+      return false;
+    }
+    *out_subscription = nullptr;
+
+    auto subscription = transport_driver_dispatcher_.AttachLoanedRetained(
+        MessageHandlerAccessInfoWrapper{
+            .pkg_path = pkg_path_,
+            .module_name = module_name_,
+            .topic_name = topic_name_,
+            .msg_type_support = msg_type_support,
+            .callback = callback},
+        RetainedLoanOptions{options.max_outstanding});
+    if (!subscription) return false;
+
+    auto* base = new SubscriptionBase(std::move(subscription));
+    *out_subscription = base->NativeHandle();
+    return true;
+  }
+
   static ibmw_transport_receiver_base_t GenBase(void* ctx) {
     return ibmw_transport_receiver_base_t{
         .on_message = [](void* ctx,
                         const ibmw_type_support_base_t* msg_type_support,
                         ibmw_function_base_t* callback) -> bool {
-          return static_cast<ReceiverAccess*>(ctx)->OnMessage(msg_type_support, callback);
+          try {
+            return static_cast<ReceiverAccess*>(ctx)->OnMessage(msg_type_support, callback);
+          } catch (...) {
+            return false;
+          }
         },
         .attach_loaned = [](void* ctx,
                            const ibmw_type_support_base_t* msg_type_support,
                            ibmw_function_base_t* callback) -> bool {
-          return static_cast<ReceiverAccess*>(ctx)->AttachLoaned(msg_type_support, callback);
+          try {
+            return static_cast<ReceiverAccess*>(ctx)->AttachLoaned(msg_type_support, callback);
+          } catch (...) {
+            return false;
+          }
         },
         .get_topic = [](void* ctx) -> ibmw_string_view_t {
-          return ibmw::util::ToIbmwStringView(static_cast<ReceiverAccess*>(ctx)->topic_name_);
+          try {
+            return ibmw::util::ToIbmwStringView(static_cast<ReceiverAccess*>(ctx)->topic_name_);
+          } catch (...) {
+            return {};
+          }
         },
-        .ctx = ctx};
+        .ctx = ctx,
+        .attach_loaned_retained = [](
+            void* ctx,
+            const ibmw_type_support_base_t* msg_type_support,
+            ibmw_function_base_t* callback,
+            ibmw_retained_loan_options_t options,
+            ibmw_loaned_subscription_base_t** out_subscription) -> bool {
+          if (out_subscription != nullptr) *out_subscription = nullptr;
+          try {
+            return static_cast<ReceiverAccess*>(ctx)->AttachLoanedRetained(
+                msg_type_support, callback, options, out_subscription);
+          } catch (...) {
+            return false;
+          }
+        }};
   }
 
  private:
@@ -377,15 +517,26 @@ class TransportAccess {
   static ibmw_transport_handle_base_t GenBase(void* ctx) {
     return ibmw_transport_handle_base_t{
         .get_sender = [](void* ctx, ibmw_string_view_t topic) -> const ibmw_transport_sender_base_t* {
-          return static_cast<TransportAccess*>(ctx)->GetPublisher(topic);
+          try {
+            return static_cast<TransportAccess*>(ctx)->GetPublisher(topic);
+          } catch (...) {
+            return nullptr;
+          }
         },
         .get_receiver = [](void* ctx, ibmw_string_view_t topic) -> const ibmw_transport_receiver_base_t* {
-          return static_cast<TransportAccess*>(ctx)->GetSubscriber(topic);
+          try {
+            return static_cast<TransportAccess*>(ctx)->GetSubscriber(topic);
+          } catch (...) {
+            return nullptr;
+          }
         },
         .merge_subscribe_context_to_publish_context = [](void* ctx,                                             //
                                                          const ibmw_transport_context_base_t* subscribe_ctx_ptr,  //
                                                          const ibmw_transport_context_base_t* publish_ctx_ptr) {  //
-          static_cast<TransportAccess*>(ctx)->MergeSubscribeContextToPublishContext(subscribe_ctx_ptr, publish_ctx_ptr);
+          try {
+            static_cast<TransportAccess*>(ctx)->MergeSubscribeContextToPublishContext(subscribe_ctx_ptr, publish_ctx_ptr);
+          } catch (...) {
+          }
         },
         .ctx = ctx};
   }

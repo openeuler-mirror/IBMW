@@ -27,12 +27,22 @@ Engine::Engine()
 
 Engine::~Engine() {
   try {
-    ShutdownImpl();
+    // AsyncStart's worker waits on this promise. Signal it before joining;
+    // running teardown first would leave the worker blocked forever.
+    Shutdown();
   } catch (const std::exception& e) {
-    MW_INFO("Engine destruct get exception, {}", e.what());
+    MW_ERROR("Engine destructor could not signal shutdown: {}", e.what());
+  } catch (...) {
+    MW_ERROR("Engine destructor could not signal shutdown: unknown exception");
   }
   if (async_shutdown_thread_.joinable()) {
     async_shutdown_thread_.join();
+  }
+  if (!shutdown_impl_flag_.load(std::memory_order_acquire)) {
+    MW_WARN("Engine teardown was not completed by the async worker; retrying once after join.");
+    if (!ShutdownImpl()) {
+      MW_ERROR("Engine destructor shutdown retry was vetoed during transport preparation.");
+    }
   }
 }
 
@@ -352,6 +362,7 @@ void Engine::Initialize(const Options& options) {
 // ---------------------------------------------------------------------------
 
 void Engine::StartImpl() {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   phase_.store(Phase::kStart, std::memory_order_release);
 
   MW_INFO("Gen initialization report:\n{}", GenInitializationReport());
@@ -374,31 +385,90 @@ void Engine::StartImpl() {
 // ShutdownImpl — iterate the subsystem table in REVERSE topological order.
 // ---------------------------------------------------------------------------
 
-void Engine::ShutdownImpl() {
-  if (std::atomic_exchange(&shutdown_impl_flag_, true)) return;
+bool Engine::ShutdownImpl() {
+  bool expected = false;
+  if (!shutdown_impl_in_progress_.compare_exchange_strong(
+          expected, true, std::memory_order_acq_rel)) {
+    return true;
+  }
+
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+  if (shutdown_impl_flag_.load(std::memory_order_acquire)) {
+    shutdown_impl_in_progress_.store(false, std::memory_order_release);
+    return true;
+  }
+  if (!transport_bus_.TryPrepareShutdown()) {
+    MW_WARN("Engine shutdown was vetoed during transport preparation; no "
+            "subsystem teardown was started and shutdown remains retryable.");
+    shutdown_impl_in_progress_.store(false, std::memory_order_release);
+    return false;
+  }
 
   MW_INFO("Shutting down...");
 
   phase_.store(Phase::kStopping, std::memory_order_release);
 
-  RunHooks(BeforePhase(Phase::kStopping));
+  std::string first_error;
+  size_t error_count = 0;
+  const auto record_error = [this, &first_error, &error_count](
+                                std::string_view operation,
+                                std::string_view detail) {
+    ++error_count;
+    if (first_error.empty()) {
+      first_error = std::string(operation) + ": " + std::string(detail);
+    }
+    MW_ERROR("Engine teardown '{}' failed: {}", operation, detail);
+  };
+  const auto run_stage = [&record_error](std::string_view operation,
+                                         const auto& fn) {
+    try {
+      fn();
+    } catch (const std::exception& e) {
+      record_error(operation, e.what());
+    } catch (...) {
+      record_error(operation, "unknown exception");
+    }
+  };
+  const auto run_shutdown_hooks = [this, &run_stage](HookPoint point,
+                                                     std::string_view name) {
+    const auto hooks = hooks_.find(point);
+    if (hooks == hooks_.end()) return;
+    for (size_t i = 0; i < hooks->second.size(); ++i) {
+      run_stage(std::string(name) + " hook #" + std::to_string(i),
+                hooks->second[i]);
+    }
+  };
+
+  run_shutdown_hooks(BeforePhase(Phase::kStopping), "before stopping phase");
 
   // Reverse iteration through init_order_ for proper dependency-respecting shutdown.
   for (auto it = init_order_.rbegin(); it != init_order_.rend(); ++it) {
     auto& entry = subsystems_[*it];
-    RunHooks(Before(Phase::kStopping, entry.id));
-    if (entry.pre_shutdown) entry.pre_shutdown();
-    entry.instance->Shutdown();
-    RunHooks(After(Phase::kStopping, entry.id));
+    run_shutdown_hooks(Before(Phase::kStopping, entry.id),
+                       std::string("before ") + std::string(entry.name));
+    if (entry.pre_shutdown) {
+      run_stage(std::string(entry.name) + " pre_shutdown", entry.pre_shutdown);
+    }
+    run_stage(std::string(entry.name) + " Shutdown",
+              [&entry] { entry.instance->Shutdown(); });
+    run_shutdown_hooks(After(Phase::kStopping, entry.id),
+                       std::string("after ") + std::string(entry.name));
   }
 
-  RunHooks(AfterPhase(Phase::kStopping));
+  run_shutdown_hooks(AfterPhase(Phase::kStopping), "after stopping phase");
 
   phase_.store(Phase::kStopped, std::memory_order_release);
+  shutdown_impl_flag_.store(true, std::memory_order_release);
+  shutdown_impl_in_progress_.store(false, std::memory_order_release);
+  if (error_count != 0) {
+    MW_ERROR("Engine teardown completed with {} error(s); first error: {}",
+             error_count, first_error);
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
-// Start / AsyncStart / Shutdown — public entry points (unchanged logic).
+// Start / AsyncStart / Shutdown — public entry points.
 // ---------------------------------------------------------------------------
 
 void Engine::Start() {
@@ -428,11 +498,23 @@ std::future<void> Engine::AsyncStart() {
 }
 
 void Engine::Shutdown() {
-  if (std::atomic_exchange(&shutdown_flag_, true)) return;
+  if (!std::atomic_exchange(&shutdown_flag_, true)) {
+    MW_INFO("Shutdown signal received.");
+    shutdown_promise_.set_value();
+    return;
+  }
 
-  MW_INFO("Shutdown signal received.");
+  if (shutdown_impl_in_progress_.load(std::memory_order_acquire) ||
+      phase_.load(std::memory_order_acquire) == Phase::kStopping) {
+    return;
+  }
 
-  shutdown_promise_.set_value();
+  // The first call remains signal-only. If the worker's prepare was vetoed,
+  // a later public call performs a real retry instead of being discarded.
+  if (!shutdown_impl_flag_.load(std::memory_order_acquire) ||
+      phase_.load(std::memory_order_acquire) != Phase::kStopped) {
+    ShutdownImpl();
+  }
 }
 
 // ---------------------------------------------------------------------------

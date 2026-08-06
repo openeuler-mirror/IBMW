@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include "engine/transport/transport_driver.h"
+#include "engine/transport/transport_driver_capabilities.h"
 #include "engine/transport/transport_driver_tools.h"
 #include "engine/thread_tools.h"
 #include "iceoryx_ext/iceoryx_bus.h"
@@ -33,7 +34,11 @@
 
 namespace ibmw::extensions::iceoryx_extension {
 
-class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transport::TransportDriver {
+class IBMW_ICEORYX_EXPORT IceoryxTransportDriver
+    : public runtime::core::transport::TransportDriver,
+      public runtime::core::transport::TransportShutdownCapabilityV1,
+      public runtime::core::transport::LoanedPodRegistrationCapabilityV1,
+      public runtime::core::transport::RetainedLoanCapabilityV1 {
  public:
   struct Options {
     std::string listener_thread_name;
@@ -52,6 +57,8 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transpo
 
   void Initialize(YAML::Node options_node) override;
   void Start() override;
+  bool CanShutdownFromCurrentThread() const noexcept override;
+  bool TryPrepareShutdown(std::chrono::milliseconds timeout) noexcept override;
   void Shutdown() override;
 
   void SetTransportCatalog(const runtime::core::transport::TransportCatalog* transport_catalog_ptr) noexcept override {
@@ -60,6 +67,9 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transpo
 
   bool RegisterSendType(
       const runtime::core::transport::SendTypeWrapper& send_type_wrapper) noexcept override;
+  bool RegisterLoanedPodTopic(
+      const runtime::core::transport::TransportInfo& info,
+      size_t initial_size_hint, size_t alignment) noexcept override;
   bool OnMessage(const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept override;
   void Send(runtime::core::transport::MessageFrame& msg_wrapper) noexcept override;
 
@@ -71,6 +81,10 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transpo
   // chunk when the user callback returns) and forwards payload+size.
   bool AttachLoaned(
       const runtime::core::transport::LoanedMessageHandlerWrapper& message_handler) noexcept override;
+  std::unique_ptr<runtime::core::transport::LoanedSubscriptionHandle>
+  AttachLoanedRetained(
+      const runtime::core::transport::LoanedMessageHandlerWrapper& message_handler,
+      runtime::core::transport::RetainedLoanOptions options) noexcept override;
 
   // ----- Zero-copy Loan API (kPodOnly + kCtxMetaThenPayload) -----
   // Phase 7 §X1: ctx parameter unifies the previously extension-only
@@ -95,7 +109,9 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transpo
   // "/transport_zc_pod/<topic>/<msg_type>". Idempotent.
   // Returns true if topic is now registered (or was already).
   bool EnsurePodTopic(std::string_view topic, std::string_view msg_type,
-                      size_t initial_size_hint) noexcept;
+                      size_t initial_size_hint,
+                      size_t alignment =
+                          iox::CHUNK_DEFAULT_USER_PAYLOAD_ALIGNMENT) noexcept;
 
   // Register a POD subscriber. The callback receives a pointer into the
   // iceoryx SHM chunk and its size in bytes. The callback MUST NOT retain
@@ -149,7 +165,6 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transpo
 
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
-  bool sched_info_set_ = false;
 
   const runtime::core::transport::TransportCatalog* transport_catalog_ptr_ = nullptr;
 
@@ -157,16 +172,18 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver : public runtime::core::transpo
 
   std::unordered_map<
       std::string,
-      std::unique_ptr<ibmw::runtime::core::transport::MessageHandlerTool>>
+      std::shared_ptr<ibmw::runtime::core::transport::MessageHandlerTool>>
       message_handler_map_;
 
   // ----- Zero-copy POD path bookkeeping -----
   // Key: "<topic>|<msg_type>" (raw, not URL-encoded). Value: pointer borrowed
   // from iceoryx_bus_ (lifetime owned by the bus). Topics live until Shutdown.
-  std::unordered_map<std::string, IoxPublisher*> pod_pub_map_;
-  // PodMessageCallback storage to keep the std::function alive across the
-  // lifetime of the driver (iceoryx Listener captures by reference).
-  std::vector<std::unique_ptr<PodMessageCallback>> pod_callback_storage_;
+  struct PodPublisherEndpoint {
+    IoxPublisher* publisher;
+    size_t initial_size_hint;
+    size_t alignment;
+  };
+  std::unordered_map<std::string, PodPublisherEndpoint> pod_pub_map_;
 };
 
 // R8.2 mixed-API detection.

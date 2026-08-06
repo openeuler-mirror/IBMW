@@ -13,8 +13,8 @@
 //
 // This header defines a *transport-agnostic* handle so that:
 //   - applications get a uniform borrow/publish/release surface;
-//   - transports that don't support loaned samples can return false from
-//     LoanSample(...) and applications fall back to the regular Send() path;
+//   - transports that don't support loaned samples return false from
+//     LoanSample(...); this API does not silently publish through Send();
 //   - the core abstraction does NOT pull in any transport-specific headers.
 //
 // Wire-format modes

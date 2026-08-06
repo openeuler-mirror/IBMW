@@ -4,6 +4,8 @@
 #include "iceoryx_ext/iceoryx_transport_driver.h"
 #include "cpp/util/buffer_array_allocator.h"
 #include "iceoryx_ext/global.h"
+#include "iceoryx_ext/internal/checked_size.h"
+#include "iceoryx_ext/internal/payload_size.h"
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
 #include "iceoryx_posh/mepoo/chunk_header.hpp"
@@ -67,11 +69,30 @@ void IceoryxTransportDriver::Start() {
       "Method can only be called when state is 'Init'.");
 }
 
+bool IceoryxTransportDriver::CanShutdownFromCurrentThread() const noexcept {
+  return !IsIceoryxListenerCallbackThread();
+}
+
+bool IceoryxTransportDriver::TryPrepareShutdown(
+    std::chrono::milliseconds timeout) noexcept {
+  if (!CanShutdownFromCurrentThread()) return false;
+  return iceoryx_bus_.TryPrepareShutdown(timeout);
+}
+
 void IceoryxTransportDriver::Shutdown() {
-  if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
+  if (IsIceoryxListenerCallbackThread()) {
+    MW_ERROR("IceoryxTransportDriver::Shutdown cannot run on an iceoryx listener callback thread; runtime lifecycle shutdown must run on its owner thread.");
     return;
+  }
+  if (state_.load() == State::kShutdown) return;
+  if (!TryPrepareShutdown(std::chrono::seconds(1))) {
+    MW_ERROR("IceoryxTransportDriver::Shutdown could not prepare; resources "
+             "remain intact for a retry.");
+    return;
+  }
 
   iceoryx_bus_.Shutdown();
+  state_.store(State::kShutdown);
 }
 
 bool IceoryxTransportDriver::RegisterSendType(
@@ -98,6 +119,17 @@ bool IceoryxTransportDriver::RegisterSendType(
   }
 }
 
+bool IceoryxTransportDriver::RegisterLoanedPodTopic(
+    const runtime::core::transport::TransportInfo& info,
+    size_t initial_size_hint, size_t alignment) noexcept {
+  if (state_.load() != State::kInit) {
+    MW_ERROR("Loaned POD topics can only be registered in Init state.");
+    return false;
+  }
+  return EnsurePodTopic(info.topic_name, info.msg_type, initial_size_hint,
+                        alignment);
+}
+
 bool IceoryxTransportDriver::OnMessage(
     const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept {
   try {
@@ -118,78 +150,93 @@ bool IceoryxTransportDriver::OnMessage(
     }
 
     // if not registered, register subscriber with url bind to handle to iceoryx
-    auto msg_handler_tool_unique_ptr = std::make_unique<runtime::core::transport::MessageHandlerTool>();
-    msg_handler_tool_unique_ptr->AddMessageHandlerWrapper(&message_handler);
+    auto msg_handler_tool =
+        std::make_shared<runtime::core::transport::MessageHandlerTool>();
+    msg_handler_tool->AddMessageHandlerWrapper(&message_handler);
 
-    auto* msg_handler_tool_ptr = msg_handler_tool_unique_ptr.get();
-
-    message_handler_map_.emplace(pattern, std::move(msg_handler_tool_unique_ptr));
+    auto sched_info_set = std::make_shared<std::atomic_bool>(false);
+    auto listener_options = options_;
 
     auto handle =
-        [this, topic_name = info.topic_name, msg_handler_tool_ptr](iox::popo::UntypedSubscriber* subscriber) {
+        [sched_info_set, listener_options = std::move(listener_options),
+         msg_handler_tool](
+            const void* payload, size_t payload_size,
+            std::function<void()>&& release) {
+          const auto validated_pkg_size =
+              internal::ValidateEncodedPayloadSize(payload, payload_size);
+          if (!validated_pkg_size) {
+            MW_WARN("Discard malformed iceoryx transport chunk: size {}.",
+                    payload_size);
+            if (release) release();
+            return;
+          }
           try {
             // if not set sched info, set it
-            if (!sched_info_set_) [[unlikely]] {
-              sched_info_set_ = true;
-              auto thread_name = options_.listener_thread_name;
+            if (!sched_info_set->exchange(true)) [[unlikely]] {
+              auto thread_name = listener_options.listener_thread_name;
               if (!thread_name.empty()) {
                 runtime::core::util::SetNameForCurrentThread(thread_name);
               }
 
-              auto cpu_set = options_.listener_thread_bind_cpu;
+              auto cpu_set = listener_options.listener_thread_bind_cpu;
               if (!cpu_set.empty()) {
                 runtime::core::util::BindCpuForCurrentThread(cpu_set);
               }
 
-              auto sched_policy = options_.listener_thread_sched_policy;
+              auto sched_policy = listener_options.listener_thread_sched_policy;
               if (!sched_policy.empty()) {
                 runtime::core::util::SetCpuSchedForCurrentThread(sched_policy);
               }
             }
             // read data from shared memory : pkg_size | serialization_type | ctx_num | ctx_key1 | ctx_val1 | ... | ctx_keyN | ctx_valN | msg_buffer
-            // use while struck to make sure all packages are read
-            while (subscriber->hasData()) {
-              subscriber->take()
-                  .and_then([&](const void* payload) {
-                    auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
+            auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
 
-                    uint32_t pkg_size = util::GetUint32FromBuf(static_cast<const char*>(payload));
+            const uint32_t pkg_size = *validated_pkg_size;
 
-                    util::ConstBufferOperator buf_oper(static_cast<const char*>(payload) + 4, pkg_size - 4);
+            util::ConstBufferOperator buf_oper(static_cast<const char*>(payload) + 4, pkg_size - 4);
 
-                    // get serialization type
-                    std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
-                    ctx_ptr->SetSerializationType(serialization_type);
+            // get serialization type
+            std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
+            ctx_ptr->SetSerializationType(serialization_type);
 
-                    //  get context meta
-                    size_t ctx_num = buf_oper.GetUint8();
-                    for (size_t ii = 0; ii < ctx_num; ++ii) {
-                      auto key = buf_oper.GetString(util::BufferLenType::kUInt16);
-                      auto val = buf_oper.GetString(util::BufferLenType::kUInt16);
-                      ctx_ptr->SetMetaValue(key, val);
-                    }
-
-                    ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
-
-                    // get msg buffer
-                    auto remaining_buf = buf_oper.GetRemainingBuffer();
-
-                    msg_handler_tool_ptr->DoMessageCallback(
-                        ctx_ptr, serialization_type, static_cast<const void*>(remaining_buf.data()), remaining_buf.size());
-
-                    // release shm
-                    subscriber->release(payload);
-                  })
-                  .or_else([](auto& error) {
-                    ;  // data has not been ready
-                  });
+            //  get context meta
+            size_t ctx_num = buf_oper.GetUint8();
+            for (size_t ii = 0; ii < ctx_num; ++ii) {
+              auto key = buf_oper.GetString(util::BufferLenType::kUInt16);
+              auto val = buf_oper.GetString(util::BufferLenType::kUInt16);
+              ctx_ptr->SetMetaValue(key, val);
             }
+
+            ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, "iceoryx");
+
+            // get msg buffer
+            auto remaining_buf = buf_oper.GetRemainingBuffer();
+
+            msg_handler_tool->DoMessageCallback(
+                ctx_ptr, serialization_type,
+                static_cast<const void*>(remaining_buf.data()),
+                remaining_buf.size());
           } catch (const std::exception& e) {
             MW_WARN("Handle Iceoryx transport msg failed, exception info: {}", e.what());
+          } catch (...) {
+            MW_WARN("Handle Iceoryx transport msg failed with an unknown exception.");
           }
+          if (release) release();
         };
 
-    iceoryx_bus_.RegisterSubscriber(pattern, std::move(handle));
+    auto registration =
+        iceoryx_bus_.RegisterSubscriber(pattern, std::move(handle));
+    try {
+      const auto emplace_result =
+          message_handler_map_.emplace(pattern, std::move(msg_handler_tool));
+      if (!emplace_result.second) {
+        throw std::runtime_error(
+            "Iceoryx message handler URL is already registered");
+      }
+    } catch (...) {
+      registration->Stop();
+      throw;
+    }
 
     MW_INFO("Register subscribe type  to iceoryx transport, url: {}", pattern);
 
@@ -315,7 +362,11 @@ void IceoryxTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wr
       if (!serialize_ret) [[unlikely]] {
         if (allocator.IsOutOfMemory()) {
           // release old shm and loan a new size shm
-          iox_pub_ctx_ptr->UpdateLoanShm(loaned_shm, loaned_shm.Size() * 2);
+          if (loaned_shm.Size() == std::numeric_limits<size_t>::max()) {
+            throw std::length_error("Iceoryx shm growth overflow");
+          }
+          iox_pub_ctx_ptr->UpdateLoanShm(loaned_shm,
+                                         loaned_shm.Size() + 1U);
           continue;
         }
 
@@ -382,23 +433,56 @@ struct CtxMetaLoanToken {
   void* chunk_ptr;     // start of iceoryx user payload (i.e. base of header)
   size_t total_size;   // header_size + payload_size, for pkg_size field
 };
+
+class RawLoanGuard {
+ public:
+  RawLoanGuard(IoxPublisher* publisher, void* chunk) noexcept
+      : publisher_(publisher), chunk_(chunk) {}
+  ~RawLoanGuard() {
+    if (chunk_ != nullptr) publisher_->ReleaseRaw(chunk_);
+  }
+
+  RawLoanGuard(const RawLoanGuard&) = delete;
+  RawLoanGuard& operator=(const RawLoanGuard&) = delete;
+
+  void Disarm() noexcept { chunk_ = nullptr; }
+
+ private:
+  IoxPublisher* publisher_;
+  void* chunk_;
+};
 }  // namespace
 
 bool IceoryxTransportDriver::EnsurePodTopic(std::string_view topic,
                                             std::string_view msg_type,
-                                            size_t /*initial_size_hint*/) noexcept {
+                                            size_t initial_size_hint,
+                                            size_t alignment) noexcept {
   try {
+    if (initial_size_hint == 0 ||
+        initial_size_hint > std::numeric_limits<uint32_t>::max() ||
+        alignment == 0 || alignment > std::numeric_limits<uint32_t>::max() ||
+        (alignment & (alignment - 1)) != 0) {
+      MW_ERROR("EnsurePodTopic: invalid size/alignment ({}, {})",
+               initial_size_hint, alignment);
+      return false;
+    }
     auto key = MakePodKey(topic, msg_type);
-    if (pod_pub_map_.find(key) != pod_pub_map_.end()) return true;
+    if (const auto existing = pod_pub_map_.find(key);
+        existing != pod_pub_map_.end()) {
+      return existing->second.initial_size_hint == initial_size_hint &&
+             existing->second.alignment == alignment;
+    }
 
     auto url = MakePodUrl(topic, msg_type);
-    iceoryx_bus_.RegisterPublisher(url);
+    iceoryx_bus_.RegisterPublisher(url, initial_size_hint);
     auto* pub = iceoryx_bus_.GetPublisher(url);
     if (pub == nullptr) {
       MW_ERROR("EnsurePodTopic: failed to obtain publisher for url={}", url);
       return false;
     }
-    pod_pub_map_.emplace(std::move(key), pub);
+    pod_pub_map_.emplace(
+        std::move(key),
+        PodPublisherEndpoint{pub, initial_size_hint, alignment});
     MW_INFO("Registered iceoryx zero-copy POD publisher, url: {}", url);
     return true;
   } catch (const std::exception& e) {
@@ -413,27 +497,19 @@ bool IceoryxTransportDriver::RegisterPodSubscriber(std::string_view topic,
   try {
     auto url = MakePodUrl(topic, msg_type);
 
-    auto cb_storage = std::make_unique<PodMessageCallback>(std::move(callback));
-    auto* cb_ptr = cb_storage.get();
-    pod_callback_storage_.push_back(std::move(cb_storage));
+    auto cb_storage =
+        std::make_shared<PodMessageCallback>(std::move(callback));
 
-    auto handle = [cb_ptr](iox::popo::UntypedSubscriber* subscriber) {
-      while (subscriber->hasData()) {
-        subscriber->take()
-            .and_then([&](const void* payload) {
-              auto chunk_header =
-                  iox::mepoo::ChunkHeader::fromUserPayload(payload);
-              size_t payload_size =
-                  chunk_header ? chunk_header->userPayloadSize() : 0;
-              try {
-                (*cb_ptr)(payload, payload_size);
-              } catch (const std::exception& e) {
-                MW_WARN("POD subscriber callback threw: {}", e.what());
-              }
-              subscriber->release(payload);
-            })
-            .or_else([](auto&) { /* no data ready */ });
+    auto handle = [cb_storage](const void* payload, size_t payload_size,
+                               std::function<void()>&& release) {
+      try {
+        (*cb_storage)(payload, payload_size);
+      } catch (const std::exception& e) {
+        MW_WARN("POD subscriber callback threw: {}", e.what());
+      } catch (...) {
+        MW_WARN("POD subscriber callback threw an unknown exception.");
       }
+      if (release) release();
     };
 
     iceoryx_bus_.RegisterSubscriber(url, std::move(handle));
@@ -451,9 +527,8 @@ bool IceoryxTransportDriver::RegisterPodSubscriber(std::string_view topic,
 // via LoanSample(kPodOnly) and a receiver that attached via this path
 // see each other on the SHM channel without any header / ctx-meta in
 // between. The dispatcher-supplied LoanedMessageHandlerCallback gets
-// wrapped in a PodMessageCallback that drops ctx_ptr (POD path has
-// none) and the release functor (iceoryx releases the chunk
-// automatically when our internal handler returns).
+// wrapped in a callback that drops ctx_ptr (POD path has none) and forwards
+// the real release token to the dispatcher.
 bool IceoryxTransportDriver::AttachLoaned(
     const runtime::core::transport::LoanedMessageHandlerWrapper& message_handler) noexcept {
   if (state_.load() != State::kInit) [[unlikely]] {
@@ -461,19 +536,76 @@ bool IceoryxTransportDriver::AttachLoaned(
     return false;
   }
 
-  const auto& info = message_handler.info;
-  auto loaned_cb = message_handler.callback;  // copy std::function (cheap)
+  try {
+    const auto& info = message_handler.info;
+    auto loaned_cb = message_handler.callback;
+    auto handle = [loaned_cb = std::move(loaned_cb)](
+                      const void* payload, size_t size,
+                      std::function<void()>&& release) {
+      loaned_cb(/*ctx_ptr=*/nullptr, payload, size, std::move(release));
+    };
+    return static_cast<bool>(iceoryx_bus_.RegisterSubscriber(
+        MakePodUrl(info.topic_name, info.msg_type), std::move(handle)));
+  } catch (const std::exception& e) {
+    MW_ERROR("AttachLoaned exception: {}", e.what());
+    return false;
+  }
+}
 
-  // Wrap LoanedMessageHandlerCallback into PodMessageCallback. POD path
-  // has no ctx_ptr (publisher used kPodOnly mode) and the release
-  // functor is a no-op because the iceoryx Listener thread released the
-  // chunk synchronously after our PodMessageCallback returns.
-  PodMessageCallback pod_cb =
-      [loaned_cb = std::move(loaned_cb)](const void* payload, size_t size) {
-        loaned_cb(/*ctx_ptr=*/nullptr, payload, size, /*release=*/[] {});
-      };
+namespace {
+class IoxLoanedSubscriptionHandle final
+    : public runtime::core::transport::LoanedSubscriptionHandle {
+ public:
+  explicit IoxLoanedSubscriptionHandle(
+      std::shared_ptr<IoxSubscriptionState> state)
+      : state_(std::move(state)) {}
+  ~IoxLoanedSubscriptionHandle() override {
+    // Stop is nonblocking. The state remains strongly owned by the bus
+    // registry until its worker has detached the listener and observed both
+    // callback and retained-loan quiescence; only then does it deregister.
+    Stop();
+  }
 
-  return RegisterPodSubscriber(info.topic_name, info.msg_type, std::move(pod_cb));
+  void Stop() noexcept override { state_->Stop(); }
+  bool Close(std::chrono::milliseconds timeout) noexcept override {
+    return state_->Close(timeout);
+  }
+
+ private:
+  std::shared_ptr<IoxSubscriptionState> state_;
+};
+}  // namespace
+
+std::unique_ptr<runtime::core::transport::LoanedSubscriptionHandle>
+IceoryxTransportDriver::AttachLoanedRetained(
+    const runtime::core::transport::LoanedMessageHandlerWrapper& message_handler,
+    runtime::core::transport::RetainedLoanOptions options) noexcept {
+  if (state_.load() != State::kInit || options.max_outstanding == 0 ||
+      options.max_outstanding >
+          iox::MAX_CHUNKS_HELD_PER_SUBSCRIBER_SIMULTANEOUSLY) {
+    MW_ERROR("Invalid retained loan max_outstanding {}; iceoryx supports 1..{}.",
+             options.max_outstanding,
+             iox::MAX_CHUNKS_HELD_PER_SUBSCRIBER_SIMULTANEOUSLY);
+    return nullptr;
+  }
+
+  try {
+    const auto& info = message_handler.info;
+    auto callback = message_handler.callback;
+    auto state = iceoryx_bus_.RegisterSubscriber(
+        MakePodUrl(info.topic_name, info.msg_type),
+        [callback = std::move(callback)](
+            const void* payload, size_t size,
+            std::function<void()>&& release) {
+          callback(nullptr, payload, size, std::move(release));
+        },
+        IoxSubscriberRegistrationOptions{
+            .retained = true, .max_outstanding = options.max_outstanding});
+    return std::make_unique<IoxLoanedSubscriptionHandle>(std::move(state));
+  } catch (const std::exception& e) {
+    MW_ERROR("AttachLoanedRetained exception: {}", e.what());
+    return nullptr;
+  }
 }
 
 bool IceoryxTransportDriver::LoanSample(
@@ -512,7 +644,11 @@ bool IceoryxTransportDriver::LoanSample(
       size_t header_size = ComputeCtxMetaHeaderSize(serialization_type, kv_map);
       if (header_size == 0) return false;  // overflow detected
 
-      size_t total_size = header_size + requested_size;
+      size_t total_size = 0;
+      if (!internal::CheckedAddSize(header_size, requested_size,
+                                    total_size)) {
+        return false;
+      }
       void* chunk = pub->LoanRaw(total_size);
       if (chunk == nullptr) return false;
 
@@ -525,7 +661,9 @@ bool IceoryxTransportDriver::LoanSample(
         return false;
       }
 
+      RawLoanGuard chunk_guard(pub, chunk);
       auto* token = new CtxMetaLoanToken{pub, chunk, total_size};
+      chunk_guard.Disarm();
       out_handle.user_payload_ptr =
           static_cast<void*>(static_cast<char*>(chunk) + header_size);
       out_handle.user_payload_size = requested_size;
@@ -548,13 +686,14 @@ bool IceoryxTransportDriver::LoanSample(
               "topic={} msg_type={}", info.topic_name, info.msg_type);
       return false;
     }
-    void* chunk = it->second->LoanRaw(requested_size);
+    void* chunk = it->second.publisher->LoanRaw(requested_size,
+                                                it->second.alignment);
     if (chunk == nullptr) return false;
 
     out_handle.user_payload_ptr = chunk;
     out_handle.user_payload_size = requested_size;
     out_handle.mode = runtime::core::transport::LoanMode::kPodOnly;
-    out_handle.driver_token = static_cast<void*>(it->second);
+    out_handle.driver_token = static_cast<void*>(it->second.publisher);
     out_handle.source_driver = this;  // Phase 7 §7.3 §K-3.3
     return true;
   } catch (const std::exception& e) {
@@ -676,7 +815,10 @@ bool IceoryxTransportDriver::LoanSerializedSample(
       return false;
     }
 
-    auto* token = new CtxMetaLoanToken{pub, chunk, header_size + actual_payload_size};
+    RawLoanGuard chunk_guard(pub, chunk);
+    auto* token =
+        new CtxMetaLoanToken{pub, chunk, header_size + actual_payload_size};
+    chunk_guard.Disarm();
     out_handle.user_payload_ptr =
         static_cast<void*>(static_cast<char*>(chunk) + header_size);
     out_handle.user_payload_size = actual_payload_size;

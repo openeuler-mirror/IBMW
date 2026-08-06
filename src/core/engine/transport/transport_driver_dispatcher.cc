@@ -44,15 +44,34 @@ void TransportDriverDispatcher::Shutdown() {
     return;
 
   const bool shutdown_profile = IsTransportShutdownProfileEnabled();
+  size_t error_count = 0;
+  std::string first_error;
   for (auto& driver : transport_driver_index_vec_) {
     if (shutdown_profile) {
       MW_INFO("Transport shutdown profile [driver-start]: {}", driver->Name());
     }
     MW_TRACE("Shutdown transport driver '{}'.", driver->Name());
-    driver->Shutdown();
+    try {
+      driver->Shutdown();
+    } catch (const std::exception& e) {
+      ++error_count;
+      if (first_error.empty()) first_error = e.what();
+      MW_ERROR("Shutdown transport driver '{}' failed: {}", driver->Name(),
+               e.what());
+    } catch (...) {
+      ++error_count;
+      if (first_error.empty()) first_error = "unknown exception";
+      MW_ERROR("Shutdown transport driver '{}' failed: unknown exception",
+               driver->Name());
+    }
     if (shutdown_profile) {
       MW_INFO("Transport shutdown profile [driver-done]: {}", driver->Name());
     }
+  }
+  owned_legacy_message_handler_pool_.clear();
+  if (error_count != 0) {
+    MW_ERROR("Transport driver shutdown completed with {} error(s); first error: {}",
+             error_count, first_error);
   }
 }
 
@@ -113,11 +132,19 @@ void TransportDriverDispatcher::SetSubTopicsDriversRules(
 
 void TransportDriverDispatcher::RegisterTransportDriver(
     TransportDriver* transport_driver_ptr) {
+  RegisterTransportDriver(transport_driver_ptr, {});
+}
+
+void TransportDriverDispatcher::RegisterTransportDriver(
+    TransportDriver* transport_driver_ptr,
+    TransportDriverCapabilitiesV1 capabilities) {
   MW_REQUIRE(
       state_.load() == State::kPreInit,
       "Method can only be called when state is 'PreInit'.");
 
   transport_driver_index_vec_.emplace_back(transport_driver_ptr);
+  transport_driver_capabilities_map_.emplace(transport_driver_ptr,
+                                              capabilities);
 }
 
 TransportDriverDispatcher::TopicDriverInfoMap TransportDriverDispatcher::GetPubTopicDriverInfo() const {

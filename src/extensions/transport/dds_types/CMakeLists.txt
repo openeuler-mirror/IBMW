@@ -8,18 +8,8 @@
 #   the DDS transport driver.
 # Both FastCDR and FastDDS (fastrtps) headers are needed by consumers.
 
-# Find Fast-DDS (try fastdds 3 first, fallback to fastrtps for ROS2 compatibility)
-if(NOT fastdds_FOUND AND NOT TARGET eProsima_atomic)
-  ibmw_find_target_package(fastdds VERSION 3 QUIET FEATURE dds-types)
-endif()
-if(NOT fastdds_FOUND)
-  ibmw_find_target_package(fastrtps QUIET FEATURE dds-types)
-  if(fastrtps_FOUND)
-    set(fastdds_FOUND TRUE)
-    if(NOT TARGET fastdds)
-      add_library(fastdds ALIAS fastrtps)
-    endif()
-  endif()
+if(NOT IBMW_FASTCDR_PROVIDER_TARGET OR NOT IBMW_FASTDDS_PROVIDER_TARGET)
+  message(FATAL_ERROR "dds_types requires the explicitly resolved IBMW DDS provider targets")
 endif()
 
 # Get the current folder name
@@ -60,11 +50,7 @@ target_link_libraries(
             ibmw::internal)
 
 # Add FastDDS dependency if available (needed for GenericDdsPubSubType)
-if(fastdds_FOUND)
-  target_link_libraries(
-    ${CUR_TARGET_NAME}
-    INTERFACE ${IBMW_FASTDDS_PROVIDER_TARGET})
-endif()
+target_link_libraries(${CUR_TARGET_NAME} INTERFACE ${IBMW_FASTDDS_PROVIDER_TARGET})
 
 # Set installation of target
 if(IBMW_INSTALL)

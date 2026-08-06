@@ -5,6 +5,11 @@ include(FetchContent)
 
 message(STATUS "get iceoryx...")
 
+if(IBMW_ICEORYX_USE_PACKAGE)
+  find_package(iceoryx_posh CONFIG REQUIRED)
+  return()
+endif()
+
 set(iceoryx_DOWNLOAD_URL
     "https://github.com/eclipse-iceoryx/iceoryx/archive/refs/tags/v2.95.4.tar.gz"
     CACHE STRING "")

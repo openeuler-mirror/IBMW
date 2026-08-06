@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string_view>
 #include <unordered_map>
@@ -52,6 +53,17 @@ struct LoanedMessageHandlerWrapper {
   LoanedMessageHandlerCallback callback;
 };
 
+struct RetainedLoanOptions {
+  size_t max_outstanding = 1;
+};
+
+class LoanedSubscriptionHandle {
+ public:
+  virtual ~LoanedSubscriptionHandle() = default;
+  virtual void Stop() noexcept = 0;
+  virtual bool Close(std::chrono::milliseconds timeout) noexcept = 0;
+};
+
 struct SendTypeWrapper {
   TransportInfo info;
   std::unordered_set<std::string> require_cache_serialization_types;
@@ -82,6 +94,18 @@ class TransportCatalog {
   const ibmw::common::util::LoggerWrapper& GetLogger() const { return *logger_ptr_; }
 
   bool OnMessage(std::unique_ptr<MessageHandlerWrapper>&& message_handler_ptr);
+
+  bool ContainsMessageHandler(
+      std::string_view msg_type,
+      std::string_view topic_name,
+      std::string_view pkg_path,
+      std::string_view module_name) const;
+
+  bool EraseMessageHandler(
+      std::string_view msg_type,
+      std::string_view topic_name,
+      std::string_view pkg_path,
+      std::string_view module_name);
 
   bool RegisterSendType(
       std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr);

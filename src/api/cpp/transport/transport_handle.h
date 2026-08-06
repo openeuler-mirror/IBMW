@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <chrono>
 #include <string_view>
+#include <utility>
 
 #include "c/transport/transport_handle_base.h"
 #include "cpp/transport/transport_context.h"
@@ -29,6 +31,113 @@ using MessageCallback = ibmw::util::Function<ibmw_function_receiver_callback_ops
 // no deserialization. Used by LoanedSubscriber<T> (loaned_subscriber.h).
 using LoanedMessageCallback = ibmw::util::Function<ibmw_function_loaned_receiver_callback_ops_t>;
 
+struct RetainedLoanOptions {
+  // Samples arriving while this many loans are outstanding are dropped and
+  // are not delivered later. Releasing a loan permits future deliveries.
+  size_t max_outstanding = 1;
+};
+
+class ReceivedLoan {
+ public:
+  ReceivedLoan() = default;
+  ~ReceivedLoan() { Release(); }
+
+  ReceivedLoan(const ReceivedLoan&) = delete;
+  ReceivedLoan& operator=(const ReceivedLoan&) = delete;
+
+  ReceivedLoan(ReceivedLoan&& other) noexcept
+      : data_(std::exchange(other.data_, nullptr)),
+        size_(std::exchange(other.size_, 0)),
+        release_(std::move(other.release_)) {}
+
+  ReceivedLoan& operator=(ReceivedLoan&& other) noexcept {
+    if (this != &other) {
+      Release();
+      data_ = std::exchange(other.data_, nullptr);
+      size_ = std::exchange(other.size_, 0);
+      release_ = std::move(other.release_);
+    }
+    return *this;
+  }
+
+  const void* Data() const noexcept { return data_; }
+  size_t Size() const noexcept { return size_; }
+  const void* data() const noexcept { return data_; }
+  size_t size() const noexcept { return size_; }
+  explicit operator bool() const noexcept { return static_cast<bool>(release_); }
+
+  void Release() noexcept {
+    if (release_) {
+      auto release = std::move(release_);
+      release();
+    }
+    data_ = nullptr;
+    size_ = 0;
+  }
+
+  ReceivedLoan(const void* data,
+               size_t size,
+               ibmw_function_base_t* release_callback) noexcept
+      : data_(data), size_(size), release_(release_callback) {}
+
+ private:
+  const void* data_ = nullptr;
+  size_t size_ = 0;
+  SubscriberReleaseCallback release_;
+};
+
+class LoanedSubscription {
+ public:
+  LoanedSubscription() = default;
+  // Requests stop and deregistration without waiting. Use Close() when
+  // quiescence is required; callbacks and loans may keep driver state alive.
+  ~LoanedSubscription() { Reset(); }
+
+  LoanedSubscription(const LoanedSubscription&) = delete;
+  LoanedSubscription& operator=(const LoanedSubscription&) = delete;
+
+  LoanedSubscription(LoanedSubscription&& other) noexcept
+      : base_ptr_(std::exchange(other.base_ptr_, nullptr)) {}
+
+  LoanedSubscription& operator=(LoanedSubscription&& other) noexcept {
+    if (this != &other) {
+      Reset();
+      base_ptr_ = std::exchange(other.base_ptr_, nullptr);
+    }
+    return *this;
+  }
+
+  explicit operator bool() const noexcept { return base_ptr_ != nullptr; }
+
+  void Stop() noexcept {
+    if (base_ptr_ != nullptr && base_ptr_->stop != nullptr) {
+      base_ptr_->stop(base_ptr_->ctx);
+    }
+  }
+
+  bool Close(std::chrono::milliseconds timeout) noexcept {
+    if (base_ptr_ == nullptr) return true;
+    if (base_ptr_->stop == nullptr || base_ptr_->close == nullptr) return false;
+    Stop();
+    return base_ptr_->close(
+        base_ptr_->ctx, static_cast<uint64_t>(timeout.count() < 0 ? 0 : timeout.count()));
+  }
+
+  void Reset() noexcept {
+    if (base_ptr_ != nullptr) {
+      if (base_ptr_->destroy != nullptr) base_ptr_->destroy(base_ptr_->ctx);
+      base_ptr_ = nullptr;
+    }
+  }
+
+ private:
+  friend class ReceiverRef;
+  explicit LoanedSubscription(ibmw_loaned_subscription_base_t* base_ptr) noexcept
+      : base_ptr_(base_ptr) {}
+
+  ibmw_loaned_subscription_base_t* base_ptr_ = nullptr;
+};
+
 class SenderRef {
  public:
   SenderRef() = default;
@@ -51,6 +160,16 @@ class SenderRef {
   bool RegisterSendType(const ibmw_type_support_base_t* msg_type_support) {
     MW_ASSERT(base_ptr_, "Reference is null.");
     return base_ptr_->register_send_type(base_ptr_->ctx, msg_type_support);
+  }
+
+  bool RegisterLoanedPodTopic(std::string_view msg_type,
+                              size_t initial_size_hint,
+                              size_t alignment = alignof(std::max_align_t)) {
+    MW_ASSERT(base_ptr_, "Reference is null.");
+    if (base_ptr_->register_loaned_pod_topic == nullptr) return false;
+    return base_ptr_->register_loaned_pod_topic(
+        base_ptr_->ctx, ibmw::util::ToIbmwStringView(msg_type),
+        initial_size_hint, alignment);
   }
 
   /**
@@ -152,8 +271,8 @@ class ReceiverRef {
    * Phase 7 §7.3 §U: receiver-side counterpart of SenderRef::Loan. The
    * driver delivers the user-payload pointer of a borrowed sample
    * directly to the callback. Returns false if the underlying driver
-   * does not implement attach_loaned (i.e. cannot do zero-copy receive),
-   * in which case the caller should fall back to OnMessage.
+   * does not implement attach_loaned (i.e. cannot do zero-copy receive).
+   * This API returns failure rather than silently using OnMessage.
    *
    * @param msg_type_support
    * @param callback
@@ -167,6 +286,44 @@ class ReceiverRef {
       return false;
     }
     return base_ptr_->attach_loaned(base_ptr_->ctx, msg_type_support, callback.NativeHandle());
+  }
+
+  bool AttachLoanedRetained(
+      const ibmw_type_support_base_t* msg_type_support,
+      LoanedMessageCallback&& callback,
+      LoanedSubscription* out_subscription,
+      RetainedLoanOptions options) {
+    MW_ASSERT(base_ptr_, "Reference is null.");
+    if (out_subscription == nullptr || options.max_outstanding == 0 ||
+        base_ptr_->attach_loaned_retained == nullptr) {
+      return false;
+    }
+
+    ibmw_loaned_subscription_base_t* native_subscription = nullptr;
+    const bool attached = base_ptr_->attach_loaned_retained(
+        base_ptr_->ctx,
+        msg_type_support,
+        callback.NativeHandle(),
+        ibmw_retained_loan_options_t{options.max_outstanding},
+        &native_subscription);
+    if (!attached || native_subscription == nullptr) {
+      if (native_subscription != nullptr &&
+          native_subscription->destroy != nullptr) {
+        native_subscription->destroy(native_subscription->ctx);
+      }
+      return false;
+    }
+    if (native_subscription->stop == nullptr ||
+        native_subscription->close == nullptr ||
+        native_subscription->destroy == nullptr) {
+      if (native_subscription->destroy != nullptr) {
+        native_subscription->destroy(native_subscription->ctx);
+      }
+      return false;
+    }
+
+    *out_subscription = LoanedSubscription(native_subscription);
+    return true;
   }
 
   /**
@@ -196,12 +353,14 @@ class TransportRef {
 
   SenderRef GetPublisher(std::string_view topic) {
     MW_ASSERT(base_ptr_, "Reference is null.");
+    if (base_ptr_->get_sender == nullptr) return SenderRef();
     return SenderRef(
         base_ptr_->get_sender(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic)));
   }
 
   ReceiverRef GetSubscriber(std::string_view topic) {
     MW_ASSERT(base_ptr_, "Reference is null.");
+    if (base_ptr_->get_receiver == nullptr) return ReceiverRef();
     return ReceiverRef(
         base_ptr_->get_receiver(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic)));
   }

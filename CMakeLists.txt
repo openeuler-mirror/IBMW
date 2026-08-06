@@ -26,6 +26,27 @@ option(IBMW_BUILD_WITH_ROS2 "IBMW build with ROS2." OFF)
 option(IBMW_BUILD_ROS2_TYPES "IBMW build ROS2 type support (rosidl build-time only, no rcl runtime dependency)." OFF)
 option(IBMW_BUILD_PROTOCOLS "IBMW build protocols." ON)
 
+# DDS selection is explicit. SYSTEM intentionally uses ordinary CMake package
+# resolution, so a sourced ROS environment may affect package selection; it
+# never adds hard-coded /opt/ros hints or implicitly switches provider classes.
+set(IBMW_DDS_PROVIDER "SYSTEM" CACHE STRING
+    "Fast DDS/Fast CDR provider: SYSTEM, ROS2_MINIMAL_SDK, or SOURCE_FASTDDS3")
+set_property(CACHE IBMW_DDS_PROVIDER PROPERTY STRINGS SYSTEM ROS2_MINIMAL_SDK SOURCE_FASTDDS3)
+set(IBMW_ROS2_MINIMAL_SDK_PREFIX "" CACHE PATH
+    "Prefix containing the ros2_minimal_deps Humble Fast DDS 2.6.12/Fast CDR 1.0.29 SDK")
+set(_IBMW_DDS_PROVIDERS SYSTEM ROS2_MINIMAL_SDK SOURCE_FASTDDS3)
+if(NOT IBMW_DDS_PROVIDER IN_LIST _IBMW_DDS_PROVIDERS)
+  message(FATAL_ERROR "Invalid IBMW_DDS_PROVIDER='${IBMW_DDS_PROVIDER}'. Allowed values: SYSTEM, ROS2_MINIMAL_SDK, SOURCE_FASTDDS3")
+endif()
+unset(_IBMW_DDS_PROVIDERS)
+
+if(IBMW_DDS_PROVIDER STREQUAL "SOURCE_FASTDDS3")
+  set(IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD ON CACHE BOOL
+      "Enable source-build ExternalProject targets for target-side third-party dependencies." FORCE)
+elseif(IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD)
+  message(FATAL_ERROR "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD requires explicit IBMW_DDS_PROVIDER=SOURCE_FASTDDS3")
+endif()
+
 # Auto-enable ROS2 types when full ROS2 support is requested
 if(IBMW_BUILD_WITH_ROS2 AND NOT IBMW_BUILD_ROS2_TYPES)
   set(IBMW_BUILD_ROS2_TYPES ON)
@@ -88,6 +109,8 @@ cmake_dependent_option(IBMW_BUILD_NET_EXTENSION "IBMW build net extension." OFF 
 cmake_dependent_option(IBMW_BUILD_MQTT_EXTENSION "IBMW build mqtt extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ZENOH_EXTENSION "IBMW build zenoh extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ICEORYX_EXTENSION "IBMW build iceoryx extension." OFF "IBMW_BUILD_RUNTIME" OFF)
+cmake_dependent_option(IBMW_BUILD_RETAINED_LOAN_E2E "IBMW build retained-loan iceoryx E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+option(IBMW_ICEORYX_USE_PACKAGE "Use a prebuilt target iceoryx package instead of FetchContent." OFF)
 cmake_dependent_option(IBMW_BUILD_OPENTELEMETRY_EXTENSION "IBMW build opentelemetry extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ECHO_EXTENSION "IBMW build echo extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ROS2_EXTENSION "IBMW build ROS2 extension." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_WITH_ROS2" OFF)
@@ -200,7 +223,7 @@ if(IBMW_MASTER_PROJECT)
   set(CMAKE_CXX_VISIBILITY_INLINES_HIDDEN ON)
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(IBMW_BUILD_TESTS)
+    if(IBMW_BUILD_TESTS AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
     endif()
@@ -226,7 +249,11 @@ endif()
 # ============================================================================
 include(NamespaceTool)
 
-if(IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_DDS_EXTENSION)
+if(IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_DDS_EXTENSION OR
+   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION)
+  # Resolve the explicitly selected DDS provider before loading code-generation
+  # helpers. Those helpers must never perform an independent provider search.
+  include(GetFastDDS)
   include(DdsIdlGenCode)
   include(DdsIdlRpcGenCode)
   find_package(Python3 REQUIRED)
@@ -313,10 +340,6 @@ endif()
 #     need FastCDR; the dds_extension target additionally needs FastDDS.
 #   - runtime DDS extension (IBMW_BUILD_RUNTIME + IBMW_BUILD_DDS_EXTENSION).
 # Pull it in whenever either is enabled, NOT only inside the runtime gate.
-if(IBMW_BUILD_RUNTIME OR IBMW_BUILD_PROTOCOLS)
-  include(GetFastDDS)
-endif()
-
 if(IBMW_BUILD_RUNTIME)
   if(IBMW_BUILD_NET_EXTENSION)
     include(GetBoost)
@@ -337,9 +360,16 @@ if(IBMW_BUILD_RUNTIME)
     endif()
 
     if(IBMW_BUILD_ICEORYX_EXTENSION)
-      include(GetCppToml)
+      if(NOT IBMW_ICEORYX_USE_PACKAGE)
+        include(GetCppToml)
+      endif()
       include(GetIceoryx)
     endif()
+  endif()
+
+  if(IBMW_BUILD_RETAINED_LOAN_E2E AND NOT IBMW_BUILD_ICEORYX_EXTENSION)
+    message(FATAL_ERROR
+      "IBMW_BUILD_RETAINED_LOAN_E2E requires IBMW_BUILD_ICEORYX_EXTENSION")
   endif()
 
   if(IBMW_BUILD_MQTT_EXTENSION)
@@ -526,6 +556,8 @@ list(
   IBMW_BUILD_TESTS
   IBMW_BUILD_RUNTIME
   IBMW_BUILD_PROTOCOLS
+  IBMW_DDS_PROVIDER
+  IBMW_ROS2_MINIMAL_SDK_PREFIX
   IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD
   IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY
   IBMW_THIRD_PARTY_SOURCE_PREFIX

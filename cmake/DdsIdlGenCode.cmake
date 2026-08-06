@@ -52,11 +52,9 @@ endif()
 # Detect FastDDS version to decide whether to compile PubSubTypes
 # FastDDS 3.x is required for the generated PubSubTypes; 2.x only supports CdrAux
 set(IBMW_FASTDDS_V3_AVAILABLE FALSE)
-if(NOT (CMAKE_CROSSCOMPILING AND IBMW_TARGET_ROS2_TIER STREQUAL "rosidl") AND NOT TARGET eProsima_atomic)
-  ibmw_find_target_package(fastdds VERSION 3 QUIET FEATURE dds-idl-pubsub-types)
-  if(fastdds_FOUND)
-    set(IBMW_FASTDDS_V3_AVAILABLE TRUE)
-  endif()
+if(fastdds_FOUND AND fastdds_VERSION AND fastdds_VERSION VERSION_GREATER_EQUAL 3
+   AND IBMW_FASTDDS_PROVIDER_TARGET AND TARGET ${IBMW_FASTDDS_PROVIDER_TARGET})
+  set(IBMW_FASTDDS_V3_AVAILABLE TRUE)
 endif()
 
 # Generate C++ code from DDS IDL files

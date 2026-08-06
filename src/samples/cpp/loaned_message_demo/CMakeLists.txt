@@ -15,21 +15,10 @@ find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-# Find FastDDS (try fastdds 3.x first, fallback to fastrtps for ROS2 Humble)
-if(NOT TARGET eProsima_atomic)
-  find_package(fastdds 3 QUIET)
+if(NOT IBMW_FASTDDS_PROVIDER_TARGET OR NOT IBMW_FASTCDR_PROVIDER_TARGET)
+  message(FATAL_ERROR "loaned_message_demo requires the explicitly resolved IBMW DDS provider targets")
 endif()
-if(NOT fastdds_FOUND)
-  find_package(fastrtps REQUIRED)
-  find_package(fastcdr REQUIRED)
-  set(fastdds_FOUND TRUE)
-  if(NOT TARGET fastdds)
-    add_library(fastdds ALIAS fastrtps)
-  endif()
-  message(STATUS "loaned_message_demo: Using fastrtps ${fastrtps_VERSION}")
-else()
-  message(STATUS "loaned_message_demo: Using fastdds ${fastdds_VERSION}")
-endif()
+message(STATUS "loaned_message_demo: Using IBMW DDS provider target ${IBMW_FASTDDS_PROVIDER_TARGET}")
 
 message(STATUS "Building loaned_message_demo")
 
@@ -54,7 +43,7 @@ target_link_libraries(plain_publisher_module
     ibmw::extensions::ros2_types
     ${geometry_msgs_TARGETS}
   PRIVATE
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 if(APPLE)
@@ -95,7 +84,7 @@ target_link_libraries(nonplain_publisher_module
     ibmw::extensions::ros2_types
     ${std_msgs_TARGETS}
   PRIVATE
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 if(APPLE)
@@ -137,7 +126,7 @@ target_link_libraries(config_test_module
     ${geometry_msgs_TARGETS}
     ${std_msgs_TARGETS}
   PRIVATE
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 if(APPLE)
@@ -220,7 +209,7 @@ target_link_libraries(loaned_message_app
     plain_publisher_module
     nonplain_publisher_module
     subscriber_module
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 # ========== Plain Only App ==========
@@ -241,7 +230,7 @@ target_link_libraries(plain_pub_only_app
     ibmw::core::engine
     ibmw_dds_extension
     plain_publisher_module
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 # ========== Non-Plain Only App ==========
@@ -262,7 +251,7 @@ target_link_libraries(nonplain_pub_only_app
     ibmw::core::engine
     ibmw_dds_extension
     nonplain_publisher_module
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 # ========== Config Test App ==========
@@ -283,7 +272,7 @@ target_link_libraries(config_test_app
     ibmw::core::engine
     ibmw_dds_extension
     config_test_module
-    fastdds
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 endif()  # IBMW_HAS_DDS

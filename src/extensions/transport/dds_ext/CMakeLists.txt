@@ -5,21 +5,8 @@ if(NOT IBMW_BUILD_DDS_EXTENSION)
   return()
 endif()
 
-# Find Fast-DDS dependencies
-if(NOT TARGET fastcdr)
-  ibmw_find_target_package(fastcdr REQUIRED FEATURE dds-extension)
-endif()
-
-# Find Fast-DDS (try fastdds first, fallback to fastrtps for ROS2 compatibility)
-if(NOT fastdds_FOUND AND NOT TARGET eProsima_atomic)
-  ibmw_find_target_package(fastdds VERSION 3 QUIET FEATURE dds-extension)
-endif()
-if(NOT fastdds_FOUND)
-  ibmw_find_target_package(fastrtps REQUIRED FEATURE dds-extension)
-  set(fastdds_FOUND TRUE)
-  if(NOT TARGET fastdds)
-    add_library(fastdds ALIAS fastrtps)
-  endif()
+if(NOT IBMW_FASTCDR_PROVIDER_TARGET OR NOT IBMW_FASTDDS_PROVIDER_TARGET)
+  message(FATAL_ERROR "dds_ext requires the explicitly resolved IBMW DDS provider targets")
 endif()
 
 # Extension library
@@ -138,8 +125,8 @@ target_link_libraries(ibmw_extensions_dds_ext
                                       # required by downstream dynamic_cast +
                                       # template instantiations (e.g. ibmw-gen
                                       # `loaned_publisher` modules).
-    fastcdr
-    fastdds
+    ${IBMW_FASTCDR_PROVIDER_TARGET}
+    ${IBMW_FASTDDS_PROVIDER_TARGET}
 )
 
 # ROS2 message support (optional, mirrors the SHARED ibmw_dds_extension above).

@@ -61,7 +61,12 @@ endif()
 
 # ROS2 type support protocols (rosidl build-time only, no rcl runtime)
 if(IBMW_BUILD_ROS2_TYPES)
-  if(IBMW_BUILD_PROTOCOLS)
+  # The cross `types` tier consumes installed message types only. Generating
+  # IBMW's own rosidl package requires the fuller target rosidl toolchain
+  # (ament_cmake and generators), which is intentionally absent from a full
+  # product message prefix.
+  if(IBMW_BUILD_PROTOCOLS
+     AND (NOT CMAKE_CROSSCOMPILING OR IBMW_TARGET_ROS2_TIER STREQUAL "rosidl"))
     add_subdirectory(ros2/ibmw_msgs)
   endif()
 endif()
