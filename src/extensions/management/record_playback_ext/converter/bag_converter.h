@@ -13,6 +13,8 @@ namespace ibmw::extensions::record_playback_extension {
 
 struct BagConvertOptions {
   std::filesystem::path input_path;
+  std::string input_format = "auto";
+  std::string output_format = "ibmw";
   std::string input_storage_id;
   std::filesystem::path input_storage_config_file;
   StorageOptions output;

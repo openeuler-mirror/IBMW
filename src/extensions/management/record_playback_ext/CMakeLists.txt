@@ -108,11 +108,21 @@ if(UNIX AND NOT APPLE)
   target_link_options(${CUR_TARGET_NAME} PRIVATE "LINKER:--no-undefined")
 endif()
 
-# Define RCLCPP_VERSION_MAJOR macro based on rclcpp version if ROS2 is enabled
-# This allows ros_storage.h to use version-specific code without directly including rclcpp/version.h
+# rosbag2 conversion is available only in ROS2-enabled builds.
 if(IBMW_BUILD_WITH_ROS2)
-  # target_compile_definitions(${CUR_TARGET_NAME}_cli_support PRIVATE RCLCPP_VERSION_MAJOR=${rclcpp_VERSION_MAJOR})
-  target_link_libraries(${CUR_TARGET_NAME}_cli_support PRIVATE rclcpp::rclcpp)
+  find_package(ament_index_cpp REQUIRED)
+  find_package(rosbag2_cpp REQUIRED)
+  find_package(rosbag2_storage REQUIRED)
+  find_package(rosbag2_transport REQUIRED)
+  target_compile_definitions(${CUR_TARGET_NAME}_cli_support
+                             PRIVATE IBMW_HAS_ROSBAG2=1)
+  target_link_libraries(
+    ${CUR_TARGET_NAME}_cli_support
+    PRIVATE rclcpp::rclcpp
+            ament_index_cpp::ament_index_cpp
+            rosbag2_cpp::rosbag2_cpp
+            rosbag2_storage::rosbag2_storage
+            rosbag2_transport::rosbag2_transport)
 endif()
 
 # Add -Werror option
@@ -174,7 +184,15 @@ target_link_libraries(
           mcap::mcap
           SQLite::SQLite3)
 if(IBMW_BUILD_WITH_ROS2)
-  target_link_libraries(${CUR_TARGET_NAME}_cli_provider PRIVATE rclcpp::rclcpp)
+  target_compile_definitions(${CUR_TARGET_NAME}_cli_provider
+                             PRIVATE IBMW_HAS_ROSBAG2=1)
+  target_link_libraries(
+    ${CUR_TARGET_NAME}_cli_provider
+    PRIVATE rclcpp::rclcpp
+            ament_index_cpp::ament_index_cpp
+            rosbag2_cpp::rosbag2_cpp
+            rosbag2_storage::rosbag2_storage
+            rosbag2_transport::rosbag2_transport)
 endif()
 add_werror(${CUR_TARGET_NAME}_cli_provider)
 set_target_properties(${CUR_TARGET_NAME}_cli_provider

@@ -142,6 +142,33 @@ if(IBMW_BUILD_TESTS)
   set_tests_properties(${CUR_TARGET_NAME}_ts_test PROPERTIES
     ENVIRONMENT
       "AMENT_PREFIX_PATH=${CMAKE_BINARY_DIR}/ament_cmake_index:$ENV{AMENT_PREFIX_PATH}")
+
+  if(IBMW_BUILD_WITH_ROS2 AND
+     TARGET ibmw_extensions_record_playback_ext_cli_support)
+    add_executable(
+      ibmw_ros2_schema_path_equivalence_test
+      ${CMAKE_CURRENT_SOURCE_DIR}/rosbag2_schema_equivalence_test.cc)
+    target_include_directories(
+      ibmw_ros2_schema_path_equivalence_test
+      PRIVATE ${CMAKE_SOURCE_DIR}/src/extensions/management)
+    target_link_libraries(
+      ibmw_ros2_schema_path_equivalence_test
+      PRIVATE GTest::gtest
+              GTest::gtest_main
+              ibmw::api::ros2_type_support
+              ibmw_extensions_record_playback_ext_cli_support
+              ibmw_extensions_record_playback_ext_runtime_support
+              ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_generator_cpp)
+    add_test(
+      NAME ibmw_ros2_schema_path_equivalence_test
+      COMMAND $<TARGET_FILE:ibmw_ros2_schema_path_equivalence_test>)
+    set_tests_properties(
+      ibmw_ros2_schema_path_equivalence_test
+      PROPERTIES ENVIRONMENT
+        "AMENT_PREFIX_PATH=${CMAKE_BINARY_DIR}/ament_cmake_index:$ENV{AMENT_PREFIX_PATH}"
+        LABELS "integration;ros2;schema"
+        TIMEOUT 60)
+  endif()
 endif()
 
 if(IBMW_INSTALL)

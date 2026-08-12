@@ -16,7 +16,6 @@
 #include <map>
 #include <set>
 #include <sstream>
-#include <type_traits>
 #include <unordered_map>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -30,9 +29,8 @@
 #include <rosbag2_transport/qos.hpp>
 
 #include "cpp/util/schema_support.h"
-#include "type_support/ros2/ros2_schema_support.h"
 #include "mcap/reader.hpp"
-#include "record_playback_ext/storage/path_safety.h"
+#include "type_support/ros2/ros2_schema_support.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -44,39 +42,11 @@ std::string QosYaml(const QosDescriptor& descriptor);
 
 uint64_t DurationNanoseconds(const rmw_time_t& value) {
   constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
-  const auto is_negative = [](auto seconds) {
-    using Seconds = decltype(seconds);
-    if constexpr (std::is_signed_v<Seconds>) {
-      return seconds < 0;
-    }
-    return false;
-  };
-  MW_ASSERT(!is_negative(value.sec), "ROS2 QoS duration seconds cannot be negative.");
-  MW_ASSERT(
-      value.nsec < 1000000000ull,
-      "ROS2 QoS duration nanoseconds must be less than one second.");
-  MW_ASSERT(
-      static_cast<uint64_t>(value.sec) <=
-          (kMax - static_cast<uint64_t>(value.nsec)) / 1000000000ull,
-      "ROS2 QoS duration exceeds the supported range.");
-  return static_cast<uint64_t>(value.sec) * 1000000000ull + value.nsec;
-}
-
-uint64_t ParseQosUint64(std::string_view value, std::string_view name) {
-  MW_ASSERT(!value.empty() && value.front() != '-',
-            "ROS2 QoS {} must be a non-negative integer.", name);
-  size_t parsed = 0;
-  try {
-    const auto text = std::string(value);
-    const uint64_t result = std::stoull(text, &parsed, 10);
-    MW_ASSERT(parsed == text.size(), "ROS2 QoS {} is not a valid integer.", name);
-    return result;
-  } catch (const std::invalid_argument&) {
-    MW_ASSERT(false, "ROS2 QoS {} is not a valid integer.", name);
-  } catch (const std::out_of_range&) {
-    MW_ASSERT(false, "ROS2 QoS {} is outside the supported range.", name);
+  if (value.nsec >= 1000000000ull ||
+      value.sec > (kMax - value.nsec) / 1000000000ull) {
+    return 0;
   }
-  return 0;
+  return static_cast<uint64_t>(value.sec) * 1000000000ull + value.nsec;
 }
 
 std::string HistoryName(rmw_qos_history_policy_t value) {
@@ -204,18 +174,10 @@ std::filesystem::path MessageDefinitionPath(std::string_view type) {
 
 ibmw::util::SchemaDescriptor BuildSchema(std::string_view type) {
   const auto canonical = MessageTypeName(type);
-  const auto data = ibmw::ros2::schema_detail::CanonicalRos2SchemaFromDefinitions(
+  return ibmw::ros2::BuildRos2SchemaDescriptor(
       canonical, [](std::string_view nested) {
         return ReadTextFile(MessageDefinitionPath(nested));
       });
-  MW_ASSERT(!data.empty(), "ROS2 message '{}' has an empty definition.", canonical);
-  return ibmw::util::SchemaDescriptor{
-      .type_name = "ros2:" + canonical,
-      .serialization_type = "ros2",
-      .schema_name = canonical,
-      .schema_encoding = "ros2msg",
-      .schema_data = data,
-      .schema_hash = ibmw::util::ComputeSchemaHash(data)};
 }
 
 std::vector<std::filesystem::path> RosbagMcapPaths(
@@ -226,12 +188,7 @@ std::vector<std::filesystem::path> RosbagMcapPaths(
     return result;
   }
   for (const auto& relative : metadata.relative_file_paths) {
-    std::filesystem::path path;
-    try {
-      path = SafeBagFilePath(bag_path, relative);
-    } catch (...) {
-      continue;
-    }
+    const auto path = bag_path / relative;
     if (std::filesystem::is_regular_file(path)) {
       result.emplace_back(path);
     }
@@ -396,12 +353,7 @@ std::string QosYaml(const QosDescriptor& descriptor) {
                                       : RMW_QOS_POLICY_HISTORY_SYSTEM_DEFAULT;
   }
   if (const auto value = find("depth"); value != descriptor.policies.end()) {
-    const uint64_t depth = ParseQosUint64(value->second, "depth");
-    MW_ASSERT(
-        depth <= static_cast<uint64_t>(
-                     std::numeric_limits<decltype(profile.depth)>::max()),
-        "ROS2 QoS depth exceeds the target type range.");
-    profile.depth = static_cast<decltype(profile.depth)>(depth);
+    profile.depth = std::stoull(value->second);
   }
   if (const auto value = find("reliability"); value != descriptor.policies.end()) {
     profile.reliability = value->second == "best_effort"
@@ -438,12 +390,8 @@ std::string QosYaml(const QosDescriptor& descriptor) {
     if (value == descriptor.policies.end()) {
       return;
     }
-    const uint64_t ns = ParseQosUint64(value->second, name);
-    MW_ASSERT(
-        ns / 1000000000ull <=
-            static_cast<uint64_t>(std::numeric_limits<decltype(target.sec)>::max()),
-        "ROS2 QoS {} duration seconds exceed the target type range.", name);
-    target.sec = static_cast<decltype(target.sec)>(ns / 1000000000ull);
+    const uint64_t ns = std::stoull(value->second);
+    target.sec = static_cast<int64_t>(ns / 1000000000ull);
     target.nsec = static_cast<uint64_t>(ns % 1000000000ull);
   };
   set_duration("deadline", profile.deadline);
@@ -499,9 +447,7 @@ void Rosbag2BagReader::Open(
   info_.compression_mode = metadata.compression_mode.empty() ? "none" : metadata.compression_mode;
   info_.compression_format = metadata.compression_format;
   for (const auto& file : metadata.files) {
-    const auto path = direct_file
-                          ? absolute
-                          : SafeBagFilePath(info_.bag_path, file.path);
+    const auto path = direct_file ? absolute : info_.bag_path / file.path;
     info_.files.emplace_back(BagFileInfo{
         .path = path,
         .start_timestamp = TimestampFromRosbag(file.starting_time),
@@ -629,17 +575,7 @@ BagConvertResult ConvertBagToRosbag2(
   storage_options.uri = std::filesystem::absolute(options.output_path).string();
   storage_options.storage_id = options.storage_id;
   storage_options.max_bagfile_size = options.max_bag_size;
-  MW_ASSERT(
-      options.max_bag_duration_ns % 1000000000ull == 0,
-      "ROS2 max bag duration must be an integral number of seconds; got {} ns.",
-      options.max_bag_duration_ns);
-  const uint64_t max_bag_duration_seconds =
-      options.max_bag_duration_ns / 1000000000ull;
-  MW_ASSERT(
-      max_bag_duration_seconds <=
-          std::numeric_limits<decltype(storage_options.max_bagfile_duration)>::max(),
-      "ROS2 max bag duration exceeds the rosbag2 API range.");
-  storage_options.max_bagfile_duration = max_bag_duration_seconds;
+  storage_options.max_bagfile_duration = options.max_bag_duration_ns / 1000000000ull;
   storage_options.storage_preset_profile = options.storage_preset_profile;
   storage_options.storage_config_uri = options.storage_config_file.string();
   writer.open(storage_options);
