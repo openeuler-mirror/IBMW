@@ -16,6 +16,9 @@ matches your task.
   OHOS target-prefix workflows.
 - [OHOS Xiaoyi Humble Cross-build Guide](guides/ohos-xiaoyi-humble-cross-build-guide.zh.md)
   — Chinese compile-only guide for the Xiaoyi environment.
+- [OHOS DDS / ROS 2 Minimal Interoperability Guide](guides/ohos-dds-ros2-minimal-interop.zh.md)
+  — canonical Chinese guide for target closure, static message products, HDC deployment,
+  evidence levels, and host/on-device ROS 2 CLI interoperability.
 - [ROS2 Interface Import](guides/ros2-interface-import-user-guide.md) — import
   installed or source ROS2 interfaces with `ibmw-gen`.
 - [Transport Benchmark](guides/transport-benchmark.md)

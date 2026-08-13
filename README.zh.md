@@ -40,8 +40,9 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 - **多 Driver Module** —— 单个 Module 可通过变参宏 `IBMW_USE_DRIVERS(...)`
   将 DDS、Iceoryx 等多个 Transport Driver 绑定到 typed slot
 - **Context API** —— 模块生命周期管理与资源隔离
-- **ROS2 互操作** —— 直接通过 FastDDS 与 ROS2 节点通信，无需 RCL/RMW 依赖
-  （Pub/Sub 和 RPC/Service 均支持）
+- **ROS2 互操作** —— 直接通过 FastDDS 与 ROS2 节点通信；产品端无需 RCL、RCLCPP
+  或 RMW implementation，但静态消息闭包可包含 ROSIDL typesupport、`rcutils` 和基础
+  `librmw`（Pub/Sub 已有受限实证，RPC/Service 按对应协议 gate 验收）
 - **DDS RPC** —— 纯 DDS RPC Driver，通过 WriteParams/SampleInfo 实现 ROS2
   Service 通信协议，使 IBMW↔ROS2 服务调用无需 rcl/rclcpp
 - **C++20** —— 协程支持、Concepts、结构化绑定
@@ -57,6 +58,7 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 | [Developer Guide](docs/contributing/developer-guide.zh.md) | 构建系统、代码结构、编写 Module 与 Extension |
 | [AArch64 交叉编译](docs/guides/cross-compilation.md) | Linux target DDS source-prefix、sysroot 与支持边界 |
 | [OHOS 小艺 Humble 交叉构建指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only 指南 |
+| [OHOS DDS / ROS2 最小依赖互通指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) | 小白入口：静态消息产品、HDC 部署、双向互通与证据边界 |
 | [ROS2 Interface Import](docs/guides/ros2-interface-import-user-guide.md) | `ibmw-gen import` 的 installed/source/workspace 模式、产物与验证边界 |
 | [ROS2 Action DDS-only Adapter](docs/experimental/ros2-action-dds-only-adapter-guide.md) | 实验性 Action adapter 开发路径与明确支持边界 |
 | [API Reference](docs/reference/api-reference.zh.md) | 完整的 C++ SDK、C ABI、Extension 与 Package API |
@@ -90,11 +92,11 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 
-# 推荐：Full 构建（所有 Extension，无 ROS2 运行时依赖）。
-# `full` preset 本身不会启用 tests / benchmarks / ROS2 interop；
-# 下面 4 个 -D flag 是完整验证构建所必需的。
+# 推荐的 rcl-free 构建：DDS transport + 构建期 ROS2 消息类型。
+# 此处不要启用已废弃的 IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION。
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
-                    -DIBMW_BUILD_WITH_ROS2=ON -DIBMW_BUILD_ROS2_EXTENSION=ON
+                    -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
+                    -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF
 cmake --build build -j$(nproc)
 
 # 生成 IDL 代码 target（install 前必须执行）

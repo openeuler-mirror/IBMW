@@ -687,8 +687,10 @@ ServiceDispatcher
 `dds` driver 由 DDS extension 注册。它使用**原生 `.srv` 模式**：业务请求/
 响应类型直接由 FastDDS 通过 gencode 提供的 TypeSupport
 （`info.req_type_support_ref.CustomTypeSupportPtr()`）进行序列化/反序列化。
-不存在 envelope wrapper 类型 -- wire 上的 CDR payload 与 ROS2 产生的完全
-相同，从而实现与标准 ROS2 service 的 100% wire 兼容互操作。
+不存在 envelope wrapper 类型。对于匹配且已验证的 ROS2 release、FastDDS/
+Fast-CDR profile、生成类型、QoS 与请求/响应关联契约，其 CDR payload 设计为与
+ROS2 service 一致。这不是跨版本、跨 vendor 的普遍兼容保证；每个 service 产品
+仍需具备 typed 双向验收证据。
 
 该 driver 仅使用 FastDDS 公共 API 实现 ROS2 Service wire 协议
 （WriteParams/SampleInfo 关联、`rq/`/`rr/` topic 命名、`dds_::` 类型名中缀），
