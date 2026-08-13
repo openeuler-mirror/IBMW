@@ -18,9 +18,19 @@ ROS2 应用开发的任务。
 
 ## Canonical 文档
 
-先读并以仓库当前版本为准：
+开发者询问“minimal ROS2 编译部署”时，**第一入口必须是**：
 
-- [OHOS DDS / ROS2 最小依赖互通指南](../../docs/guides/ohos-dds-ros2-minimal-interop.zh.md)
+- `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`（端到端命令）
+
+该入口的硬前置是认证的 `TARGET_RUNTIME_PREFIX` + `TARGET_RUNTIME_EVIDENCE` 与
+`CORE_SOURCE_CAPSULE` + `CORE_SOURCE_EVIDENCE`。
+仓库当前没有从互联网一键生产完整底层 runtime 的单命令；缺失时必须停止并交给 release
+输入链准备，禁止称为“从零构建”。producer 与里程碑只按 canonical runbook 第 1 节索引，
+不得复制环境私有参数。
+
+随后再读 IBMW 的概念/边界索引及相关参考，并以仓库当前版本为准：
+
+- [OHOS DDS / ROS2 最小依赖概念与边界索引](../../docs/guides/ohos-dds-ros2-minimal-interop.zh.md)
 - [OHOS ARM64 + ROS2 Humble 交叉构建指南](../../docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md)
 - [交叉编译指南](../../docs/guides/cross-compilation.md)
 - [ROS2 interface import 指南](../../docs/guides/ros2-interface-import-user-guide.md)
@@ -90,12 +100,30 @@ PASS 不能代表产品全集。`full-static-product` 中未执行的矩阵项�
 
 ## 3. 执行流程
 
+快速 `std_msgs/String` tier 必须严格按以下顺序执行：
+
+1. 建立本次 case 和全新 work/prefix/evidence，记录当前输入；
+2. 用 core builder 重建 `builtin_interfaces` + `std_msgs`；
+3. 构建 IBMW 本体时执行 `ibmw_dds_compat.py run --dds-only`；
+4. 在 IBMW 之后，由单个 builder 的两个隔离 CMake 阶段构建 String adapter 与 String
+   app/consumer；
+5. 审计后仅用 minimal packager `package_target_ohos_std_msgs_string.py` 打包；
+6. 部署前运行 HDC 目标查询并确认所选目标为 `Connected`；
+7. 部署、load、run，并在当前物理设备/网络上尝试双向 interop；只有本轮 evidence 通过后
+   才能写“完成”，文档本身不宣称本轮物理验证已完成。
+
+不得跳过 `--dds-only`：IBMW 全量 `ros2_types` 需要含 `geometry_msgs` 等依赖的更宽
+prefix，单 String prefix 不满足它。也不得将 minimal packager 与 27 package / 530 type
+全产品 packager `package_target_ohos_sdk.py` 的输入、manifest、产物或 claim 混用。
+历史 evidence 只可说明背景，禁止替代上述当前构建和当前物理验证。
+
 ### A. Build
 
-按 canonical OHOS 指南使用显式 SDK、target prefix、host generator 与全新 build
-目录构建。保存完整命令、环境白名单、configure/build log、生成消息清单和
-`route_b_target_artifact_audit.json`。安装到干净 prefix，并用干净 external
-consumer 验证 `find_package(ibmw CONFIG REQUIRED)`。
+按 sibling 端到端操作文档使用显式 SDK、target prefix、host generator 与全新 build
+目录，并遵守上述 core → IBMW `--dds-only` → adapter → app/consumer 顺序。保存完整
+命令、环境白名单、configure/build log、生成消息清单和
+`route_b_target_artifact_audit.json`。安装到干净 prefix，并用干净 external consumer
+验证 `find_package(ibmw CONFIG REQUIRED)`。
 
 对每个将部署的 target ELF（可执行文件及递归动态库 closure）执行 `file`、
 `readelf -h -d`、SONAME/RPATH/RUNPATH/`DT_NEEDED` 审计，并扫描字符串、动态符号
@@ -111,7 +139,8 @@ host/build-tree 路径、非 AArch64 ELF 或未解析依赖均为失败。
 
 ### B. Deploy
 
-用已记录版本的 HDC 和显式 target serial 创建本次 case 目录。部署应用、配置、
+先用本次 HDC 查询确认显式 target serial 状态为 `Connected`；否则停止并标记
+`NOT VERIFIED`。再创建本次 case 目录，部署应用、配置、
 消息资源及递归 closure，包括所需 SDK `libc++` 和 target `tinyxml2`。保存本地与
 远端 manifest（路径、大小、SHA-256），再逐项比对；不要把“传输成功”写成
 “可加载”。

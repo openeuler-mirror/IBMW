@@ -47,7 +47,7 @@ all with DDS IDL / FastCDR as the primary type system.
 | [Developer Guide](docs/contributing/developer-guide.md) | Build system, code structure, writing modules and extensions |
 | [Cross-compilation Configure Guide](docs/guides/cross-compilation.md) | aarch64 Linux configure approach, target dependency model, and scoped validation boundaries |
 | [OHOS Xiaoyi Humble Cross-build Guide, Chinese](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only guide for the Xiaoyi Humble environment |
-| [OHOS DDS / ROS2 Minimal Interoperability Guide, Chinese](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) | Canonical beginner entry for static-message products, HDC deployment, bidirectional interop, and evidence boundaries |
+| Minimal ROS2 build/deploy | Start with `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`; the [IBMW guide](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) is a concept/boundary index only |
 | [ROS2 Interface Import User Guide](docs/guides/ros2-interface-import-user-guide.md) | User-facing guide for `ibmw-gen import` modes, artifacts, and verification lanes |
 | [ROS2 Action DDS-only Adapter Guide](docs/experimental/ros2-action-dds-only-adapter-guide.md) | Experimental low-code developer guide for DDS-only Action servers |
 | [API Reference](docs/reference/api-reference.md) | Complete C++ SDK, C ABI, extension, and package API |

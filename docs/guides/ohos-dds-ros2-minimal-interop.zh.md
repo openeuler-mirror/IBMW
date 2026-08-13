@@ -1,6 +1,15 @@
-# OHOS DDS 与 ROS 2 最小依赖互通指南
+# OHOS DDS 与 ROS 2 最小依赖：概念与边界索引
 
-本文是 IBMW 的 **canonical 中文配套指南**：先说明“做什么、最小到哪里、现有证据证明了什么”，再把可复制的命令交给 sibling 工程中的详细操作文档。第一次接触本工程时，应先读本文，不要从零散的进度文档推断当前能力。
+> **“minimal ROS2 编译部署”的第一入口（含可执行的端到端命令）：**
+> `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`
+>
+> **前置门：**入口要求认证的 `TARGET_RUNTIME_PREFIX` + `TARGET_RUNTIME_EVIDENCE` 与
+> `CORE_SOURCE_CAPSULE` + `CORE_SOURCE_EVIDENCE`。本仓库组合当前不提供从互联网一键
+> 生成完整底层 runtime 的命令；缺失
+> 任一输入必须停止并交由 release 输入链准备，不能称为“从零构建”。producer 与里程碑索引
+> 以 sibling runbook 第 1 节为准。
+
+本文仅是 IBMW 侧的**概念、范围和证据边界索引**，不包含或替代端到端构建、打包、HDC 部署与互通命令。需要实际操作时先读上述 sibling 文档，再用本文核对 claim 边界；不要从零散进度文档或历史 evidence 推断当前能力。
 
 ## 1. 一句话目标
 
@@ -32,19 +41,30 @@
 | 单消息 `std_msgs/msg/String` | substrate + String 生成物/typesupport + 薄 adapter/consumer | 最窄、适合新手的真实标准消息构建与双向互通路径 | 不能代表全 catalog、generic G3/G4、service/action wire |
 | 全量静态消息产品 | 锁定 catalog 中全部消息预生成/预编译、按 bundle 交付并审计 | 面向产品的固定消息 SDK | 仍不自动提供 node/graph/executor，也不自动实现 ROS service/action 请求应答协议 |
 
+快速 `std_msgs/msg/String` tier 还有以下不可省略的构建边界：
+
+- core builder 必须在本次运行中重建 `builtin_interfaces` 与 `std_msgs`；
+- 构建 IBMW 本体必须运行 `ibmw_dds_compat.py run --dds-only`，避免让 IBMW 的全量 `ros2_types` 误用单 String prefix；
+- String adapter 与 String app/consumer 在 IBMW 本体之后，由单个 builder 的两个隔离
+  CMake 阶段构建；不能把它们与 IBMW 当作一个隐式构建步骤；
+- 若启用 IBMW 全量 `ros2_types`，prefix 必须包含 `geometry_msgs` 等更宽消息闭包；只含 `builtin_interfaces` + `std_msgs` 的单 String prefix 不满足该范围；
+- minimal String packager `package_target_ohos_std_msgs_string.py` 与 27 package / 530 type 全产品 packager `package_target_ohos_sdk.py` 属于不同产品范围，输入、manifest 和结论均不得混用。
+
 Sibling 仓库中的 `IBMW_together/ros2_minimal_deps/docs/GOALS_AND_PROGRESS.md`
 记录了产品 catalog 的 **27 个 interface package / 530 个生成消息类型**。这是全量
 产品工作的独立范围与进展，**不能说成已由本文的 `std_msgs/String` 历史验证快照
 覆盖**；该快照只覆盖 fresh build-only 和单消息实机互通。
 
-## 4. 本次项目验证摘要（历史 validation snapshot）
+## 4. 验证状态与历史 evidence 边界
 
-以下内容是项目在特定输入和环境下完成过的历史 validation snapshot，用于说明已验证能力的边界，不是用户当前 SDK、源码、制品或网络环境的 evidence，也不引用未入库文件。
+本文不宣称已完成本轮物理验证。仓库中的历史 validation snapshot 只用于解释边界，不是
+用户当前 SDK、源码、制品、设备或网络的 evidence；本轮各项在产生并审核当前原始证据前
+均为 `NOT VERIFIED`。
 
-| 项目 | 本次项目验证结果 | 已证明 | 未证明或限制 |
+| 项目 | 本轮状态 | 通过所需证据 | 未证明或限制 |
 | --- | --- | --- | --- |
-| fresh OHOS cross build | 通过 | Humble `std_msgs/String` adapter、consumer 与 clean external consumer 的全新 OHOS AArch64 构建；G2 build 成立；ELF 审计未发现被禁止的 `rcl`/`rclcpp`/`rclpy`/`rmw_fastrtps_cpp` | 这是 build-only 结果，未由该项验证目标端执行；不覆盖 G3/G4 |
-| 物理双向互通 | 通过 | stock ROS 2 Humble 与 OHOS `std_msgs/String` 在物理网络上完成双向 typed communication | 只覆盖当次单消息、版本组合和应用层结果；不覆盖其他消息、service/action 或所有 DDS 组合 |
+| fresh OHOS cross build | `NOT VERIFIED` | 本轮 fresh prefix、builder evidence、consumer 与 ELF/closure 审计 | build-only 不覆盖 target 执行或 G3/G4 |
+| 物理双向互通 | `NOT VERIFIED` | 本轮 Connected target、网络/profile、两个方向唯一 payload 与双方退出码/日志 | 即使通过也只覆盖本轮单消息、版本组合和应用层结果 |
 | generic G3 / generic G4 | 未完成 | 无 | 不得据上述两项推断完成 |
 | pcap / packet decode | 未完成 | 无 | 只能声明应用层 typed interop，不声明报文级解码通过 |
 
@@ -56,36 +76,19 @@ Sibling 仓库中的 `IBMW_together/ros2_minimal_deps/docs/GOALS_AND_PROGRESS.md
 - build-only、板端启动、单向通信、双向通信和 packet decode 必须分别标注，未执行项写明未验证；
 - SDK、源码 revision、消息定义、DDS/CDR 版本、toolchain、制品或网络配置变化后，必须重新生成 evidence，不能沿用历史结论。
 
-## 5. 小白推荐流程
+## 5. 推荐阅读与执行顺序
 
-1. **先选层级**：第一次只做 `std_msgs/String`，不要直接把全量 530 类型、service/action 或 generic G3/G4 当作起点。
-2. **固定输入**：记录 OHOS SDK、toolchain、Humble profile、Fast DDS/Fast CDR 和源码 revision；准备全新的 work/prefix/evidence 路径。
-3. **隔离构建域**：host generator 与 target prefix 分开；清除宿主 ROS/Conda/CMake package 污染；绝不让 `/opt/ros/humble` 满足 target 链接。
-4. **执行 fresh cross build**：构建 adapter、安装 consumer，并从安装 prefix 再做 clean consumer；检查 AArch64、SONAME、NEEDED、RPATH/RUNPATH 和禁止依赖。
-5. **完整部署**：通过 HDC 发送整个 target prefix 和所需 OHOS runtime，不要只发送 executable；设置 `LD_LIBRARY_PATH` 和目标网卡 Fast DDS profile。
-6. **先验网络**：确认 host/target IP、route、carrier、网卡白名单；两端 `ROS_DOMAIN_ID`、topic、type 和 QoS 必须一致。
-7. **双向验收**：先做 host ROS 2 ↔ OHOS，再按需做板内 ROS 2 CLI ↔ 最小应用；每个方向使用唯一 token/payload 并保存 stdout/stderr。
-8. **生成证据再扩范围**：只有结构化 evidence 明确覆盖的范围才能写“通过”。单消息通过后，再进入多消息或全量产品 gate。
+1. **进入操作文档**：先打开 `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`，以其中当前命令和脚本 `--help` 为准。
+2. **先选层级**：第一次只做 `std_msgs/String`，不要直接把全量 530 类型、service/action 或 generic G3/G4 当作起点。
+3. **确认设备**：任何部署前都必须读取本次 `hdc list targets -v` 输出，并确认所选目标状态为 `Connected`；未连接时停止，不能用历史设备记录代替。
+4. **固定并隔离输入**：记录 SDK、toolchain、profile、依赖和源码 revision，使用全新的 work/prefix/evidence；host generator 与 target prefix 分离。
+5. **按 tier 构建**：重建 `builtin_interfaces` + `std_msgs` core；以 `ibmw_dds_compat.py run --dds-only` 构建 IBMW；再由单个 builder 以两个隔离 CMake 阶段构建 String adapter 和 app/consumer。
+6. **审计并打包**：检查 AArch64、SONAME、NEEDED、RPATH/RUNPATH 和禁止依赖；只使用 minimal String packager，禁止混入 27/530 全产品 packager 的输入或产物。
+7. **完整部署与网络预检**：部署整个目标闭包和 profile，不只传 executable；核对当前 host/target 网络、domain、topic、type 与 QoS。
+8. **当前物理验收**：在本次已连接设备与物理网络上执行双向 typed payload 验收并保存原始输出；历史 validation snapshot 只能提供背景，不能替代本次 build、deploy、load、run 或 interop 验证。
+9. **按 evidence 扩范围**：只有本次结构化 evidence 明确覆盖的范围才能写“通过”；单 String 结果不得外推到全量产品。
 
-推荐流程中的环境相关值一律通过变量提供，不要把示例环境复制成固定配置：
-
-```sh
-: "${WORK_ROOT:?set WORK_ROOT to a fresh local work directory}"
-: "${REMOTE_ROOT:?set REMOTE_ROOT to the target deployment directory}"
-: "${HDC_TARGET:?set HDC_TARGET to the selected HDC target}"
-: "${HOST_INTERFACE:?set HOST_INTERFACE}"
-: "${HOST_IP:?set HOST_IP}"
-: "${TARGET_INTERFACE:?set TARGET_INTERFACE}"
-: "${TARGET_IP:?set TARGET_IP}"
-: "${ROS_DOMAIN_ID:?set ROS_DOMAIN_ID}"
-
-# 仅作为 host reference/generator 示例；不得让它参与 target 链接。
-HOST_ROS_ROOT="${HOST_ROS_ROOT:-/opt/ros/humble}"
-```
-
-构建目录、安装 prefix 和 evidence 输出应派生自 `$WORK_ROOT`；所有 HDC 命令显式使用 `$HDC_TARGET`，所有目标端部署路径派生自 `$REMOTE_ROOT`；Fast DDS profile 使用 `$HOST_INTERFACE`/`$HOST_IP` 与 `$TARGET_INTERFACE`/`$TARGET_IP` 生成；两端显式设置同一个 `$ROS_DOMAIN_ID`。实际值及生成后的 profile 应写入本次运行 evidence。
-
-完整命令、HDC 部署和排错步骤见 sibling 详细操作文档；执行时仍须用上述变量替换其中所有环境相关示例值：
+环境相关值必须由本次运行提供并写入 evidence，不得把文档示例、历史设备、固定网络或部署路径复制为当前配置。完整命令、HDC 部署和排错步骤只在 sibling 详细操作文档维护：
 
 > Sibling checkout：`IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`
 
@@ -129,7 +132,7 @@ HOST_ROS_ROOT="${HOST_ROS_ROOT:-/opt/ros/humble}"
   `GOALS_AND_PROGRESS.md` 及本文验证摘要交叉核对。
 - [`user-guide.zh.md`](user-guide.zh.md) 中 service 等章节的“100%（线协议）兼容”措辞过宽。没有对应 release/profile、双向 typed evidence、request/reply correlation 和完整协议 gate 时，不应外推为所有 ROS 2 类型、服务、动作、DDS vendor 或版本均兼容。
 - 早期资料缺少 **HDC 部署链路**，因此只能覆盖构建，不能证明目标板装载与运行。当前单消息实操必须包含目标选择、完整 prefix 传输、权限、动态库、profile、remote path 和清理记录。
-- 本文是范围与证据口径的 canonical 中文入口；详细命令以 sibling 操作文档为准，设计/全量产品目标以 sibling `GOALS_AND_PROGRESS.md` 为准，最终声明以用户为实际运行生成的结构化 evidence 为准。
+- 本文是 IBMW 侧的范围与证据边界索引；minimal ROS2 编译部署的第一入口及详细命令以 sibling 操作文档为准，设计/全量产品目标以 sibling `GOALS_AND_PROGRESS.md` 为准，最终声明以用户为实际运行生成的结构化 evidence 为准。
 
 ## 8. 参考文档
 

@@ -58,7 +58,7 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 | [Developer Guide](docs/contributing/developer-guide.zh.md) | 构建系统、代码结构、编写 Module 与 Extension |
 | [AArch64 交叉编译](docs/guides/cross-compilation.md) | Linux target DDS source-prefix、sysroot 与支持边界 |
 | [OHOS 小艺 Humble 交叉构建指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only 指南 |
-| [OHOS DDS / ROS2 最小依赖互通指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) | 小白入口：静态消息产品、HDC 部署、双向互通与证据边界 |
+| minimal ROS2 编译部署 | 第一入口：`IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`；[IBMW 指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md)仅作概念与边界索引 |
 | [ROS2 Interface Import](docs/guides/ros2-interface-import-user-guide.md) | `ibmw-gen import` 的 installed/source/workspace 模式、产物与验证边界 |
 | [ROS2 Action DDS-only Adapter](docs/experimental/ros2-action-dds-only-adapter-guide.md) | 实验性 Action adapter 开发路径与明确支持边界 |
 | [API Reference](docs/reference/api-reference.zh.md) | 完整的 C++ SDK、C ABI、Extension 与 Package API |
