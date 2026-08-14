@@ -29,7 +29,6 @@ if(IBMW_BUILD_EXAMPLES)
   if(IBMW_BUILD_ICEORYX_EXTENSION)
     add_subdirectory(iceoryx_inproc_demo)
     add_subdirectory(iceoryx_interproc_demo)
-    add_subdirectory(r8_validation)
   endif()
 
   # Multi-transport end-to-end benchmark suite (seven pub/sub sample pairs
@@ -37,6 +36,9 @@ if(IBMW_BUILD_EXAMPLES)
   # docs/transport-benchmark.{md,zh.md}). Gated by IBMW_BUILD_BENCHMARKS.
   if(IBMW_BUILD_BENCHMARKS)
     add_subdirectory(transport_benchmark)
+    # r8_validation links the benchmark's bench_payload target, so load it
+    # only after transport_benchmark has created that dependency.
+    add_subdirectory(r8_validation)
   endif()
 
   # ROS2 type-only examples (rosidl build-time, no rcl runtime)
