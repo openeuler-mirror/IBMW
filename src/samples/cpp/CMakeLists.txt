@@ -72,6 +72,14 @@ if(IBMW_BUILD_EXAMPLES)
      IBMW_BUILD_ROS2_TYPES)
     add_subdirectory(record_demo)
   endif()
+
+  # Pre-recorded MCAP/SQLite3 playback demonstration. It only needs DDS for
+  # the external playback route and the record/playback extension for bag CLI.
+  if(IBMW_BUILD_DDS_EXTENSION AND
+     IBMW_BUILD_PROTOCOLS AND
+     IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
+    add_subdirectory(playback_demo)
+  endif()
 endif()
 
 # Private ROS2 Action Fibonacci proof samples. The forward DDS-only server path

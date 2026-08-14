@@ -1,0 +1,42 @@
+# DDS publisher route created internally by `ibmw bag play`.
+
+ibmw:
+  # DDS publishes the stored CDR bytes directly, so no transcode package is
+  # needed. The bag player still expects this setting to be a sequence.
+  bag_playback:
+    type_support_pkgs: []
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: ../libibmw_dds_transport.so
+        options:
+          domain_id: 0
+          participant_name: playback_demo_player
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          publishers:
+            - topic: playback_demo_topic
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: playback_demo_topic
+        enable_drivers: [dds]
