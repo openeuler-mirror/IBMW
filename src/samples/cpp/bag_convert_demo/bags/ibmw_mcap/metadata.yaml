@@ -1,0 +1,54 @@
+ibmw_bagfile_information:
+  version: 1
+  storage_id: mcap
+  message_count: 5
+  start_timestamp: 1786522399485060198
+  end_timestamp: 1786522399885511821
+  duration_ns: 400451623
+  closed_cleanly: true
+  error_message: ""
+  dropped_message_count: 0
+  duplicate_message_count: 0
+  compression_mode: none
+  compression_format: ""
+  compression_queue_size: 1
+  compression_threads: 1
+  files:
+    - path: data_0.mcap
+      start_timestamp: 1786522399485060198
+      end_timestamp: 1786522399885511821
+      message_count: 5
+      size: 2337
+      compression: none
+      split_reason: ""
+  schemas:
+    - id: 1
+      type: ros2:std_msgs/msg/String
+      serialization_type: ros2
+      name: std_msgs/msg/String
+      encoding: ros2msg
+      hash: fnv1a64:bc47e64e76474eae
+      data_size: 263
+  topics:
+    - id: 1
+      topic: /sequence_probe
+      msg_type: ros2:std_msgs/msg/String
+      serialization_type: ros2
+  channels:
+    - id: 1
+      schema_id: 1
+      topic: /sequence_probe
+      msg_type: ros2:std_msgs/msg/String
+      serialization_type: ros2
+      schema_hash: fnv1a64:bc47e64e76474eae
+      message_count: 5
+      qos:
+        avoid_ros_namespace_conventions: false
+        deadline_ns: 9223372036854775807
+        depth: 0
+        durability: transient_local
+        history: unknown
+        lifespan_ns: 9223372036854775807
+        liveliness: automatic
+        liveliness_lease_duration_ns: 9223372036854775807
+        reliability: reliable

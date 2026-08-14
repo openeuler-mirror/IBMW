@@ -80,6 +80,11 @@ if(IBMW_BUILD_EXAMPLES)
      IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
     add_subdirectory(playback_demo)
   endif()
+
+  # IBMW MCAP/SQLite3 and IBMW/rosbag2 conversion demonstration.
+  if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND IBMW_BUILD_WITH_ROS2)
+    add_subdirectory(bag_convert_demo)
+  endif()
 endif()
 
 # Private ROS2 Action Fibonacci proof samples. The forward DDS-only server path
