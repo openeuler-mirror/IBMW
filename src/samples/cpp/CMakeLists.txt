@@ -57,6 +57,19 @@ if(IBMW_BUILD_EXAMPLES)
     add_subdirectory(ros2_chn)
     add_subdirectory(ros2_rpc)
   endif()
+
+  # Mixed-transport record/info demonstration. This sample requires the
+  # complete DDS, Iceoryx, MQTT and ROS2 recording matrix.
+  if(IBMW_BUILD_DDS_EXTENSION AND
+     IBMW_BUILD_PROTOCOLS AND
+     IBMW_BUILD_ICEORYX_EXTENSION AND
+     IBMW_BUILD_MQTT_EXTENSION AND
+     IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND
+     IBMW_BUILD_WITH_ROS2 AND
+     IBMW_BUILD_ROS2_EXTENSION AND
+     IBMW_BUILD_ROS2_TYPES)
+    add_subdirectory(record_demo)
+  endif()
 endif()
 
 # Private ROS2 Action Fibonacci proof samples. The forward DDS-only server path

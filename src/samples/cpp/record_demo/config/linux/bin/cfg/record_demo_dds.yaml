@@ -1,0 +1,60 @@
+# DDS publisher process for record_demo.
+
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-demo-dds
+
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+          participant_name: record_demo_dds_publisher
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-demo-dds
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libcommon_dds_ts.so
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          publishers:
+            - topic: record_demo_dds_topic
+              qos:
+                history: keep_last
+                depth: 10
+                reliability: reliable
+                durability: volatile
+    publishers:
+      - topic: record_demo_dds_topic
+        enable_drivers: [dds]
+
+  modules:
+    packages:
+      - path: ./librecord_demo_pkg.so
+        enable_modules: [CdrPublisherModule]
+    modules:
+      - name: CdrPublisherModule
+        log_level: INFO
+
+CdrPublisherModule:
+  topic: record_demo_dds_topic
+  transport_frq: 1.0

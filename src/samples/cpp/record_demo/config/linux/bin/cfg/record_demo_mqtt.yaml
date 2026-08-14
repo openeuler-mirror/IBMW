@@ -1,0 +1,57 @@
+# MQTT publisher process for record_demo.  The broker is local on port 1884
+# in the supplied demonstration commands, but broker_addr may be remote.
+
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-demo-mqtt
+
+  extensions:
+    items:
+      - name: mqtt_extension
+        path: ./libibmw_mqtt_transport.so
+        options:
+          broker_addr: tcp://127.0.0.1:1884
+          client_id: record_demo_mqtt_publisher
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-demo-mqtt
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libcommon_dds_ts.so
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: mqtt
+        options:
+          publishers:
+            - topic: record_demo_mqtt_topic
+              qos: 1
+    publishers:
+      - topic: record_demo_mqtt_topic
+        enable_drivers: [mqtt]
+
+  modules:
+    packages:
+      - path: ./librecord_demo_pkg.so
+        enable_modules: [CdrPublisherModule]
+    modules:
+      - name: CdrPublisherModule
+        log_level: INFO
+
+CdrPublisherModule:
+  topic: record_demo_mqtt_topic
+  transport_frq: 1.0
