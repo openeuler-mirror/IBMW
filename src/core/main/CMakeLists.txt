@@ -22,6 +22,10 @@ add_executable(${CUR_TARGET_ALIAS_NAME} ALIAS ${CUR_TARGET_NAME})
 # Set source file of target
 target_sources(${CUR_TARGET_NAME} PRIVATE ${src})
 
+# The runtime is the Reporter owner extensions resolve through dlopen(NULL).
+# Export this opt-in host without globally polluting every executable.
+set_target_properties(${CUR_TARGET_NAME} PROPERTIES ENABLE_EXPORTS ON)
+
 # Set include path of target
 target_include_directories(
   ${CUR_TARGET_NAME}
@@ -30,7 +34,7 @@ target_include_directories(
 # Set link libraries of target
 target_link_libraries(
   ${CUR_TARGET_NAME}
-  PRIVATE ibmw::core::engine)
+  PRIVATE ibmw::core::reporter_host_abi ibmw::core::engine)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   if(CMAKE_BUILD_TYPE STREQUAL "Release")

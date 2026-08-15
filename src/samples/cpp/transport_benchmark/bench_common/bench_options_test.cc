@@ -50,6 +50,10 @@ bench_options:
   start_delay_ms: 2000
   label: iox_send_4KB
   csv_path: /tmp/iox_send.csv
+  publisher_status_path: /tmp/iox_pub.json
+  measured_sec: 2
+  measure_begin_monotonic_ns: 1000000000
+  measure_end_monotonic_ns: 3000000000
   warmup_messages: 100
 )");
   ASSERT_FALSE(f.path().empty());
@@ -62,7 +66,23 @@ bench_options:
   EXPECT_EQ(opt.start_delay_ms, 2000u);
   EXPECT_EQ(opt.label, "iox_send_4KB");
   EXPECT_EQ(opt.csv_path, "/tmp/iox_send.csv");
+  EXPECT_EQ(opt.publisher_status_path, "/tmp/iox_pub.json");
+  EXPECT_EQ(opt.measure_begin_monotonic_ns, 1000000000u);
+  EXPECT_EQ(opt.measure_end_monotonic_ns, 3000000000u);
   EXPECT_EQ(opt.warmup_messages, 100u);
+}
+
+TEST(LoadBenchOptions, ValidatesSharedMeasurementWindow) {
+  TempFile one("bench_options:\n  measured_sec: 1\n  measure_begin_monotonic_ns: 1\n");
+  EXPECT_THROW(LoadBenchOptions(one.path()), std::runtime_error);
+  TempFile reversed("bench_options:\n  measured_sec: 1\n  measure_begin_monotonic_ns: 2\n  measure_end_monotonic_ns: 1\n");
+  EXPECT_THROW(LoadBenchOptions(reversed.path()), std::runtime_error);
+  TempFile mismatch("bench_options:\n  measured_sec: 2\n  measure_begin_monotonic_ns: 1\n  measure_end_monotonic_ns: 1000000001\n");
+  EXPECT_THROW(LoadBenchOptions(mismatch.path()), std::runtime_error);
+  TempFile legacy("bench_options:\n  measured_sec: 2\n  measure_begin_monotonic_ns: 0\n  measure_end_monotonic_ns: 0\n");
+  EXPECT_NO_THROW(LoadBenchOptions(legacy.path()));
+  TempFile short_duration("bench_options:\n  duration_sec: 2\n  warmup_sec: 2\n  measured_sec: 1\n  measure_begin_monotonic_ns: 1\n  measure_end_monotonic_ns: 1000000001\n");
+  EXPECT_THROW(LoadBenchOptions(short_duration.path()), std::runtime_error);
 }
 
 TEST(LoadBenchOptions, AppliesDefaultsForMissingFields) {
@@ -80,10 +100,33 @@ TEST(LoadBenchOptions, AppliesDefaultsForMissingFields) {
   EXPECT_TRUE(opt.csv_path.empty());      // default
 }
 
+TEST(BenchOptions, PreservesHistoricalAggregateInitialization) {
+  BenchOptions options{4096, 1000, 30, 200, 50, "aggregate", "/tmp/a.csv",
+                       25};
+  EXPECT_EQ(options.payload_bytes, 4096u);
+  EXPECT_EQ(options.warmup_messages, 25u);
+  EXPECT_TRUE(options.topic.empty());
+  EXPECT_EQ(options.batch_size, 1u);
+}
+
 TEST(LoadBenchOptions, ThrowsOnMissingTopLevelBlock) {
   TempFile f("other_block:\n  foo: bar\n");
   ASSERT_FALSE(f.path().empty());
   EXPECT_THROW(LoadBenchOptions(f.path()), std::runtime_error);
+}
+
+TEST(LoadBenchOptions, ParsesModuleNamespacedBlock) {
+  TempFile f(R"(
+IoxSendPublisherModule:
+  bench_options:
+    message_count: 3000
+    warmup_messages: 50
+    start_delay_ms: 1500
+)");
+  auto opt = LoadBenchOptions(f.path());
+  EXPECT_EQ(opt.message_count, 3000u);
+  EXPECT_EQ(opt.warmup_messages, 50u);
+  EXPECT_EQ(opt.start_delay_ms, 1500u);
 }
 
 TEST(BenchCsvWriter, EmptyPathIsNoop) {

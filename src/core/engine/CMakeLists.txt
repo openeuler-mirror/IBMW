@@ -25,6 +25,10 @@ set(EXTENSION_V2_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/test/extension_v2_fixture.cc)
 list(REMOVE_ITEM src ${LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC}
                      ${EXTENSION_V2_FIXTURE_SRC})
+list(REMOVE_ITEM src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_query.cc)
+if(NOT IBMW_ENABLE_CORE_METRICS)
+  list(REMOVE_ITEM test_files ${CMAKE_CURRENT_SOURCE_DIR}/core_metrics_test.cc)
+endif()
 
 list(REMOVE_ITEM head_files ${LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER})
 
@@ -32,16 +36,48 @@ list(REMOVE_ITEM head_files ${LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER})
 add_library(${CUR_TARGET_NAME} STATIC)
 add_library(${CUR_TARGET_ALIAS_NAME} ALIAS ${CUR_TARGET_NAME})
 
+# Stable Reporter ABI belongs to an extension-capable host, not the static
+# engine archive (which plugins also link). Hosts explicitly consume this
+# object, guaranteeing extraction without giving plugins a private copy.
+add_library(ibmw_reporter_host_abi_object OBJECT reporter_query.cc)
+target_link_libraries(ibmw_reporter_host_abi_object PRIVATE ibmw::core::extension_api)
+add_library(ibmw_reporter_host_abi_archive STATIC
+            $<TARGET_OBJECTS:ibmw_reporter_host_abi_object>)
+add_library(ibmw_reporter_host_abi INTERFACE)
+add_library(ibmw::core::reporter_host_abi ALIAS ibmw_reporter_host_abi)
+# Consumers commonly discover the ABI with dlsym, so no ordinary undefined
+# reference exists to extract reporter_query.cc from a static archive.
+target_link_libraries(ibmw_reporter_host_abi INTERFACE
+  "$<LINK_LIBRARY:WHOLE_ARCHIVE,ibmw_reporter_host_abi_archive>"
+  ibmw::core::extension_api)
+if(IBMW_ENABLE_REPORTER_V1)
+  target_compile_definitions(ibmw_reporter_host_abi_object PRIVATE IBMW_ENABLE_REPORTER_V1=1)
+  target_link_libraries(ibmw_reporter_host_abi INTERFACE ${CUR_TARGET_NAME})
+endif()
+
 # Set source file of target
 target_sources(${CUR_TARGET_NAME} PRIVATE ${src})
+if(IBMW_ENABLE_CORE_METRICS)
+  target_sources(${CUR_TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../observability/core_metrics.cc)
+  target_compile_definitions(${CUR_TARGET_NAME} PUBLIC IBMW_ENABLE_CORE_METRICS=1)
+  if(IBMW_ENABLE_REPORTER_V1)
+    target_compile_definitions(${CUR_TARGET_NAME} PUBLIC IBMW_ENABLE_REPORTER_V1=1)
+  endif()
+endif()
 
 # Set head files of target
 target_sources(${CUR_TARGET_NAME} INTERFACE FILE_SET HEADERS BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR} FILES ${head_files})
+if(IBMW_ENABLE_CORE_METRICS)
+  target_sources(${CUR_TARGET_NAME} INTERFACE FILE_SET core_metrics_headers TYPE HEADERS
+                 BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/../
+                 FILES ${CMAKE_CURRENT_SOURCE_DIR}/../observability/core_metrics.h)
+endif()
 
 # Set include path of target
 target_include_directories(
   ${CUR_TARGET_NAME}
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
+         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
          $<INSTALL_INTERFACE:include/ibmw>)
 
 # Set link libraries of target
@@ -62,14 +98,21 @@ add_werror(${CUR_TARGET_NAME})
 
 # Set installation of target
 if(IBMW_INSTALL)
+  set_property(TARGET ibmw_reporter_host_abi PROPERTY EXPORT_NAME ibmw::core::reporter_host_abi)
+  install(TARGETS ibmw_reporter_host_abi ibmw_reporter_host_abi_archive
+          EXPORT ${INSTALL_CONFIG_NAME}
+          ARCHIVE DESTINATION lib)
   set_property(TARGET ${CUR_TARGET_NAME} PROPERTY EXPORT_NAME ${CUR_TARGET_ALIAS_NAME})
-  install(
-    TARGETS ${CUR_TARGET_NAME}
-    EXPORT ${INSTALL_CONFIG_NAME}
-    LIBRARY DESTINATION lib
-    ARCHIVE DESTINATION lib
-            FILE_SET HEADERS
-            DESTINATION include/ibmw/${CUR_DIR})
+  if(IBMW_ENABLE_CORE_METRICS)
+    install(TARGETS ${CUR_TARGET_NAME} EXPORT ${INSTALL_CONFIG_NAME}
+            LIBRARY DESTINATION lib ARCHIVE DESTINATION lib
+            FILE_SET HEADERS DESTINATION include/ibmw/${CUR_DIR}
+            FILE_SET core_metrics_headers DESTINATION include/ibmw)
+  else()
+    install(TARGETS ${CUR_TARGET_NAME} EXPORT ${INSTALL_CONFIG_NAME}
+            LIBRARY DESTINATION lib ARCHIVE DESTINATION lib
+            FILE_SET HEADERS DESTINATION include/ibmw/${CUR_DIR})
+  endif()
 endif()
 
 # Set test of target

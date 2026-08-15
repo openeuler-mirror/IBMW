@@ -95,6 +95,11 @@ class PublisherModule : public ibmw::Module {
   BenchOptions opts_;
   std::atomic<bool> running_{false};
   std::thread thread_;
+  uint64_t measured_attempts_{0}, measured_success_{0}, measured_fail_{0};
+  uint32_t first_attempt_seq_{0}, last_attempt_seq_{0};
+  uint32_t first_success_seq_{0}, last_success_seq_{0};
+  bool have_attempt_{false}, have_success_{false};
+  bool completed_send_window_{false};
 };
 
 }  // namespace ibmw::samples::transport_benchmark::iox_loaned_ctx

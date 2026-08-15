@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "scenario_contract": {
+    "deployment": {"hosts": 1, "transport": "iceoryx", "topology": "publisher_subscriber"},
+    "workload": {"publish_attempts": 240, "publish_interval_ms": 25, "retained_delay_ms": 750, "max_outstanding": 1},
+    "semantics": {"cross_thread_release": true, "drop_while_outstanding": true, "recovery_after_release": true},
+    "required_counters": ["receive_delivered", "receive_released", "outstanding_current", "outstanding_peak", "limit_drop", "callback_entered", "callback_completed", "callback_threw_std", "callback_threw_nonstd"]
+  }
+}

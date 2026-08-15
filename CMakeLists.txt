@@ -99,6 +99,10 @@ cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deli
 
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
+option(IBMW_ENABLE_CORE_METRICS "Build Core Metrics V1 instrumentation." OFF)
+cmake_dependent_option(IBMW_ENABLE_REPORTER_V1
+  "Build Reporter V1 ABI runtime (requires Core Metrics)." OFF
+  "IBMW_ENABLE_CORE_METRICS" OFF)
 
 option(IBMW_CONTEXT_DEFINE_GLOBAL_LOGGER_HANDLE "IBMW context define global logger handle." ON)
 
@@ -586,6 +590,8 @@ list(
   IBMW_BUILD_DDS_EXTENSION
   IBMW_EXECUTOR_USE_STDEXEC
   IBMW_ENABLE_DLOPEN_DEEPBIND
+  IBMW_ENABLE_CORE_METRICS
+  IBMW_ENABLE_REPORTER_V1
   IBMW_BUILD_WITH_WERROR)
 
 foreach(var ${ibmw_vars})

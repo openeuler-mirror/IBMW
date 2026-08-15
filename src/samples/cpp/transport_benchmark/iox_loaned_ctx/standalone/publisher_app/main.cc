@@ -66,6 +66,7 @@ int main(int argc, char** argv) {
     }
     pub.SetIceoryxDriver(driver);
 
+    std::cout << "PERF_PUBLISHER_READY" << std::endl;
     engine.Start();
     engine.Shutdown();
     g_engine_ptr = nullptr;

@@ -14,6 +14,9 @@
 #include "cpp/transport/transport_handle.h"
 #include "engine/transport/transport_driver_tools.h"
 #include "base/time_util.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 namespace ibmw::runtime::core::transport {
 
@@ -97,46 +100,120 @@ class MessageCallbackState {
   MessageCallback callback_;
 };
 
-class LoanedCallbackState {
+class LoanedCallbackState
+#ifdef IBMW_ENABLE_CORE_METRICS
+    : public observability::LoanedReceiveGate
+#endif
+{
+  struct InvocationToken {
+    LoanedCallbackState* state;
+    InvocationToken* previous;
+  };
+
  public:
   explicit LoanedCallbackState(LoanedMessageHandlerCallback callback)
       : callback_(std::move(callback)) {}
+  void SetCallback(LoanedMessageHandlerCallback callback) {
+    std::lock_guard lock(mutex_);
+    callback_ = std::move(callback);
+  }
+#ifdef IBMW_ENABLE_CORE_METRICS
+  void SetMetricSlot(std::shared_ptr<observability::Registry::LoanedReceiveSlot> slot) {
+    std::lock_guard lock(mutex_);
+    metric_slot_ = std::move(slot);
+  }
+#endif
 
   void Invoke(const ibmw_transport_context_base_t* ctx_ptr,
               const void* payload_ptr,
               size_t payload_size,
               std::function<void()>&& release) {
-    LoanedMessageHandlerCallback callback;
+    bool invoke = false;
     {
       std::lock_guard lock(mutex_);
       if (enabled_) {
-        callback = callback_;
-        ++active_;
+        invoke = static_cast<bool>(callback_);
+#ifdef IBMW_ENABLE_CORE_METRICS
+        if (metric_slot_)
+          metric_slot_->callback_entered.fetch_add(1, std::memory_order_relaxed);
+#endif
+        if (invoke) ++active_;
       }
     }
-    if (!callback) {
+    if (!invoke) {
       if (release) release();
       return;
     }
 
     struct ActiveCall {
-      LoanedCallbackState* state;
-      ~ActiveCall() { state->CompleteCall(); }
-    } active_call{this};
-    callback(ctx_ptr, payload_ptr, payload_size, std::move(release));
+      InvocationToken token;
+      explicit ActiveCall(LoanedCallbackState* value)
+          : token{value, CurrentInvocation()} {
+        CurrentInvocation() = &token;
+      }
+      ~ActiveCall() {
+        CurrentInvocation() = token.previous;
+        token.state->CompleteCall();
+      }
+    } active_call(this);
+    callback_(ctx_ptr, payload_ptr, payload_size, std::move(release));
   }
 
-  void Disable() {
+  void Disable() noexcept
+#ifdef IBMW_ENABLE_CORE_METRICS
+      override
+#endif
+  {
+    BeginDisable();
+    WaitDisabled();
+  }
+
+  void BeginDisable() noexcept
+#ifdef IBMW_ENABLE_CORE_METRICS
+      override
+#endif
+  {
     std::lock_guard lock(mutex_);
     enabled_ = false;
-    callback_ = {};
   }
 
+  void WaitDisabled() noexcept
+#ifdef IBMW_ENABLE_CORE_METRICS
+      override
+#endif
+  {
+    std::unique_lock lock(mutex_);
+    // Stop() is allowed from the callback itself. That invocation owns one of
+    // active_, so waiting for zero here would self-deadlock; its RAII guard
+    // completes the call after Stop() returns.
+    const size_t own_depth = CurrentDepth();
+    active_calls_done_.wait(lock,
+                            [this, own_depth] { return active_ <= own_depth; });
+  }
+
+#ifdef IBMW_ENABLE_CORE_METRICS
+  bool IsCurrentInvocation() const noexcept override {
+    return CurrentDepth() != 0;
+  }
+#endif
+
  private:
+  static InvocationToken*& CurrentInvocation() {
+    static thread_local InvocationToken* current = nullptr;
+    return current;
+  }
+
+  size_t CurrentDepth() const noexcept {
+    size_t depth = 0;
+    for (auto* call = CurrentInvocation(); call; call = call->previous)
+      if (call->state == this) ++depth;
+    return depth;
+  }
+
   void CompleteCall() {
     std::lock_guard lock(mutex_);
     --active_;
-    if (active_ == 0) active_calls_done_.notify_all();
+    active_calls_done_.notify_all();
   }
 
   std::mutex mutex_;
@@ -144,7 +221,62 @@ class LoanedCallbackState {
   bool enabled_ = true;
   size_t active_ = 0;
   LoanedMessageHandlerCallback callback_;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  std::shared_ptr<observability::Registry::LoanedReceiveSlot> metric_slot_;
+#endif
 };
+
+#ifdef IBMW_ENABLE_CORE_METRICS
+class ReleaseMetricState {
+ public:
+  ReleaseMetricState(
+      std::shared_ptr<observability::Registry::LoanedReceiveSlot> metric_slot,
+      std::function<void()>&& release)
+      : metric_slot_(std::move(metric_slot)), release_(std::move(release)) {}
+
+  void Invoke() noexcept {
+    if (released_.exchange(true, std::memory_order_relaxed)) return;
+    metric_slot_->release_called.fetch_add(1, std::memory_order_relaxed);
+    if (release_) release_();
+  }
+
+  std::function<void()> TakeRelease() noexcept { return std::move(release_); }
+
+ private:
+  std::shared_ptr<observability::Registry::LoanedReceiveSlot> metric_slot_;
+  std::function<void()> release_;
+  std::atomic_bool released_{false};
+};
+
+void InvokeWithReleaseMetrics(
+    const std::shared_ptr<LoanedCallbackState>& callback_state,
+    const std::shared_ptr<observability::Registry::LoanedReceiveSlot>& metric_slot,
+    const ibmw_transport_context_base_t* ctx_ptr, const void* payload_ptr,
+    size_t payload_size, std::function<void()>&& release) noexcept {
+  if (!metric_slot) {
+    callback_state->Invoke(ctx_ptr, payload_ptr, payload_size,
+                           std::move(release));
+    return;
+  }
+
+  std::shared_ptr<ReleaseMetricState> release_state;
+  try {
+    release_state = std::make_shared<ReleaseMetricState>(metric_slot,
+                                                         std::move(release));
+    std::function<void()> observed_release = [release_state]() noexcept {
+      release_state->Invoke();
+    };
+    callback_state->Invoke(ctx_ptr, payload_ptr, payload_size,
+                           std::move(observed_release));
+  } catch (...) {
+    // Observability is fail-open. If either allocation failed, deliver with
+    // the original transport release callback and do not suppress the loan.
+    if (release_state) release = release_state->TakeRelease();
+    callback_state->Invoke(ctx_ptr, payload_ptr, payload_size,
+                           std::move(release));
+  }
+}
+#endif
 
 class GatedLoanedSubscriptionHandle final : public LoanedSubscriptionHandle {
  public:
@@ -156,12 +288,12 @@ class GatedLoanedSubscriptionHandle final : public LoanedSubscriptionHandle {
   ~GatedLoanedSubscriptionHandle() override { Stop(); }
 
   void Stop() noexcept override {
-    callback_state_->Disable();
+    callback_state_->BeginDisable();
     inner_->Stop();
   }
 
   bool Close(std::chrono::milliseconds timeout) noexcept override {
-    callback_state_->Disable();
+    callback_state_->BeginDisable();
     return inner_->Close(timeout);
   }
 
@@ -363,8 +495,16 @@ bool TransportDriverDispatcher::RegisterSendType(RegisterSendTypeAccessInfoWrapp
   // register pub wrapper
   const auto& send_type_wrapper_ref = *send_type_wrapper_ptr;
 
-  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr)))
-    return false;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  try {
+    (void)observability::CoreMetricsController().Register(
+        this, &send_type_wrapper_ref, wrapper.pkg_path, wrapper.module_name,
+        topic_name, msg_type, driver_itr->second);
+  } catch (...) {
+    // Observability is fail-open and cannot alter publisher registration.
+  }
+#endif
+  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr))) return false;
 
   bool ret = true;
   for (auto& itr : driver_itr->second) {
@@ -390,6 +530,9 @@ bool TransportDriverDispatcher::RegisterLoanedPodTopic(
     return false;
   }
 
+#ifdef IBMW_ENABLE_CORE_METRICS
+  const void* pending_metrics_registration = nullptr;
+#endif
   try {
     const auto msg_type = util::ToStdStringView(wrapper.msg_type);
     if (msg_type.empty()) {
@@ -452,23 +595,58 @@ bool TransportDriverDispatcher::RegisterLoanedPodTopic(
               wrapper.topic_name, msg_type);
       return false;
     }
+#ifdef IBMW_ENABLE_CORE_METRICS
+    // Sidecar registration uses the stable heap object identity and completes
+    // before Start/Freeze. Rollback below removes the identity if publishing
+    // the dispatcher registration fails; Registry slots remain sidecar-owned.
+    try {
+      (void)observability::CoreMetricsController().RegisterPod(
+          this, registration.get(), wrapper.topic_name, msg_type,
+          registration->driver);
+      pending_metrics_registration = registration.get();
+    } catch (...) {
+      // Observability is fail-open and cannot alter POD registration.
+    }
+#endif
 
     // The selected driver's endpoint is already created. If this allocation
     // or insertion throws, it may remain as an unused idempotent endpoint, but
     // no dispatcher registration is visible and Loan() cannot route to it.
+#ifdef IBMW_ENABLE_CORE_METRICS
+    auto* registration_identity = registration.get();
+#endif
     const auto insert_result =
         pod_registration_map_.emplace(key, std::move(registration));
     if (!insert_result.second) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+      observability::CoreMetricsController().UnregisterPod(
+          this, registration_identity);
+#endif
       MW_ERROR("Loaned POD registration changed concurrently for topic '{}'.",
                wrapper.topic_name);
       return false;
     }
     ++pub_topic_index_;
+#ifdef IBMW_ENABLE_CORE_METRICS
+    pending_metrics_registration = nullptr;
+#endif
     return true;
   } catch (const std::exception& e) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+    if (pending_metrics_registration) {
+      observability::CoreMetricsController().UnregisterPod(
+          this, pending_metrics_registration);
+    }
+#endif
     MW_ERROR("Loaned POD registration failed: {}", e.what());
     return false;
   } catch (...) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+    if (pending_metrics_registration) {
+      observability::CoreMetricsController().UnregisterPod(
+          this, pending_metrics_registration);
+    }
+#endif
     MW_ERROR("Loaned POD registration failed with an unknown exception.");
     return false;
   }
@@ -498,9 +676,20 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
     return;
   }
 
+#ifdef IBMW_ENABLE_CORE_METRICS
+  observability::MetricsEntry* metric_slots = nullptr;
+  if (observability::CoreMetricsController().Enabled()) [[unlikely]] {
+    metric_slots = observability::CoreMetricsController().Find(this, send_type_wrapper_ptr);
+    if (metric_slots) observability::CoreMetricsController().registry().AddLogicalAttempt(metric_slots->logical);
+  }
+#endif
+
   // Check ctx
   if (ctx_ref.GetType() != ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
       ctx_ref.CheckUsed()) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+    if (metric_slots) observability::CoreMetricsController().registry().AddLogicalRejected(metric_slots->logical);
+#endif
     MW_WARN("Publish context has been used!");
     return;
   }
@@ -537,11 +726,24 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
 
   // Start publish
   filter_collector.InvokeTransport(
-      [this, &cached_drivers](MessageFrame& msg_wrapper) {
-        for (auto* itr : cached_drivers) {
+      [this, &cached_drivers
+#ifdef IBMW_ENABLE_CORE_METRICS
+       , metric_slots
+#endif
+      ](MessageFrame& msg_wrapper) {
+        for (size_t driver_index = 0; driver_index < cached_drivers.size(); ++driver_index) {
+          auto* itr = cached_drivers[driver_index];
           MW_TRACE("Publish msg '{}' for topic '{}' to transport driver '{}'",
                       msg_wrapper.info.msg_type, msg_wrapper.info.topic_name, itr->Name());
+#ifdef IBMW_ENABLE_CORE_METRICS
+          auto* metric_slot = metric_slots && driver_index < metric_slots->drivers.size()
+                                  ? metric_slots->drivers[driver_index] : nullptr;
+          if (metric_slot) observability::CoreMetricsController().registry().AddSendAttempt(metric_slot);
+#endif
           itr->Send(msg_wrapper);
+#ifdef IBMW_ENABLE_CORE_METRICS
+          if (metric_slot) observability::CoreMetricsController().registry().AddSendReturned(metric_slot);
+#endif
         }
       },
       frame);
@@ -687,8 +889,17 @@ bool TransportDriverDispatcher::RegisterSendType(SendTypeWrapper&& wrapper) {
   // register pub wrapper
   const auto& send_type_wrapper_ref = *send_type_wrapper_ptr;
 
-  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr)))
-    return false;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  try {
+    (void)observability::CoreMetricsController().Register(
+        this, &send_type_wrapper_ref, send_type_wrapper_ref.info.pkg_path,
+        send_type_wrapper_ref.info.module_name, topic_name, msg_type,
+        driver_itr->second);
+  } catch (...) {
+    // Observability is fail-open and cannot alter publisher registration.
+  }
+#endif
+  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr))) return false;
 
   bool ret = true;
   for (auto& itr : driver_itr->second) {
@@ -707,11 +918,26 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
 
   auto publish_msg_wrapper_ptr = std::make_shared<MessageFrame>(std::move(wrapper));
 
+#ifdef IBMW_ENABLE_CORE_METRICS
+  observability::MetricsEntry* metric_slots = nullptr;
+  if (observability::CoreMetricsController().Enabled()) [[unlikely]] {
+    metric_slots = observability::CoreMetricsController().Find(
+        this, publish_msg_wrapper_ptr->info.pkg_path,
+        publish_msg_wrapper_ptr->info.module_name,
+        publish_msg_wrapper_ptr->info.topic_name,
+        publish_msg_wrapper_ptr->info.msg_type);
+    if (metric_slots) observability::CoreMetricsController().registry().AddLogicalAttempt(metric_slots->logical);
+  }
+#endif
+
   auto ctx_ref = publish_msg_wrapper_ptr->ctx_ref;
 
   // Check ctx
   if (ctx_ref.GetType() != ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
       ctx_ref.CheckUsed()) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+    if (metric_slots) observability::CoreMetricsController().registry().AddLogicalRejected(metric_slots->logical);
+#endif
     MW_WARN("Publish context has been used!");
     return;
   }
@@ -734,7 +960,11 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
 
   // Start publish
   filter_collector.InvokeTransport(
-      [this](MessageFrame& msg_wrapper) {
+      [this
+#ifdef IBMW_ENABLE_CORE_METRICS
+       , metric_slots
+#endif
+      ](MessageFrame& msg_wrapper) {
         std::string_view topic_name = msg_wrapper.info.topic_name;
 
         auto find_itr = pub_topics_driver_index_map_.find(topic_name);
@@ -744,10 +974,19 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
           return;
         }
 
-        for (auto& itr : find_itr->second) {
+        for (size_t driver_index = 0; driver_index < find_itr->second.size(); ++driver_index) {
+          auto* itr = find_itr->second[driver_index];
           MW_TRACE("Publish msg '{}' for topic '{}' to transport driver '{}'",
                       msg_wrapper.info.msg_type, topic_name, itr->Name());
+#ifdef IBMW_ENABLE_CORE_METRICS
+          auto* metric_slot = metric_slots && driver_index < metric_slots->drivers.size()
+                                  ? metric_slots->drivers[driver_index] : nullptr;
+          if (metric_slot) observability::CoreMetricsController().registry().AddSendAttempt(metric_slot);
+#endif
           itr->Send(msg_wrapper);
+#ifdef IBMW_ENABLE_CORE_METRICS
+          if (metric_slot) observability::CoreMetricsController().registry().AddSendReturned(metric_slot);
+#endif
         }
       },
       *publish_msg_wrapper_ptr);
@@ -786,9 +1025,29 @@ LoanedSampleHandle TransportDriverDispatcher::Loan(LoanAccessInfoWrapper&& wrapp
       const auto pod = pod_registration_map_.find(key);
       if (pod != pod_registration_map_.end()) {
         const auto& registration = *pod->second;
-        registration.driver->LoanSample(
+        LoanedSampleHandle candidate{};
+#ifdef IBMW_ENABLE_CORE_METRICS
+        auto* pod_metrics = observability::CoreMetricsController().Enabled()
+                                ? observability::CoreMetricsController().FindPod(this, &registration)
+                                : nullptr;
+        if (pod_metrics) observability::CoreMetricsController().registry().AddPodLoanAttempt(pod_metrics->logical);
+#endif
+        const bool loaned = registration.driver->LoanSample(
             registration.info, wrapper.requested_size, wrapper.mode,
-            /*ctx=*/nullptr, handle);
+            /*ctx=*/nullptr, candidate);
+        // LoanSample's established contract is its boolean result. Metrics may
+        // observe malformed/incomplete side data, but must not turn a true
+        // driver result into a transport failure.
+        if (loaned) {
+          handle = candidate;
+#ifdef IBMW_ENABLE_CORE_METRICS
+          if (pod_metrics) observability::CoreMetricsController().registry().AddPodLoanSucceeded(pod_metrics->logical);
+#endif
+          return handle;
+        }
+#ifdef IBMW_ENABLE_CORE_METRICS
+        if (pod_metrics) observability::CoreMetricsController().registry().AddPodLoanFailed(pod_metrics->logical);
+#endif
         return handle;
       }
     } catch (const std::exception& e) {
@@ -813,18 +1072,35 @@ LoanedSampleHandle TransportDriverDispatcher::Loan(LoanAccessInfoWrapper&& wrapp
     return handle;
   }
 
-  // Try drivers in registration order; first one that supports loan for
-  // this (topic, mode) wins. Driver is responsible for setting
-  // out_handle.source_driver = this on success (see
-  // loaned_sample_handle.h doc comment).
+#ifdef IBMW_ENABLE_CORE_METRICS
+  observability::MetricsEntry* metric_slots = nullptr;
+  if (observability::CoreMetricsController().Enabled()) [[unlikely]] {
+    metric_slots = observability::CoreMetricsController().Find(this, send_type_wrapper_ptr);
+    if (metric_slots) observability::CoreMetricsController().registry().AddLoanAttempt(metric_slots->logical);
+  }
+#endif
+
+  // Try drivers in registration order. Each attempt gets a fresh handle so a
+  // failed driver cannot contaminate the next attempt.
   for (auto* driver : send_type_wrapper_ptr->cached_drivers) {
-    if (driver->LoanSample(send_type_wrapper_ptr->info, wrapper.requested_size,
-                           wrapper.mode, /*ctx=*/nullptr, handle)) {
+    LoanedSampleHandle candidate{};
+    const bool loaned = driver->LoanSample(
+        send_type_wrapper_ptr->info, wrapper.requested_size, wrapper.mode,
+        /*ctx=*/nullptr, candidate);
+    if (loaned) {
+      handle = candidate;
+#ifdef IBMW_ENABLE_CORE_METRICS
+      if (metric_slots) observability::CoreMetricsController().registry().AddLoanSucceeded(metric_slots->logical);
+#endif
       return handle;
     }
   }
 
-  // No driver could fulfill the loan; handle is still zeroed.
+  // No driver returned a valid handle; failed/malformed candidates never
+  // escape this iteration or contaminate a later driver's attempt.
+#ifdef IBMW_ENABLE_CORE_METRICS
+  if (metric_slots) observability::CoreMetricsController().registry().AddLoanFailed(metric_slots->logical);
+#endif
   return handle;
 }
 
@@ -839,9 +1115,22 @@ void TransportDriverDispatcher::PublishLoaned(LoanedSampleHandle& handle) {
     return;
   }
 
-  // Driver is contracted to clear source_driver (and other fields it
-  // chooses) on completion, so the handle becomes safe to drop.
-  handle.source_driver->PublishLoaned(handle);
+  auto* source_driver = handle.source_driver;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // kPodOnly can also be issued through the ordinary catalog path. Without
+  // changing the public handle ABI there is no stateless way to distinguish
+  // those handles here, so publish metrics are deliberately deferred rather
+  // than attributed to the wrong POD/ordinary series.
+  auto* metric_slot = handle.mode != LoanMode::kPodOnly &&
+                              observability::CoreMetricsController().Enabled()
+                          ? observability::CoreMetricsController().FindLoanDriver(source_driver) : nullptr;
+#endif
+  source_driver->PublishLoaned(handle);
+  handle = {};
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // This records dispatcher invocation, not transport success: the driver API is void.
+  if (metric_slot) observability::CoreMetricsController().registry().AddLoanPublishCalled(metric_slot);
+#endif
 }
 
 void TransportDriverDispatcher::ReleaseLoaned(LoanedSampleHandle& handle) {
@@ -857,7 +1146,18 @@ void TransportDriverDispatcher::ReleaseLoaned(LoanedSampleHandle& handle) {
     return;  // already published or never loaned; silently no-op.
   }
 
-  handle.source_driver->ReleaseLoaned(handle);
+  auto* source_driver = handle.source_driver;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  auto* metric_slot = handle.mode != LoanMode::kPodOnly &&
+                              observability::CoreMetricsController().Enabled()
+                          ? observability::CoreMetricsController().FindLoanDriver(source_driver) : nullptr;
+#endif
+  source_driver->ReleaseLoaned(handle);
+  handle = {};
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // This records dispatcher invocation, not transport success: the driver API is void.
+  if (metric_slot) observability::CoreMetricsController().registry().AddLoanReleaseCalled(metric_slot);
+#endif
 }
 
 // Phase 7 §7.3 §U: receiver-side zero-copy fast lane.
@@ -901,29 +1201,6 @@ bool TransportDriverDispatcher::AttachLoaned(MessageHandlerAccessInfoWrapper&& w
 
   auto sub_func_shared_ptr = std::make_shared<ibmw::transport::LoanedMessageCallback>(wrapper.callback);
 
-  LoanedMessageHandlerCallback callback =
-      [this, sub_func_shared_ptr](
-          const ibmw_transport_context_base_t* ctx_ptr,
-          const void* payload_ptr,
-          size_t payload_size,
-          std::function<void()>&& input_release_callback) {
-        ibmw::transport::SubscriberReleaseCallback release_callback(
-            std::move(input_release_callback));
-        try {
-          (*sub_func_shared_ptr)(
-              ctx_ptr,
-              payload_ptr,
-              payload_size,
-              release_callback.NativeHandle());
-
-        } catch (const std::exception& e) {
-          MW_ERROR("{}", e.what());
-        } catch (...) {
-          MW_ERROR("Loaned subscriber callback threw an unknown exception.");
-        }
-        if (release_callback) release_callback();
-      };
-
   // Resolve sub-topic driver list (lazy populate, same pattern as
   // OnMessage above).
   auto driver_itr = sub_topics_driver_index_map_.find(topic_name);
@@ -935,13 +1212,81 @@ bool TransportDriverDispatcher::AttachLoaned(MessageHandlerAccessInfoWrapper&& w
 
   // First-success-wins: ask each driver in registration order.
   for (auto* driver : driver_itr->second) {
-    auto callback_state = std::make_shared<LoanedCallbackState>(callback);
+    auto callback_state =
+        std::make_shared<LoanedCallbackState>(LoanedMessageHandlerCallback{});
+#ifdef IBMW_ENABLE_CORE_METRICS
+    std::shared_ptr<observability::Registry::LoanedReceiveSlot> metric_slot;
+    auto& metrics = observability::CoreMetricsController();
+    if (metrics.Enabled()) {
+      try {
+        metric_slot = metrics.RegisterLoanedReceive(
+            this, callback_state.get(), topic_name, msg_type, driver->Name(),
+            callback_state);
+      } catch (...) {
+        metric_slot.reset();
+      }
+      if (metric_slot) callback_state->SetMetricSlot(metric_slot);
+    }
+#endif
+    LoanedMessageHandlerCallback callback =
+        [this, sub_func_shared_ptr
+#ifdef IBMW_ENABLE_CORE_METRICS
+         , metric_slot
+#endif
+        ](const ibmw_transport_context_base_t* ctx_ptr,
+          const void* payload_ptr, size_t payload_size,
+          std::function<void()>&& input_release_callback) {
+          ibmw::transport::SubscriberReleaseCallback release_callback(
+              std::move(input_release_callback));
+#ifdef IBMW_ENABLE_CORE_METRICS
+          // Entry is counted by LoanedCallbackState under its existing
+          // lifecycle gate, linearized against Disable().
+#endif
+          try {
+            (*sub_func_shared_ptr)(ctx_ptr, payload_ptr, payload_size,
+                                   release_callback.NativeHandle());
+#ifdef IBMW_ENABLE_CORE_METRICS
+            if (metric_slot)
+              metric_slot->callback_completed.fetch_add(
+                  1, std::memory_order_relaxed);
+#endif
+          } catch (const std::exception& e) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+            if (metric_slot)
+              metric_slot->callback_threw_std.fetch_add(
+                  1, std::memory_order_relaxed);
+#endif
+            MW_ERROR("{}", e.what());
+          } catch (...) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+            if (metric_slot)
+              metric_slot->callback_threw_nonstd.fetch_add(
+                  1, std::memory_order_relaxed);
+#endif
+            MW_ERROR("Loaned subscriber callback threw an unknown exception.");
+          }
+          if (release_callback) release_callback();
+        };
+    callback_state->SetCallback(std::move(callback));
     LoanedMessageHandlerWrapper loaned_handler{
         .info = handler_info,
         .callback =
-            [callback_state](const ibmw_transport_context_base_t* ctx_ptr,
+            [callback_state
+#ifdef IBMW_ENABLE_CORE_METRICS
+             , metric_slot
+#endif
+            ](const ibmw_transport_context_base_t* ctx_ptr,
                              const void* payload_ptr, size_t payload_size,
                              std::function<void()>&& release) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+              // Wrap outside the registration gate: a failed-driver or
+              // lifecycle residual is not entered, but an actual release is
+              // still auditable. The wrapper preserves exactly-once behavior.
+              InvokeWithReleaseMetrics(callback_state, metric_slot, ctx_ptr,
+                                       payload_ptr, payload_size,
+                                       std::move(release));
+              return;
+#endif
               callback_state->Invoke(ctx_ptr, payload_ptr, payload_size,
                                      std::move(release));
             }};
@@ -951,6 +1296,10 @@ bool TransportDriverDispatcher::AttachLoaned(MessageHandlerAccessInfoWrapper&& w
       return true;
     }
     callback_state->Disable();
+#ifdef IBMW_ENABLE_CORE_METRICS
+    observability::CoreMetricsController().UnregisterLoanedReceive(
+        this, callback_state.get());
+#endif
   }
 
   MW_WARN(
@@ -990,25 +1339,6 @@ TransportDriverDispatcher::AttachLoanedRetained(
 
   auto sub_func_shared_ptr =
       std::make_shared<ibmw::transport::LoanedMessageCallback>(wrapper.callback);
-  LoanedMessageHandlerCallback callback =
-      [this, sub_func_shared_ptr](
-          const ibmw_transport_context_base_t* ctx_ptr,
-          const void* payload_ptr,
-          size_t payload_size,
-          std::function<void()>&& input_release_callback) {
-        ibmw::transport::SubscriberReleaseCallback release_callback(
-            std::move(input_release_callback));
-        try {
-          (*sub_func_shared_ptr)(ctx_ptr, payload_ptr, payload_size,
-                                 release_callback.NativeHandle());
-        } catch (const std::exception& e) {
-          MW_ERROR("{}", e.what());
-        } catch (...) {
-          MW_ERROR("Retained loan subscriber callback threw an unknown exception.");
-        }
-        if (release_callback) release_callback();
-      };
-
   auto driver_itr = sub_topics_driver_index_map_.find(topic_name);
   if (driver_itr == sub_topics_driver_index_map_.end()) {
     auto driver_ptr_vec = GetDriversByRules(topic_name, sub_topics_drivers_rules_);
@@ -1023,13 +1353,74 @@ TransportDriverDispatcher::AttachLoanedRetained(
         capabilities->second.retained_loan_v1 == nullptr) {
       continue;
     }
-    auto callback_state = std::make_shared<LoanedCallbackState>(callback);
+    auto callback_state =
+        std::make_shared<LoanedCallbackState>(LoanedMessageHandlerCallback{});
+#ifdef IBMW_ENABLE_CORE_METRICS
+    std::shared_ptr<observability::Registry::LoanedReceiveSlot> metric_slot;
+    auto& metrics = observability::CoreMetricsController();
+    if (metrics.Enabled()) {
+      try {
+        metric_slot = metrics.RegisterLoanedReceive(
+            this, callback_state.get(), topic_name, msg_type, driver->Name(),
+            callback_state);
+      } catch (...) {
+        metric_slot.reset();
+      }
+      if (metric_slot) callback_state->SetMetricSlot(metric_slot);
+    }
+#endif
+    LoanedMessageHandlerCallback callback =
+        [this, sub_func_shared_ptr
+#ifdef IBMW_ENABLE_CORE_METRICS
+         , metric_slot
+#endif
+        ](const ibmw_transport_context_base_t* ctx_ptr,
+          const void* payload_ptr, size_t payload_size,
+          std::function<void()>&& input_release_callback) {
+          ibmw::transport::SubscriberReleaseCallback release_callback(
+              std::move(input_release_callback));
+          try {
+            (*sub_func_shared_ptr)(ctx_ptr, payload_ptr, payload_size,
+                                   release_callback.NativeHandle());
+#ifdef IBMW_ENABLE_CORE_METRICS
+            if (metric_slot)
+              metric_slot->callback_completed.fetch_add(
+                  1, std::memory_order_relaxed);
+#endif
+          } catch (const std::exception& e) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+            if (metric_slot)
+              metric_slot->callback_threw_std.fetch_add(
+                  1, std::memory_order_relaxed);
+#endif
+            MW_ERROR("{}", e.what());
+          } catch (...) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+            if (metric_slot)
+              metric_slot->callback_threw_nonstd.fetch_add(
+                  1, std::memory_order_relaxed);
+#endif
+            MW_ERROR("Retained loan subscriber callback threw an unknown exception.");
+          }
+          if (release_callback) release_callback();
+        };
+    callback_state->SetCallback(std::move(callback));
     LoanedMessageHandlerWrapper loaned_handler{
         .info = handler_info,
         .callback =
-            [callback_state](const ibmw_transport_context_base_t* ctx_ptr,
+            [callback_state
+#ifdef IBMW_ENABLE_CORE_METRICS
+             , metric_slot
+#endif
+            ](const ibmw_transport_context_base_t* ctx_ptr,
                              const void* payload_ptr, size_t payload_size,
                              std::function<void()>&& release) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+              InvokeWithReleaseMetrics(callback_state, metric_slot, ctx_ptr,
+                                       payload_ptr, payload_size,
+                                       std::move(release));
+              return;
+#endif
               callback_state->Invoke(ctx_ptr, payload_ptr, payload_size,
                                      std::move(release));
             }};
@@ -1039,6 +1430,10 @@ TransportDriverDispatcher::AttachLoanedRetained(
                             ->AttachLoanedRetained(loaned_handler, options);
     if (!subscription) {
       callback_state->Disable();
+#ifdef IBMW_ENABLE_CORE_METRICS
+      observability::CoreMetricsController().UnregisterLoanedReceive(
+          this, callback_state.get());
+#endif
       MW_WARN("Driver '{}' rejected retained zero-copy receive for topic '{}' (msg_type '{}').",
               driver->Name(), topic_name, msg_type);
       continue;

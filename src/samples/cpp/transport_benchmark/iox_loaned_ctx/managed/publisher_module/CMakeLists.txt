@@ -22,3 +22,10 @@ target_link_libraries(${CUR_TARGET_NAME}
          ibmw::extensions::iceoryx_ext
          ibmw::extensions::dds_types
          iceoryx_posh::iceoryx_posh)
+
+if(IBMW_BUILD_TESTS)
+  file(GLOB test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
+  if(test_files)
+    add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
+  endif()
+endif()

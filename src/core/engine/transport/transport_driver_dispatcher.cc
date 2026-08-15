@@ -10,6 +10,9 @@
 #include <vector>
 
 #include "base/log_util.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 namespace ibmw::runtime::core::transport {
 
@@ -42,6 +45,12 @@ void TransportDriverDispatcher::Start() {
 void TransportDriverDispatcher::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // Disable non-retained AttachLoaned sidecars before a driver can deliver a
+  // teardown residual.  The residual still releases its transport loan, but
+  // it is not a callback entry.
+  observability::CoreMetricsController().DisableLoanedReceive(this);
+#endif
 
   const bool shutdown_profile = IsTransportShutdownProfileEnabled();
   size_t error_count = 0;

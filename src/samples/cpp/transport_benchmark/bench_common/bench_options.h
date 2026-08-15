@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -51,6 +52,21 @@ struct BenchOptions {
   // Publisher-side warmup messages NOT included in latency stats.
   // Helps avoid first-publish JIT/COW penalties skewing percentiles.
   uint32_t warmup_messages{50};
+  // New options remain appended to preserve positional aggregate initializers.
+  // Transport topic. Existing samples retain their historical defaults.
+  std::string topic;
+  std::string status_path;
+  std::string publisher_status_path;
+  // Performance-gate mode: publish in fixed batches.  A zero target rate is
+  // an explicitly unpaced capacity run; otherwise pacing occurs once per
+  // batch (never once per message).
+  uint32_t batch_size{1};
+  // Optional wall-clock measurement window used by the performance gate.
+  // Zero measured_sec preserves the historical sequence-based warmup mode.
+  uint32_t warmup_sec{0};
+  uint32_t measured_sec{0};
+  uint64_t measure_begin_monotonic_ns{0};
+  uint64_t measure_end_monotonic_ns{0};
 };
 
 // Parse the `bench_options` block from a yaml file path (typically
@@ -60,20 +76,53 @@ inline BenchOptions LoadBenchOptions(std::string_view yaml_file_path) {
   BenchOptions opt;
   YAML::Node root = YAML::LoadFile(std::string(yaml_file_path));
   YAML::Node bo = root["bench_options"];
+  if (!bo && root.IsMap()) {
+    for (const auto& entry : root) {
+      if (entry.second.IsMap() && entry.second["bench_options"]) {
+        bo = entry.second["bench_options"];
+        break;
+      }
+    }
+  }
   if (!bo) {
     throw std::runtime_error(
         std::string("LoadBenchOptions: missing top-level 'bench_options' in ") +
         std::string(yaml_file_path));
   }
   if (bo["payload_bytes"]) opt.payload_bytes = bo["payload_bytes"].as<size_t>();
+  if (bo["topic"])         opt.topic = bo["topic"].as<std::string>();
   if (bo["hz"])            opt.hz = bo["hz"].as<uint32_t>();
   if (bo["duration_sec"])  opt.duration_sec = bo["duration_sec"].as<uint32_t>();
   if (bo["message_count"]) opt.message_count = bo["message_count"].as<uint32_t>();
   if (bo["start_delay_ms"]) opt.start_delay_ms = bo["start_delay_ms"].as<uint32_t>();
   if (bo["label"])         opt.label = bo["label"].as<std::string>();
   if (bo["csv_path"])      opt.csv_path = bo["csv_path"].as<std::string>();
+  if (bo["status_path"])   opt.status_path = bo["status_path"].as<std::string>();
+  if (bo["publisher_status_path"])
+    opt.publisher_status_path = bo["publisher_status_path"].as<std::string>();
   if (bo["warmup_messages"])
     opt.warmup_messages = bo["warmup_messages"].as<uint32_t>();
+  if (bo["batch_size"])
+    opt.batch_size = std::max<uint32_t>(1, bo["batch_size"].as<uint32_t>());
+  if (bo["warmup_sec"]) opt.warmup_sec = bo["warmup_sec"].as<uint32_t>();
+  if (bo["measured_sec"]) opt.measured_sec = bo["measured_sec"].as<uint32_t>();
+  if (bo["measure_begin_monotonic_ns"])
+    opt.measure_begin_monotonic_ns = bo["measure_begin_monotonic_ns"].as<uint64_t>();
+  if (bo["measure_end_monotonic_ns"])
+    opt.measure_end_monotonic_ns = bo["measure_end_monotonic_ns"].as<uint64_t>();
+  const uint64_t begin = opt.measure_begin_monotonic_ns;
+  const uint64_t end = opt.measure_end_monotonic_ns;
+  if ((begin == 0) != (end == 0)) {
+    throw std::runtime_error("LoadBenchOptions: monotonic boundaries must both be zero or nonzero");
+  }
+  if (begin != 0 &&
+      (end <= begin || end - begin != static_cast<uint64_t>(opt.measured_sec) * 1'000'000'000ULL)) {
+    throw std::runtime_error("LoadBenchOptions: monotonic interval must equal measured_sec");
+  }
+  if (begin != 0 && opt.duration_sec < opt.warmup_sec + opt.measured_sec) {
+    throw std::runtime_error(
+        "LoadBenchOptions: duration_sec must cover warmup_sec + measured_sec");
+  }
   return opt;
 }
 
