@@ -3,7 +3,7 @@ ibmw:
   extensions:
     items:
       - name: dds_extension
-        path: ./libibmw_dds_transport.so
+        path: "@ROOT_DIR@/lib/libibmw_dds_transport.so"
         options:
           domain_id: 71
           transport_policy: default
@@ -23,7 +23,7 @@ ibmw:
   messaging:
     drivers:
       - type: dds
-        options: {domain_id: 71, ros2_compatible: false}
+        options: {domain_id: 71, ros2_compatible: true, ros2_topic_prefix: rt}
     publishers:
       - {topic: "ibmw/xml/wide/image", enable_drivers: [dds]}
       - {topic: "ibmw/xml/wide/compressed_image", enable_drivers: [dds]}
@@ -41,7 +41,7 @@ ibmw:
   service:
     drivers:
       - type: dds
-        options: {ros2_compatible: false, timeout_executor: timeout_handle}
+        options: {ros2_compatible: true, timeout_executor: timeout_handle}
     clients:
       - {func_name: "(.*)", enable_drivers: [dds]}
   modules:

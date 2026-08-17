@@ -35,7 +35,6 @@ class SubscriberModule final : public ibmw::Module {
   void OnServiceRequest(bool valid);
 
  private:
-  void MaybeFinish();
   void RequestShutdown();
 
   ibmw::Runtime core_;
