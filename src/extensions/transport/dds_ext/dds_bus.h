@@ -29,11 +29,22 @@ struct DdsBusTransportConfig {
   std::string tcp_addr = "127.0.0.1";
 };
 
+struct DdsBusXmlProfileConfig {
+  // When set, both fields are required. The named participant profile is
+  // loaded explicitly instead of relying on Fast DDS process environment.
+  std::string file;
+  std::string participant_profile;
+};
+
 class DdsBus {
  public:
   DdsBus(uint32_t domain_id,
          const std::string& participant_name,
          const DdsBusTransportConfig& transport_config = {});
+  DdsBus(uint32_t domain_id,
+         const std::string& participant_name,
+         const DdsBusTransportConfig& transport_config,
+         const DdsBusXmlProfileConfig& xml_profile_config);
   ~DdsBus();
 
   void Initialize();
@@ -55,6 +66,7 @@ class DdsBus {
   uint32_t domain_id_;
   std::string participant_name_;
   DdsBusTransportConfig transport_config_;
+  DdsBusXmlProfileConfig xml_profile_config_;
 
   eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
   eprosima::fastdds::dds::DomainParticipantFactory* factory_ = nullptr;

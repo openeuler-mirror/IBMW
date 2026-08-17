@@ -2,7 +2,10 @@
 // All rights reserved.
 
 #include "dds_ext/dds_bus.h"
+#include "dds_ext/fastdds_compat.h"
 #include "dds_ext/global.h"
+
+#include <stdexcept>
 
 #include <fastdds/dds/domain/qos/DomainParticipantQos.hpp>
 #if __has_include(<fastdds/rtps/transport/TCPv4TransportDescriptor.hpp>)
@@ -42,6 +45,14 @@ DdsBus::DdsBus(uint32_t domain_id,
       participant_name_(participant_name),
       transport_config_(transport_config) {}
 
+DdsBus::DdsBus(uint32_t domain_id,
+               const std::string& participant_name,
+               const DdsBusTransportConfig& transport_config,
+               const DdsBusXmlProfileConfig& xml_profile_config)
+    : DdsBus(domain_id, participant_name, transport_config) {
+  xml_profile_config_ = xml_profile_config;
+}
+
 DdsBus::~DdsBus() {
   Shutdown();
 }
@@ -50,9 +61,45 @@ void DdsBus::Initialize() {
   factory_ = eprosima::fastdds::dds::DomainParticipantFactory::get_instance();
 
   eprosima::fastdds::dds::DomainParticipantQos pqos;
+  const bool has_xml_file = !xml_profile_config_.file.empty();
+  const bool has_xml_profile = !xml_profile_config_.participant_profile.empty();
+  if (has_xml_file != has_xml_profile) {
+    MW_ERROR("DDS XML configuration requires both xml_profile_file and xml_profile_name");
+    throw std::runtime_error(
+        "DDS XML configuration requires both xml_profile_file and xml_profile_name");
+  }
+
+  if (has_xml_file) {
+    if (factory_->load_XML_profiles_file(xml_profile_config_.file) !=
+        fastdds_compat::kReturnCodeOk) {
+      MW_ERROR("Failed to load DDS XML profile file: {}",
+               xml_profile_config_.file);
+      throw std::runtime_error("Failed to load DDS XML profile file: " +
+                               xml_profile_config_.file);
+    }
+
+    if (factory_->get_participant_qos_from_profile(
+            xml_profile_config_.participant_profile, pqos) !=
+        fastdds_compat::kReturnCodeOk) {
+      MW_ERROR("Failed to find DDS participant profile '{}' in {}",
+               xml_profile_config_.participant_profile,
+               xml_profile_config_.file);
+      throw std::runtime_error("Failed to find DDS participant profile: " +
+                               xml_profile_config_.participant_profile);
+    }
+
+    MW_INFO("DDS XML loaded, file: {}, participant_profile: {}",
+            xml_profile_config_.file,
+            xml_profile_config_.participant_profile);
+  }
+
   pqos.name(participant_name_);
 
   ApplyTransportPolicy(pqos);
+
+  MW_INFO("DDS transports resolved, builtin: {}, user_count: {}",
+          pqos.transport().use_builtin_transports,
+          pqos.transport().user_transports.size());
 
   participant_ = factory_->create_participant(domain_id_, pqos);
 
@@ -74,12 +121,19 @@ void DdsBus::ApplyTransportPolicy(
 
   switch (transport_config_.policy) {
     case DdsBusTransportPolicy::kDefault: {
-      // Leave FastDDS builtin transports (UDPv4 + SHM) untouched.
-      MW_INFO("DDS Bus transport policy: default (builtin UDPv4 + SHM)");
+      // Preserve XML transport settings when a profile was selected. Without
+      // XML this retains Fast DDS' historical builtin UDPv4 + SHM behavior.
+      MW_INFO("DDS Bus transport policy: default");
       break;
     }
     case DdsBusTransportPolicy::kShmOnly: {
       pqos.transport().use_builtin_transports = false;
+      pqos.transport().user_transports.clear();
+      pqos.wire_protocol().builtin.metatrafficUnicastLocatorList.clear();
+      pqos.wire_protocol().builtin.metatrafficMulticastLocatorList.clear();
+      pqos.wire_protocol().builtin.initialPeersList.clear();
+      pqos.wire_protocol().default_unicast_locator_list.clear();
+      pqos.wire_protocol().default_multicast_locator_list.clear();
       auto shm = std::make_shared<SharedMemTransportDescriptor>();
       pqos.transport().user_transports.push_back(shm);
       MW_INFO("DDS Bus transport policy: shm_only");
@@ -87,6 +141,12 @@ void DdsBus::ApplyTransportPolicy(
     }
     case DdsBusTransportPolicy::kTcpOnly: {
       pqos.transport().use_builtin_transports = false;
+      pqos.transport().user_transports.clear();
+      pqos.wire_protocol().builtin.metatrafficUnicastLocatorList.clear();
+      pqos.wire_protocol().builtin.metatrafficMulticastLocatorList.clear();
+      pqos.wire_protocol().builtin.initialPeersList.clear();
+      pqos.wire_protocol().default_unicast_locator_list.clear();
+      pqos.wire_protocol().default_multicast_locator_list.clear();
       auto tcp = std::make_shared<TCPv4TransportDescriptor>();
       if (transport_config_.tcp_listen_port != 0) {
         tcp->add_listener_port(transport_config_.tcp_listen_port);

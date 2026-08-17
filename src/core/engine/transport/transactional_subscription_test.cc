@@ -3,12 +3,23 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <chrono>
+#include <condition_variable>
+#include <future>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "cpp/transport/transport_handle.h"
 #include "cpp/util/string.h"
 #include "engine/transport/transport_driver_dispatcher.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 namespace ibmw::runtime::core::transport {
 namespace {
@@ -16,13 +27,16 @@ namespace {
 class FakeSubscription final : public LoanedSubscriptionHandle {
  public:
   void Stop() noexcept override { ++stop_calls; }
-  bool Close(std::chrono::milliseconds) noexcept override {
+  bool Close(std::chrono::milliseconds timeout) noexcept override {
     ++close_calls;
-    return true;
+    last_close_timeout = timeout;
+    return close ? close(timeout) : true;
   }
 
   int stop_calls = 0;
   int close_calls = 0;
+  std::chrono::milliseconds last_close_timeout{0};
+  std::function<bool(std::chrono::milliseconds)> close;
 };
 
 class ResidualCallbackDriver final : public TransportDriver,
@@ -112,7 +126,31 @@ ibmw_type_support_base_t MakeTypeSupport() {
   return result;
 }
 
-TEST(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
+class TransactionalSubscription : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (const char* value = std::getenv("IBMW_CORE_METRICS")) saved_mode_ = value;
+    unsetenv("IBMW_CORE_METRICS");
+#ifdef IBMW_ENABLE_CORE_METRICS
+    observability::CoreMetricsController().Initialize(this);
+#endif
+  }
+
+  void TearDown() override {
+#ifdef IBMW_ENABLE_CORE_METRICS
+    EXPECT_TRUE(observability::CoreMetricsController().FinalizeSnapshot(this));
+#endif
+    if (saved_mode_)
+      setenv("IBMW_CORE_METRICS", saved_mode_->c_str(), 1);
+    else
+      unsetenv("IBMW_CORE_METRICS");
+  }
+
+ private:
+  std::optional<std::string> saved_mode_;
+};
+
+TEST_F(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   TransportCatalog catalog;
   FrameworkAsyncTransportFilterBus filters;
   TransportDriverDispatcher dispatcher;
@@ -176,7 +214,7 @@ TEST(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   EXPECT_EQ(releases, 2);
 }
 
-TEST(TransactionalSubscription, AccessOnMessageFailureDisablesResidualCallback) {
+TEST_F(TransactionalSubscription, AccessOnMessageFailureDisablesResidualCallback) {
   TransportCatalog catalog;
   FrameworkAsyncTransportFilterBus filters;
   TransportDriverDispatcher dispatcher;
@@ -223,7 +261,7 @@ TEST(TransactionalSubscription, AccessOnMessageFailureDisablesResidualCallback) 
   EXPECT_EQ(rejecting.on_message_calls(), 2);
 }
 
-TEST(TransactionalSubscription, AnySuccessfulOrdinaryDriverKeepsCallbackEnabled) {
+TEST_F(TransactionalSubscription, AnySuccessfulOrdinaryDriverKeepsCallbackEnabled) {
   TransportCatalog catalog;
   FrameworkAsyncTransportFilterBus filters;
   TransportDriverDispatcher dispatcher;
@@ -277,7 +315,7 @@ TEST(TransactionalSubscription, AnySuccessfulOrdinaryDriverKeepsCallbackEnabled)
   EXPECT_TRUE(accepting.shutdown_saw_valid_handler());
 }
 
-TEST(TransactionalSubscription, OrdinaryRegistrationWithoutDriversErasesCatalogEntry) {
+TEST_F(TransactionalSubscription, OrdinaryRegistrationWithoutDriversErasesCatalogEntry) {
   TransportCatalog catalog;
   FrameworkAsyncTransportFilterBus filters;
   TransportDriverDispatcher dispatcher;
@@ -302,7 +340,7 @@ TEST(TransactionalSubscription, OrdinaryRegistrationWithoutDriversErasesCatalogE
   EXPECT_TRUE(catalog.GetSubTopicIndexMap().empty());
 }
 
-TEST(TransactionalSubscription, FailedLoanAttachDisablesEveryResidualCallback) {
+TEST_F(TransactionalSubscription, FailedLoanAttachDisablesEveryResidualCallback) {
   TransportCatalog catalog;
   TransportDriverDispatcher dispatcher;
   ResidualCallbackDriver first("first", false, false);
@@ -332,7 +370,7 @@ TEST(TransactionalSubscription, FailedLoanAttachDisablesEveryResidualCallback) {
   EXPECT_EQ(releases, 2);
 }
 
-TEST(TransactionalSubscription, LoanedFirstSuccessDisablesOnlyFailedDriverGate) {
+TEST_F(TransactionalSubscription, LoanedFirstSuccessDisablesOnlyFailedDriverGate) {
   TransportCatalog catalog;
   TransportDriverDispatcher dispatcher;
   ResidualCallbackDriver first("first", false, false);
@@ -363,7 +401,46 @@ TEST(TransactionalSubscription, LoanedFirstSuccessDisablesOnlyFailedDriverGate) 
   EXPECT_EQ(releases, 2);
 }
 
-TEST(TransactionalSubscription, RetainedFirstSuccessDisablesRejectedDriverGate) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+TEST_F(TransactionalSubscription,
+       FrozenMetricsRegistrationStillProbesUntilDriverSuccess) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& metrics = observability::CoreMetricsController();
+  metrics.ResetForTesting();
+  metrics.Initialize(this);
+  metrics.Start(this);
+
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  ResidualCallbackDriver first("first", false, false);
+  ResidualCallbackDriver second("second", false, true);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetSubTopicsDriversRules({{".*", {"first", "second"}}});
+  dispatcher.RegisterTransportDriver(&first);
+  dispatcher.RegisterTransportDriver(&second);
+  dispatcher.Initialize();
+
+  auto type_support = MakeTypeSupport();
+  int callback_calls = 0;
+  ibmw::transport::LoanedMessageCallback callback(
+      [&callback_calls](const ibmw_transport_context_base_t*, const void*,
+                        size_t, ibmw_function_base_t*) { ++callback_calls; });
+  EXPECT_TRUE(dispatcher.AttachLoaned(MessageHandlerAccessInfoWrapper{
+      .pkg_path = "pkg",
+      .module_name = "module",
+      .topic_name = "camera",
+      .msg_type_support = &type_support,
+      .callback = callback.NativeHandle()}));
+
+  int releases = 0;
+  first.TriggerLoaned(releases);
+  second.TriggerLoaned(releases);
+  EXPECT_EQ(callback_calls, 1);
+  EXPECT_EQ(releases, 2);
+}
+#endif
+
+TEST_F(TransactionalSubscription, RetainedFirstSuccessDisablesRejectedDriverGate) {
   TransportCatalog catalog;
   TransportDriverDispatcher dispatcher;
   ResidualCallbackDriver first("first", false, false, false);
@@ -398,7 +475,7 @@ TEST(TransactionalSubscription, RetainedFirstSuccessDisablesRejectedDriverGate) 
   EXPECT_EQ(releases, 2);
 }
 
-TEST(TransactionalSubscription, RetainedStopAndCloseDisableResidualCallback) {
+TEST_F(TransactionalSubscription, RetainedStopAndCloseDisableResidualCallback) {
   TransportCatalog catalog;
   TransportDriverDispatcher dispatcher;
   ResidualCallbackDriver driver("retained", false, false);
@@ -440,7 +517,7 @@ TEST(TransactionalSubscription, RetainedStopAndCloseDisableResidualCallback) {
   EXPECT_EQ(releases, 3);
 }
 
-TEST(TransactionalSubscription, RetainedCallbackCanStopItsOwnHandle) {
+TEST_F(TransactionalSubscription, RetainedCallbackCanStopItsOwnHandle) {
   TransportCatalog catalog;
   TransportDriverDispatcher dispatcher;
   ResidualCallbackDriver driver("retained", false, false);
@@ -474,6 +551,117 @@ TEST(TransactionalSubscription, RetainedCallbackCanStopItsOwnHandle) {
   driver.TriggerLoaned(releases);
   EXPECT_EQ(callback_calls, 1);
   EXPECT_EQ(driver.subscription()->stop_calls, 1);
+  EXPECT_EQ(releases, 1);
+}
+
+TEST_F(TransactionalSubscription, RetainedStopReturnsWhileCallbackIsBlocked) {
+  using namespace std::chrono_literals;
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  ResidualCallbackDriver driver("retained", false, false);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetSubTopicsDriversRules({{".*", {"retained"}}});
+  dispatcher.RegisterTransportDriver(
+      &driver, TransportDriverCapabilitiesV1{
+                   .retained_loan_v1 = static_cast<RetainedLoanCapabilityV1*>(&driver)});
+  dispatcher.Initialize();
+
+  std::mutex mutex;
+  std::condition_variable state;
+  bool entered = false;
+  bool release_callback = false;
+  auto type_support = MakeTypeSupport();
+  ibmw::transport::LoanedMessageCallback callback(
+      [&](const ibmw_transport_context_base_t*, const void*, size_t,
+          ibmw_function_base_t*) {
+        std::unique_lock lock(mutex);
+        entered = true;
+        state.notify_all();
+        state.wait(lock, [&] { return release_callback; });
+      });
+  auto handle = dispatcher.AttachLoanedRetained(
+      MessageHandlerAccessInfoWrapper{
+          .pkg_path = "pkg", .module_name = "module", .topic_name = "camera",
+          .msg_type_support = &type_support, .callback = callback.NativeHandle()},
+      RetainedLoanOptions{1});
+  ASSERT_NE(handle, nullptr);
+
+  int releases = 0;
+  std::thread invoking([&] { driver.TriggerLoaned(releases); });
+  {
+    std::unique_lock lock(mutex);
+    state.wait(lock, [&] { return entered; });
+  }
+  auto stopped = std::async(std::launch::async, [&] { handle->Stop(); });
+  EXPECT_EQ(stopped.wait_for(200ms), std::future_status::ready);
+  {
+    std::lock_guard lock(mutex);
+    release_callback = true;
+  }
+  state.notify_all();
+  stopped.get();
+  invoking.join();
+  EXPECT_EQ(driver.subscription()->stop_calls, 1);
+  EXPECT_EQ(releases, 1);
+}
+
+TEST_F(TransactionalSubscription, RetainedCloseUsesInnerTimeoutBudget) {
+  using namespace std::chrono_literals;
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  ResidualCallbackDriver driver("retained", false, false);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetSubTopicsDriversRules({{".*", {"retained"}}});
+  dispatcher.RegisterTransportDriver(
+      &driver, TransportDriverCapabilitiesV1{
+                   .retained_loan_v1 = static_cast<RetainedLoanCapabilityV1*>(&driver)});
+  dispatcher.Initialize();
+
+  std::mutex mutex;
+  std::condition_variable state;
+  bool entered = false;
+  bool release_callback = false;
+  auto type_support = MakeTypeSupport();
+  ibmw::transport::LoanedMessageCallback callback(
+      [&](const ibmw_transport_context_base_t*, const void*, size_t,
+          ibmw_function_base_t*) {
+        std::unique_lock lock(mutex);
+        entered = true;
+        state.notify_all();
+        state.wait(lock, [&] { return release_callback; });
+      });
+  auto handle = dispatcher.AttachLoanedRetained(
+      MessageHandlerAccessInfoWrapper{
+          .pkg_path = "pkg", .module_name = "module", .topic_name = "camera",
+          .msg_type_support = &type_support, .callback = callback.NativeHandle()},
+      RetainedLoanOptions{1});
+  ASSERT_NE(handle, nullptr);
+  driver.subscription()->close = [](std::chrono::milliseconds timeout) {
+    std::this_thread::sleep_for(timeout);
+    return false;
+  };
+
+  int releases = 0;
+  std::thread invoking([&] { driver.TriggerLoaned(releases); });
+  {
+    std::unique_lock lock(mutex);
+    state.wait(lock, [&] { return entered; });
+  }
+  constexpr auto timeout = 40ms;
+  auto closed = std::async(std::launch::async,
+                           [&] { return handle->Close(timeout); });
+  const auto status = closed.wait_for(250ms);
+  {
+    std::lock_guard lock(mutex);
+    release_callback = true;
+  }
+  state.notify_all();
+  invoking.join();
+
+  EXPECT_EQ(status, std::future_status::ready);
+  EXPECT_FALSE(closed.get());
+  EXPECT_EQ(driver.subscription()->close_calls, 1);
+  EXPECT_EQ(driver.subscription()->last_close_timeout, timeout);
   EXPECT_EQ(releases, 1);
 }
 

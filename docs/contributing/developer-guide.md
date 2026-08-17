@@ -701,8 +701,11 @@ The `dds` driver is registered by the DDS extension. It uses **native `.srv`
 mode**: business request/response types are directly serialized/deserialized by
 FastDDS via the TypeSupport obtained from gencode
 (`info.req_type_support_ref.CustomTypeSupportPtr()`). There are no envelope
-wrapper types -- the CDR payload on the wire is identical to what ROS2 produces,
-enabling 100% wire-compatible interop with standard ROS2 services.
+wrapper types. For a matching, validated ROS2 release, FastDDS/Fast-CDR profile,
+generated type, QoS, and request/reply correlation contract, the CDR payload is
+designed to match ROS2 services. This is not a universal cross-version/vendor
+compatibility guarantee; each service product still requires typed bidirectional
+acceptance evidence.
 
 The driver implements the ROS2 Service wire protocol (WriteParams/SampleInfo
 correlation, `rq/`/`rr/` topic naming, `dds_::` type name infixes) using only

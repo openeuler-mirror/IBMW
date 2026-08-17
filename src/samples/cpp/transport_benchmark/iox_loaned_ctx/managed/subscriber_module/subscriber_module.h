@@ -22,6 +22,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 
 #include "cpp/module_base.h"
@@ -66,7 +67,16 @@ class SubscriberModule : public ibmw::Module {
 
   std::atomic<uint64_t> received_{0};
   std::atomic<uint64_t> dropped_{0};
+  uint64_t unique_{0};
+  uint64_t duplicate_{0};
+  uint64_t out_of_order_{0};
+  uint64_t missing_{0};
+  uint32_t first_sequence_{0};
+  uint32_t last_sequence_{0};
+  bool have_last_sequence_{false};
   std::atomic<bool> finalized_{false};
+  std::chrono::steady_clock::time_point measure_begin_{};
+  std::chrono::steady_clock::time_point measure_end_{};
 };
 
 }  // namespace ibmw::samples::transport_benchmark::iox_loaned_ctx

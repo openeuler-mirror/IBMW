@@ -3,6 +3,10 @@
 
 #include "iceoryx_ext/iceoryx_bus.h"
 #include <algorithm>
+#ifdef IBMW_ENABLE_REPORTER_V1
+#include "iceoryx_ext/internal/reporter_sidecar.h"
+#include <unordered_map>
+#endif
 #include "iceoryx_ext/global.h"
 #include "iceoryx_posh/mepoo/chunk_header.hpp"
 #include "iceoryx_posh/popo/subscriber_options.hpp"
@@ -12,6 +16,33 @@ namespace ibmw::extensions::iceoryx_extension {
 
 namespace {
 thread_local IoxSubscriptionState* current_callback_subscription = nullptr;
+#ifdef IBMW_ENABLE_REPORTER_V1
+thread_local IoxReceiveReporter* pending_receive_reporter = nullptr;
+struct ReceiveReporterBinding {
+  IoxReceiveReporter* reporter;
+  size_t reported_peak = 0;
+};
+std::mutex receive_reporters_mutex;
+std::unordered_map<const IoxSubscriptionState*,
+                   std::unique_ptr<ReceiveReporterBinding>> receive_reporters;
+
+ReceiveReporterBinding* FindReceiveReporter(
+    const IoxSubscriptionState* state) noexcept {
+  std::lock_guard lock(receive_reporters_mutex);
+  const auto it = receive_reporters.find(state);
+  return it == receive_reporters.end() ? nullptr : it->second.get();
+}
+void AddReporter(const IoxReceiveReporter* reporter,
+                 ibmw_reporter_slot_v1* slot, uint64_t value) noexcept {
+  if (reporter && reporter->api && reporter->api->add && slot)
+    reporter->api->add(reporter->api->owner, slot, value);
+}
+void AddReporterSigned(const IoxReceiveReporter* reporter,
+                       ibmw_reporter_slot_v1* slot, int64_t value) noexcept {
+  if (reporter && reporter->api && reporter->api->add_signed && slot)
+    reporter->api->add_signed(reporter->api->owner, slot, value);
+}
+#endif
 
 #if ICEORYX_VERSION_MAJOR == 2 && ICEORYX_VERSION_MINOR < 90
 using IoxTruncateToCapacity = iox::cxx::TruncateToCapacity_t;
@@ -21,6 +52,17 @@ using IoxTruncateToCapacity = iox::TruncateToCapacity_t;
 constexpr auto kIoxTruncateToCapacity = iox::TruncateToCapacity;
 #endif
 }
+
+#ifdef IBMW_ENABLE_REPORTER_V1
+ScopedPendingIoxReceiveReporter::ScopedPendingIoxReceiveReporter(
+    IoxReceiveReporter* reporter) noexcept
+    : previous_(pending_receive_reporter) {
+  pending_receive_reporter = reporter;
+}
+ScopedPendingIoxReceiveReporter::~ScopedPendingIoxReceiveReporter() {
+  pending_receive_reporter = previous_;
+}
+#endif
 
 bool IsIceoryxListenerCallbackThread() noexcept {
   return current_callback_subscription != nullptr;
@@ -656,9 +698,23 @@ IoxSubscriptionState::IoxSubscriptionState(
         if (callback_context_) callback_context_->WaitForQuiescence();
         WaitForQuiescence();
         Deregister();
-      }) {}
+      }) {
+#ifdef IBMW_ENABLE_REPORTER_V1
+  if (pending_receive_reporter) {
+    std::lock_guard lock(receive_reporters_mutex);
+    receive_reporters.emplace(
+        this, std::make_unique<ReceiveReporterBinding>(
+                  ReceiveReporterBinding{pending_receive_reporter}));
+  }
+#endif
+}
 
-IoxSubscriptionState::~IoxSubscriptionState() = default;
+IoxSubscriptionState::~IoxSubscriptionState() {
+#ifdef IBMW_ENABLE_REPORTER_V1
+  std::lock_guard lock(receive_reporters_mutex);
+  receive_reporters.erase(this);
+#endif
+}
 
 bool IoxSubscriptionState::Quiescent() const noexcept {
   return active_callbacks_ == 0 && lease_limiter_.Outstanding() == 0;
@@ -671,16 +727,17 @@ bool IoxSubscriptionState::WaitForQuiescence() noexcept {
 }
 
 void IoxSubscriptionState::Stop() noexcept {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (stopping_) return;
-    stopping_ = true;
-  }
   // The worker owns a strong reference until detach, callback quiescence and
   // registry removal are complete. Therefore the raw notification context
   // cannot be destroyed while the listener can still enter it.
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (stopping_) return;
   auto self = weak_from_this().lock();
-  if (self) async_stop_.Request(std::move(self));
+  if (!self) return;
+  stopping_ = true;
+  // Request only takes IoxAsyncStop's private mutex and never waits. Publishing
+  // stopping and handing ownership to the worker must be atomic to Close().
+  async_stop_.Request(std::move(self));
 }
 
 void IoxSubscriptionState::DetachFromListener() noexcept {
@@ -726,6 +783,12 @@ void IoxSubscriptionState::Release(const void* payload) noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   if (payload != nullptr) subscriber_->release(payload);
   lease_limiter_.Release();
+#ifdef IBMW_ENABLE_REPORTER_V1
+  if (auto* binding = FindReceiveReporter(this)) {
+    AddReporter(binding->reporter, binding->reporter->released, 1);
+    AddReporterSigned(binding->reporter, binding->reporter->outstanding, -1);
+  }
+#endif
   cv_.notify_all();
 }
 
@@ -746,9 +809,25 @@ void IoxSubscriptionState::OnData() noexcept {
       payload = take_result.value();
 
       if (!lease_limiter_.TryAcquire()) {
+#ifdef IBMW_ENABLE_REPORTER_V1
+        if (auto* binding = FindReceiveReporter(this))
+          AddReporter(binding->reporter, binding->reporter->limit_drop, 1);
+#endif
         subscriber_->release(payload);
         continue;
       }
+#ifdef IBMW_ENABLE_REPORTER_V1
+      if (auto* binding = FindReceiveReporter(this)) {
+        AddReporter(binding->reporter, binding->reporter->delivered, 1);
+        AddReporterSigned(binding->reporter, binding->reporter->outstanding, 1);
+        const size_t outstanding = lease_limiter_.Outstanding();
+        if (outstanding > binding->reported_peak) {
+          AddReporter(binding->reporter, binding->reporter->outstanding_peak,
+                      outstanding - binding->reported_peak);
+          binding->reported_peak = outstanding;
+        }
+      }
+#endif
       ++active_callbacks_;
     }
 
@@ -810,8 +889,31 @@ void IoxSubscriptionState::OnData() noexcept {
                 current_callback_subscription;
             current_callback_subscription = this;
             try {
+#ifdef IBMW_ENABLE_REPORTER_V1
+              if (auto* binding = FindReceiveReporter(this))
+                AddReporter(binding->reporter,
+                            binding->reporter->callback_entered, 1);
+#endif
               callback_(payload, payload_size, std::move(release));
+#ifdef IBMW_ENABLE_REPORTER_V1
+              if (auto* binding = FindReceiveReporter(this))
+                AddReporter(binding->reporter,
+                            binding->reporter->callback_completed, 1);
+#endif
+            } catch (const std::exception&) {
+#ifdef IBMW_ENABLE_REPORTER_V1
+              if (auto* binding = FindReceiveReporter(this))
+                AddReporter(binding->reporter,
+                            binding->reporter->callback_threw_std, 1);
+#endif
+              current_callback_subscription = previous_callback_subscription;
+              throw;
             } catch (...) {
+#ifdef IBMW_ENABLE_REPORTER_V1
+              if (auto* binding = FindReceiveReporter(this))
+                AddReporter(binding->reporter,
+                            binding->reporter->callback_threw_nonstd, 1);
+#endif
               current_callback_subscription = previous_callback_subscription;
               throw;
             }

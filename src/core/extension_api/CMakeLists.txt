@@ -42,4 +42,8 @@ endif()
 # Set test of target
 if(IBMW_BUILD_TESTS AND test_files)
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
+  add_library(ibmw_reporter_v1_c_header_test OBJECT
+              ibmw_reporter_v1_c_compile_test.c)
+  target_include_directories(ibmw_reporter_v1_c_header_test
+                             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 endif()

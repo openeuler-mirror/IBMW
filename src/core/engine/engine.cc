@@ -2,6 +2,9 @@
 // All rights reserved.
 
 #include "engine/engine.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 #include <algorithm>
 #include <iostream>
@@ -14,6 +17,9 @@
 #include "base/sys_tools.h"
 
 namespace ibmw::runtime::core {
+#ifdef IBMW_ENABLE_CORE_METRICS
+using observability::CoreMetricsController;
+#endif
 
 // ---------------------------------------------------------------------------
 // Construction / Destruction
@@ -165,6 +171,9 @@ void Engine::BuildSubsystemTable() {
        .depends_on = {Subsystem::kLogger, Subsystem::kExecutor},
        .pre_init = [this, get_executor_fn] {
          transport_bus_.RegisterGetExecutorFunc(get_executor_fn);
+#ifdef IBMW_ENABLE_CORE_METRICS
+         CoreMetricsController().Initialize(this);
+#endif
        },
        .post_init = {},
        .pre_shutdown = {}},
@@ -364,6 +373,9 @@ void Engine::Initialize(const Options& options) {
 void Engine::StartImpl() {
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   phase_.store(Phase::kStart, std::memory_order_release);
+#ifdef IBMW_ENABLE_CORE_METRICS
+  CoreMetricsController().Start(this);
+#endif
 
   MW_INFO("Gen initialization report:\n{}", GenInitializationReport());
 
@@ -454,6 +466,11 @@ bool Engine::ShutdownImpl() {
     run_shutdown_hooks(After(Phase::kStopping, entry.id),
                        std::string("after ") + std::string(entry.name));
   }
+
+#ifdef IBMW_ENABLE_CORE_METRICS
+  if (!CoreMetricsController().FinalizeSnapshot(this))
+    MW_ERROR("Core Metrics V1 failed to write metrics.jsonl");
+#endif
 
   run_shutdown_hooks(AfterPhase(Phase::kStopping), "after stopping phase");
 

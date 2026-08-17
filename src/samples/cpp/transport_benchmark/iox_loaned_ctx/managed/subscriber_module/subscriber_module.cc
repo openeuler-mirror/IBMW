@@ -4,6 +4,8 @@
 #include "subscriber_module/subscriber_module.h"
 
 #include <memory>
+#include <fstream>
+#include <iostream>
 
 #include "bench_plain_payloads.h"
 
@@ -21,7 +23,7 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
   opts_ = LoadBenchOptions(cfg_path);
   stats_ = ibmw::common::util::LatencyStats(opts_.label);
   size_t expected = static_cast<size_t>(opts_.duration_sec) *
-                    static_cast<size_t>(opts_.hz);
+                    static_cast<size_t>(opts_.hz ? opts_.hz : 100000);
   stats_.Reserve(expected + expected / 5 + 64);
 
   // Standard receive-side stack: GetSubscriber + OnMessage<T>. Must be
@@ -57,11 +59,23 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
           }                                                                    \
           uint64_t latency_ns =                                                \
               (recv_ns >= send_ns) ? (recv_ns - send_ns) : 0;                  \
-          /* Skip warmup samples to avoid first-publish JIT/COW   */          \
-          /* penalties skewing the percentile tail.                */          \
-          if (seq < opts_.warmup_messages) return;                             \
+          if (opts_.measure_begin_monotonic_ns != 0) {                         \
+            if (send_ns < opts_.measure_begin_monotonic_ns || send_ns >= opts_.measure_end_monotonic_ns) return; \
+          } else if (opts_.measured_sec != 0) {                                \
+            const auto now = std::chrono::steady_clock::now();                 \
+            if (now < measure_begin_ || now >= measure_end_) return;           \
+          } else if (seq < opts_.warmup_messages) return;                      \
           {                                                                    \
             std::lock_guard<std::mutex> lk(stats_mu_);                         \
+            if (have_last_sequence_ && seq <= last_sequence_) { ++out_of_order_; ++duplicate_; } \
+            else { if (!have_last_sequence_) first_sequence_ = seq; ++unique_; } \
+            if (!have_last_sequence_ && opts_.measured_sec == 0 &&             \
+                seq > opts_.warmup_messages)                                   \
+              missing_ += seq - opts_.warmup_messages;                         \
+            if (have_last_sequence_ && seq > last_sequence_ + 1)               \
+              missing_ += seq - last_sequence_ - 1;                            \
+            last_sequence_ = seq;                                              \
+            have_last_sequence_ = true;                                        \
             stats_.Add(latency_ns);                                            \
           }                                                                    \
           received_.fetch_add(1, std::memory_order_relaxed);                   \
@@ -93,6 +107,10 @@ bool SubscriberModule::Run() {
            "SubscriberModule: iceoryx driver not injected before Run()");
     return false;
   }
+  const auto now = std::chrono::steady_clock::now();
+  measure_begin_ = now + std::chrono::seconds(opts_.warmup_sec);
+  measure_end_ = measure_begin_ + std::chrono::seconds(opts_.measured_sec);
+  std::cout << "PERF_SUBSCRIBER_RUNNING" << std::endl;
   // No driver-side wiring needed: deliveries already flow through the
   // OnMessage handlers installed in Setup().
   return true;
@@ -105,11 +123,34 @@ void SubscriberModule::Stop() {
   std::lock_guard<std::mutex> lk(stats_mu_);
   uint64_t received = received_.load();
   uint64_t dropped = dropped_.load();
+  const uint64_t unique = unique_;
+  const uint64_t span_missing = have_last_sequence_ ?
+      static_cast<uint64_t>(last_sequence_) - first_sequence_ + 1 - unique : 0;
+  const bool valid = unique > 0 && duplicate_ == 0 && out_of_order_ == 0 &&
+                     missing_ == 0 && span_missing == 0 && dropped == 0;
   std::string human = stats_.ToHumanString();
 
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
          "SubscriberModule Stop: received={} dropped={} {}",
          received, dropped, human);
+
+  if (!opts_.status_path.empty()) {
+    std::ofstream status(opts_.status_path, std::ios::trunc);
+    if (status) {
+      status << "{\n  \"received_measured\": " << received
+             << ",\n  \"measure_begin_monotonic_ns\": " << opts_.measure_begin_monotonic_ns
+             << ",\n  \"measure_end_monotonic_ns\": " << opts_.measure_end_monotonic_ns
+             << ",\n  \"unique_measured\": " << unique
+             << ",\n  \"duplicate\": " << duplicate_
+             << ",\n  \"out_of_order\": " << out_of_order_
+             << ",\n  \"missing\": " << missing_
+             << ",\n  \"span_missing\": " << span_missing
+             << ",\n  \"first_seq\": " << first_sequence_
+             << ",\n  \"last_seq\": " << last_sequence_
+             << ",\n  \"invalid\": " << dropped
+             << ",\n  \"valid\": " << (valid ? "true" : "false") << "\n}\n";
+    }
+  }
 
   if (!opts_.csv_path.empty()) {
     BenchCsvWriter::FinalizeAndAppend(opts_.csv_path, stats_);

@@ -1,0 +1,49 @@
+# Run with: ./run_xml_profile_matrix.sh <root-dir> publisher <shm|udp|mixed>
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 71
+          transport_policy: default
+          xml_profile_file: "@XML_PROFILE_FILE@"
+          xml_profile_name: "@XML_PROFILE_NAME@"
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options: {thread_num: 4}
+      - name: timeout_handle
+        type: timer
+        options: {bind_executor: work_thread_pool}
+  messaging:
+    drivers:
+      - type: dds
+        options: {domain_id: 71, ros2_compatible: false}
+    publishers:
+      - {topic: "ibmw/xml/wide/image", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/compressed_image", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/imu", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/laser_scan", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/point_cloud", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/camera_info", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/odometry", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/path", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/occupancy_grid", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/map_metadata", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/tf", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/markers", enable_drivers: [dds]}
+      - {topic: "ibmw/xml/wide/diagnostics", enable_drivers: [dds]}
+  service:
+    drivers:
+      - type: dds
+        options: {ros2_compatible: false, timeout_executor: timeout_handle}
+    clients:
+      - {func_name: "(.*)", enable_drivers: [dds]}
+  modules:
+    modules:
+      - {name: IbmwXmlWidePublisherModule, log_level: INFO}

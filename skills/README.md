@@ -8,6 +8,7 @@ Use this index to pick the correct skill entry point.
 |------|-------------|-------|
 | ROS2 application migration to DDS/ROS2 and JSON/local ecosystem roles | `migration/SKILL.md` | Tasks, templates, checklists, runtime evidence, and OHOS target audit boundaries. |
 | IBMW SDK delivery and consumption | `sdk/SKILL.md` | Generate and consume install-prefix SDKs for host/cross/customer builds without rebuilding IBMW source each time. |
+| OHOS DDS / ROS2 minimal static-message delivery | First read `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`, then use `ohos_dds_ros2/SKILL.md` | Command runbook first; the skill enforces build order, closure audit, HDC `Connected`, current physical interoperability, and evidence boundaries. |
 | Transport decoupling and red-line rules | `transport_decoupling.md` | Canonical R1-R12 red-line skill; use before touching transport/module generation paths. |
 | Test discipline and verification procedure | `ibmw_testing.md` | Use before changing tests, gates, fixtures, or verification scripts. |
 | Legacy ROS2 app migration link | `ros2_app_migration.md` | Compatibility redirect to `migration/SKILL.md`; do not add new content here. |

@@ -3,6 +3,10 @@
 
 set_namespace()
 
+if(IBMW_BUILD_DDS_XML_VALIDATION)
+  add_subdirectory(dds_xml_validation)
+endif()
+
 if(IBMW_BUILD_EXAMPLES)
   add_subdirectory(quickstart)
   add_subdirectory(executor_demo)

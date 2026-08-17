@@ -6,10 +6,21 @@
 #include "iceoryx_ext/global.h"
 #include "iceoryx_ext/internal/checked_size.h"
 #include "iceoryx_ext/internal/payload_size.h"
+#ifdef IBMW_ENABLE_REPORTER_V1
+#include "iceoryx_ext/internal/reporter_sidecar.h"
+#endif
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
 #include "iceoryx_posh/mepoo/chunk_header.hpp"
 #include <limits>
+#include "extension_api/ibmw_reporter_v1.h"
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#endif
+#ifdef IBMW_ENABLE_REPORTER_V1
+#include <mutex>
+#include <unordered_map>
+#endif
 
 namespace YAML {
 template <>
@@ -44,6 +55,79 @@ struct convert<ibmw::extensions::iceoryx_extension::IceoryxTransportDriver::Opti
 }  // namespace YAML
 
 namespace ibmw::extensions::iceoryx_extension {
+namespace {
+const ibmw_reporter_v1* QueryHostReporter() noexcept {
+#if defined(_WIN32)
+  return nullptr;
+#else
+  void* host = dlopen(nullptr, RTLD_NOW | RTLD_LOCAL);
+  if (!host) return nullptr;
+  using Query = const ibmw_reporter_v1* (*)(void);
+  auto query = reinterpret_cast<Query>(dlsym(host, "ibmw_reporter_query_v1"));
+  const ibmw_reporter_v1* api = query ? query() : nullptr;
+  dlclose(host);
+  return api;
+#endif
+}
+}  // namespace
+#ifdef IBMW_ENABLE_REPORTER_V1
+namespace {
+struct DirectReporterSlots {
+  ibmw_reporter_slot_v1* attempt{}; ibmw_reporter_slot_v1* success{};
+  ibmw_reporter_slot_v1* fail{}; ibmw_reporter_slot_v1* retry{};
+  ibmw_reporter_slot_v1* publish{}; ibmw_reporter_slot_v1* release{};
+};
+struct DirectReporterBinding {
+  const ibmw_reporter_v1* api{};
+  DirectReporterSlots slots;
+  IoxReceiveReporter receive;
+};
+struct ReporterSidecar {
+  const ibmw_reporter_v1* api{};
+  std::vector<std::unique_ptr<DirectReporterBinding>> bindings;
+  std::vector<const IoxPublisher*> publishers;
+};
+std::mutex g_reporter_sidecars_mutex;
+std::unordered_map<const IceoryxTransportDriver*, std::unique_ptr<ReporterSidecar>>
+    g_reporter_sidecars;
+std::unordered_map<const IoxPublisher*, DirectReporterBinding*>
+    g_publisher_reporters;
+ReporterSidecar* FindReporterSidecar(const IceoryxTransportDriver* driver) {
+  std::lock_guard lock(g_reporter_sidecars_mutex);
+  auto it = g_reporter_sidecars.find(driver);
+  return it == g_reporter_sidecars.end() ? nullptr : it->second.get();
+}
+bool ValidReporter(const ibmw_reporter_v1* api) noexcept {
+  return api && api->abi_version == IBMW_REPORTER_ABI_VERSION_V1 &&
+         api->struct_size >= offsetof(ibmw_reporter_v1, add) + sizeof(api->add) &&
+         api->register_slot && api->add;
+}
+bool ValidSignedReporter(const ibmw_reporter_v1* api) noexcept {
+  return ValidReporter(api) &&
+         api->struct_size >= offsetof(ibmw_reporter_v1, add_signed) + sizeof(api->add_signed) &&
+         api->add_signed;
+}
+DirectReporterBinding* FindPublisherReporter(const IoxPublisher* publisher) {
+  std::lock_guard lock(g_reporter_sidecars_mutex);
+  const auto it = g_publisher_reporters.find(publisher);
+  return it == g_publisher_reporters.end() ? nullptr : it->second;
+}
+void ReporterAdd(const ibmw_reporter_v1* api, ibmw_reporter_slot_v1* slot,
+                 uint64_t value) noexcept {
+  if (api && api->add && slot) api->add(api->owner, slot, value);
+}
+}  // namespace
+#endif
+
+extern "C" IBMW_ICEORYX_EXPORT const ibmw_reporter_v1*
+ibmw_iceoryx_query_host_reporter_v1(void) noexcept {
+  const auto* api = QueryHostReporter();
+#ifdef IBMW_ENABLE_REPORTER_V1
+  return ValidReporter(api) ? api : nullptr;
+#else
+  return api;
+#endif
+}
 void IceoryxTransportDriver::Initialize(YAML::Node options_node) {
   // todo: check options_node->shm_init_size
 
@@ -61,6 +145,13 @@ void IceoryxTransportDriver::Initialize(YAML::Node options_node) {
   }
 
   options_node = options_;
+#ifdef IBMW_ENABLE_REPORTER_V1
+  auto sidecar = std::make_unique<ReporterSidecar>();
+  sidecar->api = QueryHostReporter();
+  if (!ValidReporter(sidecar->api)) sidecar->api = nullptr;
+  std::lock_guard lock(g_reporter_sidecars_mutex);
+  g_reporter_sidecars.emplace(this, std::move(sidecar));
+#endif
 }
 
 void IceoryxTransportDriver::Start() {
@@ -92,6 +183,17 @@ void IceoryxTransportDriver::Shutdown() {
   }
 
   iceoryx_bus_.Shutdown();
+#ifdef IBMW_ENABLE_REPORTER_V1
+  {
+    std::lock_guard lock(g_reporter_sidecars_mutex);
+    if (const auto it = g_reporter_sidecars.find(this);
+        it != g_reporter_sidecars.end()) {
+      for (const auto* publisher : it->second->publishers)
+        g_publisher_reporters.erase(publisher);
+    }
+    g_reporter_sidecars.erase(this);
+  }
+#endif
   state_.store(State::kShutdown);
 }
 
@@ -109,6 +211,29 @@ bool IceoryxTransportDriver::RegisterSendType(
 
     // register publisher with url to iceoryx
     iceoryx_bus_.RegisterPublisher(pattern);
+
+#ifdef IBMW_ENABLE_REPORTER_V1
+    try {
+      if (auto* sidecar = FindReporterSidecar(this); sidecar && sidecar->api) {
+      const auto* reporter = sidecar->api;
+      auto view=[](std::string_view s){return ibmw_reporter_string_view_v1{s.data(),static_cast<uint64_t>(s.size())};};
+      auto binding=std::make_unique<DirectReporterBinding>();
+      binding->api=reporter;
+      auto& slots=binding->slots;
+      auto reg=[&](std::string_view metric){ibmw_reporter_slot_descriptor_v1 d{};d.abi_version=IBMW_REPORTER_ABI_VERSION_V1;d.struct_size=sizeof(d);d.kind=view("direct_iceoryx_loan");d.metric=view(metric);d.topic=view(info.topic_name);d.type=view(info.msg_type);d.driver=view("iceoryx");return reporter->register_slot(reporter->owner,&d);};
+      slots.attempt=reg("logical_attempt");slots.success=reg("logical_success");slots.fail=reg("logical_fail");slots.retry=reg("internal_retry");slots.publish=reg("publish");slots.release=reg("release");
+      auto* pub=iceoryx_bus_.GetPublisher(pattern);
+      if (pub) {
+        std::lock_guard lock(g_reporter_sidecars_mutex);
+        g_publisher_reporters.emplace(pub, binding.get());
+        sidecar->publishers.push_back(pub);
+      }
+        sidecar->bindings.push_back(std::move(binding));
+      }
+    } catch (...) {
+      // Reporter setup is optional and cannot change transport registration.
+    }
+#endif
 
     MW_INFO("Register publish type to iceoryx transport, url: {}", pattern);
 
@@ -432,6 +557,11 @@ struct CtxMetaLoanToken {
   ibmw::extensions::iceoryx_extension::IoxPublisher* pub;
   void* chunk_ptr;     // start of iceoryx user payload (i.e. base of header)
   size_t total_size;   // header_size + payload_size, for pkg_size field
+#ifdef IBMW_ENABLE_REPORTER_V1
+  const ibmw_reporter_v1* reporter;
+  ibmw_reporter_slot_v1* publish_slot;
+  ibmw_reporter_slot_v1* release_slot;
+#endif
 };
 
 class RawLoanGuard {
@@ -592,6 +722,29 @@ IceoryxTransportDriver::AttachLoanedRetained(
   try {
     const auto& info = message_handler.info;
     auto callback = message_handler.callback;
+#ifdef IBMW_ENABLE_REPORTER_V1
+    DirectReporterBinding* reporter_binding = nullptr;
+    try {
+      if (auto* sidecar = FindReporterSidecar(this);
+          sidecar && ValidSignedReporter(sidecar->api)) {
+        auto binding = std::make_unique<DirectReporterBinding>();
+        binding->api = sidecar->api;
+        binding->receive.api = sidecar->api;
+        auto view=[](std::string_view s){return ibmw_reporter_string_view_v1{s.data(),static_cast<uint64_t>(s.size())};};
+        auto reg=[&](std::string_view metric){ibmw_reporter_slot_descriptor_v1 d{};d.abi_version=IBMW_REPORTER_ABI_VERSION_V1;d.struct_size=sizeof(d);d.kind=view("retained_iceoryx_receive");d.metric=view(metric);d.topic=view(info.topic_name);d.type=view(info.msg_type);d.driver=view("iceoryx");return sidecar->api->register_slot(sidecar->api->owner,&d);};
+        auto& r = binding->receive;
+        r.delivered=reg("receive_delivered");r.released=reg("receive_released");r.outstanding=reg("outstanding_current");r.outstanding_peak=reg("outstanding_peak");r.limit_drop=reg("limit_drop");
+        reporter_binding = binding.get();
+        sidecar->bindings.push_back(std::move(binding));
+      }
+    } catch (...) {
+      reporter_binding = nullptr;
+    }
+#endif
+#ifdef IBMW_ENABLE_REPORTER_V1
+    ScopedPendingIoxReceiveReporter pending_reporter(
+        reporter_binding ? &reporter_binding->receive : nullptr);
+#endif
     auto state = iceoryx_bus_.RegisterSubscriber(
         MakePodUrl(info.topic_name, info.msg_type),
         [callback = std::move(callback)](
@@ -739,6 +892,18 @@ bool IceoryxTransportDriver::LoanSerializedSample(
               info.topic_name, info.msg_type);
       return false;
     }
+#ifdef IBMW_ENABLE_REPORTER_V1
+    auto* binding = FindPublisherReporter(pub);
+    auto* metrics = binding ? &binding->slots : nullptr;
+    const ibmw_reporter_v1* reporter = binding ? binding->api : nullptr;
+    ReporterAdd(reporter, metrics ? metrics->attempt : nullptr, 1);
+    struct Outcome {
+      const ibmw_reporter_v1* reporter;
+      DirectReporterSlots* slots;
+      bool success = false;
+      ~Outcome() { if (!success && slots) ReporterAdd(reporter, slots->fail, 1); }
+    } outcome{reporter, metrics};
+#endif
 
     std::string_view serialization_type = ctx.GetSerializationType();
     if (serialization_type.empty()) {
@@ -806,7 +971,16 @@ bool IceoryxTransportDriver::LoanSerializedSample(
                 "reason (topic={} msg_type={})", info.topic_name, info.msg_type);
         return false;
       }
+      // A retry means another LoanRaw/Serialize attempt will actually occur;
+      // terminal OOM on the final allowed attempt is not a retry.
+      if (attempt + 1 >= kMaxLoanRetries ||
+          chunk_size > std::numeric_limits<size_t>::max() / 2) {
+        break;
+      }
       chunk_size *= 2;
+#ifdef IBMW_ENABLE_REPORTER_V1
+      ReporterAdd(reporter, metrics ? metrics->retry : nullptr, 1);
+#endif
     }
 
     if (!ok || chunk == nullptr) {
@@ -816,8 +990,11 @@ bool IceoryxTransportDriver::LoanSerializedSample(
     }
 
     RawLoanGuard chunk_guard(pub, chunk);
-    auto* token =
-        new CtxMetaLoanToken{pub, chunk, header_size + actual_payload_size};
+    auto* token = new CtxMetaLoanToken{pub, chunk, header_size + actual_payload_size
+#ifdef IBMW_ENABLE_REPORTER_V1
+      ,reporter,metrics?metrics->publish:nullptr,metrics?metrics->release:nullptr
+#endif
+    };
     chunk_guard.Disarm();
     out_handle.user_payload_ptr =
         static_cast<void*>(static_cast<char*>(chunk) + header_size);
@@ -825,6 +1002,10 @@ bool IceoryxTransportDriver::LoanSerializedSample(
     out_handle.mode = runtime::core::transport::LoanMode::kCtxMetaThenPayload;
     out_handle.driver_token = static_cast<void*>(token);
     out_handle.source_driver = this;  // Phase 7 §7.3 §K-3.3
+#ifdef IBMW_ENABLE_REPORTER_V1
+    ReporterAdd(reporter, metrics ? metrics->success : nullptr, 1);
+    outcome.success=true;
+#endif
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("LoanSerializedSample exception: {}", e.what());
@@ -883,6 +1064,9 @@ void IceoryxTransportDriver::PublishLoaned(
   if (handle.mode == runtime::core::transport::LoanMode::kCtxMetaThenPayload) {
     auto* token = static_cast<CtxMetaLoanToken*>(handle.driver_token);
     token->pub->PublishRaw(token->chunk_ptr);
+#ifdef IBMW_ENABLE_REPORTER_V1
+    ReporterAdd(token->reporter, token->publish_slot, 1);
+#endif
     delete token;
   } else {
     auto* pub = static_cast<IoxPublisher*>(handle.driver_token);
@@ -901,6 +1085,9 @@ void IceoryxTransportDriver::ReleaseLoaned(
   if (handle.mode == runtime::core::transport::LoanMode::kCtxMetaThenPayload) {
     auto* token = static_cast<CtxMetaLoanToken*>(handle.driver_token);
     token->pub->ReleaseRaw(token->chunk_ptr);
+#ifdef IBMW_ENABLE_REPORTER_V1
+    ReporterAdd(token->reporter, token->release_slot, 1);
+#endif
     delete token;
   } else {
     auto* pub = static_cast<IoxPublisher*>(handle.driver_token);

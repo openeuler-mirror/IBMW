@@ -58,6 +58,7 @@ int main(int argc, char** argv) {
     }
     sub.SetIceoryxDriver(driver);
 
+    std::cout << "PERF_SUBSCRIBER_READY" << std::endl;
     engine.Start();
     engine.Shutdown();
     g_engine_ptr = nullptr;

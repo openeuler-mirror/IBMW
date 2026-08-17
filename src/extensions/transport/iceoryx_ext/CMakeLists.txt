@@ -32,6 +32,9 @@ set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM src ${test_files})
+set(REPORTER_HOST_BOUNDARY_TEST_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/reporter_host_boundary_test.cc)
+list(REMOVE_ITEM test_files ${REPORTER_HOST_BOUNDARY_TEST_SRC})
 
 # Public headers (installed + attached as INTERFACE FILE_SET HEADERS so
 # downstream consumers get them via the exported target).
@@ -116,6 +119,27 @@ endif()
 # Set test of target
 if(IBMW_BUILD_TESTS AND test_files)
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
+
+  if(UNIX AND NOT APPLE)
+    add_executable(ibmw_reporter_host_boundary_test
+                   ${REPORTER_HOST_BOUNDARY_TEST_SRC})
+    target_link_libraries(ibmw_reporter_host_boundary_test
+      PRIVATE ibmw::core::reporter_host_abi ibmw::core::engine
+              ibmw::core::extension_api
+              GTest::gtest GTest::gtest_main ${CMAKE_DL_LIBS})
+    target_compile_definitions(ibmw_reporter_host_boundary_test PRIVATE
+      "ICEORYX_EXTENSION_PATH=\"$<TARGET_FILE:${CUR_TARGET_NAME}>\"")
+    if(IBMW_ENABLE_CORE_METRICS)
+      target_compile_definitions(ibmw_reporter_host_boundary_test PRIVATE IBMW_ENABLE_CORE_METRICS=1)
+    endif()
+    if(IBMW_ENABLE_REPORTER_V1)
+      target_compile_definitions(ibmw_reporter_host_boundary_test PRIVATE IBMW_ENABLE_REPORTER_V1=1)
+    endif()
+    set_target_properties(ibmw_reporter_host_boundary_test PROPERTIES ENABLE_EXPORTS ON)
+    add_dependencies(ibmw_reporter_host_boundary_test ${CUR_TARGET_NAME})
+    add_test(NAME ibmw_reporter_host_boundary_test
+             COMMAND $<TARGET_FILE:ibmw_reporter_host_boundary_test>)
+  endif()
 endif()
 
 # Set misc of target

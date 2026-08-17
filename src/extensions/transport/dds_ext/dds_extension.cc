@@ -32,6 +32,10 @@ struct convert<ibmw::extensions::dds_extension::DdsExtension::Options> {
     Node node;
     node["domain_id"] = rhs.domain_id;
     node["participant_name"] = rhs.participant_name;
+    if (!rhs.xml_profile_file.empty())
+      node["xml_profile_file"] = rhs.xml_profile_file;
+    if (!rhs.xml_profile_name.empty())
+      node["xml_profile_name"] = rhs.xml_profile_name;
     node["transport_policy"] = std::string(PolicyToStr(rhs.transport_policy));
     node["tcp_listen_port"] = rhs.tcp_listen_port;
     node["tcp_peer_port"] = rhs.tcp_peer_port;
@@ -48,11 +52,16 @@ struct convert<ibmw::extensions::dds_extension::DdsExtension::Options> {
     if (node["participant_name"])
       rhs.participant_name = node["participant_name"].as<std::string>();
 
+    if (node["xml_profile_file"])
+      rhs.xml_profile_file = node["xml_profile_file"].as<std::string>();
+
+    if (node["xml_profile_name"])
+      rhs.xml_profile_name = node["xml_profile_name"].as<std::string>();
+
     if (node["transport_policy"]) {
       auto s = node["transport_policy"].as<std::string>();
       if (!StrToPolicy(s, rhs.transport_policy)) {
-        // Invalid string -- fall back to default but flag it during init.
-        rhs.transport_policy = TransportPolicy::kDefault;
+        return false;
       }
     }
 
@@ -99,11 +108,15 @@ bool DdsExtension::OnInit(runtime::core::Engine* core_ptr) {
   bus_transport_config.tcp_listen_port = options_.tcp_listen_port;
   bus_transport_config.tcp_peer_port = options_.tcp_peer_port;
   bus_transport_config.tcp_addr = options_.tcp_addr;
+  DdsBusXmlProfileConfig xml_profile_config;
+  xml_profile_config.file = options_.xml_profile_file;
+  xml_profile_config.participant_profile = options_.xml_profile_name;
 
   // Create DDS Bus (but don't initialize yet - wait for logger)
   dds_bus_ = std::make_unique<DdsBus>(options_.domain_id,
                                        options_.participant_name,
-                                       bus_transport_config);
+                                       bus_transport_config,
+                                       xml_profile_config);
 
   core_ptr_->RegisterHook(runtime::core::After(runtime::core::Phase::kInitialize,
                                                 runtime::core::Subsystem::kLogger),

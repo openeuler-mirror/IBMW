@@ -34,11 +34,11 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 
-# Build IBMW (recommended: use CMake presets). The full preset itself does not
-# enable tests, benchmarks, or ROS2 interop; the four -D flags below are the
-# complete verification build configuration.
+# Recommended rcl-free build: DDS transport plus build-time ROS2 message types.
+# Do not enable deprecated IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION here.
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
-                    -DIBMW_BUILD_WITH_ROS2=ON -DIBMW_BUILD_ROS2_EXTENSION=ON
+                    -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
+                    -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF
 cmake --build build -j$(nproc)
 
 # Generate IDL code targets (required before install)

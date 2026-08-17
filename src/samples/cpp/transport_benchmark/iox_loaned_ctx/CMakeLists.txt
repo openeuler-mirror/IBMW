@@ -41,11 +41,23 @@ target_include_directories(iox_loaned_ctx_publisher_app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/managed)
 
 target_link_libraries(iox_loaned_ctx_publisher_app PRIVATE
+  ibmw::core::reporter_host_abi
   ibmw::core::engine
   ibmw_samples_cpp_transport_benchmark_iox_loaned_ctx_publisher_module)
+set_target_properties(iox_loaned_ctx_publisher_app PROPERTIES ENABLE_EXPORTS ON)
 
 add_executable(iox_loaned_ctx_subscriber_app
   standalone/subscriber_app/main.cc)
+
+# Build the compile-out baseline and the fully enabled Reporter lane. A Core
+# Metrics build without Reporter V1 has no Reporter hot path to benchmark.
+if(NOT IBMW_ENABLE_CORE_METRICS OR IBMW_ENABLE_REPORTER_V1)
+  add_executable(core_metrics_reporter_hot_bench
+    standalone/reporter_hot_bench/main.cc)
+  target_link_libraries(core_metrics_reporter_hot_bench PRIVATE
+    ibmw::core::engine ibmw::core::extension_api ibmw::core::reporter_host_abi)
+  set_target_properties(core_metrics_reporter_hot_bench PROPERTIES ENABLE_EXPORTS ON)
+endif()
 
 target_include_directories(iox_loaned_ctx_subscriber_app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/managed)

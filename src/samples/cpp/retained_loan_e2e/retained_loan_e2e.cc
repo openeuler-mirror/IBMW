@@ -3,8 +3,10 @@
 
 #include <array>
 #include <atomic>
+#include <csignal>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -13,14 +15,29 @@
 #include <optional>
 #include <string_view>
 #include <thread>
+#include <vector>
 
+#include "c/util/type_support_base.h"
+#include "cpp/transport/transport_context.h"
 #include "cpp/transport/loaned_sample.h"
 #include "cpp/transport/loaned_subscriber.h"
 #include "engine/transport/transport_bus.h"
 #include "iceoryx_ext/iceoryx_bus.h"
 #include "iceoryx_ext/iceoryx_transport_driver.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 namespace {
+
+std::atomic<bool> managed_stop{false};
+void ManagedSignal(int) { managed_stop.store(true); }
+void WaitForCollectorStop() {
+  if (std::getenv("MW_PERF_MANAGED") == nullptr) return;
+  std::signal(SIGTERM, ManagedSignal);
+  std::signal(SIGINT, ManagedSignal);
+  while (!managed_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
 
 using namespace std::chrono_literals;
 namespace core_transport = ibmw::runtime::core::transport;
@@ -31,6 +48,36 @@ constexpr std::string_view kMessageType = "ibmw.realsense/FrameBundleV1";
 constexpr uint32_t kMagic = 0x49424D57U;
 constexpr uint32_t kVersion = 1U;
 constexpr size_t kPublishCount = 240U;
+
+struct SerializedPayload {
+  std::vector<uint8_t> bytes;
+};
+
+const ibmw_type_support_base_t* DirectTypeSupport() {
+  static const ibmw_string_view_t serializations[] = {{"cdr", 3}};
+  static const ibmw_type_support_base_t support{
+      .type_name = [](void*) { return ibmw_string_view_t{"ibmw.e2e/SerializedPayload", 26}; },
+      .create = [](void*) -> void* { return new SerializedPayload; },
+      .destroy = [](void*, void* value) { delete static_cast<SerializedPayload*>(value); },
+      .copy = [](void*, const void* from, void* to) { *static_cast<SerializedPayload*>(to) = *static_cast<const SerializedPayload*>(from); },
+      .move = [](void*, void* from, void* to) { *static_cast<SerializedPayload*>(to) = std::move(*static_cast<SerializedPayload*>(from)); },
+      .serialize = [](void*, ibmw_string_view_t, const void* value,
+                      const ibmw_buffer_array_allocator_t* allocator,
+                      ibmw_buffer_array_t* buffers) {
+        const auto& payload = *static_cast<const SerializedPayload*>(value);
+        auto buffer = allocator->allocate(allocator->ctx, buffers, payload.bytes.size());
+        if (buffer.data == nullptr || buffer.len < payload.bytes.size()) return false;
+        std::memcpy(buffer.data, payload.bytes.data(), payload.bytes.size());
+        buffers->data[buffers->len - 1].len = payload.bytes.size();
+        return true;
+      },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) { return false; },
+      .serialization_types_supported_num = [](void*) { return size_t{1}; },
+      .serialization_types_supported_list = [](void*) { return serializations; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .ctx = nullptr};
+  return &support;
+}
 
 struct alignas(64) FrameBundle {
   uint32_t magic;
@@ -90,10 +137,14 @@ YAML::Node MakeConfig(bool publisher) {
 
 struct Runtime {
   explicit Runtime(std::string_view runtime_id, bool publisher) {
+#ifdef IBMW_ENABLE_CORE_METRICS
+    ibmw::runtime::core::observability::CoreMetricsController().Initialize(this);
+#endif
     iceoryx_bus.Initialize(sizeof(FrameBundle), runtime_id);
     auto concrete_driver =
         std::make_unique<iox_ext::IceoryxTransportDriver>(iceoryx_bus);
     auto* concrete_ptr = concrete_driver.get();
+    driver = concrete_ptr;
     std::unique_ptr<core_transport::TransportDriver> driver =
         std::move(concrete_driver);
     transport_bus.RegisterTransportDriver(
@@ -110,16 +161,30 @@ struct Runtime {
   }
 
   ~Runtime() {
-    if (!shutdown) transport_bus.Shutdown();
+    if (!shutdown) Shutdown();
   }
 
   void Shutdown() {
     transport_bus.Shutdown();
+#ifdef IBMW_ENABLE_CORE_METRICS
+    if (!ibmw::runtime::core::observability::CoreMetricsController()
+             .FinalizeSnapshot(this)) {
+      std::cerr << "METRICS_FINAL_SNAPSHOT_FAIL\n";
+    }
+#endif
     shutdown = true;
+  }
+
+  void Start() {
+    transport_bus.Start();
+#ifdef IBMW_ENABLE_CORE_METRICS
+    ibmw::runtime::core::observability::CoreMetricsController().Start(this);
+#endif
   }
 
   iox_ext::IceoryxBus iceoryx_bus;
   core_transport::TransportBus transport_bus;
+  iox_ext::IceoryxTransportDriver* driver = nullptr;
   bool shutdown = false;
 };
 
@@ -134,7 +199,7 @@ int RunPublisher() {
     return 2;
   }
 
-  runtime.transport_bus.Start();
+  runtime.Start();
   std::cout << "RETAINED_E2E_PUBLISHER_READY size=" << sizeof(FrameBundle)
             << " alignment=" << alignof(FrameBundle) << std::endl;
 
@@ -162,6 +227,49 @@ int RunPublisher() {
   std::cout << "RETAINED_E2E_PUBLISHER_DONE published=" << published
             << " loan_failures=" << loan_failures << std::endl;
   return published == 0 ? 3 : 0;
+}
+
+int RunDirectLoanWorkload() {
+  constexpr std::string_view topic = "/ibmw/e2e/direct_serialized";
+  Runtime runtime("direct_loan_metrics_owner", true);
+  const auto* support = DirectTypeSupport();
+  core_transport::TransportInfo info{
+      .msg_type = "ibmw.e2e/SerializedPayload", .topic_name = std::string(topic),
+      .msg_type_support_ref = ibmw::util::TypeSupportRef(support)};
+  core_transport::SendTypeWrapper registration{.info = info};
+  auto* driver = runtime.driver;
+  if (driver == nullptr || !driver->RegisterSendType(registration)) {
+    std::cerr << "DIRECT_LOAN_FAIL reason=register\n";
+    return 2;
+  }
+  runtime.Start();
+
+  SerializedPayload payload;
+  payload.bytes.resize(20000U, 0x5aU);  // forces real 4K -> 8K -> 16K -> 32K retries
+  ibmw::transport::Context context;
+  context.SetSerializationType("cdr");
+  core_transport::LoanedSampleHandle publish_handle{};
+  core_transport::LoanedSampleHandle release_handle{};
+  const bool publish_loan = driver->LoanSerializedSample(
+      info, context, &payload, publish_handle);
+  if (publish_loan) driver->PublishLoaned(publish_handle);
+  const bool release_loan = driver->LoanSerializedSample(
+      info, context, &payload, release_handle);
+  if (release_loan) driver->ReleaseLoaned(release_handle);
+
+  // A semantically invalid wire serialization name fails after the Reporter
+  // attempt slot is incremented, exercising the terminal-failure path.
+  ibmw::transport::Context invalid_context;
+  invalid_context.SetSerializationType(std::string(256U, 'x'));
+  core_transport::LoanedSampleHandle failed_handle{};
+  const bool expected_failure = !driver->LoanSerializedSample(
+      info, invalid_context, &payload, failed_handle);
+  WaitForCollectorStop();
+  runtime.Shutdown();
+  const bool pass = publish_loan && release_loan && expected_failure;
+  std::cout << "DIRECT_LOAN_WORKLOAD attempt=3 success=2 fail=1 "
+               "publish=1 release=1 pass=" << pass << std::endl;
+  return pass ? 0 : 3;
 }
 
 struct SubscriberState {
@@ -242,7 +350,7 @@ int RunSubscriber() {
               << std::endl;
   });
 
-  runtime.transport_bus.Start();
+  runtime.Start();
   std::cout << "RETAINED_E2E_SUBSCRIBER_READY max_outstanding=1" << std::endl;
 
   {
@@ -253,6 +361,7 @@ int RunSubscriber() {
   }
   releaser.join();
 
+  WaitForCollectorStop();
   const bool close_ok = subscription.Close(3s);
   subscription.Reset();
   runtime.Shutdown();
@@ -287,11 +396,12 @@ int RunSubscriber() {
 
 int main(int argc, char** argv) {
   if (argc != 2) {
-    std::cerr << "usage: retained_loan_e2e publisher|subscriber\n";
+    std::cerr << "usage: retained_loan_e2e publisher|subscriber|direct\n";
     return 1;
   }
   if (std::string_view(argv[1]) == "publisher") return RunPublisher();
   if (std::string_view(argv[1]) == "subscriber") return RunSubscriber();
-  std::cerr << "usage: retained_loan_e2e publisher|subscriber\n";
+  if (std::string_view(argv[1]) == "direct") return RunDirectLoanWorkload();
+  std::cerr << "usage: retained_loan_e2e publisher|subscriber|direct\n";
   return 1;
 }

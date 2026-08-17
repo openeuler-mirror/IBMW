@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>ibmw_xml_shm_transport</transport_id>
+        <type>SHM</type>
+      </transport_descriptor>
+      <transport_descriptor>
+        <transport_id>ibmw_xml_udp_transport</transport_id>
+        <type>UDPv4</type>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="ibmw_xml_shm" is_default_profile="false">
+      <rtps>
+        <name>ibmw_xml_shm</name>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <userTransports>
+          <transport_id>ibmw_xml_shm_transport</transport_id>
+        </userTransports>
+      </rtps>
+    </participant>
+    <participant profile_name="ibmw_xml_udp" is_default_profile="false">
+      <rtps>
+        <name>ibmw_xml_udp</name>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <userTransports>
+          <transport_id>ibmw_xml_udp_transport</transport_id>
+        </userTransports>
+      </rtps>
+    </participant>
+    <participant profile_name="ibmw_xml_mixed" is_default_profile="false">
+      <rtps>
+        <name>ibmw_xml_mixed</name>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <userTransports>
+          <transport_id>ibmw_xml_shm_transport</transport_id>
+          <transport_id>ibmw_xml_udp_transport</transport_id>
+        </userTransports>
+      </rtps>
+    </participant>
+    <participant profile_name="ibmw_xml_profile" is_default_profile="false">
+      <rtps>
+        <name>ibmw_xml_profile</name>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <userTransports>
+          <transport_id>ibmw_xml_shm_transport</transport_id>
+          <transport_id>ibmw_xml_udp_transport</transport_id>
+        </userTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

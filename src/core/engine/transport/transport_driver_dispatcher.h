@@ -150,10 +150,8 @@ class TransportDriverDispatcher {
   // writing.
   //
   // PublishLoaned() / ReleaseLoaned() route through handle.source_driver
-  // populated by the issuing driver. Both clear source_driver on
-  // completion so a double-publish/release becomes an obvious null
-  // dereference rather than silent UB. Both are no-ops on an empty
-  // handle (source_driver == nullptr).
+  // populated by the issuing driver. Both clear the handle on completion,
+  // and are no-ops on an empty/already-consumed handle.
   LoanedSampleHandle Loan(LoanAccessInfoWrapper&& wrapper);
   void PublishLoaned(LoanedSampleHandle& handle);
   void ReleaseLoaned(LoanedSampleHandle& handle);

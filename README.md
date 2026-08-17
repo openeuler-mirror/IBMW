@@ -26,11 +26,14 @@ all with DDS IDL / FastCDR as the primary type system.
   Iceoryx) to typed slots in a single module via the variadic
   `IBMW_USE_DRIVERS(...)` macro
 - **Context API** -- Module lifecycle management with resource isolation
-- **ROS2 interoperability** -- Direct FastDDS communication with ROS2 nodes
-  without RCL/RMW dependency (both pub/sub and RPC/Service)
-- **DDS RPC** -- Pure-DDS RPC driver that implements the ROS2 Service wire
-  protocol via WriteParams/SampleInfo, enabling IBMW↔ROS2 service calls
-  without rcl/rclcpp
+- **ROS2 interoperability** -- Direct FastDDS communication with ROS2 nodes;
+  product endpoints do not require RCL/RCLCPP or an RMW implementation, while
+  a static message closure may retain ROSIDL typesupport, `rcutils`, and base
+  `librmw` ABI support. Pub/sub has scoped evidence; RPC/Service requires its
+  protocol-specific acceptance gate.
+- **DDS RPC** -- Pure-DDS RPC driver for the ROS2 Service protocol via
+  WriteParams/SampleInfo, without rcl/rclcpp; compatibility claims remain
+  scoped to the validated release, DDS profile, types, and acceptance evidence.
 - **C++20** -- Coroutine support, concepts, structured bindings
 
 ## Documentation
@@ -44,6 +47,7 @@ all with DDS IDL / FastCDR as the primary type system.
 | [Developer Guide](docs/contributing/developer-guide.md) | Build system, code structure, writing modules and extensions |
 | [Cross-compilation Configure Guide](docs/guides/cross-compilation.md) | aarch64 Linux configure approach, target dependency model, and scoped validation boundaries |
 | [OHOS Xiaoyi Humble Cross-build Guide, Chinese](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only guide for the Xiaoyi Humble environment |
+| Minimal ROS2 build/deploy | Start with `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`; the [IBMW guide](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) is a concept/boundary index only |
 | [ROS2 Interface Import User Guide](docs/guides/ros2-interface-import-user-guide.md) | User-facing guide for `ibmw-gen import` modes, artifacts, and verification lanes |
 | [ROS2 Action DDS-only Adapter Guide](docs/experimental/ros2-action-dds-only-adapter-guide.md) | Experimental low-code developer guide for DDS-only Action servers |
 | [API Reference](docs/reference/api-reference.md) | Complete C++ SDK, C ABI, extension, and package API |
@@ -77,11 +81,11 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 
-# Recommended: Full build (all extensions, no ROS2 runtime dependency).
-# The `full` preset itself does NOT enable tests/benchmarks/ROS2 interop;
-# the four explicit -D flags below are required to enable them.
+# Recommended rcl-free build: DDS transport plus build-time ROS2 message types.
+# Do not enable deprecated IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION here.
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
-                    -DIBMW_BUILD_WITH_ROS2=ON -DIBMW_BUILD_ROS2_EXTENSION=ON
+                    -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
+                    -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF
 cmake --build build -j$(nproc)
 
 # Generate IDL code targets (required before install).

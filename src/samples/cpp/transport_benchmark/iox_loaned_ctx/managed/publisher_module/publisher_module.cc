@@ -2,8 +2,11 @@
 // All rights reserved.
 
 #include "publisher_module/publisher_module.h"
+#include "pacing_schedule.h"
 
 #include <chrono>
+#include <fstream>
+#include <iostream>
 
 namespace ibmw::samples::transport_benchmark::iox_loaned_ctx {
 
@@ -116,12 +119,30 @@ bool PublisherModule::Run() {
 
   running_ = true;
   thread_ = std::thread([this]() { PublishLoop(); });
+  std::cout << "PERF_PUBLISHER_RUNNING" << std::endl;
   return true;
 }
 
 void PublisherModule::Stop() {
   running_ = false;
   if (thread_.joinable()) thread_.join();
+  if (!opts_.publisher_status_path.empty()) {
+    std::ofstream out(opts_.publisher_status_path, std::ios::trunc);
+    if (out) {
+      const bool valid = completed_send_window_ && measured_attempts_ > 0 &&
+                         measured_fail_ == 0 &&
+                         measured_success_ == measured_attempts_;
+      out << "{\n  \"measure_begin_monotonic_ns\": " << opts_.measure_begin_monotonic_ns
+          << ",\n  \"measure_end_monotonic_ns\": " << opts_.measure_end_monotonic_ns
+          << ",\n  \"attempts\": " << measured_attempts_ << ",\n  \"success\": " << measured_success_
+          << ",\n  \"fail\": " << measured_fail_ << ",\n  \"first_attempt_seq\": " << first_attempt_seq_
+          << ",\n  \"last_attempt_seq\": " << last_attempt_seq_ << ",\n  \"first_success_seq\": " << first_success_seq_
+          << ",\n  \"last_success_seq\": " << last_success_seq_
+          << ",\n  \"completed_send_window\": "
+          << (completed_send_window_ ? "true" : "false")
+          << ",\n  \"valid\": " << (valid ? "true" : "false") << "\n}\n";
+    }
+  }
 #define IBMW_PUB_STOP_RESET(LBL, N, ALIAS) slot_##N##_.typed_pub.reset();
   IBMW_BENCH_PLAIN_FOR_EACH(IBMW_PUB_STOP_RESET)
 #undef IBMW_PUB_STOP_RESET
@@ -130,9 +151,14 @@ void PublisherModule::Stop() {
 void PublisherModule::PublishLoop() {
   using clock = std::chrono::steady_clock;
 
-  const auto period_ns = std::chrono::nanoseconds(
-      static_cast<int64_t>(1'000'000'000ULL / std::max<uint32_t>(opts_.hz, 1)));
+  const uint32_t batch = std::max<uint32_t>(opts_.batch_size, 1);
+  const auto batch_period_ns = BatchPacingPeriod(opts_.hz, batch);
   const auto deadline = clock::now() + std::chrono::seconds(opts_.duration_sec);
+  const bool shared_window = opts_.measure_begin_monotonic_ns != 0;
+  const auto begin = clock::time_point(std::chrono::nanoseconds(opts_.measure_begin_monotonic_ns));
+  const auto end = clock::time_point(std::chrono::nanoseconds(opts_.measure_end_monotonic_ns));
+  const auto send_begin = begin - std::chrono::seconds(opts_.warmup_sec);
+  const auto send_end = end + std::chrono::seconds(opts_.duration_sec - opts_.warmup_sec - opts_.measured_sec);
 
   // The CDR sertype is the only KV the receive side needs to
   // disambiguate the payload encoding. Setting it explicitly here keeps
@@ -145,9 +171,18 @@ void PublisherModule::PublishLoop() {
 
   uint32_t seq = 0;
   uint64_t publish_failed = 0;
-  auto next_tick = clock::now();
+  // Keep an absolute schedule. Resetting an overdue tick to now creates
+  // catch-up bursts whose CPU load depends on scheduler jitter.
+  auto next_tick = shared_window ? send_begin : clock::now();
+  if (shared_window && clock::now() < send_begin) {
+    std::this_thread::sleep_until(send_begin);
+  }
 
-  while (running_ && clock::now() < deadline) {
+  while (running_ && clock::now() < (shared_window ? send_end : deadline)) {
+    const uint32_t this_batch = batch;
+    for (uint32_t batch_pos = 0;
+         batch_pos < this_batch && running_ && clock::now() < (shared_window ? send_end : deadline);
+         ++batch_pos) {
     // Static fan-out by payload_bytes. The if-chain is fully resolved
     // at compile time per branch -- the only runtime cost over the
     // single-type loop is one `==` per iteration per non-matching
@@ -158,8 +193,14 @@ void PublisherModule::PublishLoop() {
     /* the default 8 MB pthread stack on the publisher thread.        */       \
     auto msg = std::make_unique<ALIAS>();                                      \
     FillBenchPlainPayload(*msg, seq);                                          \
+    const uint64_t send_ns = ExtractBenchPlainSendNs(*msg);                    \
+    const bool measured = shared_window && send_ns >= opts_.measure_begin_monotonic_ns && send_ns < opts_.measure_end_monotonic_ns; \
+    if (measured) { if (!have_attempt_) first_attempt_seq_ = seq; last_attempt_seq_ = seq; have_attempt_ = true; ++measured_attempts_; } \
     if (!slot_##N##_.typed_pub->publish(ctx, *msg)) {                          \
       ++publish_failed;                                                        \
+      if (measured) ++measured_fail_;                                          \
+    } else if (measured) {                                                     \
+      if (!have_success_) first_success_seq_ = seq; last_success_seq_ = seq; have_success_ = true; ++measured_success_; \
     }                                                                          \
   } else
     IBMW_BENCH_PLAIN_FOR_EACH(IBMW_PUB_LOOP_DISPATCH)
@@ -168,18 +209,19 @@ void PublisherModule::PublishLoop() {
       ++publish_failed;
     }
 #undef IBMW_PUB_LOOP_DISPATCH
-    ++seq;
-
-    next_tick += period_ns;
-    auto now = clock::now();
-    if (next_tick > now) {
+      ++seq;
+    }
+    // Fixed-batch open-loop pacing keeps scheduler work distinguishable from
+    // transport work and removes the old per-message sleep dependency.
+    if (opts_.hz != 0) {
+      next_tick += batch_period_ns;
+      auto now = clock::now();
+      next_tick = AdvancePacingDeadline<clock>(next_tick, batch_period_ns, now);
       std::this_thread::sleep_until(next_tick);
-    } else {
-      // Behind schedule -- drop the catch-up to avoid burst artifacts
-      // skewing the subscriber's percentile tail.
-      next_tick = now;
     }
   }
+  completed_send_window_ =
+      clock::now() >= (shared_window ? send_end : deadline);
 
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
          "PublisherModule done: total_seq={} publish_failed={}",

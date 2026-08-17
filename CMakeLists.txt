@@ -77,7 +77,6 @@ cmake_dependent_option(IBMW_BUILD_EXAMPLES "IBMW build examples." OFF "IBMW_BUIL
 # it; DDS extension should also be enabled to build all 7 samples. Off by
 # default to keep regular CI builds light.
 cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
-
 if(CMAKE_CROSSCOMPILING)
   set(_IBMW_ROS2_SAMPLE_DEFAULT OFF)
 else()
@@ -99,6 +98,10 @@ cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deli
 
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
+option(IBMW_ENABLE_CORE_METRICS "Build Core Metrics V1 instrumentation." OFF)
+cmake_dependent_option(IBMW_ENABLE_REPORTER_V1
+  "Build Reporter V1 ABI runtime (requires Core Metrics)." OFF
+  "IBMW_ENABLE_CORE_METRICS" OFF)
 
 option(IBMW_CONTEXT_DEFINE_GLOBAL_LOGGER_HANDLE "IBMW context define global logger handle." ON)
 
@@ -123,6 +126,9 @@ cmake_dependent_option(IBMW_BUILD_GRPC_EXTENSION "IBMW build grpc extension." OF
 cmake_dependent_option(IBMW_BUILD_PROXY_EXTENSION "IBMW build proxy extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_SERVICE_INTROSPECTION_EXTENSION "IBMW build service introspection extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_DDS_EXTENSION "IBMW build DDS extension (FastDDS)." OFF "IBMW_BUILD_RUNTIME" OFF)
+cmake_dependent_option(IBMW_BUILD_DDS_XML_VALIDATION
+  "Build the standalone DDS XML transport validation pair." OFF
+  "IBMW_BUILD_RUNTIME;IBMW_BUILD_DDS_EXTENSION" OFF)
 
 option(IBMW_ZENOH_USE_PACKAGE "IBMW use an existing/prebuilt zenohc CMake package instead of building zenoh-c from source." OFF)
 
@@ -586,6 +592,8 @@ list(
   IBMW_BUILD_DDS_EXTENSION
   IBMW_EXECUTOR_USE_STDEXEC
   IBMW_ENABLE_DLOPEN_DEEPBIND
+  IBMW_ENABLE_CORE_METRICS
+  IBMW_ENABLE_REPORTER_V1
   IBMW_BUILD_WITH_WERROR)
 
 foreach(var ${ibmw_vars})

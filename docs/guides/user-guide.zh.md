@@ -33,9 +33,11 @@ set +u
 source /opt/ros/humble/setup.bash
 set -u
 
-# 构建 IBMW（推荐使用 CMake Preset）
+# 推荐的 rcl-free 构建：DDS transport + 构建期 ROS2 消息类型。
+# 此处不要启用已废弃的 IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION。
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
-                    -DIBMW_BUILD_WITH_ROS2=ON -DIBMW_BUILD_ROS2_EXTENSION=ON
+                    -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
+                    -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF
 cmake --build build -j$(nproc)
 
 # 生成 IDL 代码 target（install 前必须执行）

@@ -4,10 +4,17 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <unordered_set>
 
 #include "cpp/transport/transport_handle.h"
 #include "engine/transport/transport_access.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 namespace ibmw::runtime::core::transport {
 namespace {
@@ -42,6 +49,15 @@ class FakePodDriver : public TransportDriver,
                   LoanMode mode, const ibmw::transport::Context*,
                   LoanedSampleHandle& out) noexcept override {
     ++loan_calls;
+    saw_clean_input &= out.user_payload_ptr == nullptr &&
+                       out.user_payload_size == 0 && out.driver_token == nullptr &&
+                       out.source_driver == nullptr;
+    if (dirty_failure) {
+      out.user_payload_ptr = storage.data();
+      out.driver_token = storage.data();
+      out.source_driver = this;
+      return false;
+    }
     EXPECT_EQ(&info, last_info);
     if (mode != LoanMode::kPodOnly || requested_size > storage.size()) {
       return false;
@@ -50,7 +66,7 @@ class FakePodDriver : public TransportDriver,
     out.user_payload_size = requested_size;
     out.mode = mode;
     out.driver_token = storage.data();
-    out.source_driver = this;
+    out.source_driver = forged_source ? forged_source : this;
     return true;
   }
 
@@ -65,6 +81,9 @@ class FakePodDriver : public TransportDriver,
   }
 
   bool supports_registration = true;
+  bool dirty_failure = false;
+  TransportDriver* forged_source = nullptr;
+  bool saw_clean_input = true;
   int registration_calls = 0;
   int loan_calls = 0;
   int publish_calls = 0;
@@ -123,6 +142,69 @@ TEST_F(PodRegistrationTest, PublicRegisterThenStartLoanPublishAndRelease) {
   EXPECT_EQ(driver.release_calls, 1);
   EXPECT_EQ(release.source_driver, nullptr);
 }
+
+#ifdef IBMW_ENABLE_CORE_METRICS
+TEST(PodMetricsIntegration, RealDispatcherWorkloadWritesFinalSnapshot) {
+  const char* metrics_mode = std::getenv("IBMW_CORE_METRICS");
+  const char* output_dir = std::getenv("IBMW_OBSERVABILITY_OUTPUT_DIR");
+  if (metrics_mode == nullptr || std::string_view(metrics_mode) != "counters" ||
+      output_dir == nullptr || *output_dir == '\0') {
+    GTEST_SKIP() << "Set IBMW_CORE_METRICS=counters and "
+                    "IBMW_OBSERVABILITY_OUTPUT_DIR externally";
+  }
+
+  const auto metrics_path = std::filesystem::path(output_dir) / "metrics.jsonl";
+  std::error_code remove_error;
+  std::filesystem::remove(metrics_path, remove_error);
+
+  ibmw::common::util::LoggerWrapper logger;
+  std::unordered_set<std::string> passed_keys;
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  FakePodDriver driver;
+  auto& metrics = observability::CoreMetricsController();
+
+  metrics.Initialize(&dispatcher);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"fake-pod"}}});
+  dispatcher.RegisterTransportDriver(
+      &driver,
+      TransportDriverCapabilitiesV1{
+          .loaned_pod_registration_v1 =
+              static_cast<LoanedPodRegistrationCapabilityV1*>(&driver)});
+  dispatcher.Initialize();
+
+  SenderAccess access("metrics-pkg", "metrics-module", "metrics-camera",
+                      logger, dispatcher, passed_keys);
+  ibmw::transport::SenderRef sender(access.NativeHandle());
+  ASSERT_TRUE(sender.RegisterLoanedPodTopic("MetricsFrame", 128, 64));
+
+  metrics.Start(&dispatcher);
+  dispatcher.Start();
+
+  auto loan = sender.Loan("MetricsFrame", 96);
+  ASSERT_NE(loan.user_payload_ptr, nullptr);
+  auto invalid = sender.Loan("MetricsFrame", driver.storage.size() + 1);
+  EXPECT_EQ(invalid.user_payload_ptr, nullptr);
+
+  sender.ReleaseLoaned(loan);
+  sender.PublishLoaned(loan);
+  EXPECT_EQ(driver.release_calls, 1);
+  EXPECT_EQ(driver.publish_calls, 0);
+
+  ASSERT_TRUE(metrics.FinalizeSnapshot(&dispatcher));
+  std::ifstream input(metrics_path);
+  ASSERT_TRUE(input.is_open()) << metrics_path;
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto jsonl = contents.str();
+  EXPECT_NE(jsonl.find("\"kind\":\"logical_pod_loan\""),
+            std::string::npos);
+  EXPECT_NE(jsonl.find("\"loan_attempted\":2"), std::string::npos);
+  EXPECT_NE(jsonl.find("\"loan_succeeded\":1"), std::string::npos);
+  EXPECT_NE(jsonl.find("\"loan_failed\":1"), std::string::npos);
+}
+#endif
 
 TEST_F(PodRegistrationTest, RejectsInvalidConflictingAndLateRegistration) {
   auto sender = Sender();
@@ -201,6 +283,22 @@ TEST_F(PodRegistrationTest, FailedDriverRegistrationDoesNotEnableLoan) {
   dispatcher.Start();
   EXPECT_EQ(sender.Loan("Frame", 32).user_payload_ptr, nullptr);
   EXPECT_EQ(driver.loan_calls, 0);
+}
+
+TEST_F(PodRegistrationTest, RejectsFalseResultButAcceptsSuccessfulDriverHandle) {
+  auto sender = Sender();
+  ASSERT_TRUE(sender.RegisterLoanedPodTopic("Frame", 128, 64));
+  dispatcher.Start();
+
+  driver.dirty_failure = true;
+  EXPECT_EQ(sender.Loan("Frame", 32).source_driver, nullptr);
+  EXPECT_TRUE(driver.saw_clean_input);
+
+  driver.dirty_failure = false;
+  FakePodDriver outsider;
+  driver.forged_source = &outsider;
+  EXPECT_EQ(sender.Loan("Frame", 32).source_driver, &outsider);
+  EXPECT_EQ(driver.release_calls, 0);
 }
 
 TEST(PodRegistrationRouting, LegacyDriverWithoutCapabilityFailsClearly) {
