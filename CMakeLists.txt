@@ -77,7 +77,6 @@ cmake_dependent_option(IBMW_BUILD_EXAMPLES "IBMW build examples." OFF "IBMW_BUIL
 # it; DDS extension should also be enabled to build all 7 samples. Off by
 # default to keep regular CI builds light.
 cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
-
 if(CMAKE_CROSSCOMPILING)
   set(_IBMW_ROS2_SAMPLE_DEFAULT OFF)
 else()
@@ -127,6 +126,9 @@ cmake_dependent_option(IBMW_BUILD_GRPC_EXTENSION "IBMW build grpc extension." OF
 cmake_dependent_option(IBMW_BUILD_PROXY_EXTENSION "IBMW build proxy extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_SERVICE_INTROSPECTION_EXTENSION "IBMW build service introspection extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_DDS_EXTENSION "IBMW build DDS extension (FastDDS)." OFF "IBMW_BUILD_RUNTIME" OFF)
+cmake_dependent_option(IBMW_BUILD_DDS_XML_VALIDATION
+  "Build the standalone DDS XML transport validation pair." OFF
+  "IBMW_BUILD_RUNTIME;IBMW_BUILD_DDS_EXTENSION" OFF)
 
 option(IBMW_ZENOH_USE_PACKAGE "IBMW use an existing/prebuilt zenohc CMake package instead of building zenoh-c from source." OFF)
 

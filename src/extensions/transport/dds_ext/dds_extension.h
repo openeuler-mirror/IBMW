@@ -40,6 +40,10 @@ class DdsExtension : public ExtensionBase {
   struct Options {
     uint32_t domain_id = 0;
     std::string participant_name = "ibmw_dds_participant";
+    // Both fields must be provided together. The XML profile supplies the
+    // participant QoS baseline; IBMW still owns domain_id and participant_name.
+    std::string xml_profile_file;
+    std::string xml_profile_name;
     TransportPolicy transport_policy = TransportPolicy::kDefault;
     // For kTcpOnly only.
     //   tcp_listen_port: this participant binds + listens on this port.
