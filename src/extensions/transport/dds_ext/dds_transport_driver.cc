@@ -6,8 +6,10 @@
 #include "dds_ext/ros2_type_helper.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <string_view>
@@ -18,6 +20,11 @@
 #include <fastdds/dds/subscriber/qos/SubscriberQos.hpp>
 #include <fastdds/dds/publisher/qos/DataWriterQos.hpp>
 #include <fastdds/dds/subscriber/qos/DataReaderQos.hpp>
+#if __has_include(<fastdds/rtps/common/InstanceHandle.hpp>)
+#include <fastdds/rtps/common/InstanceHandle.hpp>
+#else
+#include <fastdds/rtps/common/InstanceHandle.h>
+#endif
 
 // Compatibility for ReturnCode_t (FastDDS 3.x vs FastRTPS 2.x)
 #if __has_include(<fastdds/dds/core/detail/DDSReturnCode.hpp>)
@@ -60,6 +67,12 @@
   }
   inline std::string CompatWriteResultString(bool ret) {
     return ret ? "true" : "false";
+  }
+  inline bool CompatWriteSuccess(const compat_dds::ReturnCode_t& ret) {
+    return ret == compat_dds::RETCODE_OK;
+  }
+  inline std::string CompatWriteResultString(const compat_dds::ReturnCode_t& ret) {
+    return std::to_string(ret());
   }
   #define COMPAT_WRITE_SUCCESS(ret) (CompatWriteSuccess(ret))
 #endif
@@ -478,6 +491,32 @@ static void ApplyQosOptions(
   }
 }
 
+static void ApplyWriterResourceHeadroom(
+    eprosima::fastdds::dds::DataWriterQos& qos) {
+  const char* configured = std::getenv("IBMW_DDS_RELIABLE_EXTRA_SAMPLES");
+  if (configured == nullptr || configured[0] == '\0') {
+    return;
+  }
+
+  char* end = nullptr;
+  errno = 0;
+  const long parsed = std::strtol(configured, &end, 10);
+  if (errno == ERANGE || end == configured || *end != '\0' || parsed < 0 ||
+      parsed > std::numeric_limits<int32_t>::max()) {
+    MW_WARN("Ignoring invalid IBMW_DDS_RELIABLE_EXTRA_SAMPLES='{}'.", configured);
+    return;
+  }
+
+  if (qos.history().kind != eprosima::fastdds::dds::KEEP_LAST_HISTORY_QOS ||
+      qos.reliability().kind != eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS) {
+    return;
+  }
+
+  // Additional slots keep payload allocation available while a full writer
+  // history or outstanding loans temporarily retain cache entries.
+  qos.resource_limits().extra_samples = static_cast<int32_t>(parsed);
+}
+
 static bool IsEnvFlagEnabled(const char* name) noexcept {
   const char* value = std::getenv(name);
   return value != nullptr && value[0] != '\0' && std::string_view(value) != "0";
@@ -592,6 +631,7 @@ eprosima::fastdds::dds::DataWriterQos DdsTransportDriver::GetWriterQos(
   if (IsSyncPublishProfileEnabled()) {
     ApplySyncPublishProfile(qos);
   }
+  ApplyWriterResourceHeadroom(qos);
 
   return qos;
 }
@@ -1078,7 +1118,7 @@ void DdsTransportDriver::SendPlainType(
 }
 
 // ---------------------------------------------------------------------------
-// SendNonPlainType - serialize + deserialize to loaned (2-copy)
+// SendNonPlainType - regular write for constructed C++ objects
 // ---------------------------------------------------------------------------
 
 void DdsTransportDriver::SendNonPlainType(
@@ -1099,7 +1139,8 @@ void DdsTransportDriver::SendNonPlainType(
   const auto& profile_stats = pub_info.publish_profile_stats;
   const uint64_t write_start_ns =
       profile_stats ? DdsLoanedAsyncProfileStats::NowNs() : 0;
-  auto write_ret = pub_info.writer->write(const_cast<void*>(msg_ptr));
+  auto write_ret = pub_info.writer->write(
+      const_cast<void*>(msg_ptr), eprosima::fastdds::dds::HANDLE_NIL);
   if (profile_stats) {
     const uint64_t write_ns = DdsLoanedAsyncProfileStats::NowNs() - write_start_ns;
     profile_stats->nonplain_write_count.fetch_add(1, std::memory_order_relaxed);

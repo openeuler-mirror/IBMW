@@ -1007,6 +1007,10 @@ DDS Transport Driver 选项（`messaging` 下的 `type: dds`）：
 | `subscribers[].executor` | string | `""` | 回调 Executor |
 | `zero_copy.mode` | string | `"auto"` | `auto`、`strict`、`compat` |
 
+将 `IBMW_DDS_RELIABLE_EXTRA_SAMPLES` 设为非负整数，可覆盖可靠 `keep_last`
+Publisher 的 Fast DDS Writer 缓存余量。该参数不会增加逻辑历史深度，也不会应用到
+Reader、best-effort Writer 或 `keep_all` Writer。未设置时保留 Fast DDS 默认值。
+
 #### gRPC Extension
 
 Extension 选项：

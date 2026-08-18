@@ -1033,6 +1033,11 @@ samples stay checked out until the executor task completes. Use a single-threade
 executor when per-topic callback order matters, and size DDS history/loan pools
 for the callback hold time.
 
+Set `IBMW_DDS_RELIABLE_EXTRA_SAMPLES` to a non-negative integer to override
+Fast DDS writer cache headroom for reliable `keep_last` publishers. It does not
+increase the logical history depth and is not applied to readers, best-effort
+writers, or `keep_all` writers. Leave it unset to preserve the Fast DDS default.
+
 #### gRPC Extension
 
 Extension options:
