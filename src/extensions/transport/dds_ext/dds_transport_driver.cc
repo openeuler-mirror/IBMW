@@ -493,28 +493,34 @@ static void ApplyQosOptions(
 
 static void ApplyWriterResourceHeadroom(
     eprosima::fastdds::dds::DataWriterQos& qos) {
-  const char* configured = std::getenv("IBMW_DDS_RELIABLE_EXTRA_SAMPLES");
-  if (configured == nullptr || configured[0] == '\0') {
-    return;
-  }
-
-  char* end = nullptr;
-  errno = 0;
-  const long parsed = std::strtol(configured, &end, 10);
-  if (errno == ERANGE || end == configured || *end != '\0' || parsed < 0 ||
-      parsed > std::numeric_limits<int32_t>::max()) {
-    MW_WARN("Ignoring invalid IBMW_DDS_RELIABLE_EXTRA_SAMPLES='{}'.", configured);
-    return;
-  }
-
   if (qos.history().kind != eprosima::fastdds::dds::KEEP_LAST_HISTORY_QOS ||
       qos.reliability().kind != eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS) {
     return;
   }
 
+  constexpr int32_t kSafeDefaultExtraSamples = 100;
+  int32_t extra_samples = kSafeDefaultExtraSamples;
+  const char* configured = std::getenv("IBMW_DDS_RELIABLE_EXTRA_SAMPLES");
+  if (configured != nullptr && configured[0] != '\0') {
+    char* end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(configured, &end, 10);
+    if (errno == ERANGE || end == configured || *end != '\0' || parsed < -1 ||
+        parsed > std::numeric_limits<int32_t>::max()) {
+      MW_WARN(
+          "Invalid IBMW_DDS_RELIABLE_EXTRA_SAMPLES='{}'; using safe default {}.",
+          configured,
+          kSafeDefaultExtraSamples);
+    } else if (parsed == -1) {
+      return;
+    } else {
+      extra_samples = static_cast<int32_t>(parsed);
+    }
+  }
+
   // Additional slots keep payload allocation available while a full writer
   // history or outstanding loans temporarily retain cache entries.
-  qos.resource_limits().extra_samples = static_cast<int32_t>(parsed);
+  qos.resource_limits().extra_samples = extra_samples;
 }
 
 static bool IsEnvFlagEnabled(const char* name) noexcept {

@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <limits>
 #include <string>
 
 #include <yaml-cpp/yaml.h>
@@ -70,7 +71,7 @@ publishers:
   EXPECT_EQ(WriterQos().resource_limits().extra_samples, 23);
 }
 
-TEST_F(DdsQosTest, DefaultHeadroomPreservesFastDdsAndReaderIsUnchanged) {
+TEST_F(DdsQosTest, DefaultHeadroomUsesSafeWriterValueAndReaderIsUnchanged) {
   ScopedExtraSamplesEnv env(nullptr);
   Configure(R"yaml(
 publishers:
@@ -83,10 +84,8 @@ subscribers:
 
   const auto writer = WriterQos();
   const auto reader = ReaderQos();
-  const eprosima::fastdds::dds::DataWriterQos default_writer;
   const eprosima::fastdds::dds::DataReaderQos default_reader;
-  EXPECT_EQ(writer.resource_limits().extra_samples,
-            default_writer.resource_limits().extra_samples);
+  EXPECT_EQ(writer.resource_limits().extra_samples, 100);
   EXPECT_EQ(reader.resource_limits().extra_samples,
             default_reader.resource_limits().extra_samples);
 }
@@ -100,8 +99,10 @@ publishers:
 )yaml");
 
   const auto qos = WriterQos();
+  const eprosima::fastdds::dds::DataWriterQos default_writer;
   EXPECT_EQ(qos.reliability().kind, eprosima::fastdds::dds::BEST_EFFORT_RELIABILITY_QOS);
-  EXPECT_NE(qos.resource_limits().extra_samples, 37);
+  EXPECT_EQ(qos.resource_limits().extra_samples,
+            default_writer.resource_limits().extra_samples);
 }
 
 TEST_F(DdsQosTest, KeepAllWriterDoesNotForceHeadroom) {
@@ -113,12 +114,14 @@ publishers:
 )yaml");
 
   const auto qos = WriterQos();
+  const eprosima::fastdds::dds::DataWriterQos default_writer;
   EXPECT_EQ(qos.history().kind, eprosima::fastdds::dds::KEEP_ALL_HISTORY_QOS);
-  EXPECT_NE(qos.resource_limits().extra_samples, 41);
+  EXPECT_EQ(qos.resource_limits().extra_samples,
+            default_writer.resource_limits().extra_samples);
 }
 
-TEST_F(DdsQosTest, InvalidHeadroomPreservesFastDdsDefault) {
-  ScopedExtraSamplesEnv env("-2");
+TEST_F(DdsQosTest, MinusOnePreservesFastDdsDefault) {
+  ScopedExtraSamplesEnv env("-1");
   Configure(R"yaml(
 publishers:
   - topic: topic
@@ -128,6 +131,51 @@ publishers:
   const eprosima::fastdds::dds::DataWriterQos default_writer;
   EXPECT_EQ(WriterQos().resource_limits().extra_samples,
             default_writer.resource_limits().extra_samples);
+}
+
+TEST_F(DdsQosTest, InvalidHeadroomUsesSafeDefault) {
+  ScopedExtraSamplesEnv env("-2");
+  Configure(R"yaml(
+publishers:
+  - topic: topic
+    qos: {history: keep_last, reliability: reliable}
+)yaml");
+
+  EXPECT_EQ(WriterQos().resource_limits().extra_samples, 100);
+}
+
+TEST_F(DdsQosTest, ZeroHeadroomIsAccepted) {
+  ScopedExtraSamplesEnv env("0");
+  Configure(R"yaml(
+publishers:
+  - topic: topic
+    qos: {history: keep_last, reliability: reliable}
+)yaml");
+
+  EXPECT_EQ(WriterQos().resource_limits().extra_samples, 0);
+}
+
+TEST_F(DdsQosTest, MaximumHeadroomIsAccepted) {
+  ScopedExtraSamplesEnv env("2147483647");
+  Configure(R"yaml(
+publishers:
+  - topic: topic
+    qos: {history: keep_last, reliability: reliable}
+)yaml");
+
+  EXPECT_EQ(WriterQos().resource_limits().extra_samples,
+            std::numeric_limits<int32_t>::max());
+}
+
+TEST_F(DdsQosTest, MalformedHeadroomUsesSafeDefault) {
+  ScopedExtraSamplesEnv env("100samples");
+  Configure(R"yaml(
+publishers:
+  - topic: topic
+    qos: {history: keep_last, reliability: reliable}
+)yaml");
+
+  EXPECT_EQ(WriterQos().resource_limits().extra_samples, 100);
 }
 
 }  // namespace
