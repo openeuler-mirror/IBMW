@@ -1,0 +1,24 @@
+ibmw:
+  config: {temp_cfg_path: ./cfg/tmp/play-smoke-udp}
+  extensions:
+    items:
+      - name: net_extension
+        path: ./libibmw_net_transport.so
+        options:
+          thread_num: 2
+          udp_options: {listen_ip: 127.0.0.1, listen_port: 50282, max_pkg_size: 65536}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 1}}
+  messaging:
+    drivers: [{type: udp}]
+    subscribers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [udp]}
+  modules:
+    packages:
+      - {path: ./libplay_smoke_pkg.so, enable_modules: [PlaySmokeCdrSubscriberModule]}
+    modules:
+      - {name: PlaySmokeCdrSubscriberModule, log_level: INFO}
+PlaySmokeCdrSubscriberModule:
+  topics: [/ibmw_play_smoke/data]

@@ -1,0 +1,41 @@
+# Independently owned late-discovery publisher configuration.
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-smoke-late
+  extensions:
+    items:
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-smoke-late
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libcommon_dds_ts.so
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: record_smoke_executor
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: local
+        options:
+          subscriber_use_inline_executor: false
+          subscriber_executor: record_smoke_executor
+    publishers:
+      - topic: /ibmw_record_smoke/features/late
+        enable_drivers: [local]
+  modules:
+    packages:
+      - path: ./librecord_smoke_pkg.so
+        enable_modules: [RecordSmokeCdrModule]
+    modules:
+      - name: RecordSmokeCdrModule
+        log_level: INFO
+RecordSmokeCdrModule:
+  publish_topics: [/ibmw_record_smoke/features/late]
+  frequency_hz: 10.0

@@ -1,0 +1,31 @@
+ibmw:
+  config: {temp_cfg_path: ./cfg/tmp/play-smoke-local}
+  extensions:
+    items:
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: play-smoke-local
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs: [{path: ./libplay_smoke_ts.so}]
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      # Playback order is part of the assertion, so callbacks must be serialized.
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 1}}
+  messaging:
+    drivers:
+      - type: local
+        options: {subscriber_use_inline_executor: false, subscriber_executor: play_smoke_executor}
+    publishers:
+      - {topic: "/ibmw_play_smoke/(data|secondary|remapped)", enable_drivers: [local]}
+    subscribers:
+      - {topic: "/ibmw_play_smoke/(data|secondary|remapped)", enable_drivers: [local]}
+  modules:
+    packages:
+      - {path: ./libplay_smoke_pkg.so, enable_modules: [PlaySmokeCdrSubscriberModule]}
+    modules:
+      - {name: PlaySmokeCdrSubscriberModule, log_level: INFO}
+PlaySmokeCdrSubscriberModule:
+  topics: [/ibmw_play_smoke/data, /ibmw_play_smoke/secondary, /ibmw_play_smoke/remapped]

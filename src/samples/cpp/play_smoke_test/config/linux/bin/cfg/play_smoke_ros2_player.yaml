@@ -1,0 +1,20 @@
+ibmw:
+  bag_playback:
+    type_support_pkgs: [../libplay_smoke_ts.so]
+  extensions:
+    items:
+      - name: ros2_extension
+        path: ../libibmw_ros2_transport.so
+        options: {node_name: play_smoke_ros2_player, executor_type: MultiThreaded, executor_thread_num: 2}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 2}}
+  messaging:
+    drivers:
+      - type: ros2
+        options:
+          publishers:
+            - {topic: /ibmw_play_smoke/ros2, use_serialized: true}
+    publishers:
+      - {topic: /ibmw_play_smoke/ros2, enable_drivers: [ros2]}

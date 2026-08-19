@@ -8,14 +8,14 @@
 
 #include "cpp/util/json_type_support.h"
 #include "cpp/util/buffer.h"
-#include "type_support/dds/dds_type_support.h"
+#include "dds_types/util/dds_type_support.h"
 #include "example_ros2/msg/ros_test_msg.hpp"
 #include "Header.hpp"
 #include "HeaderCdrAux.ipp"
 #include "HeaderSchema.hpp"
 #include "record_smoke_message.h"
-#include "type_support/ros2/ros2_schema_support.h"
-#include "type_support/ros2/ros2_type_support_factory.h"
+#include "ros2_types/util/ros2_schema_support.h"
+#include "ros2_types/util/ros2_type_support_factory.h"
 #include "rosgraph_msgs/msg/clock.hpp"
 
 using JsonSmokeMessage =
@@ -174,7 +174,6 @@ static const ibmw_type_support_package_v1_t type_support_package{
     .reserved = {}};
 
 extern "C" {
-
 const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
   return &type_support_package;
 }

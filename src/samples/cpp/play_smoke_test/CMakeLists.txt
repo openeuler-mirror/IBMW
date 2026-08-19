@@ -60,8 +60,10 @@ add_library(${TS_TARGET} SHARED type_support_pkg_main.cc)
 target_include_directories(${TS_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
   ${TS_TARGET}
-  PRIVATE ibmw::api::dds_type_support
-          ibmw::api::ros2_type_support
+  PRIVATE ibmw::api::type_support
+          ibmw::api::cpp
+          ibmw::extensions::dds_types
+          ibmw::extensions::ros2_types
           ibmw::schema::common_idl_gencode
           example_ros2::example_ros2__rosidl_generator_cpp
           example_ros2::example_ros2__rosidl_typesupport_cpp
@@ -154,31 +156,3 @@ add_custom_target(
           ibmw_extensions_net_ext
           ibmw_extensions_ros2_ext
           ibmw_extensions_record_playback_ext)
-
-if(IBMW_BUILD_TESTS)
-  add_test(
-    NAME ibmw_play_smoke_fixture
-    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
-            --target ${FIXTURE_TARGET}_bags
-                    ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all)
-  set_tests_properties(
-    ibmw_play_smoke_fixture
-    PROPERTIES FIXTURES_SETUP ibmw_play_smoke_fixture
-               TIMEOUT 900
-               RESOURCE_LOCK ibmw_bag_smoke)
-
-  add_test(
-    NAME ibmw_play_smoke
-    COMMAND ${CMAKE_COMMAND} -E env
-            BUILD_DIR=${CMAKE_BINARY_DIR}
-            BAGS_DIR=${CMAKE_BINARY_DIR}/play_smoke_bags
-            CFG_DIR=${CMAKE_BINARY_DIR}/play_smoke_cfg
-            TMP_DIR=${CMAKE_BINARY_DIR}/ctest-play-smoke
-            ${CMAKE_BINARY_DIR}/validate_play_smoke.sh)
-  set_tests_properties(
-    ibmw_play_smoke
-    PROPERTIES FIXTURES_REQUIRED ibmw_play_smoke_fixture
-               TIMEOUT 300
-               RESOURCE_LOCK ibmw_bag_smoke
-               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-endif()

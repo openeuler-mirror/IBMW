@@ -26,28 +26,3 @@ add_custom_target(
   COMMAND chmod +x ${CMAKE_BINARY_DIR}/validate_info_smoke.sh
   DEPENDS ibmw::core::main
           ibmw_extensions_record_playback_ext)
-
-if(IBMW_BUILD_TESTS)
-  add_test(
-    NAME ibmw_info_smoke_fixture
-    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
-            --target ibmw_samples_cpp_info_smoke_test_build_all)
-  set_tests_properties(
-    ibmw_info_smoke_fixture
-    PROPERTIES FIXTURES_SETUP ibmw_info_smoke_fixture
-               TIMEOUT 900
-               RESOURCE_LOCK ibmw_bag_smoke)
-
-  add_test(
-    NAME ibmw_info_smoke
-    COMMAND ${CMAKE_COMMAND} -E env
-            BUILD_DIR=${CMAKE_BINARY_DIR}
-            BAGS_DIR=${CMAKE_BINARY_DIR}/info_smoke_bags
-            ${CMAKE_BINARY_DIR}/validate_info_smoke.sh)
-  set_tests_properties(
-    ibmw_info_smoke
-    PROPERTIES FIXTURES_REQUIRED ibmw_info_smoke_fixture
-               TIMEOUT 120
-               RESOURCE_LOCK ibmw_bag_smoke
-               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-endif()

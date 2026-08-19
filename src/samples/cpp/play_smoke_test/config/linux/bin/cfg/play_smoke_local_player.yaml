@@ -1,0 +1,6 @@
+ibmw:
+  bag_playback:
+    runtime_registry_path: /tmp/ibmw/runtimes
+    type_support_pkgs: [../libplay_smoke_ts.so]
+    runtime_routes:
+      - {topic: "/ibmw_play_smoke/(data|secondary|remapped)", runtime_id: play-smoke-local}

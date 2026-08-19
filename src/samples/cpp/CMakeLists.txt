@@ -73,6 +73,21 @@ if(IBMW_BUILD_EXAMPLES)
     add_subdirectory(record_demo)
   endif()
 
+  # Strict bag-record smoke coverage for every recordable transport and the
+  # record CLI feature surface. The sample owns its configs and test runner.
+  if(IBMW_BUILD_DDS_EXTENSION AND
+     IBMW_BUILD_PROTOCOLS AND
+     IBMW_BUILD_ICEORYX_EXTENSION AND
+     IBMW_BUILD_MQTT_EXTENSION AND
+     IBMW_BUILD_ZENOH_EXTENSION AND
+     IBMW_BUILD_NET_EXTENSION AND
+     IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND
+     IBMW_BUILD_WITH_ROS2 AND
+     IBMW_BUILD_ROS2_EXTENSION AND
+     IBMW_BUILD_ROS2_TYPES)
+    add_subdirectory(record_smoke_test)
+  endif()
+
   # Pre-recorded MCAP/SQLite3 playback demonstration. It only needs DDS for
   # the external playback route and the record/playback extension for bag CLI.
   if(IBMW_BUILD_DDS_EXTENSION AND
@@ -81,9 +96,36 @@ if(IBMW_BUILD_EXAMPLES)
     add_subdirectory(playback_demo)
   endif()
 
+  # Strict smoke coverage for the bag info CLI. The suite owns static MCAP and
+  # SQLite3 fixtures and does not depend on record_smoke_test.
+  if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
+    add_subdirectory(info_smoke_test)
+  endif()
+
   # IBMW MCAP/SQLite3 and IBMW/rosbag2 conversion demonstration.
   if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND IBMW_BUILD_WITH_ROS2)
     add_subdirectory(bag_convert_demo)
+  endif()
+
+  # Strict smoke coverage for the IBMW bag convert CLI.  This is independent
+  # from bag_convert_demo and owns its own fixture and storage configurations.
+  if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND IBMW_BUILD_WITH_ROS2)
+    add_subdirectory(convert_smoke_test)
+  endif()
+
+  # Strict end-to-end coverage for every bag play transport route and normal
+  # CLI option.  The suite owns its fixtures, configs, subscriber and runner.
+  if(IBMW_BUILD_DDS_EXTENSION AND
+     IBMW_BUILD_PROTOCOLS AND
+     IBMW_BUILD_ICEORYX_EXTENSION AND
+     IBMW_BUILD_MQTT_EXTENSION AND
+     IBMW_BUILD_ZENOH_EXTENSION AND
+     IBMW_BUILD_NET_EXTENSION AND
+     IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND
+     IBMW_BUILD_WITH_ROS2 AND
+     IBMW_BUILD_ROS2_EXTENSION AND
+     IBMW_BUILD_ROS2_TYPES)
+    add_subdirectory(play_smoke_test)
   endif()
 endif()
 

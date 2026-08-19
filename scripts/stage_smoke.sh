@@ -18,6 +18,30 @@ STAGE="${STAGE:-/tmp/ibmw_regress/stage}"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/cfg" "$STAGE/lib"
 
+RECORD_SMOKE_REQUIRED=0
+if [ -f "$BUILD/record_smoke_required" ]; then
+  RECORD_SMOKE_REQUIRED=1
+fi
+INFO_SMOKE_REQUIRED=0
+if [ -f "$BUILD/info_smoke_required" ]; then
+  INFO_SMOKE_REQUIRED=1
+fi
+CONVERT_SMOKE_REQUIRED=0
+if [ -f "$BUILD/convert_smoke_required" ]; then
+  CONVERT_SMOKE_REQUIRED=1
+fi
+PLAY_SMOKE_REQUIRED=0
+if [ -f "$BUILD/play_smoke_required" ]; then
+  PLAY_SMOKE_REQUIRED=1
+fi
+
+copy_required() {
+  src="$1"
+  dst="$2"
+  [ -e "$src" ] || { echo "stage: required smoke artifact missing: $src" >&2; exit 1; }
+  cp -a "$src" "$dst"
+}
+
 # 1) ibmw + iox-roudi binary
 cp "$BUILD/ibmw" "$STAGE/bin/" 2>/dev/null || true
 cp "$BUILD/ibmw" "$STAGE/" 2>/dev/null || true
@@ -90,6 +114,184 @@ cp "$REPO_ROOT/src/samples/cpp/extension_smoke_test/validate_local_loopback_matr
   "$STAGE/validate_local_loopback_matrix.sh" 2>/dev/null || true
 cp "$REPO_ROOT/src/samples/cpp/extension_smoke_test/validate_dds_cdr_executor_matrix.sh" \
   "$STAGE/validate_dds_cdr_executor_matrix.sh" 2>/dev/null || true
+if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
+  copy_required "$BUILD/validate_record_smoke.sh" "$STAGE/validate_record_smoke.sh"
+  copy_required "$BUILD/record_smoke_ros2_runtime" "$STAGE/record_smoke_ros2_runtime"
+  copy_required "$BUILD/record_smoke_required" "$STAGE/record_smoke_required"
+  chmod +x "$STAGE/validate_record_smoke.sh"
+else
+  cp "$BUILD/validate_record_smoke.sh" "$STAGE/validate_record_smoke.sh" 2>/dev/null || true
+  cp -r "$BUILD/record_smoke_ros2_runtime" "$STAGE/record_smoke_ros2_runtime" 2>/dev/null || true
+fi
+
+if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
+  for cfg in \
+    record_smoke_local.yaml record_smoke_dds.yaml record_smoke_iceoryx.yaml \
+    record_smoke_mqtt.yaml record_smoke_zenoh.yaml record_smoke_ros2.yaml \
+    record_smoke_tcp.yaml record_smoke_udp.yaml record_smoke_http.yaml \
+    record_smoke_features.yaml record_smoke_json.yaml \
+    record_smoke_sim_time.yaml record_smoke_late.yaml \
+    record_smoke_mcap_storage.yaml record_smoke_sqlite_storage.yaml \
+    record_smoke_transcode.yaml; do
+    [ -f "$STAGE/cfg/$cfg" ] || {
+      echo "stage: required record smoke config missing: $cfg" >&2
+      exit 1
+    }
+  done
+  for artifact in \
+    librecord_smoke_pkg.so librecord_smoke_ts.so libcommon_dds_ts.so \
+    libibmw_record_playback.so libibmw_dds_transport.so \
+    libibmw_iceoryx_transport.so libibmw_mqtt_transport.so \
+    libibmw_zenoh_transport.so libibmw_ros2_transport.so \
+    libibmw_net_transport.so; do
+    [ -f "$STAGE/lib/$artifact" ] || {
+      echo "stage: required record smoke library missing: $artifact" >&2
+      exit 1
+    }
+  done
+  [ -x "$STAGE/ibmw" ] || {
+    echo "stage: required record smoke binary missing: ibmw" >&2
+    exit 1
+  }
+  [ -x "$STAGE/iox-roudi" ] || [ -x "$STAGE/bin/iox-roudi" ] || {
+    echo "stage: required record smoke binary missing: iox-roudi" >&2
+    exit 1
+  }
+fi
+
+if [ "$INFO_SMOKE_REQUIRED" -eq 1 ]; then
+  copy_required "$BUILD/validate_info_smoke.sh" "$STAGE/validate_info_smoke.sh"
+  copy_required "$BUILD/info_smoke_bags" "$STAGE/info_smoke_bags"
+  copy_required "$BUILD/info_smoke_required" "$STAGE/info_smoke_required"
+  chmod +x "$STAGE/validate_info_smoke.sh"
+else
+  cp "$BUILD/validate_info_smoke.sh" "$STAGE/validate_info_smoke.sh" 2>/dev/null || true
+  cp -r "$BUILD/info_smoke_bags" "$STAGE/info_smoke_bags" 2>/dev/null || true
+fi
+
+if [ "$INFO_SMOKE_REQUIRED" -eq 1 ]; then
+  [ -x "$STAGE/validate_info_smoke.sh" ] || {
+    echo "stage: required info smoke script missing" >&2
+    exit 1
+  }
+  [ -f "$STAGE/info_smoke_bags/mcap/metadata.yaml" ] || {
+    echo "stage: required info smoke MCAP fixture missing" >&2
+    exit 1
+  }
+  [ -f "$STAGE/info_smoke_bags/sqlite3/metadata.yaml" ] || {
+    echo "stage: required info smoke SQLite3 fixture missing" >&2
+    exit 1
+  }
+  for fixture in multi_file_mcap message_zstd_mcap file_lz4_mcap empty_mcap; do
+    [ -f "$STAGE/info_smoke_bags/$fixture/metadata.yaml" ] || {
+      echo "stage: required info smoke fixture missing: $fixture" >&2
+      exit 1
+    }
+  done
+fi
+
+if [ "$CONVERT_SMOKE_REQUIRED" -eq 1 ]; then
+  copy_required "$BUILD/validate_convert_smoke.sh" "$STAGE/validate_convert_smoke.sh"
+  copy_required "$BUILD/convert_smoke_bags" "$STAGE/convert_smoke_bags"
+  copy_required "$BUILD/convert_smoke_cfg" "$STAGE/convert_smoke_cfg"
+  copy_required "$BUILD/convert_smoke_required" "$STAGE/convert_smoke_required"
+  chmod +x "$STAGE/validate_convert_smoke.sh"
+else
+  cp "$BUILD/validate_convert_smoke.sh" "$STAGE/validate_convert_smoke.sh" 2>/dev/null || true
+  cp -r "$BUILD/convert_smoke_bags" "$STAGE/convert_smoke_bags" 2>/dev/null || true
+  cp -r "$BUILD/convert_smoke_cfg" "$STAGE/convert_smoke_cfg" 2>/dev/null || true
+fi
+
+if [ "$CONVERT_SMOKE_REQUIRED" -eq 1 ]; then
+  [ -x "$STAGE/validate_convert_smoke.sh" ] || {
+    echo "stage: required convert smoke script missing" >&2
+    exit 1
+  }
+  [ -f "$STAGE/convert_smoke_bags/ibmw_mcap/metadata.yaml" ] || {
+    echo "stage: required convert smoke IBMW fixture missing" >&2
+    exit 1
+  }
+  for cfg in \
+    convert_smoke_mcap_writer.yaml convert_smoke_mcap_reader.yaml \
+    convert_smoke_sqlite_writer.yaml convert_smoke_sqlite_reader.yaml; do
+    [ -f "$STAGE/convert_smoke_cfg/$cfg" ] || {
+      echo "stage: required convert smoke config missing: $cfg" >&2
+      exit 1
+    }
+  done
+  [ -x "$STAGE/ibmw" ] || {
+    echo "stage: required convert smoke binary missing: ibmw" >&2
+    exit 1
+  }
+  [ -f "$STAGE/lib/libibmw_record_playback.so" ] || {
+    echo "stage: required convert smoke library missing: libibmw_record_playback.so" >&2
+    exit 1
+  }
+fi
+
+if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
+  copy_required "$BUILD/validate_play_smoke.sh" "$STAGE/validate_play_smoke.sh"
+  copy_required "$BUILD/play_smoke_bags" "$STAGE/play_smoke_bags"
+  copy_required "$BUILD/play_smoke_cfg" "$STAGE/play_smoke_cfg"
+  copy_required "$BUILD/play_smoke_ros2_runtime" "$STAGE/play_smoke_ros2_runtime"
+  copy_required "$BUILD/play_smoke_required" "$STAGE/play_smoke_required"
+  chmod +x "$STAGE/validate_play_smoke.sh"
+else
+  cp "$BUILD/validate_play_smoke.sh" "$STAGE/validate_play_smoke.sh" 2>/dev/null || true
+  cp -r "$BUILD/play_smoke_bags" "$STAGE/play_smoke_bags" 2>/dev/null || true
+  cp -r "$BUILD/play_smoke_cfg" "$STAGE/play_smoke_cfg" 2>/dev/null || true
+  cp -r "$BUILD/play_smoke_ros2_runtime" "$STAGE/play_smoke_ros2_runtime" 2>/dev/null || true
+fi
+
+if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
+  [ -x "$STAGE/validate_play_smoke.sh" ] || {
+    echo "stage: required play smoke script missing" >&2
+    exit 1
+  }
+  for fixture in cdr_mcap cdr_mcap_reader cdr_sqlite3 ros2_mcap; do
+    [ -f "$STAGE/play_smoke_bags/$fixture/metadata.yaml" ] || {
+      echo "stage: required play smoke fixture missing: $fixture" >&2
+      exit 1
+    }
+  done
+  for cfg in \
+    play_smoke_local_subscriber.yaml play_smoke_local_player.yaml \
+    play_smoke_local_player_alt.yaml play_smoke_json_subscriber.yaml \
+    play_smoke_json_player.yaml play_smoke_mcap_reader.yaml \
+    play_smoke_sqlite_reader.yaml \
+    play_smoke_dds_subscriber.yaml play_smoke_dds_player.yaml \
+    play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml \
+    play_smoke_mqtt_subscriber.yaml play_smoke_mqtt_player.yaml \
+    play_smoke_zenoh_subscriber.yaml play_smoke_zenoh_player.yaml \
+    play_smoke_ros2_subscriber.yaml play_smoke_ros2_player.yaml \
+    play_smoke_tcp_subscriber.yaml play_smoke_tcp_player.yaml \
+    play_smoke_udp_subscriber.yaml play_smoke_udp_player.yaml \
+    play_smoke_http_subscriber.yaml play_smoke_http_player.yaml; do
+    [ -f "$STAGE/play_smoke_cfg/$cfg" ] || {
+      echo "stage: required play smoke config missing: $cfg" >&2
+      exit 1
+    }
+  done
+  for artifact in \
+    libplay_smoke_pkg.so libplay_smoke_ts.so \
+    libibmw_record_playback.so libibmw_dds_transport.so \
+    libibmw_iceoryx_transport.so libibmw_mqtt_transport.so \
+    libibmw_zenoh_transport.so libibmw_ros2_transport.so \
+    libibmw_net_transport.so; do
+    [ -f "$STAGE/lib/$artifact" ] || {
+      echo "stage: required play smoke library missing: $artifact" >&2
+      exit 1
+    }
+  done
+  [ -x "$STAGE/ibmw" ] || {
+    echo "stage: required play smoke binary missing: ibmw" >&2
+    exit 1
+  }
+  [ -x "$STAGE/iox-roudi" ] || [ -x "$STAGE/bin/iox-roudi" ] || {
+    echo "stage: required play smoke binary missing: iox-roudi" >&2
+    exit 1
+  }
+fi
 chmod +x "$STAGE/validate_transport_bench_matrix.sh" \
   "$STAGE/validate_dds_loaned_e2e.sh" \
   "$STAGE/validate_dds_send_shm_executor_e2e.sh" \

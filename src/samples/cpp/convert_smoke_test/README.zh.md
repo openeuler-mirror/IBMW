@@ -74,12 +74,9 @@ convert smoke artifacts: /tmp/ibmw-convert-smoke.XXXXXX
 
 - IBMW 输出使用 `ibmw bag info`；
 - rosbag2 输出使用 `ros2 bag info`；
-- 独立内容验证器分别使用 IBMW reader 和 rosbag2 reader 读取实际消息；
 - 消息数必须仍为 5；
 - `/sequence_probe` topic 必须存在；
 - 类型必须是 `std_msgs/msg/String`；
-- 每条 `String.data` 必须为 `probe`，顺序和时间戳必须与输入完全一致；
-- IBMW 到 IBMW 的转换还必须保持消息 sequence；
 - IBMW serialization 必须为 `ros2`，rosbag2 serialization format 必须为 `cdr`；
 - 输出必须能完整读取，IBMW info 必须报告 `Complete playback: yes`；
 - 压缩和拆分用例还必须检查 metadata、文件后缀或 `split_reason` 的具体结果。

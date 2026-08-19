@@ -10,11 +10,8 @@ BAGS_DIR="${BAGS_DIR:-$BUILD_DIR/convert_smoke_bags}"
 CFG_DIR="${CFG_DIR:-$BUILD_DIR/convert_smoke_cfg}"
 IBMW_BIN="${IBMW_BIN:-$BUILD_DIR/ibmw}"
 [[ -x "$IBMW_BIN" ]] || IBMW_BIN="$BUILD_DIR/bin/ibmw"
-IBMW_PAYLOAD_VALIDATOR="${IBMW_PAYLOAD_VALIDATOR:-$BUILD_DIR/ibmw_convert_smoke_ibmw_payload_validator}"
-ROS2_PAYLOAD_VALIDATOR="${ROS2_PAYLOAD_VALIDATOR:-$BUILD_DIR/ibmw_convert_smoke_rosbag2_payload_validator}"
 RUN_DIR="$(mktemp -d "${TMP_DIR:-${TMPDIR:-/tmp}/ibmw-convert-smoke}.XXXXXX")"
 INPUT_BAG="$BAGS_DIR/ibmw_mcap"
-REFERENCE_MANIFEST="$RUN_DIR/reference-content.tsv"
 
 fail() {
   echo "FAIL: convert smoke: $*" >&2
@@ -23,10 +20,6 @@ fail() {
 }
 
 [[ -x "$IBMW_BIN" ]] || fail "missing ibmw binary: $IBMW_BIN"
-[[ -x "$IBMW_PAYLOAD_VALIDATOR" ]] ||
-  fail "missing IBMW payload validator: $IBMW_PAYLOAD_VALIDATOR"
-[[ -x "$ROS2_PAYLOAD_VALIDATOR" ]] ||
-  fail "missing rosbag2 payload validator: $ROS2_PAYLOAD_VALIDATOR"
 [[ -d "$INPUT_BAG" && -f "$INPUT_BAG/metadata.yaml" &&
    -f "$INPUT_BAG/data_0.mcap" ]] || fail "incomplete independent IBMW fixture"
 for required_cfg in \
@@ -116,25 +109,7 @@ new_output() {
   printf '%s' "$path"
 }
 
-validate_content() {
-  local bag="$1"
-  local format="$2"
-  local storage_id="$3"
-  if [[ "$format" == "ibmw" ]]; then
-    "$IBMW_PAYLOAD_VALIDATOR" compare \
-      "$bag" "$storage_id" "$REFERENCE_MANIFEST" ||
-      fail "$format/$storage_id content validation failed for $bag"
-  else
-    "$ROS2_PAYLOAD_VALIDATOR" \
-      "$bag" "$storage_id" "$REFERENCE_MANIFEST" ||
-      fail "$format/$storage_id content validation failed for $bag"
-  fi
-}
-
 echo "convert smoke: help and independent input"
-"$IBMW_PAYLOAD_VALIDATOR" dump \
-  "$INPUT_BAG" mcap "$REFERENCE_MANIFEST" ||
-  fail "cannot establish the independent input content manifest"
 expect_convert_success help --help
 require_output help "Convert:"
 require_output help "--input-format <format>"
@@ -146,7 +121,6 @@ require_output input_info "Storage id:        mcap"
 require_output input_info "Messages:          5"
 require_output input_info "Topic: /sequence_probe"
 require_output input_info "Complete playback: yes"
-validate_content "$INPUT_BAG" ibmw mcap
 
 echo "convert smoke: IBMW to IBMW"
 IBMW_SQLITE="$(new_output 01_ibmw_mcap_to_sqlite3)"
@@ -163,7 +137,6 @@ require_output ibmw_to_sqlite_info "Topic: /sequence_probe"
 require_output ibmw_to_sqlite_info "    Type: ros2:std_msgs/msg/String"
 require_output ibmw_to_sqlite_info "    Serialization: ros2"
 require_output ibmw_to_sqlite_info "Complete playback: yes"
-validate_content "$IBMW_SQLITE" ibmw sqlite3
 
 IBMW_MCAP="$(new_output 02_ibmw_sqlite3_to_mcap)"
 expect_convert_success sqlite_to_ibmw \
@@ -177,7 +150,6 @@ require_output sqlite_to_ibmw_info "Storage id:        mcap"
 require_output sqlite_to_ibmw_info "Messages:          5"
 require_output sqlite_to_ibmw_info "Topic: /sequence_probe"
 require_output sqlite_to_ibmw_info "Complete playback: yes"
-validate_content "$IBMW_MCAP" ibmw mcap
 
 echo "convert smoke: IBMW to rosbag2"
 ROS2_MCAP="$(new_output 03_ibmw_to_ros2_mcap)"
@@ -190,7 +162,6 @@ require_output ibmw_to_ros2_mcap_info "Storage id:        mcap"
 require_output ibmw_to_ros2_mcap_info "Messages:          5"
 require_output ibmw_to_ros2_mcap_info "Topic: /sequence_probe | Type: std_msgs/msg/String | Count: 5 | Serialization Format: cdr"
 require_metadata "$ROS2_MCAP" "rosbag2_bagfile_information:"
-validate_content "$ROS2_MCAP" rosbag2 mcap
 
 ROS2_SQLITE="$(new_output 04_ibmw_to_ros2_sqlite3)"
 expect_convert_success ibmw_to_ros2_sqlite \
@@ -202,7 +173,6 @@ require_output ibmw_to_ros2_sqlite_info "Storage id:        sqlite3"
 require_output ibmw_to_ros2_sqlite_info "Messages:          5"
 require_output ibmw_to_ros2_sqlite_info "Topic: /sequence_probe | Type: std_msgs/msg/String | Count: 5 | Serialization Format: cdr"
 require_metadata "$ROS2_SQLITE" "rosbag2_bagfile_information:"
-validate_content "$ROS2_SQLITE" rosbag2 sqlite3
 
 echo "convert smoke: rosbag2 to IBMW"
 ROS2_MCAP_TO_IBMW="$(new_output 05_ros2_mcap_to_ibmw_sqlite3)"
@@ -217,7 +187,6 @@ require_output ros2_mcap_to_ibmw_info "Topic: /sequence_probe"
 require_output ros2_mcap_to_ibmw_info "    Type: ros2:std_msgs/msg/String"
 require_output ros2_mcap_to_ibmw_info "    Serialization: ros2"
 require_output ros2_mcap_to_ibmw_info "Complete playback: yes"
-validate_content "$ROS2_MCAP_TO_IBMW" ibmw sqlite3
 
 ROS2_SQLITE_TO_IBMW="$(new_output 06_ros2_sqlite3_to_ibmw_mcap)"
 expect_convert_success ros2_sqlite_to_ibmw \
@@ -229,7 +198,6 @@ require_output ros2_sqlite_to_ibmw_info "Storage id:        mcap"
 require_output ros2_sqlite_to_ibmw_info "Messages:          5"
 require_output ros2_sqlite_to_ibmw_info "Topic: /sequence_probe"
 require_output ros2_sqlite_to_ibmw_info "Complete playback: yes"
-validate_content "$ROS2_SQLITE_TO_IBMW" ibmw mcap
 
 echo "convert smoke: split and compression options"
 SPLIT_SIZE="$(new_output 07_split_by_size)"

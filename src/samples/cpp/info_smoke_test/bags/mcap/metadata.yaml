@@ -1,0 +1,49 @@
+ibmw_bagfile_information:
+  version: 1
+  storage_id: mcap
+  message_count: 5
+  start_timestamp: 1786679571965552151
+  end_timestamp: 1786679575966051379
+  duration_ns: 4000499228
+  closed_cleanly: true
+  error_message: ""
+  dropped_message_count: 0
+  duplicate_message_count: 0
+  compression_mode: none
+  compression_format: ""
+  compression_queue_size: 1
+  compression_threads: 1
+  files:
+    - path: data_0.mcap
+      start_timestamp: 1786679571965552151
+      end_timestamp: 1786679575966051379
+      message_count: 5
+      size: 2453
+      compression: none
+      split_reason: ""
+  schemas:
+    - id: 1
+      type: dds:ibmw::protocols::common::Header
+      serialization_type: cdr
+      name: ibmw::protocols::common::Header
+      encoding: omgidl
+      hash: fnv1a64:31cc1f944e68859f
+      data_size: 472
+  topics:
+    - id: 1
+      topic: playback_demo_topic
+      msg_type: dds:ibmw::protocols::common::Header
+      serialization_type: cdr
+  channels:
+    - id: 1
+      schema_id: 1
+      topic: playback_demo_topic
+      msg_type: dds:ibmw::protocols::common::Header
+      serialization_type: cdr
+      schema_hash: fnv1a64:31cc1f944e68859f
+      message_count: 5
+      qos:
+        depth: 10
+        durability: volatile
+        history: keep_last
+        reliability: reliable

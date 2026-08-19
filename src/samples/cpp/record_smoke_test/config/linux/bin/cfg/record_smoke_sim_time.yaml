@@ -1,0 +1,61 @@
+# Real rosgraph_msgs/msg/Clock configuration for --use-sim-time.
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-smoke-sim-time
+  extensions:
+    items:
+      - name: ros2_extension
+        path: ./libibmw_ros2_transport.so
+        options:
+          node_name: record_smoke_sim_time_publisher
+          executor_type: MultiThreaded
+          executor_thread_num: 2
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-smoke-sim-time
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./librecord_smoke_ts.so
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: record_smoke_executor
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: ros2
+        options:
+          publishers:
+            - topic: /ibmw_record_smoke/features/sim_data
+              use_serialized: true
+            - topic: /clock
+              use_serialized: true
+          subscribers:
+            - topic: /ibmw_record_smoke/features/sim_data
+              use_serialized: true
+            - topic: /clock
+              use_serialized: true
+    publishers:
+      - topic: /ibmw_record_smoke/features/sim_data
+        enable_drivers: [ros2]
+      - topic: /clock
+        enable_drivers: [ros2]
+  modules:
+    packages:
+      - path: ./librecord_smoke_pkg.so
+        enable_modules: [RecordSmokeRos2Module]
+    modules:
+      - name: RecordSmokeRos2Module
+        log_level: INFO
+RecordSmokeRos2Module:
+  publish_topics: [/ibmw_record_smoke/features/sim_data]
+  clock_topic: /clock
+  clock_start_ns: 100123456789
+  clock_step_ns: 40000000
+  clock_delay_ms: 250
+  frequency_hz: 10.0

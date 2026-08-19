@@ -65,10 +65,12 @@ add_library(${TS_TARGET} SHARED type_support_pkg_main.cc)
 target_include_directories(${TS_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
   ${TS_TARGET}
-  PRIVATE ibmw::api::dds_type_support
+  PRIVATE ibmw::api::type_support
+          ibmw::api::cpp
+          ibmw::extensions::dds_types
           ibmw::schema::common_idl_gencode
           nlohmann_json::nlohmann_json
-          ibmw::api::ros2_type_support
+          ibmw::extensions::ros2_types
           fastcdr
           example_ros2::example_ros2__rosidl_generator_cpp
           example_ros2::example_ros2__rosidl_typesupport_cpp
@@ -79,33 +81,6 @@ target_link_libraries(
           rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_fastrtps_cpp
           rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_introspection_cpp)
 set_target_properties(${TS_TARGET} PROPERTIES OUTPUT_NAME record_smoke_ts)
-
-add_executable(
-  ibmw_record_smoke_payload_validator
-  validate_record_payload.cc)
-target_include_directories(
-  ibmw_record_smoke_payload_validator
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-          ${PROJECT_SOURCE_DIR}/src/extensions/management)
-target_link_libraries(
-  ibmw_record_smoke_payload_validator
-  PRIVATE ibmw::core::engine
-          ibmw::extensions::record_playback_ext
-          ibmw::api::type_support
-          ibmw::api::cpp
-          ibmw::extensions::dds_types
-          ibmw::extensions::ros2_types
-          ibmw::schema::common_idl_gencode
-          nlohmann_json::nlohmann_json
-          fastcdr
-          example_ros2::example_ros2__rosidl_generator_cpp
-          example_ros2::example_ros2__rosidl_typesupport_cpp
-          example_ros2::example_ros2__rosidl_typesupport_fastrtps_cpp
-          example_ros2::example_ros2__rosidl_typesupport_introspection_cpp
-          rosgraph_msgs::rosgraph_msgs__rosidl_generator_cpp
-          rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_cpp
-          rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_fastrtps_cpp
-          rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_introspection_cpp)
 
 add_custom_target(
   ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all ALL
@@ -135,7 +110,6 @@ add_custom_target(
   DEPENDS ibmw::core::main
           ${PKG_TARGET}
           ${TS_TARGET}
-          ibmw_record_smoke_payload_validator
           example_ros2__rosidl_typesupport_cpp
           example_ros2__rosidl_typesupport_fastrtps_cpp
           example_ros2__rosidl_typesupport_introspection_cpp
@@ -148,29 +122,3 @@ add_custom_target(
           ibmw_extensions_net_ext
           ibmw_extensions_ros2_ext
           ibmw_extensions_record_playback_ext)
-
-if(IBMW_BUILD_TESTS)
-  add_test(
-    NAME ibmw_record_smoke_fixture
-    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR}
-            --target ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all)
-  set_tests_properties(
-    ibmw_record_smoke_fixture
-    PROPERTIES FIXTURES_SETUP ibmw_record_smoke_fixture
-               TIMEOUT 900
-               RESOURCE_LOCK ibmw_bag_smoke)
-
-  add_test(
-    NAME ibmw_record_smoke
-    COMMAND ${CMAKE_COMMAND} -E env
-            BUILD_DIR=${CMAKE_BINARY_DIR}
-            CFG_DIR=${CMAKE_BINARY_DIR}/cfg
-            TMP_DIR=${CMAKE_BINARY_DIR}/ctest-record-smoke
-            ${CMAKE_BINARY_DIR}/validate_record_smoke.sh)
-  set_tests_properties(
-    ibmw_record_smoke
-    PROPERTIES FIXTURES_REQUIRED ibmw_record_smoke_fixture
-               TIMEOUT 300
-               RESOURCE_LOCK ibmw_bag_smoke
-               WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-endif()

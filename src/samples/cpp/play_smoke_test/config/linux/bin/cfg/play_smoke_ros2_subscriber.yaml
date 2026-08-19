@@ -1,0 +1,26 @@
+ibmw:
+  config: {temp_cfg_path: ./cfg/tmp/play-smoke-ros2}
+  extensions:
+    items:
+      - name: ros2_extension
+        path: ./libibmw_ros2_transport.so
+        options: {node_name: play_smoke_ros2_subscriber, executor_type: SingleThreaded}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 1}}
+  messaging:
+    drivers:
+      - type: ros2
+        options:
+          subscribers:
+            - {topic: /ibmw_play_smoke/ros2, use_serialized: true}
+    subscribers:
+      - {topic: /ibmw_play_smoke/ros2, enable_drivers: [ros2]}
+  modules:
+    packages:
+      - {path: ./libplay_smoke_pkg.so, enable_modules: [PlaySmokeRos2SubscriberModule]}
+    modules:
+      - {name: PlaySmokeRos2SubscriberModule, log_level: INFO}
+PlaySmokeRos2SubscriberModule:
+  topics: [/ibmw_play_smoke/ros2]

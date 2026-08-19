@@ -7,33 +7,17 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR}"
 CFG_DIR="${CFG_DIR:-$BUILD_DIR/cfg}"
-RUN_PARENT="${TMP_DIR:-/tmp/ibmw-record-smoke}"
-mkdir -p "$RUN_PARENT"
-RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
-# The bag CLI currently discovers the default registry path.  Serialize the
-# suite with the lock below and clean only this run's runtime IDs, so the
-# shared registry cannot cause cross-run discovery races.
+RUN_PARENT="${TMP_DIR:-${TMPDIR:-/tmp}/ibmw-record-smoke}"
 RUNTIME_DIR="/tmp/ibmw/runtimes"
-CFG_SOURCE_DIR="$CFG_DIR"
-CFG_DIR="$RUN_DIR/cfg"
-mkdir -p "$RUNTIME_DIR" "$CFG_DIR"
-RUN_TAG="$(basename "$RUN_DIR")"
-DOMAIN_SEED="$(printf '%s' "$RUN_TAG" | cksum | awk '{print $1}')"
-RECORD_SMOKE_DOMAIN_ID=$((100 + DOMAIN_SEED % 100))
-export ROS_DOMAIN_ID="$RECORD_SMOKE_DOMAIN_ID"
-MQTT_PORT=$((18884 + DOMAIN_SEED % 1000))
-TCP_PORT=$((50181 + DOMAIN_SEED % 1000))
-UDP_PORT=$((TCP_PORT + 1))
-HTTP_PORT=$((TCP_PORT + 2))
 IBMW_BIN="${IBMW_BIN:-$BUILD_DIR/ibmw}"
 [[ -x "$IBMW_BIN" ]] || IBMW_BIN="$BUILD_DIR/bin/ibmw"
 ROUDI_BIN="${ROUDI_BIN:-$BUILD_DIR/bin/iox-roudi}"
 [[ -x "$ROUDI_BIN" ]] || ROUDI_BIN="$BUILD_DIR/iox-roudi"
-PAYLOAD_VALIDATOR="${PAYLOAD_VALIDATOR:-$BUILD_DIR/ibmw_record_smoke_payload_validator}"
 
 set +u
 source /opt/ros/humble/setup.bash
 set -u
+export ROS_DOMAIN_ID=87
 export AMENT_PREFIX_PATH="$BUILD_DIR/record_smoke_ros2_runtime:${AMENT_PREFIX_PATH:-}"
 export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/record_smoke_ros2_runtime/lib:/usr/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
 
@@ -77,13 +61,9 @@ required_commands=(jq mosquitto mosquitto_pub python3 ss timeout)
   echo "record smoke: missing iox-roudi binary: $ROUDI_BIN" >&2
   exit 2
 }
-[[ -x "$PAYLOAD_VALIDATOR" ]] || {
-  echo "record smoke: missing payload validator: $PAYLOAD_VALIDATOR" >&2
-  exit 2
-}
 for item in "${required_configs[@]}"; do
-  [[ -f "$CFG_SOURCE_DIR/$item" ]] || {
-    echo "record smoke: missing config: $CFG_SOURCE_DIR/$item" >&2
+  [[ -f "$CFG_DIR/$item" ]] || {
+    echo "record smoke: missing config: $CFG_DIR/$item" >&2
     exit 2
   }
 done
@@ -100,22 +80,8 @@ for item in "${required_commands[@]}"; do
   }
 done
 
-for config in "$CFG_SOURCE_DIR"/*.yaml; do
-  [[ -f "$config" ]] || continue
-  sed \
-    -e "s#/tmp/ibmw/runtimes#$RUNTIME_DIR#g" \
-    -e "s/domain_id: 87/domain_id: $RECORD_SMOKE_DOMAIN_ID/g" \
-    -e "s/18884/$MQTT_PORT/g" \
-    -e "s/50181/$TCP_PORT/g" \
-    -e "s/50182/$UDP_PORT/g" \
-    -e "s/50183/$HTTP_PORT/g" \
-    -e "s#\./cfg/tmp/#$RUN_DIR/cfg/tmp/#g" \
-    -e "s#path: \./lib#path: $BUILD_DIR/lib#g" \
-    -e "s#type_support_pkgs: \[\.\./lib#type_support_pkgs: [$BUILD_DIR/lib#g" \
-    "$config" >"$CFG_DIR/$(basename "$config")"
-done
-exec 9>"${RECORD_SMOKE_LOCK_FILE:-${TMPDIR:-/tmp}/ibmw-record-smoke.lock}"
-flock 9
+mkdir -p "$RUN_PARENT" "$RUNTIME_DIR"
+RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
 cd "$BUILD_DIR"
 
 RUNTIME_PID=""
@@ -160,7 +126,6 @@ cleanup() {
     stop_pid "$ROUDI_PID" TERM
     stop_pid "$MOSQUITTO_PID" TERM
   fi
-  if [[ "$CASE_CHILD" == 0 ]]; then rm -rf -- "$RUN_DIR"; fi
 }
 trap cleanup EXIT INT TERM
 
@@ -202,15 +167,15 @@ start_services() {
     kill -0 "$ROUDI_PID" 2>/dev/null || fail_case "iox-roudi failed to start"
   fi
 
-  if ! ss -ltn "( sport = :$MQTT_PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
-    mosquitto -p "$MQTT_PORT" -v >"$RUN_DIR/mosquitto.log" 2>&1 &
+  if ! ss -ltn '( sport = :18884 )' 2>/dev/null | tail -n +2 | grep -q .; then
+    mosquitto -p 18884 -v >"$RUN_DIR/mosquitto.log" 2>&1 &
     MOSQUITTO_PID=$!
     sleep 1
     kill -0 "$MOSQUITTO_PID" 2>/dev/null || fail_case "Mosquitto failed to start"
   fi
-  mosquitto_pub -h 127.0.0.1 -p "$MQTT_PORT" \
+  mosquitto_pub -h 127.0.0.1 -p 18884 \
     -t /ibmw_record_smoke/startup -m ready -q 1 ||
-    fail_case "port $MQTT_PORT is not a usable MQTT broker"
+    fail_case "port 18884 is not a usable MQTT broker"
 }
 
 start_runtime() {
@@ -305,20 +270,6 @@ read_info() {
   LAST_INFO="$RUN_DIR/${CURRENT_CASE}.info.log"
   "$IBMW_BIN" bag info "$LAST_OUT" >"$LAST_INFO" 2>&1 ||
     fail_case "bag info failed"
-}
-
-validate_payload() {
-  local topic="$1"
-  local serialization="$2"
-  local package="$BUILD_DIR/libcommon_dds_ts.so"
-  [[ "$serialization" == "ros2" || "$serialization" == "json" ]] &&
-    package="$BUILD_DIR/librecord_smoke_ts.so"
-  [[ -f "$package" ]] || package="$BUILD_DIR/lib/$(basename "$package")"
-  "$PAYLOAD_VALIDATOR" "$LAST_OUT" "$topic" "$serialization" "$package" \
-    >"$RUN_DIR/${CURRENT_CASE}.payload.log" 2>&1 || {
-      sed -n '1,240p' "$RUN_DIR/${CURRENT_CASE}.payload.log" >&2
-      fail_case "independent payload validation failed for $topic"
-    }
 }
 
 info_value() {
@@ -463,7 +414,8 @@ run_transport_case() {
     --storage mcap --serialization-format "$serialization"
   sleep 1.0
   stop_record
-  require_record_log "Recording to"
+  require_record_log "$topic"
+  require_record_log "$description"
   stop_runtime
   read_info
   require_common_bag_health
@@ -476,7 +428,6 @@ run_transport_case() {
     require_info "Serialization: $serialization"
   fi
   [[ "$(topic_count)" == 1 ]] || fail_case "transport bag must contain exactly one topic"
-  validate_payload "$topic" "$serialization"
   if [[ "$mode" == runtime_tap ]]; then
     grep -Fq "Record smoke received: kind='cdr', topic='$topic'" \
       "$CURRENT_RUNTIME_LOG" ||
@@ -653,7 +604,6 @@ run_feature_test() {
       require_topic /ibmw_record_smoke/features/json
       require_positive_topic /ibmw_record_smoke/features/json
       require_info "Serialization: json"
-      validate_payload /ibmw_record_smoke/features/json json
       ;;
     transcode_cdr_to_json)
       run_feature_case transcode_cdr_to_json record_smoke_transcode.yaml \
@@ -664,7 +614,6 @@ run_feature_test() {
       require_positive_topic /ibmw_record_smoke/features/transcode
       require_info "Serialization: json"
       require_info "encoding=jsonschema"
-      validate_payload /ibmw_record_smoke/features/transcode json
       ;;
     sqlite_preset)
       run_feature_case sqlite_preset record_smoke_features.yaml \

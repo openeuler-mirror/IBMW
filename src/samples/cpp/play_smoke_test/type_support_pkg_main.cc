@@ -10,11 +10,11 @@
 #include "HeaderCdrAux.ipp"
 #include "HeaderSchema.hpp"
 #include "cpp/util/buffer.h"
-#include "type_support/dds/dds_type_support.h"
+#include "dds_types/util/dds_type_support.h"
 #include "example_ros2/msg/ros_test_msg.hpp"
 #include "nlohmann/json.hpp"
-#include "type_support/ros2/ros2_schema_support.h"
-#include "type_support/ros2/ros2_type_support_factory.h"
+#include "ros2_types/util/ros2_schema_support.h"
+#include "ros2_types/util/ros2_type_support_factory.h"
 
 using Header = ibmw::protocols::common::Header;
 
@@ -146,17 +146,18 @@ const ibmw_schema_support_base_t* schema_support_array[]{
     HeaderJsonSchema(),
     ibmw::ros2::GetRos2MessageSchemaSupport<
         example_ros2::msg::RosTestMsg>()};
+
 const ibmw_schema_support_package_v1_t schema_support_package{
     .abi_version = IBMW_SCHEMA_SUPPORT_ABI_VERSION_V1,
     .struct_size = sizeof(ibmw_schema_support_package_v1_t),
-    .entry_count = sizeof(schema_support_array) / sizeof(schema_support_array[0]),
+    .entry_count = std::size(schema_support_array),
     .entries = schema_support_array,
     .reserved = {}};
 
 const ibmw_type_support_package_v1_t type_support_package{
     .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
     .struct_size = sizeof(ibmw_type_support_package_v1_t),
-    .entry_count = sizeof(type_support_array) / sizeof(type_support_array[0]),
+    .entry_count = std::size(type_support_array),
     .entries = type_support_array,
     .schema_support = &schema_support_package,
     .reserved = {}};

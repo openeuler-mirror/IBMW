@@ -31,9 +31,7 @@ export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/play_smoke_ros2_run
 
 mkdir -p "$RUN_PARENT"
 RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
-# Keep the runtime registry path short (the runtime-agent Unix socket has a
-# bounded pathname length), while retaining per-invocation isolation.
-RUNTIME_DIR="/tmp/ibmw/ps-$$"
+RUNTIME_DIR="$RUN_DIR/runtimes"
 mkdir -p "$RUNTIME_DIR"
 
 RUN_TAG="$(basename "$RUN_DIR")"
@@ -106,7 +104,6 @@ cleanup() {
   stop_pid "$RUNTIME_PID"
   stop_pid "$ROUDI_PID" TERM
   stop_pid "$MOSQUITTO_PID" TERM
-  rm -rf -- "$RUN_DIR" "$RUNTIME_DIR"
 }
 trap cleanup EXIT INT TERM
 

@@ -1,0 +1,20 @@
+ibmw:
+  bag_playback:
+    type_support_pkgs: [../libplay_smoke_ts.so]
+  extensions:
+    items:
+      - name: net_extension
+        path: ../libibmw_net_transport.so
+        options: {thread_num: 2}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 2}}
+  messaging:
+    drivers:
+      - type: udp
+        options:
+          publishers:
+            - {topic: /ibmw_play_smoke/data, server_url_list: ["127.0.0.1:50282"]}
+    publishers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [udp]}

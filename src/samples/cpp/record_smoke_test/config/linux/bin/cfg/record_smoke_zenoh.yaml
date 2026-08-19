@@ -1,0 +1,48 @@
+# Independently owned Zenoh transport configuration for record smoke.
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-smoke-zenoh
+  extensions:
+    items:
+      - name: zenoh_extension
+        path: ./libibmw_zenoh_transport.so
+        options:
+          limit_domain: ibmw_record_smoke
+          shm_pool_size: 10485760
+          shm_init_loan_size: 1024
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-smoke-zenoh
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libcommon_dds_ts.so
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: record_smoke_executor
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: zenoh
+        options:
+          publishers:
+            - topic: /ibmw_record_smoke/transport/zenoh
+              shm_enabled: false
+    publishers:
+      - topic: /ibmw_record_smoke/transport/zenoh
+        enable_drivers: [zenoh]
+  modules:
+    packages:
+      - path: ./librecord_smoke_pkg.so
+        enable_modules: [RecordSmokeCdrModule]
+    modules:
+      - name: RecordSmokeCdrModule
+        log_level: INFO
+RecordSmokeCdrModule:
+  publish_topics: [/ibmw_record_smoke/transport/zenoh]
+  frequency_hz: 10.0

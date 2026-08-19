@@ -1,0 +1,22 @@
+ibmw:
+  config: {temp_cfg_path: ./cfg/tmp/play-smoke-zenoh}
+  extensions:
+    items:
+      - name: zenoh_extension
+        path: ./libibmw_zenoh_transport.so
+        options: {limit_domain: ibmw_play_smoke, shm_pool_size: 10485760, shm_init_loan_size: 1024}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 1}}
+  messaging:
+    drivers: [{type: zenoh}]
+    subscribers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [zenoh]}
+  modules:
+    packages:
+      - {path: ./libplay_smoke_pkg.so, enable_modules: [PlaySmokeCdrSubscriberModule]}
+    modules:
+      - {name: PlaySmokeCdrSubscriberModule, log_level: INFO}
+PlaySmokeCdrSubscriberModule:
+  topics: [/ibmw_play_smoke/data]
