@@ -4,7 +4,11 @@
 #include "publisher_module/publisher_module.h"
 
 #include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <memory>
+
+#include "benchmark_run_state.h"
 
 namespace ibmw::samples::transport_benchmark::iox_send {
 
@@ -13,7 +17,7 @@ namespace {
 // samples can run side-by-side on the same iceoryx RouDi without their
 // service URLs colliding. Each Plain bench type still gets its own
 // (topic, msg_type) entry so subscribers can route by type.
-constexpr std::string_view kTopic = "iox_bench_send_topic";
+constexpr std::string_view kDefaultTopic = "iox_bench_send_topic";
 }  // namespace
 
 bool PublisherModule::Setup(ibmw::Runtime core) {
@@ -21,6 +25,7 @@ bool PublisherModule::Setup(ibmw::Runtime core) {
 
   auto cfg_path = core_.GetConfigurator().GetConfigFilePath();
   opts_ = LoadBenchOptions(cfg_path);
+  const std::string topic = opts_.topic.empty() ? std::string(kDefaultTopic) : opts_.topic;
   if (PayloadSizeLabel(opts_.payload_bytes) == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
            "PublisherModule: payload_bytes={} not in supported bench "
@@ -42,7 +47,7 @@ bool PublisherModule::Setup(ibmw::Runtime core) {
   // via the publisher_for<T> factory (which returns by value).
 #define IBMW_PUB_SETUP_REGISTER(LBL, N, ALIAS)                                \
   {                                                                           \
-    sender_##N##_.emplace(core_.GetTransport().GetPublisher(kTopic));         \
+    sender_##N##_.emplace(core_.GetTransport().GetPublisher(topic));         \
     if (!sender_##N##_->RegisterSendType()) {                                 \
       MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,           \
              "PublisherModule: RegisterSendType<" LBL "> failed");            \
@@ -54,9 +59,10 @@ bool PublisherModule::Setup(ibmw::Runtime core) {
 
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
          "PublisherModule Setup OK: label={} payload_bytes={} ({}) hz={} "
-         "duration_sec={} warmup={}",
+         "duration_sec={} message_count={} start_delay_ms={} warmup={}",
          opts_.label, opts_.payload_bytes,
          PayloadSizeLabel(opts_.payload_bytes), opts_.hz, opts_.duration_sec,
+         opts_.message_count, opts_.start_delay_ms,
          opts_.warmup_messages);
   return true;
 }
@@ -79,6 +85,10 @@ void PublisherModule::Stop() {
 void PublisherModule::PublishLoop() {
   using clock = std::chrono::steady_clock;
 
+  if (opts_.start_delay_ms != 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(opts_.start_delay_ms));
+  }
+
   const auto period_ns = std::chrono::nanoseconds(
       static_cast<int64_t>(1'000'000'000ULL / std::max<uint32_t>(opts_.hz, 1)));
   const auto deadline = clock::now() + std::chrono::seconds(opts_.duration_sec);
@@ -86,7 +96,11 @@ void PublisherModule::PublishLoop() {
   uint32_t seq = 0;
   auto next_tick = clock::now();
 
-  while (running_ && clock::now() < deadline) {
+  const uint64_t fixed_total = static_cast<uint64_t>(opts_.warmup_messages) +
+                               static_cast<uint64_t>(opts_.message_count);
+  while (running_ &&
+         (opts_.message_count != 0 ? seq < fixed_total
+                                   : clock::now() < deadline)) {
     // Static fan-out by payload_bytes -- mirrors iox_loaned_ctx so
     // any latency delta vs. that sample is attributable solely to the
     // publish-side path (heap+memcpy here vs. ctx-meta loan there).
@@ -118,6 +132,34 @@ void PublisherModule::PublishLoop() {
       // Behind schedule -- drop the catch-up to avoid burst artifacts
       // skewing the subscriber's percentile tail.
       next_tick = now;
+    }
+  }
+
+  const auto status_value = MakePublisherRunStatus(
+      opts_.message_count, opts_.warmup_messages, seq,
+      clock::now() >= deadline);
+  if (!opts_.publisher_status_path.empty()) {
+    const std::string temporary_path = opts_.publisher_status_path + ".tmp";
+    bool written = false;
+    {
+      std::ofstream status(temporary_path, std::ios::trunc);
+      if (status) {
+        status << "{\n"
+               << "  \"completion\": " << (status_value.completion ? "true" : "false") << ",\n"
+               << "  \"attempted_total\": " << status_value.attempted_total << ",\n"
+               << "  \"attempted_measured\": " << status_value.attempted_measured << ",\n"
+               << "  \"valid\": " << (status_value.valid ? "true" : "false") << "\n"
+               << "}\n";
+        status.flush();
+        written = status.good();
+      }
+    }
+    if (!written || std::rename(temporary_path.c_str(),
+                                opts_.publisher_status_path.c_str()) != 0) {
+      std::remove(temporary_path.c_str());
+      MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+             "PublisherModule: cannot atomically write publisher_status_path={}",
+             opts_.publisher_status_path);
     }
   }
 

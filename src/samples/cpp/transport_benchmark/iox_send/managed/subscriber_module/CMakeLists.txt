@@ -12,7 +12,13 @@ add_library(${CUR_TARGET_NAME} STATIC subscriber_module.cc)
 
 target_include_directories(${CUR_TARGET_NAME}
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..
+         ${CMAKE_CURRENT_SOURCE_DIR}/../..
          ${CMAKE_SOURCE_DIR}/src/extensions/transport)
+
+if(IBMW_BUILD_TESTS)
+  add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME}
+    TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../benchmark_run_state_test.cc)
+endif()
 
 target_link_libraries(${CUR_TARGET_NAME}
   PUBLIC ibmw::api::cpp

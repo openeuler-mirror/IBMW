@@ -12,6 +12,7 @@ add_library(${CUR_TARGET_NAME} STATIC publisher_module.cc)
 
 target_include_directories(${CUR_TARGET_NAME}
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..
+         ${CMAKE_CURRENT_SOURCE_DIR}/../..
          ${CMAKE_SOURCE_DIR}/src/extensions/transport)
 
 target_link_libraries(${CUR_TARGET_NAME}
