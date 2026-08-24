@@ -1007,6 +1007,12 @@ DDS Transport Driver 选项（`messaging` 下的 `type: dds`）：
 | `subscribers[].executor` | string | `""` | 回调 Executor |
 | `zero_copy.mode` | string | `"auto"` | `auto`、`strict`、`compat` |
 
+可靠 `keep_last` Publisher 默认使用 100 个额外 Writer 缓存槽，优先保障常见机器人
+和 SLAM 负载的功能可靠性，普通用户无需配置。内存敏感的部署可将
+`IBMW_DDS_RELIABLE_EXTRA_SAMPLES` 设为 `0` 到 `INT32_MAX` 的整数，或设为 `-1`
+恢复 Fast DDS 默认值。非法值会回退到安全默认值 100。该设置不会增加逻辑历史深度，
+也不会应用到 Reader、best-effort Writer 或 `keep_all` Writer。
+
 #### gRPC Extension
 
 Extension 选项：

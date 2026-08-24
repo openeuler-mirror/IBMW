@@ -38,6 +38,11 @@ add_subdirectory(net_send_tcp)
 # Phase 7 §7.3 Step 3.8: encapsulated user-level loan path benchmark.
 add_subdirectory(iox_loan_v2)
 
+# Minimal cross-middleware A/B/C interop endpoint.  It is deliberately
+# separate from the historical matrix so existing targets and ABI remain
+# unchanged.
+add_subdirectory(abc_interop)
+
 add_custom_target(
   ibmw_samples_cpp_transport_benchmark_strict_matrix_scripts ALL
   COMMAND ${CMAKE_COMMAND} -E copy_if_different

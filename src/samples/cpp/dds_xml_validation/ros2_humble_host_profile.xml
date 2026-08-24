@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dds xmlns="http://www.eprosima.com">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>ros2_humble_physical_udp</transport_id>
+        <type>UDPv4</type>
+        <interfaceWhiteList>
+          <address>192.168.2.1</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="ros2_humble_physical" is_default_profile="true">
+      <rtps>
+        <name>ros2_humble_physical</name>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <userTransports>
+          <transport_id>ros2_humble_physical_udp</transport_id>
+        </userTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

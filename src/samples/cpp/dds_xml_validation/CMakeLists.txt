@@ -147,3 +147,16 @@ add_executable(ibmw_dds_xml_wide_subscriber_app
 target_include_directories(ibmw_dds_xml_wide_subscriber_app PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}" "${_IBMW_XML_WIDE_GEN_DIR}")
 target_link_libraries(ibmw_dds_xml_wide_subscriber_app PRIVATE ${_IBMW_XML_WIDE_LIBS})
+
+foreach(_target IN ITEMS
+    ibmw_dds_xml_publisher_app
+    ibmw_dds_xml_subscriber_app
+    ibmw_dds_xml_wide_publisher_app
+    ibmw_dds_xml_wide_subscriber_app)
+  set_target_properties(${_target} PROPERTIES
+    BUILD_RPATH ""
+    INSTALL_RPATH ""
+    INSTALL_RPATH_USE_LINK_PATH FALSE
+    SKIP_BUILD_RPATH TRUE
+    BUILD_WITH_INSTALL_RPATH FALSE)
+endforeach()

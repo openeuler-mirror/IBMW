@@ -38,6 +38,8 @@
 
 namespace ibmw::extensions::dds_extension {
 
+class DdsQosTest;
+
 /**
  * @brief Zero-copy statistics
  */
@@ -179,6 +181,8 @@ class __attribute__((visibility("default"))) DdsTransportDriver : public runtime
   const Options& GetOptions() const { return options_; }
 
  private:
+  friend class DdsQosTest;
+
   // DDS data reader listener
   class DdsDataReaderListener : public eprosima::fastdds::dds::DataReaderListener {
    public:

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "run": {"sample_seconds": 5, "stop_timeout_seconds": 5},
+  "sut": {
+    "mode": "managed",
+    "command": ["/bin/sh", "/home/oee/ibmw_together_dev/IBMW/src/samples/cpp/transport_benchmark/abc_interop/run_a_managed.sh"],
+    "env": {
+      "IBMW_ABC_ROS2_ENDPOINT": "/home/oee/ibmw_together_dev/IBMW/build-benchmark-smoke/ibmw_abc_ros2_endpoint",
+      "IBMW_ABC_LATENCY_JSONL": "/home/oee/ibmw_together_dev/IBMW/.opencode/a-lane-e2e/latency.jsonl",
+      "LD_LIBRARY_PATH": "/opt/ros/humble/lib:/opt/ros/humble/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu"
+    }
+  },
+  "adapters": {"ros2": {"latency_artifact": {"path": "/home/oee/ibmw_together_dev/IBMW/.opencode/a-lane-e2e/latency.jsonl", "required": true}}}
+}

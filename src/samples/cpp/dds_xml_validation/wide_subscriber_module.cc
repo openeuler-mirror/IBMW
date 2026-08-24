@@ -31,9 +31,10 @@ class SerializePoseGraphServiceImpl final
             : slam_toolbox::srv::SerializePoseGraph_Response::
                   RESULT_FAILED_TO_WRITE_FILE;
     owner_.OnServiceRequest(ready);
-    return ready
-               ? ibmw::rpc::Status()
-               : ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_UNKNOWN);
+    // Native ROS2 .srv replies carry application failure in the response.
+    // Returning an IBMW RPC error would suppress the DDS reply and prevent a
+    // stock ROS2 client from observing the result and retrying.
+    return ibmw::rpc::Status();
   }
 
  private:
@@ -64,13 +65,6 @@ void SubscriberModule::OnServiceRequest(bool valid) {
   if (valid) {
     service_ok_ = true;
   }
-  MaybeFinish();
-}
-
-void SubscriberModule::MaybeFinish() {
-  if (TopicsComplete() && service_ok_.load()) {
-    RequestShutdown();
-  }
 }
 
 void SubscriberModule::RequestShutdown() {
@@ -89,7 +83,6 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
           [this](const std::shared_ptr<const type>& message) {             \
             if (message && *message == fixture()) {                       \
               mask_.fetch_or(1u << bit);                                  \
-              MaybeFinish();                                              \
             }                                                             \
           })) {                                                           \
     return false;                                                         \
@@ -125,13 +118,21 @@ bool SubscriberModule::Run() {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (running_ && std::chrono::steady_clock::now() < deadline) {
+      if (Passed()) {
+        // Let the service adapter publish and acknowledge its response before
+        // this validation process tears down the DDS endpoints.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (running_) {
+          RequestShutdown();
+        }
+        return;
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if (running_) {
       RequestShutdown();
     }
   });
-  MaybeFinish();
   return true;
 }
 

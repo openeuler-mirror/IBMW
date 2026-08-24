@@ -4,6 +4,11 @@
 #include "dds_ext/dds_rpc_driver.h"
 
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
+#if __has_include(<fastdds/dds/core/Time_t.hpp>)
+#include <fastdds/dds/core/Time_t.hpp>
+#else
+#include <fastdds/rtps/common/Time_t.h>
+#endif
 #if __has_include(<fastdds/rtps/common/InstanceHandle.hpp>)
 #include <fastdds/rtps/common/InstanceHandle.hpp>
 #else
@@ -45,6 +50,12 @@ struct convert<ibmw::extensions::dds_extension::DdsRpcDriver::Options> {
 namespace ibmw::extensions::dds_extension {
 
 namespace {
+
+#if __has_include(<fastdds/dds/core/Time_t.hpp>)
+using DdsRpcAckDuration = eprosima::fastdds::dds::Duration_t;
+#else
+using DdsRpcAckDuration = eprosima::fastrtps::Duration_t;
+#endif
 
 /// Encode a service name for ROS2 compatibility.
 /// Non-alphanumeric chars (except '/') are replaced with _XX hex encoding.
@@ -138,7 +149,15 @@ void DdsRpcDriver::Shutdown() {
   // Clean up server endpoints
   for (auto& [key, ep] : server_endpoints_) {
     if (ep->reader) subscriber_->delete_datareader(ep->reader);
-    if (ep->writer) publisher_->delete_datawriter(ep->writer);
+    if (ep->writer) {
+      const auto ret = ep->writer->wait_for_acknowledgments(
+          DdsRpcAckDuration{2, 0u});
+      if (!DdsRpcWriteSucceeded(ret)) {
+        MW_WARN("DDS RPC server '{}' response acknowledgment timed out during shutdown.",
+                key);
+      }
+      publisher_->delete_datawriter(ep->writer);
+    }
   }
   server_listeners_.clear();
   server_endpoints_.clear();

@@ -2,7 +2,7 @@
 set -eu
 
 if [ "$#" -ne 3 ]; then
-  printf 'usage: %s <root-dir> <role> <profile>\n' "$0" >&2
+  printf 'usage: %s <root-dir> <role> <shm|udp|mixed|physical>\n' "$0" >&2
   exit 2
 fi
 
@@ -29,7 +29,8 @@ esac
 case "$profile" in
   shm) profile_name=ibmw_xml_shm ;;
   udp) profile_name=ibmw_xml_udp ;;
-  mixed) profile_name=ibmw_xml_profile ;;
+  mixed) profile_name=ibmw_xml_mixed ;;
+  physical) profile_name=ibmw_xml_udp_physical ;;
   *)
     printf 'invalid profile: %s\n' "$profile" >&2
     exit 2
@@ -55,6 +56,7 @@ trap 'exit 1' HUP INT TERM
 while IFS= read -r line || [ -n "$line" ]; do
   line=${line//@XML_PROFILE_FILE@/$xml_profile_file}
   line=${line//@XML_PROFILE_NAME@/$profile_name}
+  line=${line//@ROOT_DIR@/$root_dir}
   printf '%s\n' "$line"
 done < "$template" > "$config_file"
 

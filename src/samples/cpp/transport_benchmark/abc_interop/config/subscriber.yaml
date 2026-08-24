@@ -1,0 +1,28 @@
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options: {domain_id: 45}
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          domain_id: 45
+          ros2_compatible: true
+          ros2_topic_prefix: "rt"
+          subscribers:
+            - topic: "(.*)"
+              qos: {history: keep_last, depth: 8192, reliability: reliable, durability: volatile}
+    subscribers:
+      - topic: "/mw_perf/payload_4kb"
+        enable_drivers: [dds]
+  modules:
+    modules:
+      - name: AbcDdsSubscriberModule
+        log_level: INFO

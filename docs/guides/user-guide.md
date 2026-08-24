@@ -1033,6 +1033,14 @@ samples stay checked out until the executor task completes. Use a single-threade
 executor when per-topic callback order matters, and size DDS history/loan pools
 for the callback hold time.
 
+Reliable `keep_last` publishers use 100 extra writer cache slots by default to
+favor functional reliability for common robotics and SLAM workloads. Most users
+do not need to configure this. Memory-sensitive deployments can set
+`IBMW_DDS_RELIABLE_EXTRA_SAMPLES` to an integer from `0` through `INT32_MAX`, or
+`-1` to restore the Fast DDS default. Invalid values fall back to the safe
+default of 100. This does not increase the logical history depth and is not
+applied to readers, best-effort writers, or `keep_all` writers.
+
 #### gRPC Extension
 
 Extension options:

@@ -26,6 +26,7 @@
 #include "base/benchmark_util.h"
 #include "bench_options.h"
 #include "bench_plain_payloads.h"
+#include "benchmark_run_state.h"
 
 namespace ibmw::samples::transport_benchmark::iox_send {
 
@@ -53,8 +54,7 @@ class SubscriberModule : public ibmw::Module {
   std::mutex stats_mu_;
   ibmw::common::util::LatencyStats stats_;
 
-  std::atomic<uint64_t> received_{0};
-  std::atomic<uint64_t> dropped_{0};
+  std::optional<SubscriberAccounting> accounting_;
   std::atomic<bool> finalized_{false};
 
   // Per-payload typed receivers (switched from raw
