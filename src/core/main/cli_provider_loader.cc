@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "bag_command_loader.h"
+#include "cli_provider_loader.h"
 
 #include <array>
 #include <cstdlib>

@@ -13,7 +13,11 @@ set(CUR_TARGET_NAME ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR})
 set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 
 # Set file collection
-file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
+file(GLOB_RECURSE src CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
+file(GLOB_RECURSE test_files CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
+set(CLI_PROVIDER_FIXTURE_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/cli_provider_fixture.cc)
+list(REMOVE_ITEM src ${test_files} ${CLI_PROVIDER_FIXTURE_SRC})
 
 # Add target
 add_executable(${CUR_TARGET_NAME})
@@ -57,3 +61,17 @@ endif()
 
 # Set misc of target
 set_target_properties(${CUR_TARGET_NAME} PROPERTIES OUTPUT_NAME "ibmw")
+
+if(IBMW_BUILD_TESTS AND test_files)
+  add_library(ibmw_cli_provider_fixture MODULE ${CLI_PROVIDER_FIXTURE_SRC})
+  target_link_libraries(ibmw_cli_provider_fixture PRIVATE ibmw::core::extension_api)
+  add_executable(ibmw_cli_test ${test_files} ${src})
+  target_compile_definitions(ibmw_cli_test PRIVATE IBMW_CLI_TEST
+    IBMW_TEST_CLI_PROVIDER="$<TARGET_FILE:ibmw_cli_provider_fixture>")
+  target_include_directories(ibmw_cli_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(ibmw_cli_test PRIVATE ibmw::core::engine GTest::gtest_main)
+  add_dependencies(ibmw_cli_test ibmw_cli_provider_fixture)
+  add_werror(ibmw_cli_test)
+  add_test(NAME ibmw_cli_test COMMAND ibmw_cli_test)
+  set_tests_properties(ibmw_cli_test PROPERTIES TIMEOUT 30)
+endif()

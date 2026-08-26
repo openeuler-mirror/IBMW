@@ -2,18 +2,22 @@
 // All rights reserved.
 
 #include <algorithm>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 #include "engine/engine.h"
 #include "engine/core_types.h"
-#include "bag_command_loader.h"
+#include "cli_provider_loader.h"
+#include "cli/command.h"
 
 using namespace ibmw::runtime::core;
 
@@ -31,140 +35,24 @@ void PrintVersion() {
   std::cout << "ibmw " << util::GetIbmwVersion() << std::endl;
 }
 
-void PrintUsage() {
-  std::cout
-      << "OVERVIEW: ibmw — high-performance middleware framework for modern robotics.\n\n"
-         "VERSION: "
-      << util::GetIbmwVersion()
-      << "\n\n"
-         "USAGE:\n"
-         "  ibmw run <config.yaml> [options]    Start the runtime with the given config\n"
-         "  ibmw [--cli-config <path>] bag ...  Run a configured CLI provider\n"
-         "  ibmw version                        Show version\n"
-         "  ibmw help                           Show this help\n"
-         "\n"
-         "RUN OPTIONS:\n"
-         "  --dump-cfg[=<path>]                 Dump resolved config (default: ./dump_cfg.yaml)\n"
-         "  --dump-report[=<path>]              Dump initialization report (default: ./init_report.txt)\n"
-         "  --no-signal                         Do not register SIGINT/SIGTERM handlers\n"
-         "  --duration=<seconds>                Run for N seconds then exit (default: 0 = forever)\n";
-}
-
-// Simple option helpers — no external dependency required.
-
-static bool StartsWith(const std::string& s, const std::string& prefix) {
-  return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
-}
-
-static std::string OptionValue(const std::string& arg, const std::string& prefix) {
-  // --flag=value  → value
-  if (arg.size() > prefix.size() && arg[prefix.size()] == '=')
-    return arg.substr(prefix.size() + 1);
-  return {};
-}
-
-int32_t main(int32_t argc, char** argv) {
-  if (argc < 2) {
-    PrintUsage();
-    return 0;
-  }
-
-  int command_index = 1;
-  std::filesystem::path cli_config_path;
-  if (std::string(argv[command_index]) == "--cli-config") {
-    if (argc < command_index + 3) {
-      std::cerr << "Error: '--cli-config' requires a path and a command.\n";
-      return 1;
-    }
-    cli_config_path = argv[command_index + 1];
-    command_index += 2;
-  } else if (StartsWith(argv[command_index], "--cli-config=")) {
-    cli_config_path = OptionValue(argv[command_index], "--cli-config");
-    if (cli_config_path.empty() || argc < command_index + 2) {
-      std::cerr << "Error: '--cli-config' requires a path and a command.\n";
-      return 1;
-    }
-    ++command_index;
-  }
-
-  if (command_index >= argc) {
-    PrintUsage();
-    return 0;
-  }
-  std::string subcmd = argv[command_index];
-
-  // ---- ibmw version ----
-  if (subcmd == "version" || subcmd == "--version" || subcmd == "-v") {
-    PrintVersion();
-    return 0;
-  }
-
-  // ---- ibmw help ----
-  if (subcmd == "help" || subcmd == "--help" || subcmd == "-h") {
-    PrintUsage();
-    return 0;
-  }
-
-  // Built-in runtime command.  Every other command is offered to the
-  // configured CLI providers, so adding a provider command does not require
-  // changing Core's command switch.
-  if (subcmd != "run") {
-    const int command_argc = argc - command_index;
-    const int result = RunCliCommandFromProviders(
-        command_argc, argv + command_index, cli_config_path);
-    if (result != kCliCommandNotFound) {
-      return result;
-    }
-    std::cerr << "Unknown command: " << subcmd << "\n\n";
-    PrintUsage();
-    return 1;
-  }
-
-  if (!cli_config_path.empty()) {
-    std::cerr << "Error: '--cli-config' applies only to provider commands, "
-                 "not to 'run'.\n";
-    return 1;
-  }
-
-  if (argc < 3) {
-    std::cerr << "Error: 'ibmw run' requires a config file path.\n\n"
-                 "Usage: ibmw run <config.yaml> [options]\n";
-    return 1;
-  }
-
-  std::string cfg_file_path = argv[2];
+int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
+  const std::string cfg_file_path = invocation.positional_args.front();
 
   // Defaults
-  bool register_signal = true;
+  const bool register_signal = !invocation.HasOption("--no-signal");
   int32_t running_duration = 0;
-  bool dump_cfg = false;
-  std::string dump_cfg_path = "./dump_cfg.yaml";
-  bool dump_report = false;
-  std::string dump_report_path = "./init_report.txt";
+  bool dump_cfg = invocation.HasOption("--dump-cfg");
+  std::string dump_cfg_path =
+      invocation.OptionValue("--dump-cfg", "./dump_cfg.yaml");
+  bool dump_report = invocation.HasOption("--dump-report");
+  std::string dump_report_path =
+      invocation.OptionValue("--dump-report", "./init_report.txt");
 
-  for (int i = 3; i < argc; ++i) {
-    std::string arg = argv[i];
-
-    if (arg == "--no-signal") {
-      register_signal = false;
-    } else if (StartsWith(arg, "--duration")) {
-      auto val = OptionValue(arg, "--duration");
-      if (val.empty() && i + 1 < argc) {
-        val = argv[++i];
-      }
-      running_duration = std::stoi(val);
-    } else if (StartsWith(arg, "--dump-cfg")) {
-      dump_cfg = true;
-      auto val = OptionValue(arg, "--dump-cfg");
-      if (!val.empty()) dump_cfg_path = val;
-    } else if (StartsWith(arg, "--dump-report")) {
-      dump_report = true;
-      auto val = OptionValue(arg, "--dump-report");
-      if (!val.empty()) dump_report_path = val;
-    } else {
-      std::cerr << "Unknown option: " << arg << "\n";
-      return 1;
-    }
+  try {
+    running_duration = std::stoi(invocation.OptionValue("--duration", "0"));
+  } catch (const std::exception&) {
+    std::cerr << "Error: --duration requires an integer number of seconds.\n";
+    return 1;
   }
 
   if (register_signal) {
@@ -219,3 +107,76 @@ int32_t main(int32_t argc, char** argv) {
   // completed above (Engine destructor ran, all modules stopped).
   _exit(0);
 }
+
+int RunCli(int argc, char** argv) {
+  std::filesystem::path cli_config_path;
+  int command_index = 1;
+  if (argc > 1 && std::string_view(argv[1]) == "--cli-config") {
+    if (argc > 2) cli_config_path = argv[2];
+    command_index = 3;
+  } else if (argc > 1 && std::string_view(argv[1]).starts_with("--cli-config=")) {
+    cli_config_path = std::string_view(argv[1]).substr(13);
+    command_index = 2;
+  }
+  if (command_index != 1 && (cli_config_path.empty() || argc <= command_index)) {
+    std::cerr << "Error: '--cli-config' requires a path and a command.\n";
+    return 1;
+  }
+  std::vector<char*> arguments{argv[0]};
+  for (int index = command_index; index < argc; ++index) {
+    arguments.push_back(argv[index]);
+  }
+
+  ibmw::cli::Command app(
+      "ibmw", "High-performance middleware framework for modern robotics.");
+  app.AddOption(
+      "--cli-config", {}, "path", "CLI provider configuration",
+      ibmw::cli::OptionValueMode::kRequired);
+
+  auto& version = app.AddSubcommand("version", "Show version");
+  version.AddAlias("--version").AddAlias("-v");
+  version.SetHandler([](const ibmw::cli::Invocation&) {
+    PrintVersion();
+    return 0;
+  });
+
+  auto& run = app.AddSubcommand("run", "Start the runtime with a config file");
+  run.AddArgument("<config.yaml>", "Runtime YAML configuration");
+  run.AddOption(
+      "--dump-cfg", {}, "path", "Dump resolved config (default: ./dump_cfg.yaml)",
+      ibmw::cli::OptionValueMode::kOptional);
+  run.AddOption(
+      "--dump-report", {}, "path",
+      "Dump initialization report (default: ./init_report.txt)",
+      ibmw::cli::OptionValueMode::kOptional);
+  run.AddOption(
+      "--duration", {}, "seconds", "Run for N seconds (default: 0 = forever)",
+      ibmw::cli::OptionValueMode::kRequired);
+  run.AddOption(
+      "--no-signal", {}, {}, "Do not register SIGINT/SIGTERM handlers");
+  run.SetHandler(RunRuntimeCommand);
+
+  const std::string_view command = arguments.size() > 1 ? arguments[1] : "";
+  const bool help = command.empty() || command == "help" ||
+                    command == "--help" || command == "-h";
+  if (!help && !app.HasSubcommand(command)) {
+    const auto result = RunCliCommandFromProviders(
+        static_cast<int>(arguments.size()) - 1, arguments.data() + 1,
+        cli_config_path);
+    if (result != kCliCommandNotFound) return result;
+  }
+  const bool version_command = command == "version" || command == "--version" ||
+                               command == "-v";
+  if (!help && !version_command && !cli_config_path.empty() &&
+      app.HasSubcommand(command)) {
+    std::cerr << "Error: '--cli-config' applies only to provider commands.\n";
+    return 1;
+  }
+  return app.Run(static_cast<int>(arguments.size()), arguments.data());
+}
+
+#ifndef IBMW_CLI_TEST
+int32_t main(int32_t argc, char** argv) {
+  return RunCli(argc, argv);
+}
+#endif
