@@ -32,7 +32,7 @@ class DynamicCaptureController {
 
   void Reconcile(
       const std::set<std::string>& selected_topics,
-      const BagTopicGraph& graph,
+      const TopicGraph& graph,
       const PlanBuilder& build_plan);
   void StopAll();
 
@@ -46,7 +46,7 @@ class DynamicCaptureController {
 
   static bool SourceStillAvailable(
       const CapturePlan& plan,
-      const BagTopicGraph& graph);
+      const TopicGraph& graph);
   void Start(std::string_view topic, Entry& entry);
   void Stop(std::string_view topic, Entry& entry);
 

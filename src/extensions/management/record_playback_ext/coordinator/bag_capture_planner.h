@@ -11,9 +11,16 @@
 #include <vector>
 
 #include "record_playback_ext/capture/capture_source.h"
-#include "record_playback_ext/discovery/bag_topic_graph.h"
+#include "engine/runtime_graph/topic_advertisement.h"
+#include "engine/runtime_graph/topic_graph.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
+using ibmw::runtime::core::runtime_graph::TopicGraph;
+
+TopicGraph BuildCaptureGraph(
+    std::vector<ibmw::runtime::core::runtime_graph::RuntimeRegistration> runtimes);
 
 struct CapturePlanEntry {
   TopicAdvertisement advertisement;
@@ -54,7 +61,7 @@ class BagCapturePlanner {
   using RuntimeTapSourceFactory = std::function<std::unique_ptr<CaptureSource>(
       const TopicAdvertisement&)>;
 
-  explicit BagCapturePlanner(const BagTopicGraph& graph) : graph_(graph) {}
+  explicit BagCapturePlanner(const TopicGraph& graph) : graph_(graph) {}
 
   void RegisterTransportSourceFactory(
       std::string driver_name,
@@ -75,7 +82,7 @@ class BagCapturePlanner {
   std::vector<Candidate> CandidatesFor(
       std::string_view topic_name) const;
 
-  const BagTopicGraph& graph_;
+  const TopicGraph& graph_;
   std::unordered_map<std::string, TransportSourceFactory>
       transport_factories_;
   RuntimeTapSourceFactory runtime_tap_factory_;

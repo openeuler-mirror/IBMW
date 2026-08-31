@@ -24,7 +24,7 @@ TopicAdvertisement MakeAdvertisement(
   return advertisement;
 }
 
-BagTopicGraph MakeGraph() {
+TopicGraph MakeGraph() {
   RuntimeRegistration runtime;
   runtime.runtime_id = "runtime";
   runtime.topics = {
@@ -32,7 +32,7 @@ BagTopicGraph MakeGraph() {
       MakeAdvertisement("/camera/debug"),
       MakeAdvertisement("/hidden", true, true),
       MakeAdvertisement("/leaf", false)};
-  BagTopicGraph graph;
+  TopicGraph graph;
   graph.MergeRuntime(runtime);
   return graph;
 }

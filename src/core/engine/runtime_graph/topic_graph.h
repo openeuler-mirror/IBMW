@@ -8,11 +8,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include "record_playback_ext/runtime/runtime_registration.h"
+#include "engine/runtime_graph/runtime_registration.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
-class BagTopicGraph {
+class TopicGraph {
  public:
   void Clear();
   void MergeRuntime(const RuntimeRegistration& runtime);
@@ -25,4 +25,4 @@ class BagTopicGraph {
   std::unordered_map<std::string, std::vector<TopicAdvertisement>> topics_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

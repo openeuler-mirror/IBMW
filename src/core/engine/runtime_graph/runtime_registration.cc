@@ -1,9 +1,10 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/runtime/runtime_registration.h"
+#include "engine/runtime_graph/runtime_registration.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <fstream>
 #include <sstream>
@@ -11,9 +12,10 @@
 #include <unistd.h>
 
 #include "base/exception.h"
-#include "record_playback_ext/runtime/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_directory.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
 bool IsValidRuntimeId(std::string_view value) noexcept {
   // Runtime IDs are used as single path components for the registration,
@@ -144,26 +146,35 @@ void WriteRuntimeRegistration(
           socket_path.filename() == registration.runtime_id + ".sock" &&
           socket_path.parent_path().lexically_normal() == registry_dir,
       "Runtime registration paths must stay within the registry directory.");
-  std::filesystem::create_directories(path.parent_path());
-  std::filesystem::permissions(
-      path.parent_path(), std::filesystem::perms::owner_all,
-      std::filesystem::perm_options::replace);
-  const auto temporary = path.string() + ".tmp";
-  {
-    std::ofstream output(temporary, std::ios::trunc);
-    MW_ASSERT(
-        output.is_open(), "Cannot write Runtime registration '{}'.",
-        temporary);
-    output << RuntimeRegistrationToJson(registration).dump(2) << '\n';
-    output.close();
-    MW_ASSERT(output.good(), "Failed to write Runtime registration.");
+  const auto directory = OpenRuntimeDirectory(path.parent_path(), true);
+  const auto payload = RuntimeRegistrationToJson(registration).dump(2) + '\n';
+  static std::atomic<uint64_t> sequence{0};
+  RuntimeFileDescriptor output;
+  std::string temporary;
+  for (size_t attempt = 0; attempt < 64; ++attempt) {
+    temporary = registration_name + "." + std::to_string(::getpid()) + "." +
+                std::to_string(sequence.fetch_add(1)) + ".tmp";
+    output = RuntimeFileDescriptor(::openat(directory.Get(), temporary.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    if (output.Get() >= 0) break;
+    MW_ASSERT(errno == EEXIST, "Cannot create runtime registration temporary file.");
   }
-  std::filesystem::permissions(
-      temporary,
-      std::filesystem::perms::owner_read |
-          std::filesystem::perms::owner_write,
-      std::filesystem::perm_options::replace);
-  std::filesystem::rename(temporary, path);
+  MW_ASSERT(output.Get() >= 0, "Cannot create a unique runtime registration temporary file.");
+  try {
+    size_t offset = 0;
+    while (offset < payload.size()) {
+      const auto written = ::write(output.Get(), payload.data() + offset, payload.size() - offset);
+      if (written < 0 && errno == EINTR) continue;
+      MW_ASSERT(written > 0, "Failed to write runtime registration.");
+      offset += static_cast<size_t>(written);
+    }
+    MW_ASSERT(::renameat(directory.Get(), temporary.c_str(), directory.Get(),
+                         registration_name.c_str()) == 0,
+              "Failed to publish runtime registration.");
+  } catch (...) {
+    ::unlinkat(directory.Get(), temporary.c_str(), 0);
+    throw;
+  }
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

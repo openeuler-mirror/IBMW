@@ -1159,12 +1159,16 @@ publisher's first send.
 |-----|------|---------|-------------|
 | `service_name` | string | `""` | RPC service name |
 | `timer_executor` | string | `""` | Timer executor |
-| `type_support_pkgs[].path` | string | -- | Type support .so |
 | `record_actions[].name` | string | -- | Action name |
 | `record_actions[].options.bag_path` | string | -- | Bag storage dir |
 | `record_actions[].options.mode` | string | -- | `imd` or `signal` |
 | `record_actions[].options.topic_meta_list[].topic` | string | -- | Topic |
 | `record_actions[].options.topic_meta_list[].msg_type` | string | -- | Type |
+
+Runtime Graph (`ibmw.runtime_graph`) owns runtime advertisements, topic discovery,
+and the control socket. Configure TypeSupport packages used for topic schemas,
+recording, or playback under `ibmw.runtime_graph.type_support_pkgs`; the
+Record/Playback extension does not maintain a separate copy.
 
 ---
 

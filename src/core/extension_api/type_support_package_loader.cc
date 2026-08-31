@@ -150,10 +150,13 @@ bool TypeSupportPackageLoader::TryLoad(std::string_view path) {
   handle_ = candidate.release();
   type_supports_ = types;
   schema_supports_ = schemas;
+  Dl_info library_info{};
+  const auto loaded_path = ::dladdr(symbol, &library_info) && library_info.dli_fname
+                               ? std::string(library_info.dli_fname) : std::string(path);
   try {
-    resolved_path_ = std::filesystem::canonical(path).string();
+    resolved_path_ = std::filesystem::canonical(loaded_path).string();
   } catch (...) {
-    resolved_path_ = std::filesystem::absolute(path).string();
+    resolved_path_ = std::filesystem::absolute(loaded_path).string();
   }
   return true;
 }

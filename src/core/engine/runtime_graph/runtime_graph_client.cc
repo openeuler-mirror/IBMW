@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/runtime/bag_runtime_agent_client.h"
+#include "engine/runtime_graph/runtime_graph_client.h"
 
 #include <array>
 #include <cerrno>
@@ -12,9 +12,9 @@
 #include <unistd.h>
 
 #include "base/exception.h"
-#include "record_playback_ext/runtime/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_protocol.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
 namespace {
 
@@ -30,7 +30,7 @@ sockaddr_un MakeSocketAddress(const std::string& path) {
 
 }  // namespace
 
-std::vector<TopicAdvertisement> BagRuntimeAgentClient::ListTopics() const {
+std::vector<TopicAdvertisement> RuntimeGraphAgentClient::ListTopics() const {
   std::vector<TopicAdvertisement> result;
   for (const auto& item : Call("ListTopics")) {
     result.emplace_back(TopicAdvertisementFromJson(item));
@@ -38,7 +38,7 @@ std::vector<TopicAdvertisement> BagRuntimeAgentClient::ListTopics() const {
   return result;
 }
 
-TopicAdvertisement BagRuntimeAgentClient::GetTopicDescriptor(
+TopicAdvertisement RuntimeGraphAgentClient::GetTopicDescriptor(
     std::string_view topic,
     std::string_view publisher_id) const {
   return TopicAdvertisementFromJson(Call(
@@ -46,7 +46,7 @@ TopicAdvertisement BagRuntimeAgentClient::GetTopicDescriptor(
       {{"topic", topic}, {"publisher_id", publisher_id}}));
 }
 
-TapSessionDescriptor BagRuntimeAgentClient::StartTap(
+TapSessionDescriptor RuntimeGraphAgentClient::StartTap(
     std::string_view topic,
     std::string_view publisher_id) const {
   const auto result = Call(
@@ -56,13 +56,13 @@ TapSessionDescriptor BagRuntimeAgentClient::StartTap(
       .stream_socket = result.at("stream_socket").get<std::string>()};
 }
 
-bool BagRuntimeAgentClient::StopTap(std::string_view session_id) const {
+bool RuntimeGraphAgentClient::StopTap(std::string_view session_id) const {
   return Call("StopTap", {{"session_id", session_id}})
       .at("stopped")
       .get<bool>();
 }
 
-TapSessionDescriptor BagRuntimeAgentClient::StartPlayback(
+TapSessionDescriptor RuntimeGraphAgentClient::StartPlayback(
     std::string_view topic,
     std::string_view subscriber_id) const {
   const auto result = Call(
@@ -72,13 +72,13 @@ TapSessionDescriptor BagRuntimeAgentClient::StartPlayback(
       .stream_socket = result.at("stream_socket").get<std::string>()};
 }
 
-bool BagRuntimeAgentClient::StopPlayback(std::string_view session_id) const {
+bool RuntimeGraphAgentClient::StopPlayback(std::string_view session_id) const {
   return Call("StopPlayback", {{"session_id", session_id}})
       .at("stopped")
       .get<bool>();
 }
 
-nlohmann::json BagRuntimeAgentClient::Call(
+nlohmann::json RuntimeGraphAgentClient::Call(
     std::string_view method,
     nlohmann::json params) const {
   const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -132,4 +132,4 @@ nlohmann::json BagRuntimeAgentClient::Call(
   return response.at("result");
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

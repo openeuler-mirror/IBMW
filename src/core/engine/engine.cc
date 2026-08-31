@@ -204,6 +204,15 @@ void Engine::BuildSubsystemTable() {
        },
        .post_init = {},
        .pre_shutdown = {}},
+      // 11 — Runtime Graph (advertisements and runtime control endpoint)
+      {.id = Subsystem::kRuntimeGraph,
+       .name = "RuntimeGraph",
+       .config_key = "runtime_graph",
+       .instance = &runtime_graph_subsystem_,
+       .depends_on = {Subsystem::kModule},
+       .pre_init = [this] { runtime_graph_subsystem_.SetEngine(this); },
+       .post_init = {},
+       .pre_shutdown = {}},
   };
 }
 
@@ -317,6 +326,8 @@ void Engine::Initialize(const Options& options) {
       // Initialize: ConfigSubsystem uses path-based init; all others use YAML.
       if (entry.id == Subsystem::kConfigurator) {
         config_subsystem_.Initialize(options_.cfg_file_path);
+        runtime_graph_subsystem_.Configure(
+            config_subsystem_.GetIbmwOptionsNode("runtime_graph"));
       } else {
         entry.instance->Initialize(
             config_subsystem_.GetIbmwOptionsNode(entry.config_key));

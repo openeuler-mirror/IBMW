@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/runtime/bag_runtime_agent.h"
+#include "engine/runtime_graph/runtime_graph_agent.h"
 
 #include <array>
 #include <cerrno>
@@ -17,9 +17,10 @@
 #include <unistd.h>
 
 #include "base/exception.h"
-#include "record_playback_ext/runtime/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_directory.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
 namespace {
 
@@ -46,30 +47,24 @@ sockaddr_un MakeSocketAddress(const std::string& path) {
 class RuntimeIdLock {
  public:
   explicit RuntimeIdLock(const std::filesystem::path& path) {
-    fd_ = ::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    MW_ASSERT(fd_ >= 0, "Failed to open Runtime ID lock '{}'.", path.string());
-    if (::flock(fd_, LOCK_EX) != 0) {
-      const int error = errno;
-      ::close(fd_);
-      fd_ = -1;
-      MW_ASSERT(
-          false, "Failed to lock Runtime ID '{}': {}.", path.string(),
-          std::strerror(error));
-    }
-  }
-
-  ~RuntimeIdLock() {
-    if (fd_ >= 0) {
-      static_cast<void>(::flock(fd_, LOCK_UN));
-      ::close(fd_);
-    }
+    const auto directory = OpenRuntimeDirectory(path.parent_path(), false);
+    fd_ = RuntimeFileDescriptor(::openat(directory.Get(), path.filename().c_str(),
+        O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600));
+    MW_ASSERT(fd_.Get() >= 0, "Failed to open Runtime ID lock '{}'.", path.string());
+    struct stat status {};
+    MW_ASSERT(::fstat(fd_.Get(), &status) == 0 && S_ISREG(status.st_mode) &&
+                  status.st_uid == ::geteuid() && (status.st_mode & 077) == 0 &&
+                  status.st_nlink == 1,
+              "Unsafe Runtime ID lock '{}'.", path.string());
+    MW_ASSERT(::flock(fd_.Get(), LOCK_EX) == 0,
+              "Failed to lock Runtime ID '{}'.", path.string());
   }
 
   RuntimeIdLock(const RuntimeIdLock&) = delete;
   RuntimeIdLock& operator=(const RuntimeIdLock&) = delete;
 
  private:
-  int fd_ = -1;
+  RuntimeFileDescriptor fd_;
 };
 
 std::optional<RuntimeRegistration> ReadRegistrationFile(
@@ -116,34 +111,46 @@ bool SameRegistrationOwner(
 
 }  // namespace
 
-BagRuntimeAgent::BagRuntimeAgent(Options options)
-    : options_(std::move(options)) {}
+RuntimeGraphAgent::RuntimeGraphAgent(Options options)
+    : options_(std::move(options)) {
+  options_.registry_path = ibmw::extension::RuntimeRegistryDirectory(options_.registry_path);
+}
 
-BagRuntimeAgent::~BagRuntimeAgent() {
+RuntimeGraphAgent::~RuntimeGraphAgent() {
   Shutdown();
 }
 
-void BagRuntimeAgent::SetStartTapHandler(StartTapHandler handler) {
-  MW_ASSERT(state_.load() == State::kCreated, "Set handlers before Initialize.");
+void RuntimeGraphAgent::UpdateRegistration(RuntimeRegistration registration) {
+  MW_ASSERT(state_.load() == State::kCreated,
+            "Runtime registration can only be updated before Initialize.");
+  options_.registration = std::move(registration);
+}
+
+void RuntimeGraphAgent::SetStartTapHandler(StartTapHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
+            "Set handlers before Start.");
   start_tap_handler_ = std::move(handler);
 }
 
-void BagRuntimeAgent::SetStopTapHandler(StopTapHandler handler) {
-  MW_ASSERT(state_.load() == State::kCreated, "Set handlers before Initialize.");
+void RuntimeGraphAgent::SetStopTapHandler(StopTapHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
+            "Set handlers before Start.");
   stop_tap_handler_ = std::move(handler);
 }
 
-void BagRuntimeAgent::SetStartPlaybackHandler(StartPlaybackHandler handler) {
-  MW_ASSERT(state_.load() == State::kCreated, "Set handlers before Initialize.");
+void RuntimeGraphAgent::SetStartPlaybackHandler(StartPlaybackHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
+            "Set handlers before Start.");
   start_playback_handler_ = std::move(handler);
 }
 
-void BagRuntimeAgent::SetStopPlaybackHandler(StopPlaybackHandler handler) {
-  MW_ASSERT(state_.load() == State::kCreated, "Set handlers before Initialize.");
+void RuntimeGraphAgent::SetStopPlaybackHandler(StopPlaybackHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
+            "Set handlers before Start.");
   stop_playback_handler_ = std::move(handler);
 }
 
-void BagRuntimeAgent::Initialize() {
+void RuntimeGraphAgent::Initialize() {
   State expected = State::kCreated;
   MW_ASSERT(
       state_.compare_exchange_strong(expected, State::kInitialized),
@@ -154,10 +161,8 @@ void BagRuntimeAgent::Initialize() {
     MW_ASSERT(
         IsValidRuntimeId(registration.runtime_id),
         "Runtime ID must be a safe single path component (alphanumeric, '-', '_' or '.').");
-    std::filesystem::create_directories(options_.registry_path);
-    std::filesystem::permissions(
-        options_.registry_path, std::filesystem::perms::owner_all,
-        std::filesystem::perm_options::replace);
+    const auto root = OpenRuntimeDirectory(options_.registry_path.parent_path(), true);
+    const auto directory = OpenRuntimeDirectory(options_.registry_path, true);
     registration.pid = static_cast<int64_t>(::getpid());
     const auto process_start_time =
         ReadProcessStartTimeTicks(registration.pid);
@@ -201,7 +206,8 @@ void BagRuntimeAgent::Initialize() {
         std::filesystem::perms::owner_read |
             std::filesystem::perms::owner_write,
         std::filesystem::perm_options::replace);
-    ConfigureRuntimeSocket(fd);
+    // Idle control traffic must not time out accept() and stop the service.
+    // Apply request I/O deadlines only to accepted sockets in Serve().
     MW_ASSERT(::listen(fd, 16) == 0, "Failed to listen on Runtime Agent socket.");
     WriteRuntimeRegistration(registration, registration_path_);
   } catch (...) {
@@ -217,7 +223,7 @@ void BagRuntimeAgent::Initialize() {
   }
 }
 
-void BagRuntimeAgent::Start() {
+void RuntimeGraphAgent::Start() {
   State expected = State::kInitialized;
   MW_ASSERT(
       state_.compare_exchange_strong(expected, State::kRunning),
@@ -225,7 +231,7 @@ void BagRuntimeAgent::Start() {
   server_thread_ = std::thread([this] { Serve(); });
 }
 
-void BagRuntimeAgent::Shutdown() {
+void RuntimeGraphAgent::Shutdown() {
   const State previous = state_.exchange(State::kStopped);
   if (previous == State::kStopped || previous == State::kCreated) {
     return;
@@ -260,7 +266,7 @@ void BagRuntimeAgent::Shutdown() {
   }
 }
 
-void BagRuntimeAgent::Serve() {
+void RuntimeGraphAgent::Serve() {
   while (state_.load() == State::kRunning) {
     const int fd = server_fd_.load();
     if (fd < 0) {
@@ -294,7 +300,7 @@ void BagRuntimeAgent::Serve() {
   }
 }
 
-void BagRuntimeAgent::HandleClient(int client_fd) {
+void RuntimeGraphAgent::HandleClient(int client_fd) {
   nlohmann::json response;
   try {
     std::string request_data;
@@ -325,7 +331,7 @@ void BagRuntimeAgent::HandleClient(int client_fd) {
   SendAll(client_fd, response_data);
 }
 
-nlohmann::json BagRuntimeAgent::HandleRequest(
+nlohmann::json RuntimeGraphAgent::HandleRequest(
     const nlohmann::json& request) {
   MW_ASSERT(
       request.value("protocol_version", 0u) == kRuntimeProtocolVersion,
@@ -380,7 +386,7 @@ nlohmann::json BagRuntimeAgent::HandleRequest(
                         {"id", id}, {"ok", true}, {"result", result}};
 }
 
-TopicAdvertisement BagRuntimeAgent::FindTopic(
+TopicAdvertisement RuntimeGraphAgent::FindTopic(
     const nlohmann::json& params) const {
   const std::string topic_name = params.at("topic").get<std::string>();
   const std::string publisher_id = params.value("publisher_id", "");
@@ -394,4 +400,4 @@ TopicAdvertisement BagRuntimeAgent::FindTopic(
   return {};
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

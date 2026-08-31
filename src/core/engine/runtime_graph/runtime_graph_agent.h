@@ -10,35 +10,29 @@
 #include <string_view>
 #include <thread>
 
-#include "record_playback_ext/runtime/runtime_registration.h"
+#include "engine/runtime_graph/runtime_registration.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
-struct TapSessionDescriptor {
-  std::string session_id;
-  std::string stream_socket;
-};
+using ibmw::extension::TapSessionDescriptor;
 
-class BagRuntimeAgent {
+class RuntimeGraphAgent {
  public:
   struct Options {
     RuntimeRegistration registration;
-    std::filesystem::path registry_path = "/tmp/ibmw/runtimes";
+    std::filesystem::path registry_path = ibmw::extension::DefaultRuntimeRegistryPath();
   };
 
-  using StartTapHandler =
-      std::function<TapSessionDescriptor(const TopicAdvertisement&)>;
-  using StopTapHandler = std::function<bool(std::string_view session_id)>;
-  using StartPlaybackHandler =
-      std::function<TapSessionDescriptor(const TopicAdvertisement&)>;
-  using StopPlaybackHandler =
-      std::function<bool(std::string_view session_id)>;
+  using StartTapHandler = ibmw::extension::RuntimeGraphV1::StartTapHandler;
+  using StopTapHandler = ibmw::extension::RuntimeGraphV1::StopTapHandler;
+  using StartPlaybackHandler = ibmw::extension::RuntimeGraphV1::StartPlaybackHandler;
+  using StopPlaybackHandler = ibmw::extension::RuntimeGraphV1::StopPlaybackHandler;
 
-  explicit BagRuntimeAgent(Options options);
-  ~BagRuntimeAgent();
+  explicit RuntimeGraphAgent(Options options);
+  ~RuntimeGraphAgent();
 
-  BagRuntimeAgent(const BagRuntimeAgent&) = delete;
-  BagRuntimeAgent& operator=(const BagRuntimeAgent&) = delete;
+  RuntimeGraphAgent(const RuntimeGraphAgent&) = delete;
+  RuntimeGraphAgent& operator=(const RuntimeGraphAgent&) = delete;
 
   void SetStartTapHandler(StartTapHandler handler);
   void SetStopTapHandler(StopTapHandler handler);
@@ -52,6 +46,8 @@ class BagRuntimeAgent {
   const RuntimeRegistration& Registration() const noexcept {
     return options_.registration;
   }
+
+  void UpdateRegistration(RuntimeRegistration registration);
 
  private:
   enum class State {
@@ -78,4 +74,4 @@ class BagRuntimeAgent {
   StopPlaybackHandler stop_playback_handler_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

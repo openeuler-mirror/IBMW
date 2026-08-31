@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "record_playback_ext/runtime/runtime_tap_stream.h"
+#include "engine/runtime_graph/runtime_directory.h"
 
 #include <array>
 #include <cerrno>
@@ -388,7 +389,7 @@ RuntimeTapServer::RuntimeTapServer(
     std::filesystem::path socket_directory)
     : publish_tap_(publish_tap),
       runtime_id_(std::move(runtime_id)),
-      socket_directory_(std::move(socket_directory)) {}
+      socket_directory_(ibmw::extension::RuntimeRegistryDirectory(socket_directory)) {}
 
 RuntimeTapServer::~RuntimeTapServer() {
   Shutdown();
@@ -398,10 +399,8 @@ void RuntimeTapServer::Start() {
   bool expected = false;
   MW_ASSERT(started_.compare_exchange_strong(expected, true),
             "Runtime tap server is already started.");
-  std::filesystem::create_directories(socket_directory_);
-  std::filesystem::permissions(
-      socket_directory_, std::filesystem::perms::owner_all,
-      std::filesystem::perm_options::replace);
+  const auto root = ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
+  const auto directory = ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
 }
 
 TapSessionDescriptor RuntimeTapServer::StartSession(

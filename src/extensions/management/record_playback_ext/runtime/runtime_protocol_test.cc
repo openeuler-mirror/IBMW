@@ -21,15 +21,17 @@
 #include "engine/transport/message_frame.h"
 #include "engine/transport/transport_bus.h"
 #include "engine/transport/transport_driver_tools.h"
-#include "record_playback_ext/runtime/bag_runtime_agent.h"
-#include "record_playback_ext/runtime/bag_runtime_agent_client.h"
+#include "engine/runtime_graph/runtime_graph_agent.h"
+#include "engine/runtime_graph/runtime_graph_client.h"
 #include "record_playback_ext/runtime/runtime_playback_stream.h"
 #include "record_playback_ext/runtime/runtime_protocol.h"
-#include "record_playback_ext/runtime/runtime_registry.h"
+#include "engine/runtime_graph/runtime_registry.h"
 #include "record_playback_ext/runtime/runtime_tap_stream.h"
 #include "yaml-cpp/yaml.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using namespace ibmw::runtime::core::runtime_graph;
 namespace {
 
 class RuntimeTemporaryDirectory {
@@ -41,6 +43,9 @@ class RuntimeTemporaryDirectory {
              std::to_string(sequence.fetch_add(1)));
     std::filesystem::remove_all(path_);
     std::filesystem::create_directories(path_);
+    std::filesystem::permissions(path_, std::filesystem::perms::owner_all);
+    std::filesystem::create_directory(RegistryDirectory());
+    std::filesystem::permissions(RegistryDirectory(), std::filesystem::perms::owner_all);
   }
 
   ~RuntimeTemporaryDirectory() {
@@ -49,6 +54,9 @@ class RuntimeTemporaryDirectory {
   }
 
   const std::filesystem::path& Path() const noexcept { return path_; }
+  std::filesystem::path RegistryDirectory() const {
+    return ibmw::extension::RuntimeRegistryDirectory(path_);
+  }
 
  private:
   std::filesystem::path path_;
@@ -177,16 +185,16 @@ mode_t Permissions(const std::filesystem::path& path) {
   return value.st_mode & 0777;
 }
 
-TEST(RuntimeProtocolTest, RegistrationRequiresV1AndOwnerOnlyPermissions) {
+TEST(RuntimeProtocolTest, RegistrationRequiresV2AndOwnerOnlyPermissions) {
   RuntimeTemporaryDirectory temporary;
-  const auto registration_path = temporary.Path() / "runtime.json";
+  const auto registration_path = temporary.RegistryDirectory() / "runtime.json";
   const auto start_time = ReadProcessStartTimeTicks(::getpid());
   ASSERT_TRUE(start_time.has_value());
   RuntimeRegistration registration{
       .runtime_id = "runtime",
       .pid = ::getpid(),
       .process_start_time_ticks = *start_time,
-      .control_socket = (temporary.Path() / "runtime.sock").string()};
+      .control_socket = (temporary.RegistryDirectory() / "runtime.sock").string()};
   WriteRuntimeRegistration(registration, registration_path);
 
   EXPECT_EQ(Permissions(temporary.Path()), 0700);
@@ -215,7 +223,7 @@ TEST(RuntimeProtocolTest, DiscoveryRemovesAStaleSameUidRegistration) {
   std::filesystem::permissions(
       temporary.Path(), std::filesystem::perms::owner_all,
       std::filesystem::perm_options::replace);
-  const auto socket_path = temporary.Path() / "stale.sock";
+  const auto socket_path = temporary.RegistryDirectory() / "stale.sock";
   const int socket_fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   ASSERT_GE(socket_fd, 0);
   sockaddr_un address{};
@@ -235,7 +243,7 @@ TEST(RuntimeProtocolTest, DiscoveryRemovesAStaleSameUidRegistration) {
 
   const auto start_time = ReadProcessStartTimeTicks(::getpid());
   ASSERT_TRUE(start_time.has_value());
-  const auto registration_path = temporary.Path() / "stale.json";
+  const auto registration_path = temporary.RegistryDirectory() / "stale.json";
   WriteRuntimeRegistration(
       RuntimeRegistration{
           .runtime_id = "stale",
@@ -278,7 +286,7 @@ TEST(RuntimeProtocolTest, DiscoveryRejectsAControlSocketOutsideRegistry) {
 
   const auto start_time = ReadProcessStartTimeTicks(::getpid());
   ASSERT_TRUE(start_time.has_value());
-  const auto registration_path = registry.Path() / "runtime.json";
+  const auto registration_path = registry.RegistryDirectory() / "runtime.json";
   const auto registration = RuntimeRegistration{
       .runtime_id = "runtime",
       .pid = ::getpid(),
@@ -293,14 +301,14 @@ TEST(RuntimeProtocolTest, DiscoveryRejectsAControlSocketOutsideRegistry) {
       std::filesystem::perm_options::replace);
 
   EXPECT_TRUE(RuntimeRegistry(registry.Path()).DiscoverLocalRuntimes().empty());
-  EXPECT_FALSE(std::filesystem::exists(registration_path));
+  EXPECT_TRUE(std::filesystem::exists(registration_path));
   EXPECT_TRUE(std::filesystem::exists(outside_socket));
   ::close(socket_fd);
 }
 
 TEST(RuntimeProtocolTest, AgentRejectsUnsafeRuntimeId) {
   RuntimeTemporaryDirectory temporary;
-  BagRuntimeAgent agent(BagRuntimeAgent::Options{
+  RuntimeGraphAgent agent(RuntimeGraphAgent::Options{
       .registration = RuntimeRegistration{.runtime_id = "../escape"},
       .registry_path = temporary.Path()});
   EXPECT_THROW(agent.Initialize(), ibmw::common::util::IbmwException);
@@ -308,12 +316,12 @@ TEST(RuntimeProtocolTest, AgentRejectsUnsafeRuntimeId) {
                                        "escape.json"));
 }
 
-TEST(RuntimeProtocolTest, DiscoveryRemovesOversizedRegistration) {
+TEST(RuntimeProtocolTest, DiscoveryPreservesOversizedRegistration) {
   RuntimeTemporaryDirectory temporary;
   std::filesystem::permissions(
       temporary.Path(), std::filesystem::perms::owner_all,
       std::filesystem::perm_options::replace);
-  const auto registration_path = temporary.Path() / "oversized.json";
+  const auto registration_path = temporary.RegistryDirectory() / "oversized.json";
   {
     std::ofstream output(registration_path, std::ios::binary);
     ASSERT_TRUE(output.is_open());
@@ -327,17 +335,17 @@ TEST(RuntimeProtocolTest, DiscoveryRemovesOversizedRegistration) {
       std::filesystem::perm_options::replace);
 
   EXPECT_TRUE(RuntimeRegistry(temporary.Path()).DiscoverLocalRuntimes().empty());
-  EXPECT_FALSE(std::filesystem::exists(registration_path));
+  EXPECT_TRUE(std::filesystem::exists(registration_path));
 }
 
-TEST(RuntimeProtocolTest, DiscoveryRemovesCorruptRegistrationAndOwnedSocket) {
+TEST(RuntimeProtocolTest, DiscoveryPreservesCorruptRegistrationAndOwnedSocket) {
   RuntimeTemporaryDirectory temporary;
   std::filesystem::permissions(
       temporary.Path(), std::filesystem::perms::owner_all,
       std::filesystem::perm_options::replace);
-  const auto registration_path = temporary.Path() / "corrupt.json";
+  const auto registration_path = temporary.RegistryDirectory() / "corrupt.json";
   std::ofstream(registration_path) << "{not-json\n";
-  const auto socket_path = temporary.Path() / "corrupt.sock";
+  const auto socket_path = temporary.RegistryDirectory() / "corrupt.sock";
   const int socket_fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   ASSERT_GE(socket_fd, 0);
   sockaddr_un address{};
@@ -361,14 +369,38 @@ TEST(RuntimeProtocolTest, DiscoveryRemovesCorruptRegistrationAndOwnedSocket) {
       std::filesystem::perm_options::replace);
 
   EXPECT_TRUE(RuntimeRegistry(temporary.Path()).DiscoverLocalRuntimes().empty());
-  EXPECT_FALSE(std::filesystem::exists(registration_path));
-  EXPECT_FALSE(std::filesystem::exists(socket_path));
+  EXPECT_TRUE(std::filesystem::exists(registration_path));
+  EXPECT_TRUE(std::filesystem::exists(socket_path));
   ::close(socket_fd);
+}
+
+TEST(RuntimeProtocolTest, ExplicitRegistryRootIsIsolatedAndUnknownVersionsArePreserved) {
+  RuntimeTemporaryDirectory temporary;
+  const auto legacy = temporary.Path() / "legacy.json";
+  std::ofstream(legacy) << "{old-data}";
+  RuntimeGraphAgent agent({.registration = {.runtime_id = "current"},
+                           .registry_path = temporary.Path()});
+  ASSERT_NO_THROW(agent.Initialize());
+  const auto registration_path = temporary.RegistryDirectory() / "current.json";
+  const auto socket_path = temporary.RegistryDirectory() / "current.sock";
+  EXPECT_EQ(agent.Registration().control_socket, socket_path.string());
+  ASSERT_EQ(RuntimeRegistry(temporary.Path()).DiscoverLocalRuntimes().size(), 1u);
+  EXPECT_FALSE(std::filesystem::exists(temporary.Path() / "current.json"));
+  auto json = RuntimeRegistrationToJson(agent.Registration());
+  for (const auto version : {1u, kRuntimeProtocolVersion + 1}) {
+    json["protocol_version"] = version;
+    std::ofstream(registration_path) << json.dump();
+    EXPECT_TRUE(RuntimeRegistry(temporary.Path()).DiscoverLocalRuntimes().empty());
+    EXPECT_TRUE(std::filesystem::exists(registration_path));
+    EXPECT_TRUE(std::filesystem::exists(socket_path));
+  }
+  EXPECT_TRUE(std::filesystem::exists(legacy));
+  agent.Shutdown();
 }
 
 TEST(RuntimeProtocolTest, ControlRpcRejectsAnUnknownVersion) {
   RuntimeTemporaryDirectory temporary;
-  BagRuntimeAgent agent(BagRuntimeAgent::Options{
+  RuntimeGraphAgent agent(RuntimeGraphAgent::Options{
       .registration = RuntimeRegistration{.runtime_id = "agent"},
       .registry_path = temporary.Path()});
   ASSERT_NO_THROW(agent.Initialize());
@@ -376,7 +408,7 @@ TEST(RuntimeProtocolTest, ControlRpcRejectsAnUnknownVersion) {
   EXPECT_EQ(Permissions(temporary.Path()), 0700);
   EXPECT_EQ(Permissions(agent.Registration().control_socket), 0600);
   EXPECT_TRUE(
-      BagRuntimeAgentClient(agent.Registration().control_socket)
+      RuntimeGraphAgentClient(agent.Registration().control_socket)
           .ListTopics()
           .empty());
 

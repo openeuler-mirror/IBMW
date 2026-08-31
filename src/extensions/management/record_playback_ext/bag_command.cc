@@ -37,7 +37,7 @@
 #include "base/exception.h"
 #include "engine/engine.h"
 #include "engine/transport/serialized_transport_driver.h"
-#include "engine/type_support_pkg_loader.h"
+#include "engine/runtime_graph/type_support_registry.h"
 #include "nlohmann/json.hpp"
 #include "record_playback_ext/capture/cached_transport_subscription_source.h"
 #include "record_playback_ext/capture/runtime_tap_source.h"
@@ -47,9 +47,9 @@
 #include "record_playback_ext/coordinator/recorder_coordinator.h"
 #include "record_playback_ext/coordinator/record_topic_selector.h"
 #include "record_playback_ext/converter/bag_converter.h"
-#include "record_playback_ext/discovery/bag_topic_graph.h"
+#include "engine/runtime_graph/runtime_registry.h"
+#include "engine/runtime_graph/topic_graph.h"
 #include "record_playback_ext/player/player.h"
-#include "record_playback_ext/runtime/runtime_registry.h"
 #include "record_playback_ext/runtime/runtime_tap_stream.h"
 #include "record_playback_ext/storage/bag_reader_factory.h"
 #include "record_playback_ext/storage/mcap_bag_reader.h"
@@ -58,6 +58,11 @@
 #include "yaml-cpp/yaml.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
+using ibmw::runtime::core::runtime_graph::TopicGraph;
+using ibmw::runtime::core::runtime_graph::TransportCaptureCapability;
 
 namespace {
 
@@ -926,7 +931,7 @@ bool CompatibleRecorderConnection(
 }
 
 RecorderRuntimeSpec BuildRecorderRuntimeSpec(
-    const BagTopicGraph& graph,
+    const TopicGraph& graph,
     const std::vector<std::string>& topics,
     bool include_cached_serialized = true) {
   RecorderRuntimeSpec spec;
@@ -975,6 +980,9 @@ std::filesystem::path WriteRecorderConfig(
     std::string log_level = "info") {
   YAML::Node root;
   YAML::Node ibmw = root["ibmw"];
+  // This Engine is an internal direct-capture helper.  It needs the transport
+  // drivers, but must not publish a separate Runtime Graph registration.
+  ibmw["runtime_graph"]["enabled"] = false;
   std::map<std::string, TransportCaptureCapability> extensions;
   for (const auto& [driver, capability] : spec.direct_drivers) {
     static_cast<void>(driver);
@@ -1070,7 +1078,7 @@ using PlaybackRouteMap = std::unordered_map<std::string, PlaybackRoute>;
 
 struct ResolvedPlaybackConfig {
   PlaybackRouteMap routes;
-  std::filesystem::path runtime_registry_path = "/tmp/ibmw/runtimes";
+  std::filesystem::path runtime_registry_path = ibmw::extension::DefaultRuntimeRegistryPath();
 };
 
 std::string PlaybackTopicKey(
@@ -1244,17 +1252,26 @@ ResolvedPlaybackConfig ResolvePlaybackConfig(
       bag_playback.IsDefined() && !bag_playback.IsNull()
           ? bag_playback["runtime_routes"]
           : YAML::Node{};
-  const YAML::Node runtime_registry_path =
-      bag_playback.IsDefined() && !bag_playback.IsNull()
-          ? bag_playback["runtime_registry_path"]
-          : YAML::Node{};
-  if (runtime_registry_path.IsDefined() &&
-      !runtime_registry_path.IsNull()) {
+  const YAML::Node runtime_graph = ibmw["runtime_graph"];
+  MW_ASSERT(
+      !runtime_graph.IsDefined() || runtime_graph.IsNull() ||
+          runtime_graph.IsMap(),
+      "ibmw.runtime_graph must be a map.");
+  if (runtime_graph.IsDefined() && !runtime_graph.IsNull() &&
+      runtime_graph["registry_path"].IsDefined() &&
+      !runtime_graph["registry_path"].IsNull()) {
     result.runtime_registry_path =
-        runtime_registry_path.as<std::string>();
+        runtime_graph["registry_path"].as<std::string>();
     MW_ASSERT(
         !result.runtime_registry_path.empty(),
-        "ibmw.bag_playback.runtime_registry_path cannot be empty.");
+        "ibmw.runtime_graph.registry_path cannot be empty.");
+  } else if (bag_playback.IsDefined() && !bag_playback.IsNull() &&
+             bag_playback["runtime_registry_path"].IsDefined() &&
+             !bag_playback["runtime_registry_path"].IsNull()) {
+    result.runtime_registry_path =
+        bag_playback["runtime_registry_path"].as<std::string>();
+    MW_ASSERT(!result.runtime_registry_path.empty(),
+              "ibmw.bag_playback.runtime_registry_path cannot be empty.");
   }
   for (const auto& channel : channels) {
     auto drivers = ResolvePlaybackDrivers(
@@ -1315,12 +1332,19 @@ std::filesystem::path WritePlayerConfig(
   YAML::Node ibmw = root["ibmw"];
   for (const std::string_view key : {
            "config", "extensions", "main_loop", "watchdog",
-           "scheduling", "logging", "memory"}) {
+           "scheduling", "logging", "memory", "runtime_graph"}) {
     if (source_ibmw[std::string(key)]) {
       ibmw[std::string(key)] =
           YAML::Clone(source_ibmw[std::string(key)]);
     }
   }
+  // The Player-owned publisher Engine is an internal helper; Runtime route
+  // discovery is performed by the CLI process itself.  Disable registration
+  // even when the source config did not define a runtime_graph section.
+  ibmw["runtime_graph"]["enabled"] = false;
+  ibmw["runtime_graph"].remove("type_support_pkgs");
+  ibmw["runtime_graph"]["runtime_id"] =
+      "ibmw-bag-player-" + std::to_string(::getpid());
   if (ibmw["extensions"] && ibmw["extensions"]["items"]) {
     for (auto extension : ibmw["extensions"]["items"]) {
       if (!extension["path"]) {
@@ -1408,86 +1432,27 @@ std::filesystem::path WritePlayerConfig(
   return config_path;
 }
 
-class CliTypeSupportRegistry {
- public:
-  void Load(const std::string& path) {
-    std::lock_guard lock(mutex_);
-    if (loaded_paths_.contains(path)) {
-      return;
-    }
-    auto loader =
-        std::make_unique<runtime::core::util::TypeSupportPkgLoader>();
-    loader->LoadTypeSupportPkg(path);
-    for (const auto* item : loader->GetTypeSupportArray()) {
-      ibmw::util::TypeSupportRef type_support(item);
-      type_supports_.try_emplace(
-          std::string(type_support.TypeName()), type_support);
-      type_support_packages_.try_emplace(
-          std::string(type_support.TypeName()), path);
-    }
-    for (const auto* item : loader->GetSchemaSupportArray()) {
-      ibmw::util::SchemaSupportRef schema(item);
-      schemas_.try_emplace(
-          std::string(schema.TypeName()) + '\0' +
-              std::string(schema.SerializationType()),
-          schema.ToDescriptor());
-    }
-    loaded_paths_.emplace(path);
-    loaders_.emplace_back(std::move(loader));
-  }
-
-  ibmw::util::TypeSupportRef Find(std::string_view type_name) const {
-    std::lock_guard lock(mutex_);
-    const auto found = type_supports_.find(std::string(type_name));
-    return found == type_supports_.end() ? ibmw::util::TypeSupportRef{}
-                                        : found->second;
-  }
-
-  std::string PackagePath(std::string_view type_name) const {
-    std::lock_guard lock(mutex_);
-    const auto found = type_support_packages_.find(std::string(type_name));
-    return found == type_support_packages_.end() ? std::string{}
-                                                 : found->second;
-  }
-
-  std::optional<ibmw::util::SchemaDescriptor> FindSchema(
-      std::string_view type_name,
-      std::string_view serialization_type) const {
-    std::lock_guard lock(mutex_);
-    const auto found = schemas_.find(
-        std::string(type_name) + '\0' + std::string(serialization_type));
-    return found == schemas_.end()
-               ? std::nullopt
-               : std::optional<ibmw::util::SchemaDescriptor>(found->second);
-  }
-
- private:
-  std::set<std::string> loaded_paths_;
-  std::vector<std::unique_ptr<runtime::core::util::TypeSupportPkgLoader>>
-      loaders_;
-  std::unordered_map<std::string, ibmw::util::TypeSupportRef> type_supports_;
-  std::unordered_map<std::string, std::string> type_support_packages_;
-  std::unordered_map<std::string, ibmw::util::SchemaDescriptor> schemas_;
-  mutable std::mutex mutex_;
-};
-
 void LoadPlayerTypeSupportPackages(
     const std::filesystem::path& config_path,
-    CliTypeSupportRegistry& registry) {
+    runtime::core::runtime_graph::TypeSupportRegistry& registry) {
   if (config_path.empty()) {
     return;
   }
   const YAML::Node root = YAML::LoadFile(config_path.string());
-  const YAML::Node packages = root["ibmw"] && root["ibmw"]["bag_playback"]
-                                  ? root["ibmw"]["bag_playback"]
+  YAML::Node packages = root["ibmw"] && root["ibmw"]["runtime_graph"]
+                                  ? root["ibmw"]["runtime_graph"]
                                         ["type_support_pkgs"]
                                   : YAML::Node{};
-  if (!packages) {
+  if ((!packages || packages.IsNull()) && root["ibmw"] &&
+      root["ibmw"]["bag_playback"]) {
+    packages.reset(root["ibmw"]["bag_playback"]["type_support_pkgs"]);
+  }
+  if (!packages || packages.IsNull()) {
     return;
   }
   MW_ASSERT(
       packages.IsSequence(),
-      "ibmw.bag_playback.type_support_pkgs must be a sequence.");
+      "ibmw.runtime_graph.type_support_pkgs must be a sequence.");
   for (const auto& package : packages) {
     std::filesystem::path path = package.IsScalar()
                                      ? package.as<std::string>()
@@ -1511,7 +1476,7 @@ std::shared_ptr<ibmw::util::BufferArrayView> MakeOwnedPayload(
 }
 
 bool CanTranscodePlayback(
-    CliTypeSupportRegistry& registry,
+    runtime::core::runtime_graph::TypeSupportRegistry& registry,
     const BagChannelInfo& channel,
     const TopicAdvertisement& advertisement) {
   if (channel.topic.msg_type != advertisement.topic.msg_type ||
@@ -1541,7 +1506,7 @@ bool CanTranscodePlayback(
 }
 
 ibmw::transport::SerializedMessage TranscodePlaybackMessage(
-    CliTypeSupportRegistry& registry,
+    runtime::core::runtime_graph::TypeSupportRegistry& registry,
     const TopicAdvertisement& advertisement,
     const ibmw::transport::SerializedMessage& message) {
   MW_ASSERT(
@@ -1623,7 +1588,7 @@ class PlayerOwnedPublisherRegistry {
  public:
   PlayerOwnedPublisherRegistry(
       runtime::core::transport::TransportBus& transport_bus,
-      CliTypeSupportRegistry& type_support_registry)
+      runtime::core::runtime_graph::TypeSupportRegistry& type_support_registry)
       : transport_bus_(transport_bus),
         type_support_registry_(type_support_registry) {
     for (auto* driver : transport_bus_.GetUsedTransportDriver()) {
@@ -1792,7 +1757,7 @@ class PlayerOwnedPublisherRegistry {
   };
 
   runtime::core::transport::TransportBus& transport_bus_;
-  CliTypeSupportRegistry& type_support_registry_;
+  runtime::core::runtime_graph::TypeSupportRegistry& type_support_registry_;
   std::unordered_map<std::string, runtime::core::transport::TransportDriver*>
       drivers_;
   std::unordered_map<std::string, Entry> entries_;
@@ -2053,7 +2018,7 @@ int RunPlay(int argc, const char* const* argv) {
           static_cast<double>(reader->Info().Duration()),
       "Playback start offset is outside the bag duration.");
 
-  CliTypeSupportRegistry playback_type_support_registry;
+  runtime::core::runtime_graph::TypeSupportRegistry playback_type_support_registry;
   const auto route_compatible =
       [&playback_type_support_registry](
           const BagChannelInfo& channel,
@@ -2228,8 +2193,7 @@ int RunRecord(int argc, const char* const* argv) {
   }
   SimpleLoggerLevelGuard logger_level(options.log_level);
   RuntimeRegistry registry;
-  BagTopicGraph graph;
-  graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
+  TopicGraph graph = BuildCaptureGraph(registry.DiscoverLocalRuntimes());
   RecordTopicSelector selector({
       .explicit_topics = options.topics,
       .all = options.all,
@@ -2265,7 +2229,7 @@ int RunRecord(int argc, const char* const* argv) {
           capture_topics.begin(), capture_topics.end()));
 
   std::optional<TemporaryFileGuard> config_guard;
-  CliTypeSupportRegistry type_support_registry;
+  runtime::core::runtime_graph::TypeSupportRegistry type_support_registry;
   for (const auto& path : runtime_spec.type_support_packages) {
     type_support_registry.Load(path);
   }
@@ -2562,7 +2526,7 @@ int RunRecord(int argc, const char* const* argv) {
     if (options.no_discovery) {
       continue;
     }
-    graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
+    graph = BuildCaptureGraph(registry.DiscoverLocalRuntimes());
     selected_topics = selector.Select(graph);
     register_unpublished_channels(selected_topics);
     record_clock = selected_topics.contains("/clock");

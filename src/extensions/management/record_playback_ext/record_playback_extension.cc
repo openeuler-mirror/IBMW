@@ -3,15 +3,9 @@
 
 #include "record_playback_ext/record_playback_extension.h"
 
-#include <chrono>
-#include <array>
-#include <cstdio>
-#include <filesystem>
 #include <set>
 #include <string>
 #include <utility>
-
-#include <unistd.h>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/executor/executor.h"
@@ -19,29 +13,25 @@
 #include "extension_api/extension_logger.h"
 #include "extension_api/ibmw_extension_main.h"
 #include "extension_api/ibmw_extension_runtime.h"
-#include "extension_api/type_support_package_loader.h"
+#include "extension_api/ibmw_runtime_graph.h"
 #include "record_playback_ext/global.h"
 #include "base/time_util.h"
 #include "record_playback_ext/playback_action.h"
 #include "record_playback_ext/record_action.h"
-#include "record_playback_ext/schema/schema_registry.h"
 #include "record_playback_ext/service.h"
-#include "record_playback_ext/runtime/bag_runtime_agent.h"
 #include "record_playback_ext/runtime/runtime_playback_stream.h"
 #include "record_playback_ext/runtime/runtime_tap_stream.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
+
 class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
  public:
   struct Options {
     std::string service_name;
-    struct TypeSupportPkg { std::string path; };
-    std::vector<TypeSupportPkg> type_support_pkgs;
     std::string timer_executor;
-    bool enable_runtime_agent = true;
-    std::string runtime_id;
-    std::string runtime_registry_path = "/tmp/ibmw/runtimes";
+    ibmw::extension::RuntimeGraphOptions graph_options;
     struct RecordActionOptions { std::string name; YAML::Node options; };
     std::vector<RecordActionOptions> record_actions;
     struct PlaybackActionOptions { std::string name; YAML::Node options; };
@@ -61,12 +51,6 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
   void Shutdown() noexcept override;
 
  private:
-  void InitTypeSupport(Options::TypeSupportPkg& options);
-  bool TryInitTypeSupport(std::string_view package_path);
-  void RegisterTypeSupportPackage(
-      std::string package_path,
-      std::unique_ptr<ibmw::extension::TypeSupportPackageLoader> loader);
-  void DiscoverTypeSupportPackagesFromCatalog();
   void RegisterRpcService();
   void RegisterRecordTransport();
   void RegisterPlaybackTransport();
@@ -76,34 +60,21 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
       ibmw::transport::SerializedMessage&& message);
   void StartRuntimeAgent();
   void StopRuntimeAgent();
-  RuntimeRegistration BuildRuntimeRegistration() const;
 
   Options options_;
+  ibmw::extension::RuntimeGraphV1* graph_ = nullptr;
   ibmw::extension::RuntimeV1* runtime_ = nullptr;
   bool initialized_ = false;
   std::unique_ptr<RecordPlaybackServiceImpl> service_ptr_;
-  std::vector<std::unique_ptr<ibmw::extension::TypeSupportPackageLoader>>
-      type_support_pkg_loader_vec_;
   ibmw::executor::ExecutorHandle timer_executor_ref_;
 
-  struct TypeSupportWrapper {
-    std::string package_path;
-    ibmw::util::TypeSupportRef type_support_ref;
-    ibmw::extension::TypeSupportPackageLoader* loader_ptr;
-  };
-  static std::string PackageTypeKey(
-      std::string_view package_path, std::string_view msg_type);
-  const TypeSupportWrapper* FindTypeSupport(
+  ibmw::util::TypeSupportRef FindTypeSupport(
       std::string_view msg_type, std::string_view package_path = {}) const;
-  std::unordered_map<std::string, TypeSupportWrapper> type_support_map_;
-  std::unordered_map<std::string, TypeSupportWrapper>
-      package_type_support_map_;
-  std::unordered_set<std::string> loaded_type_support_packages_;
-  SchemaRegistry schema_registry_;
+  std::string TypeSupportPackage(
+      std::string_view msg_type, std::string_view package_path = {}) const;
   std::unique_ptr<RuntimeTapServer> runtime_tap_server_;
   std::unique_ptr<PublishTapCapability> publish_tap_capability_;
   std::unique_ptr<RuntimePlaybackServer> runtime_playback_server_;
-  std::unique_ptr<BagRuntimeAgent> runtime_agent_;
   std::unordered_map<std::string, ibmw::extension::PublisherHandle>
       runtime_playback_publishers_;
   std::unordered_map<std::string_view, std::unique_ptr<RecordAction>>
@@ -125,15 +96,17 @@ struct convert<ibmw::extensions::record_playback_extension::RecordPlaybackExtens
 
     node["service_name"] = rhs.service_name;
     node["timer_executor"] = rhs.timer_executor;
-    node["enable_runtime_agent"] = rhs.enable_runtime_agent;
-    node["runtime_id"] = rhs.runtime_id;
-    node["runtime_registry_path"] = rhs.runtime_registry_path;
 
-    node["type_support_pkgs"] = YAML::Node();
-    for (const auto& type_support_pkg : rhs.type_support_pkgs) {
-      Node type_support_pkg_node;
-      type_support_pkg_node["path"] = type_support_pkg.path;
-      node["type_support_pkgs"].push_back(type_support_pkg_node);
+    const auto& graph = rhs.graph_options;
+    if (graph.enabled) node["enable_runtime_agent"] = *graph.enabled;
+    if (graph.runtime_id) node["runtime_id"] = *graph.runtime_id;
+    if (graph.registry_path) {
+      node["runtime_registry_path"] = graph.registry_path->string();
+    }
+    for (const auto& path : graph.type_support_pkgs) {
+      Node package;
+      package["path"] = path;
+      node["type_support_pkgs"].push_back(package);
     }
 
     node["record_actions"] = YAML::Node();
@@ -161,24 +134,22 @@ struct convert<ibmw::extensions::record_playback_extension::RecordPlaybackExtens
     if (node["service_name"])
       rhs.service_name = node["service_name"].as<std::string>();
 
-    if (node["type_support_pkgs"] && node["type_support_pkgs"].IsSequence()) {
-      for (const auto& type_support_pkg_node : node["type_support_pkgs"]) {
-        auto type_support_pkg = Options::TypeSupportPkg{
-            .path = type_support_pkg_node["path"].as<std::string>()};
-
-        rhs.type_support_pkgs.emplace_back(std::move(type_support_pkg));
-      }
-    }
-
     if (node["timer_executor"])
       rhs.timer_executor = node["timer_executor"].as<std::string>();
-    if (node["enable_runtime_agent"])
-      rhs.enable_runtime_agent = node["enable_runtime_agent"].as<bool>();
-    if (node["runtime_id"])
-      rhs.runtime_id = node["runtime_id"].as<std::string>();
-    if (node["runtime_registry_path"])
-      rhs.runtime_registry_path =
-          node["runtime_registry_path"].as<std::string>();
+
+    auto& graph = rhs.graph_options;
+    if (node["enable_runtime_agent"]) {
+      graph.enabled = node["enable_runtime_agent"].as<bool>();
+    }
+    if (node["runtime_id"]) graph.runtime_id = node["runtime_id"].as<std::string>();
+    if (node["runtime_registry_path"]) {
+      graph.registry_path = node["runtime_registry_path"].as<std::string>();
+    }
+    if (node["type_support_pkgs"] && node["type_support_pkgs"].IsSequence()) {
+      for (const auto& package : node["type_support_pkgs"]) {
+        graph.type_support_pkgs.push_back(package["path"].as<std::string>());
+      }
+    }
 
     if (node["record_actions"] && node["record_actions"].IsSequence()) {
       for (const auto& record_action_node : node["record_actions"]) {
@@ -226,24 +197,6 @@ class RuntimePublishTapCapability final : public PublishTapCapability {
  private:
   ibmw::extension::RuntimeV1& runtime_;
 };
-
-bool IsHiddenTopic(std::string_view topic) {
-  size_t segment_start = 0;
-  while (segment_start < topic.size()) {
-    while (segment_start < topic.size() && topic[segment_start] == '/') {
-      ++segment_start;
-    }
-    if (segment_start < topic.size() && topic[segment_start] == '_') {
-      return true;
-    }
-    const auto separator = topic.find('/', segment_start);
-    if (separator == std::string_view::npos) {
-      break;
-    }
-    segment_start = separator + 1;
-  }
-  return false;
-}
 
 std::string PlaybackPublisherKey(
     std::string_view topic,
@@ -299,32 +252,19 @@ bool RecordPlaybackExtension::InitializeRuntime(
             runtime->AbiVersion() == ibmw::extension::kRuntimeAbiVersionV1,
         "Record/playback requires Runtime capability V1.");
     runtime_ = runtime;
+    auto* graph_access = dynamic_cast<ibmw::extension::RuntimeGraphAccessV1*>(runtime_);
+    MW_REQUIRE(graph_access, "Record/playback requires Runtime Graph capability V1.");
+    graph_ = &graph_access->GetRuntimeGraph();
     YAML::Node extension_options_node = runtime_->GetExtensionOptions(Name());
 
   if (extension_options_node && !extension_options_node.IsNull()) {
     options_ = extension_options_node.as<Options>();
   }
-  if (options_.enable_runtime_agent) {
+  graph_->ApplyFallbackOptions(options_.graph_options);
+  auto& runtime_graph = *graph_;
+  if (runtime_graph.Enabled()) {
     EnsureRuntimePlaybackPublisherRules(*runtime_);
   }
-
-  // type support
-  for (auto& type_support_pkg : options_.type_support_pkgs) {
-    // Check for duplicate pkg
-    auto finditr = std::find_if(
-        options_.type_support_pkgs.begin(), options_.type_support_pkgs.end(),
-        [&type_support_pkg](const auto& op) {
-          if (&type_support_pkg == &op) return false;
-          return op.path == type_support_pkg.path;
-        });
-    MW_REQUIRE(finditr == options_.type_support_pkgs.end(),
-                            "Duplicate pkg path {}", type_support_pkg.path);
-
-    InitTypeSupport(type_support_pkg);
-  }
-
-  MW_TRACE("Load {} pkg and {} type.",
-              type_support_pkg_loader_vec_.size(), type_support_map_.size());
 
   // record
   for (auto& record_action_options : options_.record_actions) {
@@ -346,14 +286,12 @@ bool RecordPlaybackExtension::InitializeRuntime(
         });
     action_ptr->RegisterGetTypeSupportFunc(
         [this](std::string_view msg_type) -> ibmw::util::TypeSupportRef {
-          if (const auto* type_support = FindTypeSupport(msg_type)) {
-            return type_support->type_support_ref;
-          }
-          return {};
+          return FindTypeSupport(msg_type);
         });
     action_ptr->RegisterGetSchemaSupportFunc(
         [this](std::string_view msg_type, std::string_view serialization_type) {
-          return schema_registry_.Find(msg_type, serialization_type);
+          return graph_->FindSchema(
+              msg_type, serialization_type);
         });
     action_ptr->Initialize(record_action_options.options);
 
@@ -380,15 +318,32 @@ bool RecordPlaybackExtension::InitializeRuntime(
         });
     action_ptr->RegisterGetTypeSupportFunc(
         [this](std::string_view msg_type) -> ibmw::util::TypeSupportRef {
-          if (const auto* type_support = FindTypeSupport(msg_type)) {
-            return type_support->type_support_ref;
-          }
-          return {};
+          return FindTypeSupport(msg_type);
         });
     action_ptr->Initialize(playback_action_options.options);
 
     playback_action_map_.emplace(playback_action_options.name, std::move(action_ptr));
   }
+
+  runtime_graph.HideModulePublishers(std::string(kRuntimePlaybackModule));
+  runtime_graph.SetStartTapHandler(
+      [this](const TopicAdvertisement& advertisement) {
+        MW_REQUIRE(runtime_tap_server_, "Runtime tap server is unavailable.");
+        return runtime_tap_server_->StartSession(advertisement);
+      });
+  runtime_graph.SetStopTapHandler(
+      [this](std::string_view session_id) {
+        return runtime_tap_server_ && runtime_tap_server_->StopSession(session_id);
+      });
+  runtime_graph.SetStartPlaybackHandler(
+      [this](const TopicAdvertisement& advertisement) {
+        MW_REQUIRE(runtime_playback_server_, "Runtime playback server is unavailable.");
+        return runtime_playback_server_->StartSession(advertisement);
+      });
+  runtime_graph.SetStopPlaybackHandler(
+      [this](std::string_view session_id) {
+        return runtime_playback_server_ && runtime_playback_server_->StopSession(session_id);
+      });
 
   runtime_->RegisterHook(
       {ibmw::extension::RuntimePhase::kInitialize,
@@ -424,7 +379,21 @@ bool RecordPlaybackExtension::InitializeRuntime(
       {ibmw::extension::RuntimePhase::kInitialize,
        ibmw::extension::RuntimeSubsystem::kModule,
        ibmw::extension::RuntimeHookTiming::kAfter},
+      [this] {
+        RegisterRuntimePlaybackTransport();
+      });
+
+  runtime_->RegisterHook(
+      {ibmw::extension::RuntimePhase::kInitialize,
+       ibmw::extension::RuntimeSubsystem::kRuntimeGraph,
+       ibmw::extension::RuntimeHookTiming::kAfter},
       [this] { StartRuntimeAgent(); });
+
+  runtime_->RegisterHook(
+      {ibmw::extension::RuntimePhase::kStopping,
+       ibmw::extension::RuntimeSubsystem::kRuntimeGraph,
+       ibmw::extension::RuntimeHookTiming::kAfter},
+      [this] { StopRuntimeAgent(); });
 
   runtime_->RegisterHook(
       {ibmw::extension::RuntimePhase::kStart,
@@ -444,7 +413,6 @@ bool RecordPlaybackExtension::InitializeRuntime(
        ibmw::extension::RuntimeSubsystem::kAll,
        ibmw::extension::RuntimeHookTiming::kBefore},
       [this] {
-        StopRuntimeAgent();
         for (auto& itr : playback_action_map_)
           itr.second->Shutdown();
 
@@ -491,156 +459,30 @@ void RecordPlaybackExtension::Shutdown() noexcept {
   }
 }
 
-RuntimeRegistration RecordPlaybackExtension::BuildRuntimeRegistration() const {
-  std::array<char, 4096> executable_buffer{};
-  const ssize_t executable_size = ::readlink(
-      "/proc/self/exe", executable_buffer.data(), executable_buffer.size() - 1);
-  const std::string executable_name =
-      executable_size > 0
-          ? std::filesystem::path(std::string(
-                executable_buffer.data(), static_cast<size_t>(executable_size)))
-                .filename()
-                .string()
-          : "ibmw";
-  RuntimeRegistration registration{
-      .runtime_id = GenerateRuntimeId(options_.runtime_id, executable_name)};
-
-  for (const auto& endpoint : runtime_->GetTransportEndpoints()) {
-    if (endpoint.published && endpoint.module_name == kRuntimePlaybackModule) {
-      continue;
-    }
-    const std::string serialization_type(
-        endpoint.type_support.DefaultSerializationType());
-    if (serialization_type.empty()) {
-      MW_WARN(
-          "Runtime Agent skips topic '{}' type '{}' because its TypeSupport "
-          "does not advertise a serialization format.",
-          endpoint.topic, endpoint.msg_type);
-      continue;
-    }
-    const auto schema =
-        schema_registry_.Find(endpoint.msg_type, serialization_type);
-    if (!schema) {
-      if (endpoint.published) {
-        MW_WARN(
-            "Runtime Agent skips topic '{}' type '{}' because Schema '{}' is unavailable.",
-            endpoint.topic, endpoint.msg_type, serialization_type);
-      }
-      continue;
-    }
-    std::string type_support_package;
-    if (const auto* type_support = FindTypeSupport(
-            endpoint.msg_type, endpoint.package_path)) {
-      type_support_package = type_support->package_path;
-    }
-    std::map<std::string, TransportCaptureCapability> capabilities;
-    for (const auto& [driver, advertised] : endpoint.capture_capabilities) {
-      TransportCaptureCapability capability{.mode = "runtime_tap"};
-      capability.priority = advertised.priority;
-      capability.abi_version = advertised.abi_version;
-      const bool cached_supported =
-          advertised.mode != ibmw::extension::CaptureMode::kCachedSerialized ||
-          !type_support_package.empty();
-      if (advertised.supports_topic && cached_supported &&
-          !advertised.extension_name.empty() &&
-          !advertised.extension_path.empty() &&
-          !advertised.driver_options_yaml.empty()) {
-        capability.extension_name = advertised.extension_name;
-        capability.extension_path = advertised.extension_path;
-        capability.extension_options_yaml = advertised.extension_options_yaml;
-        capability.driver_options_yaml = advertised.driver_options_yaml;
-        capability.provider_instance_option =
-            advertised.provider_instance_option;
-        capability.provider_clear_option = advertised.provider_clear_option;
-        capability.provider_strip_leading_slash_option =
-            advertised.provider_strip_leading_slash_option;
-        if (advertised.mode ==
-            ibmw::extension::CaptureMode::kNativeSerialized) {
-          capability.mode = "native_serialized";
-        } else if (advertised.mode ==
-                   ibmw::extension::CaptureMode::kCachedSerialized) {
-          capability.mode = "cached_serialized";
-        }
-      }
-      capabilities.emplace(driver, std::move(capability));
-    }
-    registration.topics.emplace_back(TopicAdvertisement{
-        .runtime_id = registration.runtime_id,
-        .publisher_id = endpoint.published
-                            ? endpoint.module_name + "-" +
-                                  std::to_string(endpoint.index)
-                            : "subscriber-" + endpoint.module_name + "-" +
-                                  std::to_string(endpoint.index),
-        .topic =
-            {.topic = endpoint.topic,
-             .msg_type = endpoint.msg_type,
-             .serialization_type = serialization_type,
-             .schema = *schema,
-             .qos = endpoint.qos,
-             .available_drivers = endpoint.drivers},
-        .type_support_package = type_support_package,
-        .capture_capabilities = std::move(capabilities),
-        .published = endpoint.published,
-        .embedded_tap = endpoint.published,
-        .hidden = IsHiddenTopic(endpoint.topic)});
-  }
-  return registration;
-}
-
 void RecordPlaybackExtension::StartRuntimeAgent() {
-  if (!options_.enable_runtime_agent || runtime_agent_) {
+  auto& runtime_graph = *graph_;
+  if (!runtime_graph.Enabled() || runtime_tap_server_) {
     return;
   }
-  DiscoverTypeSupportPackagesFromCatalog();
-  RegisterRuntimePlaybackTransport();
-  auto registration = BuildRuntimeRegistration();
+  const auto& registration = runtime_graph.Registration();
+  const auto& runtime_id = registration.runtime_id;
   publish_tap_capability_ =
       std::make_unique<RuntimePublishTapCapability>(*runtime_);
   runtime_tap_server_ = std::make_unique<RuntimeTapServer>(
-      *publish_tap_capability_, registration.runtime_id,
-      options_.runtime_registry_path);
+      *publish_tap_capability_, runtime_id,
+      runtime_graph.RegistryPath());
   runtime_tap_server_->Start();
   runtime_playback_server_ = std::make_unique<RuntimePlaybackServer>(
-      registration.runtime_id, options_.runtime_registry_path,
+      runtime_id, runtime_graph.RegistryPath(),
       [this](const TopicAdvertisement& advertisement, auto&& message) {
         PublishRuntimePlaybackMessage(
             advertisement, std::move(message));
       });
   runtime_playback_server_->Start();
 
-  runtime_agent_ = std::make_unique<BagRuntimeAgent>(
-      BagRuntimeAgent::Options{
-          .registration = std::move(registration),
-          .registry_path = options_.runtime_registry_path});
-  runtime_agent_->SetStartTapHandler(
-      [this](const TopicAdvertisement& advertisement) {
-        return runtime_tap_server_->StartSession(advertisement);
-      });
-  runtime_agent_->SetStopTapHandler(
-      [this](std::string_view session_id) {
-        return runtime_tap_server_->StopSession(session_id);
-      });
-  runtime_agent_->SetStartPlaybackHandler(
-      [this](const TopicAdvertisement& advertisement) {
-        return runtime_playback_server_->StartSession(advertisement);
-      });
-  runtime_agent_->SetStopPlaybackHandler(
-      [this](std::string_view session_id) {
-        return runtime_playback_server_->StopSession(session_id);
-      });
-  runtime_agent_->Initialize();
-  runtime_agent_->Start();
-  MW_INFO(
-      "Bag Runtime Agent '{}' advertises {} topic endpoint(s).",
-      runtime_agent_->Registration().runtime_id,
-      runtime_agent_->Registration().topics.size());
 }
 
 void RecordPlaybackExtension::StopRuntimeAgent() {
-  if (runtime_agent_) {
-    runtime_agent_->Shutdown();
-    runtime_agent_.reset();
-  }
   if (runtime_tap_server_) {
     runtime_tap_server_->Shutdown();
     runtime_tap_server_.reset();
@@ -652,113 +494,18 @@ void RecordPlaybackExtension::StopRuntimeAgent() {
   }
 }
 
-void RecordPlaybackExtension::InitTypeSupport(Options::TypeSupportPkg& options) {
-  auto loader =
-      std::make_unique<ibmw::extension::TypeSupportPackageLoader>();
-  loader->Load(options.path);
-  options.path = loader->ResolvedPath();
-  MW_REQUIRE(
-      loaded_type_support_packages_.emplace(options.path).second,
-      "Duplicate TypeSupport package path {}", options.path);
-  RegisterTypeSupportPackage(options.path, std::move(loader));
-}
-
-bool RecordPlaybackExtension::TryInitTypeSupport(
-    std::string_view package_path) {
-  if (loaded_type_support_packages_.contains(std::string(package_path))) {
-    return true;
-  }
-  auto loader =
-      std::make_unique<ibmw::extension::TypeSupportPackageLoader>();
-  if (!loader->TryLoad(package_path)) {
-    return false;
-  }
-  std::string resolved_path = loader->ResolvedPath();
-  if (!loaded_type_support_packages_.emplace(resolved_path).second) {
-    loader->Unload();
-    return true;
-  }
-  RegisterTypeSupportPackage(resolved_path, std::move(loader));
-  return true;
-}
-
-void RecordPlaybackExtension::RegisterTypeSupportPackage(
-    std::string package_path,
-    std::unique_ptr<ibmw::extension::TypeSupportPackageLoader> loader) {
-  const auto type_support_array = loader->TypeSupports();
-  const auto schema_support_array = loader->SchemaSupports();
-
-  for (const auto* item : type_support_array) {
-    ibmw::util::TypeSupportRef type_support_ref(item);
-    const std::string type_name(type_support_ref.TypeName());
-    TypeSupportWrapper wrapper{
-        .package_path = package_path,
-        .type_support_ref = type_support_ref,
-        .loader_ptr = loader.get()};
-    MW_REQUIRE(
-        package_type_support_map_
-            .emplace(PackageTypeKey(package_path, type_name), wrapper)
-            .second,
-        "Duplicate msg type '{}' in TypeSupport package {}.",
-        type_name, package_path);
-    const auto [fallback, inserted] =
-        type_support_map_.emplace(type_name, std::move(wrapper));
-    if (!inserted) {
-      MW_WARN(
-          "Duplicate msg type '{}' in {} and {}; package-local matching will "
-          "be used.",
-          type_name, package_path, fallback->second.package_path);
-    }
-  }
-
-  for (const auto* item : schema_support_array) {
-    schema_registry_.Register(ibmw::util::SchemaSupportRef(item));
-  }
-
-  type_support_pkg_loader_vec_.emplace_back(std::move(loader));
-}
-
-void RecordPlaybackExtension::DiscoverTypeSupportPackagesFromCatalog() {
-  std::set<std::string> package_paths;
-  for (const auto& endpoint : runtime_->GetTransportEndpoints()) {
-    if (!endpoint.package_path.empty() && endpoint.package_path != "core") {
-      package_paths.emplace(endpoint.package_path);
-    }
-  }
-
-  for (const auto& package_path : package_paths) {
-    if (!TryInitTypeSupport(package_path)) {
-      MW_WARN(
-          "Module package '{}' is not self-describing; Runtime Agent cannot "
-          "advertise its Topics unless a matching TypeSupport package is "
-          "configured.",
-          package_path);
-    }
-  }
-}
-
-std::string RecordPlaybackExtension::PackageTypeKey(
-    std::string_view package_path,
-    std::string_view msg_type) {
-  std::string key(package_path);
-  key.push_back('\0');
-  key.append(msg_type.data(), msg_type.size());
-  return key;
-}
-
-const RecordPlaybackExtension::TypeSupportWrapper*
-RecordPlaybackExtension::FindTypeSupport(
+ibmw::util::TypeSupportRef RecordPlaybackExtension::FindTypeSupport(
     std::string_view msg_type,
     std::string_view package_path) const {
-  if (!package_path.empty()) {
-    const auto exact = package_type_support_map_.find(
-        PackageTypeKey(package_path, msg_type));
-    if (exact != package_type_support_map_.end()) {
-      return &exact->second;
-    }
-  }
-  const auto fallback = type_support_map_.find(std::string(msg_type));
-  return fallback == type_support_map_.end() ? nullptr : &fallback->second;
+  return graph_->FindTypeSupport(
+      msg_type, package_path);
+}
+
+std::string RecordPlaybackExtension::TypeSupportPackage(
+    std::string_view msg_type,
+    std::string_view package_path) const {
+  return graph_->TypeSupportPackage(
+      msg_type, package_path);
 }
 
 void RecordPlaybackExtension::RegisterRpcService() {
@@ -833,18 +580,18 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
     const auto& key = recore_func_itr.first;
     auto& wrapper = recore_func_itr.second;
 
-    const auto* type_support_wrapper = FindTypeSupport(key.msg_type);
+    const auto type_support_ref = FindTypeSupport(key.msg_type);
     MW_REQUIRE(
-        type_support_wrapper != nullptr,
+        type_support_ref,
         "Cannot find TypeSupport for record type '{}'.", key.msg_type);
-    auto type_support_ref = type_support_wrapper->type_support_ref;
+    const auto package_path = TypeSupportPackage(key.msg_type);
 
     // Small optimization
     auto& record_func_vec = wrapper.record_func_vec;
     ibmw::extension::SubscriptionOptions subscription{
         .topic = key.topic_name,
         .msg_type = key.msg_type,
-        .package_path = type_support_wrapper->package_path,
+        .package_path = package_path,
         .module_name = "core",
         .type_support = type_support_ref,
         .required_serialization_types =
@@ -900,16 +647,16 @@ void RecordPlaybackExtension::RegisterPlaybackTransport() {
 
   // RegisterSendType
   for (const auto& item : playback_topic_meta_set) {
-    const auto* type_support_wrapper = FindTypeSupport(item.msg_type);
+    const auto type_support_ref = FindTypeSupport(item.msg_type);
     MW_REQUIRE(
-        type_support_wrapper != nullptr,
+        type_support_ref,
         "Cannot find TypeSupport for playback type '{}'.", item.msg_type);
-    auto type_support_ref = type_support_wrapper->type_support_ref;
+    const auto package_path = TypeSupportPackage(item.msg_type);
 
     const auto publisher = runtime_->RegisterPublisher(
         {.topic = item.topic_name,
          .msg_type = item.msg_type,
-         .package_path = type_support_wrapper->package_path,
+         .package_path = package_path,
          .module_name = "core",
          .type_support = type_support_ref});
     MW_REQUIRE(publisher, "Register publish type failed!");
@@ -928,18 +675,19 @@ void RecordPlaybackExtension::RegisterPlaybackTransport() {
 
     for (const auto& topic_meta_itr : topic_meta_map) {
       const auto& topic_meta = topic_meta_itr.second;
-      const auto* type_support_wrapper = FindTypeSupport(topic_meta.msg_type);
+      const auto type_support_ref = FindTypeSupport(topic_meta.msg_type);
       MW_REQUIRE(
-          type_support_wrapper != nullptr,
+          type_support_ref,
           "Cannot find TypeSupport for playback type '{}'.",
           topic_meta.msg_type);
+      const auto package_path = TypeSupportPackage(topic_meta.msg_type);
 
       const auto publisher = runtime_->RegisterPublisher(
           {.topic = topic_meta.topic_name,
            .msg_type = topic_meta.msg_type,
-           .package_path = type_support_wrapper->package_path,
+           .package_path = package_path,
            .module_name = "core",
-           .type_support = type_support_wrapper->type_support_ref});
+           .type_support = type_support_ref});
       MW_REQUIRE(publisher, "Get publish type failed!");
 
       topic_id_wrapper_map.emplace(

@@ -4,15 +4,16 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "nlohmann/json.hpp"
-#include "record_playback_ext/runtime/bag_runtime_agent.h"
+#include "engine/runtime_graph/runtime_graph_agent.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
-class BagRuntimeAgentClient {
+class RuntimeGraphAgentClient {
  public:
-  explicit BagRuntimeAgentClient(std::string control_socket)
+  explicit RuntimeGraphAgentClient(std::string control_socket)
       : control_socket_(std::move(control_socket)) {}
 
   std::vector<TopicAdvertisement> ListTopics() const;
@@ -36,4 +37,4 @@ class BagRuntimeAgentClient {
   std::string control_socket_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

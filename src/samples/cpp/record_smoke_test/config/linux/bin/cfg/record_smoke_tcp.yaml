@@ -2,6 +2,10 @@
 ibmw:
   config:
     temp_cfg_path: ./cfg/tmp/record-smoke-tcp
+  runtime_graph:
+    runtime_id: record-smoke-tcp
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
   extensions:
     items:
       - name: net_extension
@@ -11,12 +15,7 @@ ibmw:
           tcp_options: {listen_ip: 127.0.0.1, listen_port: 50181}
       - name: record_playback_extension
         path: ./libibmw_record_playback.so
-        options:
-          enable_runtime_agent: true
-          runtime_id: record-smoke-tcp
-          runtime_registry_path: /tmp/ibmw/runtimes
-          type_support_pkgs:
-            - path: ./libcommon_dds_ts.so
+        options: {}
   logging:
     core_level: INFO
     backends: [{type: console}]

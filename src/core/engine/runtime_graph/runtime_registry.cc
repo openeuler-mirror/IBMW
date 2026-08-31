@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/runtime/runtime_registry.h"
+#include "engine/runtime_graph/runtime_registry.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -11,42 +11,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "record_playback_ext/runtime/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_directory.h"
 
-namespace ibmw::extensions::record_playback_extension {
-
-namespace {
-
-void RemoveOwnedSiblingSocket(
-    const std::filesystem::path& registry_path,
-    const std::filesystem::path& registration_path) {
-  const auto socket_path =
-      registry_path / (registration_path.stem().string() + ".sock");
-  struct stat socket_stat {};
-  if (::lstat(socket_path.c_str(), &socket_stat) != 0 ||
-      !S_ISSOCK(socket_stat.st_mode) ||
-      socket_stat.st_uid != ::geteuid() ||
-      (socket_stat.st_mode & 077) != 0) {
-    return;
-  }
-  std::error_code error;
-  std::filesystem::remove(socket_path, error);
-}
-
-}  // namespace
+namespace ibmw::runtime::core::runtime_graph {
 
 std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimes() const {
   std::vector<RuntimeRegistration> result;
   if (!std::filesystem::exists(registry_path_)) {
     return result;
   }
-  struct stat directory_stat {};
-  if (::stat(registry_path_.c_str(), &directory_stat) != 0 ||
-      !S_ISDIR(directory_stat.st_mode) ||
-      directory_stat.st_uid != ::geteuid() ||
-      (directory_stat.st_mode & 077) != 0) {
-    return result;
-  }
+  const auto root = OpenRuntimeDirectory(registry_path_.parent_path(), false);
+  const auto directory = OpenRuntimeDirectory(registry_path_, false);
 
   for (const auto& entry : std::filesystem::directory_iterator(registry_path_)) {
     struct stat registration_stat {};
@@ -64,9 +40,6 @@ std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimes() const 
       }
       if (std::filesystem::file_size(entry.path()) >=
           kRuntimeMaxControlMessage) {
-        std::error_code error;
-        std::filesystem::remove(entry.path(), error);
-        RemoveOwnedSiblingSocket(registry_path_, entry.path());
         continue;
       }
       nlohmann::json value;
@@ -91,10 +64,10 @@ std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimes() const 
           S_ISSOCK(socket_stat.st_mode) &&
           socket_stat.st_uid == ::geteuid() &&
           (socket_stat.st_mode & 077) == 0;
+      if (!registration_name_matches || !socket_in_registry) continue;
       const bool stale = !IsProcessAlive(registration.pid) ||
-          !process_start_time.has_value() ||
-          *process_start_time != registration.process_start_time_ticks ||
-          !registration_name_matches || !valid_socket;
+          (process_start_time.has_value() &&
+           *process_start_time != registration.process_start_time_ticks);
       if (stale) {
         std::error_code error;
         if (socket_in_registry && socket_stat.st_uid == ::geteuid() &&
@@ -105,16 +78,11 @@ std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimes() const 
         std::filesystem::remove(entry.path(), error);
         continue;
       }
+      if (!process_start_time.has_value() || !valid_socket) continue;
       result.emplace_back(std::move(registration));
     } catch (...) {
-      // A corrupt registration cannot be parsed to recover its advertised
-      // socket path.  The registration filename is trusted only after the
-      // owner-only directory and `.json` suffix checks above; derive the
-      // matching socket name locally so crashes/corruption do not leave an
-      // orphan endpoint behind.
-      std::error_code error;
-      std::filesystem::remove(entry.path(), error);
-      RemoveOwnedSiblingSocket(registry_path_, entry.path());
+      // Unreadable or unsupported data does not establish process death.
+      continue;
     }
   }
 
@@ -147,4 +115,4 @@ bool RuntimeRegistry::IsProcessAlive(int64_t pid) noexcept {
   return errno == EPERM;
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

@@ -2,11 +2,16 @@
 // All rights reserved.
 
 #include <cstddef>
+#include <atomic>
 #include <utility>
 
 #include "type_support/type_support_pkg_main.h"
 
 namespace {
+
+std::atomic<unsigned> load_count{0};
+void (*load_hook)(void*) = nullptr;
+void* load_hook_context = nullptr;
 
 template <size_t Size>
 constexpr ibmw_string_view_t View(const char (&text)[Size]) {
@@ -110,7 +115,17 @@ const ibmw_schema_support_package_v1_t schema_support_package{
 
 extern "C" {
 
+IBMW_TYPE_SUPPORT_PKG_EXPORT void SetTypeSupportLoadHook(void (*hook)(void*), void* context) {
+  load_hook = hook;
+  load_hook_context = context;
+  load_count = 0;
+}
+
+IBMW_TYPE_SUPPORT_PKG_EXPORT unsigned TypeSupportLoadCount() { return load_count.load(); }
+
 const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
+  ++load_count;
+  if (load_hook) load_hook(load_hook_context);
   static const ibmw_type_support_package_v1_t package{
       .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
       .struct_size = sizeof(ibmw_type_support_package_v1_t),

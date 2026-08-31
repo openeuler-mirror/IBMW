@@ -31,6 +31,19 @@ bool SameEndpoint(
 
 }  // namespace
 
+TopicGraph BuildCaptureGraph(
+    std::vector<ibmw::runtime::core::runtime_graph::RuntimeRegistration> runtimes) {
+  TopicGraph graph;
+  for (auto& runtime : runtimes) {
+    // Discovery also serves topic queries, while bag requires a schema.
+    std::erase_if(runtime.topics, [](const auto& advertisement) {
+      return advertisement.topic.schema.schema_hash.empty();
+    });
+    graph.MergeRuntime(runtime);
+  }
+  return graph;
+}
+
 CapturePlan::~CapturePlan() {
   try {
     StopAll();
@@ -218,8 +231,11 @@ std::vector<BagCapturePlanner::Candidate> BagCapturePlanner::CandidatesFor(
             return factory_copy(advertisement, driver);
           }});
     }
-    if (advertisement.published && advertisement.embedded_tap &&
-        runtime_tap_factory_) {
+    const auto runtime_tap = advertisement.capture_capabilities.find(
+        "runtime-tap");
+    if (advertisement.published && runtime_tap !=
+                                       advertisement.capture_capabilities.end() &&
+        runtime_tap->second.mode == "runtime_tap" && runtime_tap_factory_) {
       const auto factory_copy = runtime_tap_factory_;
       result.emplace_back(Candidate{
           .priority = kRuntimeTapCapturePriority,

@@ -2,6 +2,10 @@
 ibmw:
   config:
     temp_cfg_path: ./cfg/tmp/record-smoke-iceoryx
+  runtime_graph:
+    runtime_id: record-smoke-iceoryx
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
   extensions:
     items:
       - name: iceoryx_extension
@@ -11,12 +15,7 @@ ibmw:
           runtime_id: record_smoke_iceoryx_publisher
       - name: record_playback_extension
         path: ./libibmw_record_playback.so
-        options:
-          enable_runtime_agent: true
-          runtime_id: record-smoke-iceoryx
-          runtime_registry_path: /tmp/ibmw/runtimes
-          type_support_pkgs:
-            - path: ./libcommon_dds_ts.so
+        options: {}
   logging:
     core_level: INFO
     backends: [{type: console}]

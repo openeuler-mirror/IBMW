@@ -8,7 +8,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR}"
 CFG_DIR="${CFG_DIR:-$BUILD_DIR/cfg}"
 RUN_PARENT="${TMP_DIR:-${TMPDIR:-/tmp}/ibmw-record-smoke}"
-RUNTIME_DIR="/tmp/ibmw/runtimes"
+RUNTIME_DIR="${XDG_RUNTIME_DIR:+${XDG_RUNTIME_DIR}/ibmw}"
+RUNTIME_DIR="${RUNTIME_DIR:-/tmp/ibmw-$(id -u)}"
 IBMW_BIN="${IBMW_BIN:-$BUILD_DIR/ibmw}"
 [[ -x "$IBMW_BIN" ]] || IBMW_BIN="$BUILD_DIR/bin/ibmw"
 ROUDI_BIN="${ROUDI_BIN:-$BUILD_DIR/bin/iox-roudi}"
@@ -80,7 +81,7 @@ for item in "${required_commands[@]}"; do
   }
 done
 
-mkdir -p "$RUN_PARENT" "$RUNTIME_DIR"
+mkdir -p "$RUN_PARENT"
 RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
 cd "$BUILD_DIR"
 
@@ -113,9 +114,9 @@ stop_pid() {
 
 cleanup_runtime_files() {
   local runtime_id="$1"
-  rm -f -- "$RUNTIME_DIR/$runtime_id.json" \
-    "$RUNTIME_DIR/$runtime_id.sock" \
-    "$RUNTIME_DIR/$runtime_id.lock"
+  rm -f -- "$RUNTIME_DIR/v2/$runtime_id.json" \
+    "$RUNTIME_DIR/v2/$runtime_id.sock" \
+    "$RUNTIME_DIR/v2/$runtime_id.lock"
 }
 
 cleanup() {
@@ -191,7 +192,7 @@ start_runtime() {
   "$IBMW_BIN" run "$CFG_DIR/$cfg_name" >"$CURRENT_RUNTIME_LOG" 2>&1 &
   RUNTIME_PID=$!
 
-  local registration="$RUNTIME_DIR/$runtime_id.json"
+  local registration="$RUNTIME_DIR/v2/$runtime_id.json"
   for _ in {1..150}; do
     if [[ -s "$registration" ]] &&
        jq -e --argjson pid "$RUNTIME_PID" '.pid == $pid' \

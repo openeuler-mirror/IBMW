@@ -33,6 +33,7 @@
 #include "engine/module/parameter_store.h"
 #include "engine/extension/extension_bus.h"
 #include "engine/service/service_dispatcher.h"
+#include "engine/runtime_graph/runtime_graph_subsystem.h"
 #include "base/log_util.h"
 
 namespace ibmw::runtime::core {
@@ -67,6 +68,7 @@ enum class Subsystem : uint8_t {
   kTransport,
   kParameter,
   kModule,
+  kRuntimeGraph,
 
   kCount,  // sentinel — total number of subsystems
 };
@@ -158,6 +160,7 @@ class Engine {
   auto& GetTransportBus() { return transport_bus_; }
   auto& GetParameterStore() { return parameter_store_; }
   auto& GetModuleBus() { return module_bus_; }
+  auto& GetRuntimeGraphSubsystem() { return runtime_graph_subsystem_; }
 
   const auto& GetLogger() const { return *logger_ptr_; }
 
@@ -212,6 +215,8 @@ class Engine {
 
   // Bus instances.
   configurator::ConfigSubsystem config_subsystem_;
+  // Shared TypeSupport libraries outlive all modules and extensions.
+  runtime_graph::RuntimeGraphSubsystem runtime_graph_subsystem_;
   extension::ExtensionBus extension_bus_;
   executor::MainLoopExecutor main_loop_executor_;
   executor::WatchdogExecutor watchdog_executor_;

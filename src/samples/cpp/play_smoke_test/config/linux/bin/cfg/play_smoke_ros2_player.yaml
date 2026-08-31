@@ -1,5 +1,5 @@
 ibmw:
-  bag_playback:
+  runtime_graph:
     type_support_pkgs: [../libplay_smoke_ts.so]
   extensions:
     items:

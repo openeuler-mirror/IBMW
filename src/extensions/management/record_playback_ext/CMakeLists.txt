@@ -23,18 +23,12 @@ list(REMOVE_ITEM cli_support_src ${test_files}
 
 set(runtime_support_src
     ${CMAKE_CURRENT_SOURCE_DIR}/global.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/topic_advertisement.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/mcap_impl.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/playback_action.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/record_action.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/recorder/record_payload.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/bag_runtime_agent.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/bag_runtime_agent_client.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_playback_stream.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_registration.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_registry.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_tap_stream.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/schema/schema_registry.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/service.cc)
 list(REMOVE_ITEM cli_support_src ${runtime_support_src})
 

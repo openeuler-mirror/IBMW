@@ -10,13 +10,19 @@
 #include "engine/transport/endpoint_qos_provider.h"
 #include "engine/transport/serialized_transport_driver.h"
 #include "engine/transport/transport_driver_tools.h"
+#include "extension_api/ibmw_runtime_graph.h"
 
 namespace ibmw::runtime::core::extension {
 namespace {
 
-class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
+class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1,
+                              public ibmw::extension::RuntimeGraphAccessV1 {
  public:
   explicit EngineRuntimeV1(Engine& engine) : engine_(engine) {}
+
+  ibmw::extension::RuntimeGraphV1& GetRuntimeGraph() override {
+    return engine_.GetRuntimeGraphSubsystem();
+  }
 
   uint32_t AbiVersion() const noexcept override {
     return ibmw::extension::kRuntimeAbiVersionV1;
@@ -319,6 +325,8 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
           return Subsystem::kModule;
         case ibmw::extension::RuntimeSubsystem::kAll:
           return Subsystem::kCount;
+        case ibmw::extension::RuntimeSubsystem::kRuntimeGraph:
+          return Subsystem::kRuntimeGraph;
       }
       return Subsystem::kCount;
     }();

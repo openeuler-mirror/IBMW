@@ -18,6 +18,16 @@ case-specific verification.
 
 ## Package ABI and headers
 
+- Runtime graph protocol 2 uses `<registry_path>/v2/` for registrations and
+  sockets, including when a custom registry root is configured. Old protocol
+  data is not converted. Unknown or malformed registrations are skipped without
+  deleting another process's files; cleanup requires evidence of process exit
+  or PID reuse.
+- The default registry root is `$XDG_RUNTIME_DIR/ibmw`, falling back to
+  `/tmp/ibmw-<euid>`. Custom roots must be private and owned by the current
+  effective UID. Symlink components and writable untrusted ancestors are
+  rejected; existing directory permissions are never silently changed.
+
 - Package loading has one public entry, `IbmwPkgEntry`, with typed-slot driver
   injection. Slot IDs are stable; string driver names and dual-entry ABI behavior
   are not public contracts. See [API Reference](api-reference.md).

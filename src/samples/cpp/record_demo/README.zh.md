@@ -121,7 +121,7 @@ source ./record_demo_env.sh
 - `CdrPublisherModule` 具体使用 DDS、Iceoryx 还是 MQTT，由各自 Runtime 中唯一启用的
   driver 决定；`Ros2PublisherModule` 的 IBMW serialization type 是 `ros2`；
 - 每个 publisher Runtime 都启用了 record/playback extension 的 Runtime Agent，
-  recorder 通过 `/tmp/ibmw/runtimes` 中的 advertisement 发现它们；
+  recorder 通过 `$XDG_RUNTIME_DIR/ibmw/v2`（否则 `/tmp/ibmw-<euid>/v2`）中的 advertisement 发现它们；
 - `record_demo_env.sh` 在发布端和 recorder 端都要 source，因为两个终端是独立的
   shell 环境；
 - `--serialization-format auto` 会保留每个 topic 的原始 serialization type。不要

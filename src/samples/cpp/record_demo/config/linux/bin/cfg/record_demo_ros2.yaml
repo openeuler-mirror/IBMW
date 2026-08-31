@@ -6,6 +6,10 @@
 ibmw:
   config:
     temp_cfg_path: ./cfg/tmp/record-demo-ros2
+  runtime_graph:
+    runtime_id: record-demo-ros2
+    type_support_pkgs:
+      - path: ./libexample_ros2_ros2_ts.so
 
   extensions:
     items:
@@ -17,12 +21,7 @@ ibmw:
           executor_thread_num: 2
       - name: record_playback_extension
         path: ./libibmw_record_playback.so
-        options:
-          enable_runtime_agent: true
-          runtime_id: record-demo-ros2
-          runtime_registry_path: /tmp/ibmw/runtimes
-          type_support_pkgs:
-            - path: ./libexample_ros2_ros2_ts.so
+        options: {}
 
   logging:
     core_level: INFO

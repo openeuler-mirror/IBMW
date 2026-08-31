@@ -32,7 +32,7 @@ export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/play_smoke_ros2_run
 mkdir -p "$RUN_PARENT"
 RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
 RUNTIME_DIR="$RUN_DIR/runtimes"
-mkdir -p "$RUNTIME_DIR"
+mkdir -m 700 -p "$RUNTIME_DIR"
 
 RUN_TAG="$(basename "$RUN_DIR")"
 DOMAIN_SEED="$(printf '%s' "$RUN_TAG" | cksum | awk '{print $1}')"
@@ -94,8 +94,8 @@ stop_pid() {
 
 cleanup_runtime_files() {
   local runtime_id="$1"
-  rm -f -- "$RUNTIME_DIR/$runtime_id.json" \
-    "$RUNTIME_DIR/$runtime_id.sock" "$RUNTIME_DIR/$runtime_id.lock"
+  rm -f -- "$RUNTIME_DIR/v2/$runtime_id.json" \
+    "$RUNTIME_DIR/v2/$runtime_id.sock" "$RUNTIME_DIR/v2/$runtime_id.lock"
 }
 
 cleanup() {
@@ -151,7 +151,7 @@ start_runtime() {
   wait_for_log "$CURRENT_RUNTIME_LOG" "$ready_marker" "$RUNTIME_PID" ||
     fail_case "subscriber Runtime failed to become ready"
   if [[ -n "$runtime_id" ]]; then
-    local registration="$RUNTIME_DIR/$runtime_id.json"
+    local registration="$RUNTIME_DIR/v2/$runtime_id.json"
     for _ in {1..100}; do
       [[ -s "$registration" ]] && return 0
       kill -0 "$RUNTIME_PID" 2>/dev/null || break
@@ -693,7 +693,7 @@ run_config_file() {
   wait_for_log "$CURRENT_RUNTIME_LOG" "Play smoke subscriber ready" "$RUNTIME_PID" ||
     fail_case "alternate subscriber did not start"
   for _ in {1..100}; do
-    [[ -s "$RUNTIME_DIR/play-smoke-local-alt.json" ]] && break
+    [[ -s "$RUNTIME_DIR/v2/play-smoke-local-alt.json" ]] && break
     sleep 0.1
   done
   run_play "$BAGS_DIR/cdr_mcap" --topics /ibmw_play_smoke/data \

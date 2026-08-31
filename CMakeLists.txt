@@ -499,6 +499,15 @@ add_subdirectory(tools)
 if(IBMW_INSTALL)
   include(CMakePackageConfigHelpers)
 
+  # Runtime Graph exposes nlohmann::json in its public Core headers. Keep the
+  # header-only dependency available to consumers of the installed SDK.
+  if(DEFINED nlohmann_json_SOURCE_DIR AND
+     EXISTS "${nlohmann_json_SOURCE_DIR}/include/nlohmann")
+    install(
+      DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/nlohmann
+      DESTINATION include)
+  endif()
+
   # Install cmake helper modules (DdsIdlGenCode, Ros2IdlGenCode, etc.)
   install(
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/cmake

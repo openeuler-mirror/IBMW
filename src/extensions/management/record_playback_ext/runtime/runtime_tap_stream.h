@@ -16,10 +16,14 @@
 #include <unordered_map>
 
 #include "record_playback_ext/capture/runtime_tap_source.h"
-#include "record_playback_ext/runtime/bag_runtime_agent_client.h"
+#include "engine/runtime_graph/runtime_graph_client.h"
 #include "extension_api/ibmw_extension_runtime.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::RuntimeGraphAgentClient;
+using ibmw::runtime::core::runtime_graph::TapSessionDescriptor;
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
 // Host-provided publish tap capability. The frame pointer is intentionally
 // opaque at this boundary; the Core adapter owns conversion to serialized
@@ -89,7 +93,7 @@ class UnixRuntimeTapClient final : public RuntimeTapClient {
   void ReportStreamError(std::string error);
 
   const std::string control_socket_;
-  BagRuntimeAgentClient agent_client_;
+  RuntimeGraphAgentClient agent_client_;
   DroppedMessageCallback dropped_message_callback_;
   StreamErrorCallback stream_error_callback_;
   std::atomic<bool> running_{false};

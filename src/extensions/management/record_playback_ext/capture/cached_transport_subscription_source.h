@@ -15,9 +15,11 @@
 #include "cpp/util/type_support.h"
 #include "engine/transport/transport_driver.h"
 #include "record_playback_ext/capture/capture_source.h"
-#include "record_playback_ext/discovery/topic_advertisement.h"
+#include "engine/runtime_graph/topic_advertisement.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
 class CachedTransportSubscriptionRegistry {
  public:

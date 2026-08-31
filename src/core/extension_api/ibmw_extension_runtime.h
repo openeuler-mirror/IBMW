@@ -36,6 +36,7 @@ enum class RuntimeSubsystem : uint8_t {
   kLogger,
   kModule,
   kAll,
+  kRuntimeGraph,
 };
 
 enum class RuntimeHookTiming : uint8_t {

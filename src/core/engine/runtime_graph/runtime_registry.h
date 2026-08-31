@@ -7,15 +7,15 @@
 #include <string_view>
 #include <vector>
 
-#include "record_playback_ext/runtime/runtime_registration.h"
+#include "engine/runtime_graph/runtime_registration.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
 class RuntimeRegistry {
  public:
   explicit RuntimeRegistry(
-      std::filesystem::path registry_path = "/tmp/ibmw/runtimes")
-      : registry_path_(std::move(registry_path)) {}
+      std::filesystem::path registry_path = ibmw::extension::DefaultRuntimeRegistryPath())
+      : registry_path_(ibmw::extension::RuntimeRegistryDirectory(registry_path)) {}
 
   std::vector<RuntimeRegistration> DiscoverLocalRuntimes() const;
   std::vector<TopicAdvertisement> FindTopic(
@@ -31,4 +31,4 @@ class RuntimeRegistry {
   std::filesystem::path registry_path_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

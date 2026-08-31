@@ -27,7 +27,7 @@ DynamicCaptureController::~DynamicCaptureController() {
 
 void DynamicCaptureController::Reconcile(
     const std::set<std::string>& selected_topics,
-    const BagTopicGraph& graph,
+    const TopicGraph& graph,
     const PlanBuilder& build_plan) {
   for (auto& [topic, entry] : entries_) {
     if (entry.active &&
@@ -95,7 +95,7 @@ size_t DynamicCaptureController::ActiveCount() const noexcept {
 
 bool DynamicCaptureController::SourceStillAvailable(
     const CapturePlan& plan,
-    const BagTopicGraph& graph) {
+    const TopicGraph& graph) {
   if (plan.Entries().empty()) {
     return false;
   }
@@ -125,7 +125,10 @@ bool DynamicCaptureController::SourceStillAvailable(
   if (source_name == "runtime-tap") {
     const size_t published_tap_count = static_cast<size_t>(std::count_if(
         advertisements.begin(), advertisements.end(), [](const auto& current) {
-          return current.published && current.embedded_tap;
+          const auto capability = current.capture_capabilities.find("runtime-tap");
+          return current.published && capability !=
+                                             current.capture_capabilities.end() &&
+                 capability->second.mode == "runtime_tap";
         }));
     return entries.size() == published_tap_count;
   }

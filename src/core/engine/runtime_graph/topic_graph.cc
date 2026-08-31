@@ -1,19 +1,19 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/discovery/bag_topic_graph.h"
+#include "engine/runtime_graph/topic_graph.h"
 
 #include <algorithm>
 
 #include "base/exception.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
-void BagTopicGraph::Clear() {
+void TopicGraph::Clear() {
   topics_.clear();
 }
 
-void BagTopicGraph::MergeRuntime(const RuntimeRegistration& runtime) {
+void TopicGraph::MergeRuntime(const RuntimeRegistration& runtime) {
   for (auto advertisement : runtime.topics) {
     advertisement.runtime_id = runtime.runtime_id;
     advertisement.control_socket = runtime.control_socket;
@@ -22,13 +22,19 @@ void BagTopicGraph::MergeRuntime(const RuntimeRegistration& runtime) {
       if (existing.topic.msg_type == advertisement.topic.msg_type &&
           existing.topic.serialization_type ==
               advertisement.topic.serialization_type) {
-        MW_ASSERT(
-            existing.topic.schema.schema_hash ==
-                advertisement.topic.schema.schema_hash &&
-                existing.topic.schema.schema_data ==
-                    advertisement.topic.schema.schema_data,
-            "Conflicting Schema advertisements for topic '{}' and type '{}'.",
-            advertisement.topic.topic, advertisement.topic.msg_type);
+        const bool existing_has_schema =
+            !existing.topic.schema.schema_data.empty();
+        const bool advertisement_has_schema =
+            !advertisement.topic.schema.schema_data.empty();
+        if (existing_has_schema && advertisement_has_schema) {
+          MW_ASSERT(
+              existing.topic.schema.schema_hash ==
+                      advertisement.topic.schema.schema_hash &&
+                  existing.topic.schema.schema_data ==
+                      advertisement.topic.schema.schema_data,
+              "Conflicting Schema advertisements for topic '{}' and type '{}'.",
+              advertisement.topic.topic, advertisement.topic.msg_type);
+        }
       }
     }
 
@@ -49,7 +55,7 @@ void BagTopicGraph::MergeRuntime(const RuntimeRegistration& runtime) {
   }
 }
 
-void BagTopicGraph::ReplaceRuntimes(
+void TopicGraph::ReplaceRuntimes(
     const std::vector<RuntimeRegistration>& runtimes) {
   Clear();
   for (const auto& runtime : runtimes) {
@@ -57,14 +63,14 @@ void BagTopicGraph::ReplaceRuntimes(
   }
 }
 
-std::vector<TopicAdvertisement> BagTopicGraph::Find(
+std::vector<TopicAdvertisement> TopicGraph::Find(
     std::string_view topic_name) const {
   const auto found = topics_.find(std::string(topic_name));
   return found == topics_.end() ? std::vector<TopicAdvertisement>{}
                                : found->second;
 }
 
-std::vector<std::string> BagTopicGraph::Topics() const {
+std::vector<std::string> TopicGraph::Topics() const {
   std::vector<std::string> result;
   result.reserve(topics_.size());
   for (const auto& [topic, entries] : topics_) {
@@ -75,4 +81,4 @@ std::vector<std::string> BagTopicGraph::Topics() const {
   return result;
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

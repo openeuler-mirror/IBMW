@@ -1130,12 +1130,16 @@ RouDi），并且 Subscriber 必须在 Publisher 第一次发送之前启动。
 |-----|------|------|------|
 | `service_name` | string | `""` | RPC service 名 |
 | `timer_executor` | string | `""` | Timer Executor |
-| `type_support_pkgs[].path` | string | -- | Type support .so |
 | `record_actions[].name` | string | -- | Action 名 |
 | `record_actions[].options.bag_path` | string | -- | Bag 存储目录 |
 | `record_actions[].options.mode` | string | -- | `imd` 或 `signal` |
 | `record_actions[].options.topic_meta_list[].topic` | string | -- | Topic |
 | `record_actions[].options.topic_meta_list[].msg_type` | string | -- | 类型 |
+
+Runtime Graph（`ibmw.runtime_graph`）统一负责运行时广告、话题发现和控制
+Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
+`ibmw.runtime_graph.type_support_pkgs` 下；Record/Playback 扩展本身不再
+单独维护这份配置。
 
 ---
 

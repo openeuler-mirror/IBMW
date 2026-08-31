@@ -1,11 +1,11 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/discovery/topic_advertisement.h"
+#include "engine/runtime_graph/topic_advertisement.h"
 
 #include "base/exception.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::runtime_graph {
 
 nlohmann::json TopicAdvertisementToJson(
     const TopicAdvertisement& advertisement) {
@@ -45,7 +45,6 @@ nlohmann::json TopicAdvertisementToJson(
       {"type_support_package", advertisement.type_support_package},
       {"capture_capabilities", std::move(capture_capabilities)},
       {"published", advertisement.published},
-      {"embedded_tap", advertisement.embedded_tap},
       {"hidden", advertisement.hidden}};
 }
 
@@ -68,19 +67,20 @@ TopicAdvertisement TopicAdvertisementFromJson(const nlohmann::json& value) {
       .schema_encoding = schema.at("encoding").get<std::string>(),
       .schema_data = schema.at("data").get<std::string>(),
       .schema_hash = schema.at("hash").get<std::string>()};
-  MW_ASSERT(
-      advertisement.topic.schema.type_name ==
-              advertisement.topic.msg_type &&
-          advertisement.topic.schema.serialization_type ==
-              advertisement.topic.serialization_type &&
-          !advertisement.topic.schema.schema_name.empty() &&
-          !advertisement.topic.schema.schema_encoding.empty() &&
-          !advertisement.topic.schema.schema_data.empty() &&
-          advertisement.topic.schema.schema_hash ==
-              ibmw::util::ComputeSchemaHash(
-                  advertisement.topic.schema.schema_data),
-      "Topic advertisement for '{}' contains an invalid Schema.",
-      advertisement.topic.topic);
+  const bool has_schema = !advertisement.topic.schema.schema_data.empty();
+  if (has_schema) {
+    MW_ASSERT(
+        advertisement.topic.schema.type_name == advertisement.topic.msg_type &&
+            advertisement.topic.schema.serialization_type ==
+                advertisement.topic.serialization_type &&
+            !advertisement.topic.schema.schema_name.empty() &&
+            !advertisement.topic.schema.schema_encoding.empty() &&
+            advertisement.topic.schema.schema_hash ==
+                ibmw::util::ComputeSchemaHash(
+                    advertisement.topic.schema.schema_data),
+        "Topic advertisement for '{}' contains an invalid Schema.",
+        advertisement.topic.topic);
+  }
   if (value.contains("qos")) {
     advertisement.topic.qos.policies =
         value.at("qos").get<std::map<std::string, std::string>>();
@@ -136,7 +136,6 @@ TopicAdvertisement TopicAdvertisementFromJson(const nlohmann::json& value) {
     }
   }
   advertisement.published = value.value("published", true);
-  advertisement.embedded_tap = value.value("embedded_tap", false);
   advertisement.hidden = value.value("hidden", false);
 
   MW_ASSERT(
@@ -148,4 +147,4 @@ TopicAdvertisement TopicAdvertisementFromJson(const nlohmann::json& value) {
   return advertisement;
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::runtime_graph

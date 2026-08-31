@@ -13,9 +13,13 @@
 #include <unordered_map>
 
 #include "cpp/transport/serialized_message.h"
-#include "record_playback_ext/runtime/bag_runtime_agent_client.h"
+#include "engine/runtime_graph/runtime_graph_client.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::RuntimeGraphAgentClient;
+using ibmw::runtime::core::runtime_graph::TapSessionDescriptor;
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
 class RuntimePlaybackServer {
  public:
@@ -65,7 +69,7 @@ class UnixRuntimePlaybackClient {
   void Stop();
 
  private:
-  BagRuntimeAgentClient agent_client_;
+  RuntimeGraphAgentClient agent_client_;
   std::atomic<int> stream_fd_{-1};
   std::string session_id_;
 };

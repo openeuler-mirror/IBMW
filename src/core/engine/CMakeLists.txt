@@ -17,6 +17,22 @@ file(GLOB_RECURSE head_files ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
 file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM src ${test_files})
+
+# Shared discovery and serialized payload code has no Engine dependency.
+set(shared_runtime_src
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_agent.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_client.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registration.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registry.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_advertisement.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_graph.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/type_support_registry.cc)
+list(REMOVE_ITEM src ${shared_runtime_src})
+target_sources(ibmw_extension_support PRIVATE ${shared_runtime_src})
+target_include_directories(ibmw_extension_support
+  PUBLIC $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include>)
+target_link_libraries(ibmw_extension_support PRIVATE ibmw::base yaml-cpp::yaml-cpp)
 set(LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1/driver_fixture.cc)
 set(LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER
@@ -100,7 +116,11 @@ target_link_libraries(
          backward_iface
          ibmw::api::cpp
          ibmw::core::extension_api
+         ibmw::core::extension_support
          ibmw::base)
+target_include_directories(${CUR_TARGET_NAME}
+  PUBLIC $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include>)
 
 # Add -Werror option
 include(AddWerror)
