@@ -36,9 +36,9 @@ bool PublisherModule::Run() {
   running_ = true;
 
   // Start publish loop in a separate thread
-  std::thread([this]() {
+  publish_thread_ = std::thread([this]() {
     PublishLoop();
-  }).detach();
+  });
 
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo, "PublisherModule Start succeeded.");
   return true;
@@ -47,7 +47,9 @@ bool PublisherModule::Run() {
 void PublisherModule::Stop() {
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo, "PublisherModule Shutdown");
   running_ = false;
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (publish_thread_.joinable()) {
+    publish_thread_.join();
+  }
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo, "PublisherModule Shutdown succeeded.");
 }
 
