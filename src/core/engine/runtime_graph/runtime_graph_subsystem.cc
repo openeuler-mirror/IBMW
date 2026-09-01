@@ -50,6 +50,23 @@ struct convert<ibmw::runtime::core::runtime_graph::RuntimeGraphSubsystem::Option
 namespace ibmw::runtime::core::runtime_graph {
 namespace {
 
+class RuntimePublishTapCapability final : public topic_io::PublishTapCapability {
+ public:
+  explicit RuntimePublishTapCapability(ibmw::extension::RuntimeV1& runtime)
+      : runtime_(runtime) {}
+
+  uint64_t Register(Callback callback) override {
+    return runtime_.RegisterPublishTap(std::move(callback));
+  }
+
+  bool Unregister(uint64_t handle) override {
+    return runtime_.UnregisterPublishTap(handle);
+  }
+
+ private:
+  ibmw::extension::RuntimeV1& runtime_;
+};
+
 bool IsHiddenTopic(std::string_view topic) {
   size_t start = 0;
   while (start < topic.size()) {
@@ -204,8 +221,8 @@ RuntimeRegistration RuntimeGraphSubsystem::BuildRegistration() const {
         FindSchema(endpoint.msg_type, serialization_type);
     const auto type_support_package =
         TypeSupportPackage(endpoint.msg_type, endpoint.package_path);
-    const bool supports_tap = endpoint.published && start_tap_handler_ &&
-                              stop_tap_handler_ && schema.has_value();
+    const bool supports_tap = endpoint.published && options_.enabled &&
+                              schema.has_value();
     std::map<std::string, TransportCaptureCapability> capabilities;
     for (const auto& [driver, advertised] : endpoint.capture_capabilities) {
       TransportCaptureCapability capability{.mode = "runtime_tap"};
@@ -279,14 +296,21 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
   DiscoverTypeSupportPackagesFromCatalog();
   registration_ = BuildRegistration();
   if (!options_.enabled) return;
+  tap_runtime_ = extension::MakeExtensionRuntimeV1(*engine_);
+  publish_tap_ = std::make_unique<RuntimePublishTapCapability>(*tap_runtime_);
+  tap_server_ = std::make_unique<topic_io::RuntimeTapServer>(
+      *publish_tap_, registration_.runtime_id, options_.registry_path, GetLogger());
+  tap_server_->Start();
   agent_ = std::make_unique<RuntimeGraphAgent>(RuntimeGraphAgent::Options{
       .registration = registration_, .registry_path = options_.registry_path});
-  if (start_tap_handler_) {
-    agent_->SetStartTapHandler(start_tap_handler_);
-  }
-  if (stop_tap_handler_) {
-    agent_->SetStopTapHandler(stop_tap_handler_);
-  }
+  agent_->SetStartTapHandler(start_tap_handler_ ? start_tap_handler_ :
+      RuntimeGraphAgent::StartTapHandler([this](const auto& advertisement) {
+        return tap_server_->StartSession(advertisement);
+      }));
+  agent_->SetStopTapHandler(stop_tap_handler_ ? stop_tap_handler_ :
+      RuntimeGraphAgent::StopTapHandler([this](auto session_id) {
+        return tap_server_->StopSession(session_id);
+      }));
   if (start_playback_handler_) {
     agent_->SetStartPlaybackHandler(start_playback_handler_);
   }
@@ -323,6 +347,10 @@ void RuntimeGraphSubsystem::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown) return;
   if (agent_) agent_->Shutdown();
   agent_.reset();
+  if (tap_server_) tap_server_->Shutdown();
+  tap_server_.reset();
+  publish_tap_.reset();
+  tap_runtime_.reset();
   // Destroy extension-owned callbacks while their libraries are still loaded.
   start_tap_handler_ = {};
   stop_tap_handler_ = {};

@@ -1,11 +1,11 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/capture/runtime_tap_source.h"
+#include "engine/topic_io/runtime_tap_source.h"
 
 #include "base/exception.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 RuntimeTapSource::RuntimeTapSource(
     TopicAdvertisement advertisement,
@@ -40,4 +40,4 @@ std::string RuntimeTapSource::Description() const {
   return "runtime tap (runtime " + advertisement_.runtime_id + ")";
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

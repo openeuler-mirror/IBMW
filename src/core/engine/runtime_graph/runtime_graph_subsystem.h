@@ -17,6 +17,8 @@
 #include "engine/isubsystem.h"
 #include "engine/runtime_graph/runtime_graph_agent.h"
 #include "engine/runtime_graph/type_support_registry.h"
+#include "engine/topic_io/runtime_tap_stream.h"
+#include "extension_api/ibmw_extension_runtime.h"
 #include "extension_api/ibmw_runtime_graph.h"
 
 namespace ibmw::runtime::core {
@@ -87,6 +89,9 @@ class RuntimeGraphSubsystem final : public ISubsystem,
   RuntimeGraphAgent::StopTapHandler stop_tap_handler_;
   RuntimeGraphAgent::StartPlaybackHandler start_playback_handler_;
   RuntimeGraphAgent::StopPlaybackHandler stop_playback_handler_;
+  std::unique_ptr<ibmw::extension::RuntimeV1> tap_runtime_;
+  std::unique_ptr<topic_io::PublishTapCapability> publish_tap_;
+  std::unique_ptr<topic_io::RuntimeTapServer> tap_server_;
   std::unique_ptr<RuntimeGraphAgent> agent_;
   RuntimeRegistration registration_;
   bool configured_ = false;

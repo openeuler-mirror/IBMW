@@ -7,15 +7,15 @@
 
 #include "engine/transport/serialized_subscriber.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
-class CaptureSource {
+class SerializedMessageSource {
  public:
-  CaptureSource() = default;
-  virtual ~CaptureSource() = default;
+  SerializedMessageSource() = default;
+  virtual ~SerializedMessageSource() = default;
 
-  CaptureSource(const CaptureSource&) = delete;
-  CaptureSource& operator=(const CaptureSource&) = delete;
+  SerializedMessageSource(const SerializedMessageSource&) = delete;
+  SerializedMessageSource& operator=(const SerializedMessageSource&) = delete;
 
   virtual void Start(
       ibmw::transport::SerializedMessageCallback callback) = 0;
@@ -23,4 +23,4 @@ class CaptureSource {
   virtual std::string Description() const = 0;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

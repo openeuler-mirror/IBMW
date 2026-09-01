@@ -5,10 +5,10 @@
 
 #include <memory>
 
-#include "record_playback_ext/capture/capture_source.h"
+#include "engine/topic_io/serialized_message_source.h"
 #include "engine/runtime_graph/topic_advertisement.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
@@ -23,7 +23,7 @@ class RuntimeTapClient {
   virtual void StopTap() = 0;
 };
 
-class RuntimeTapSource final : public CaptureSource {
+class RuntimeTapSource final : public SerializedMessageSource {
  public:
   RuntimeTapSource(
       TopicAdvertisement advertisement,
@@ -42,4 +42,4 @@ class RuntimeTapSource final : public CaptureSource {
   bool started_ = false;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

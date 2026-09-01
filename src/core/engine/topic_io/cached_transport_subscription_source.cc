@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/capture/cached_transport_subscription_source.h"
+#include "engine/topic_io/cached_transport_subscription_source.h"
 
 #include <charconv>
 #include <cstdint>
@@ -9,10 +9,9 @@
 #include "base/exception.h"
 #include "base/time_util.h"
 #include "engine/transport/transport_driver_tools.h"
-#include "record_playback_ext/global.h"
-#include "record_playback_ext/recorder/record_payload.h"
+#include "engine/topic_io/serialized_payload.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 namespace {
 
@@ -25,8 +24,10 @@ uint64_t ParseUint64(std::string_view value) {
 
 std::string SubscriptionKey(
     const ibmw::runtime::core::transport::TransportDriver& driver,
-    const TopicAdvertisement& advertisement) {
+    const TopicAdvertisement& advertisement,
+    std::string_view module_name) {
   return std::to_string(reinterpret_cast<uintptr_t>(&driver)) + '\0' +
+         std::string(module_name) + '\0' +
          advertisement.topic.topic + '\0' + advertisement.topic.msg_type +
          '\0' + advertisement.topic.serialization_type + '\0' +
          advertisement.topic.schema.schema_hash;
@@ -61,7 +62,7 @@ struct InFlightGuard {
   }
 };
 
-void CaptureFrame(
+void DeliverFrame(
     const std::shared_ptr<SubscriptionState>& state,
     ibmw::runtime::core::transport::MessageFrame& frame,
     bool loaned_payload,
@@ -71,6 +72,7 @@ void CaptureFrame(
   TopicAdvertisement advertisement;
   std::string driver_name;
   ibmw::transport::SerializedMessageCallback callback;
+  const ibmw::common::util::LoggerWrapper* logger = nullptr;
   try {
     {
       std::lock_guard lock(state->mutex);
@@ -79,6 +81,7 @@ void CaptureFrame(
       }
       ++state->in_flight;
       in_flight_guard.armed = true;
+      logger = state->logger;
       advertisement = state->advertisement;
       driver_name = state->driver_name;
       callback = state->callback;
@@ -102,9 +105,9 @@ void CaptureFrame(
           return ibmw::runtime::core::transport::TrySerializeMsgWithCache(
               frame, format);
         }};
-    auto payload = AcquireRecordPayload(
+    auto payload = AcquireSerializedPayload(
         view, advertisement.topic.serialization_type,
-        RecordTranscodePolicy::kAllow);
+        SerializedPayloadPolicy::kAllow);
     if (!payload) {
       return;
     }
@@ -133,18 +136,24 @@ void CaptureFrame(
             .source_driver = driver_name,
             .payload = std::move(payload)});
   } catch (const std::exception& error) {
-    MW_ERROR(
-        "Cached {} capture failed for topic '{}': {}.", driver_name,
-        advertisement.topic.topic, error.what());
+    if (logger) {
+      MW_LOG(
+          *logger, ibmw::common::util::kLogLevelError,
+          "Cached {} subscription failed for topic '{}': {}.", driver_name,
+          advertisement.topic.topic, error.what());
+    }
     std::lock_guard lock(state->mutex);
     if (!state->error) {
       state->error = std::current_exception();
     }
     state->active = false;
   } catch (...) {
-    MW_ERROR(
-        "Cached {} capture failed for topic '{}' with an unknown error.",
-        driver_name, advertisement.topic.topic);
+    if (logger) {
+      MW_LOG(
+          *logger, ibmw::common::util::kLogLevelError,
+          "Cached {} subscription failed for topic '{}' with an unknown error.",
+          driver_name, advertisement.topic.topic);
+    }
     std::lock_guard lock(state->mutex);
     if (!state->error) {
       state->error = std::current_exception();
@@ -158,6 +167,7 @@ void CaptureFrame(
 std::shared_ptr<CachedTransportSubscriptionRegistry::SubscriptionState>
 CachedTransportSubscriptionRegistry::Attach(
     std::string driver_name,
+    std::string module_name,
     ibmw::runtime::core::transport::TransportDriver& driver,
     const TopicAdvertisement& advertisement,
     ibmw::util::TypeSupportRef type_support,
@@ -169,7 +179,8 @@ CachedTransportSubscriptionRegistry::Attach(
       "TypeSupport '{}' does not match advertised type '{}'.",
       type_support.TypeName(), advertisement.topic.msg_type);
 
-  const std::string subscription_key = SubscriptionKey(driver, advertisement);
+  const std::string subscription_key =
+      SubscriptionKey(driver, advertisement, module_name);
   {
     std::lock_guard registry_lock(mutex_);
     const auto existing = states_.find(subscription_key);
@@ -183,6 +194,7 @@ CachedTransportSubscriptionRegistry::Attach(
       state->callback = std::move(callback);
       state->advertisement = advertisement;
       state->driver_name = std::move(driver_name);
+      state->logger = &logger_;
       state->error = nullptr;
       state->active = true;
       return state;
@@ -193,6 +205,7 @@ CachedTransportSubscriptionRegistry::Attach(
   state->callback = std::move(callback);
   state->advertisement = advertisement;
   state->driver_name = std::move(driver_name);
+  state->logger = &logger_;
   state->active = true;
   auto handler = std::make_unique<
       ibmw::runtime::core::transport::MessageHandlerWrapper>();
@@ -200,7 +213,7 @@ CachedTransportSubscriptionRegistry::Attach(
       .msg_type = advertisement.topic.msg_type,
       .topic_name = advertisement.topic.topic,
       .pkg_path = advertisement.type_support_package,
-      .module_name = "ibmw-bag-recorder",
+      .module_name = std::move(module_name),
       .msg_type_support_ref = type_support};
   handler->requested_qos = requested_qos;
   handler->require_cache_serialization_types.emplace(
@@ -209,7 +222,7 @@ CachedTransportSubscriptionRegistry::Attach(
       [state](ibmw::runtime::core::transport::MessageFrame& frame,
               std::function<void()>&& release,
               const ibmw::runtime::core::transport::internal::CallbackInvocationEnvelopeV1*) {
-        CaptureFrame(state, frame, false, std::move(release));
+        DeliverFrame(state, frame, false, std::move(release));
       };
 
   MW_ASSERT(
@@ -230,7 +243,7 @@ CachedTransportSubscriptionRegistry::Attach(
             .info = info,
             .msg_ptr = payload,
             .ctx_ref = ibmw::transport::ContextRef(context)};
-        CaptureFrame(state, frame, true, std::move(release));
+        DeliverFrame(state, frame, true, std::move(release));
       };
   const bool loaned_attached = driver.AttachLoaned(*loaned_handler);
   {
@@ -246,12 +259,14 @@ CachedTransportSubscriptionRegistry::Attach(
 
 CachedTransportSubscriptionSource::CachedTransportSubscriptionSource(
     std::string driver_name,
+    std::string module_name,
     ibmw::runtime::core::transport::TransportDriver& driver,
     TopicAdvertisement advertisement,
     ibmw::util::TypeSupportRef type_support,
     CachedTransportSubscriptionRegistry& registry,
     ibmw::transport::QosDescriptor requested_qos)
     : driver_name_(std::move(driver_name)),
+      module_name_(std::move(module_name)),
       driver_(driver),
       advertisement_(std::move(advertisement)),
       type_support_(type_support),
@@ -268,7 +283,7 @@ CachedTransportSubscriptionSource::~CachedTransportSubscriptionSource() {
 void CachedTransportSubscriptionSource::Start(
     ibmw::transport::SerializedMessageCallback callback) {
   state_ = registry_.Attach(
-      driver_name_, driver_, advertisement_, type_support_,
+      driver_name_, module_name_, driver_, advertisement_, type_support_,
       requested_qos_,
       std::move(callback));
 }
@@ -294,4 +309,4 @@ std::string CachedTransportSubscriptionSource::Description() const {
          advertisement_.runtime_id + ")";
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

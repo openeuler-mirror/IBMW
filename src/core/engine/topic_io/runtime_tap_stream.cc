@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/runtime/runtime_tap_stream.h"
+#include "engine/topic_io/runtime_tap_stream.h"
 #include "engine/runtime_graph/runtime_directory.h"
 
 #include <array>
@@ -21,11 +21,12 @@
 
 #include "base/exception.h"
 #include "base/time_util.h"
-#include "record_playback_ext/global.h"
-#include "record_playback_ext/recorder/record_payload.h"
-#include "record_playback_ext/runtime/runtime_protocol.h"
+#include "engine/topic_io/serialized_payload.h"
+#include "engine/runtime_graph/runtime_protocol.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
+
+using namespace ibmw::runtime::core::runtime_graph;
 
 namespace {
 
@@ -386,10 +387,12 @@ struct RuntimeTapServer::Session {
 RuntimeTapServer::RuntimeTapServer(
     PublishTapCapability& publish_tap,
     std::string runtime_id,
-    std::filesystem::path socket_directory)
+    std::filesystem::path socket_directory,
+    ibmw::common::util::LoggerWrapper logger)
     : publish_tap_(publish_tap),
       runtime_id_(std::move(runtime_id)),
-      socket_directory_(ibmw::extension::RuntimeRegistryDirectory(socket_directory)) {}
+      socket_directory_(ibmw::extension::RuntimeRegistryDirectory(socket_directory)),
+      logger_(std::move(logger)) {}
 
 RuntimeTapServer::~RuntimeTapServer() {
   Shutdown();
@@ -399,8 +402,8 @@ void RuntimeTapServer::Start() {
   bool expected = false;
   MW_ASSERT(started_.compare_exchange_strong(expected, true),
             "Runtime tap server is already started.");
-  const auto root = ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
-  const auto directory = ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
+  const auto root = runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
+  const auto directory = runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
 }
 
 TapSessionDescriptor RuntimeTapServer::StartSession(
@@ -482,7 +485,7 @@ void RuntimeTapServer::Shutdown() {
   for (auto& [id, session] : sessions) {
     const std::string stream_error = session->Stop();
     if (!stream_error.empty()) {
-      MW_ERROR(
+      MW_LOG(logger_, ibmw::common::util::kLogLevelError,
           "Runtime tap session '{}' stopped with an error: {}", id,
           stream_error);
     }
@@ -511,7 +514,7 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
 
   for (const auto& session : matching) {
     try {
-      auto payload = AcquireRecordPayload(
+      auto payload = ibmw::runtime::core::topic_io::AcquireSerializedPayload(
           frame, session->advertisement.topic.serialization_type);
       MW_ASSERT(
           payload != nullptr,
@@ -547,11 +550,13 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
 UnixRuntimeTapClient::UnixRuntimeTapClient(
     std::string control_socket,
     DroppedMessageCallback dropped_message_callback,
-    StreamErrorCallback stream_error_callback)
+    StreamErrorCallback stream_error_callback,
+    ibmw::common::util::LoggerWrapper logger)
     : control_socket_(control_socket),
       agent_client_(std::move(control_socket)),
       dropped_message_callback_(std::move(dropped_message_callback)),
-      stream_error_callback_(std::move(stream_error_callback)) {}
+      stream_error_callback_(std::move(stream_error_callback)),
+      logger_(std::move(logger)) {}
 
 UnixRuntimeTapClient::~UnixRuntimeTapClient() {
   try {
@@ -672,7 +677,7 @@ void UnixRuntimeTapClient::ReadLoop(
       if (header_result.status == ReceiveStatus::kEof) {
         if (!stop_requested_.load() && !terminal_received_.load()) {
           remote_closed_ = true;
-          MW_WARN(
+          MW_LOG(logger_, ibmw::common::util::kLogLevelWarn,
               "Runtime tap stream for '{}' closed at a frame boundary; "
               "waiting for discovery to remove or replace the endpoint.",
               advertisement.topic.topic);
@@ -806,7 +811,7 @@ void UnixRuntimeTapClient::ReportDroppedTotal(uint64_t dropped_total) {
   if (dropped_message_callback_) {
     dropped_message_callback_(delta);
   } else {
-    MW_WARN(
+    MW_LOG(logger_, ibmw::common::util::kLogLevelWarn,
         "Runtime tap reported {} dropped message(s), but no accounting callback is installed.",
         delta);
   }
@@ -828,18 +833,19 @@ void UnixRuntimeTapClient::ReportStreamError(std::string error) {
   if (fd >= 0) {
     ::shutdown(fd, SHUT_RDWR);
   }
-  MW_ERROR("{}", error);
+  MW_LOG(logger_, ibmw::common::util::kLogLevelError, "{}", error);
   if (stream_error_callback_) {
     try {
       stream_error_callback_(error);
     } catch (const std::exception& callback_error) {
-      MW_ERROR(
+      MW_LOG(logger_, ibmw::common::util::kLogLevelError,
           "Runtime tap stream-error callback failed: {}",
           callback_error.what());
     } catch (...) {
-      MW_ERROR("Runtime tap stream-error callback failed unexpectedly.");
+      MW_LOG(logger_, ibmw::common::util::kLogLevelError,
+             "Runtime tap stream-error callback failed unexpectedly.");
     }
   }
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

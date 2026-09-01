@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "record_playback_ext/capture/capture_source.h"
+#include "engine/topic_io/serialized_message_source.h"
 #include "engine/runtime_graph/topic_advertisement.h"
 #include "engine/runtime_graph/topic_graph.h"
 
@@ -21,13 +21,14 @@ using ibmw::runtime::core::runtime_graph::TopicGraph;
 
 TopicGraph BuildCaptureGraph(
     std::vector<ibmw::runtime::core::runtime_graph::RuntimeRegistration> runtimes);
+using ibmw::runtime::core::topic_io::SerializedMessageSource;
 
 struct CapturePlanEntry {
   TopicAdvertisement advertisement;
   std::string source_name;
   std::string capture_mode;
   std::string description;
-  std::unique_ptr<CaptureSource> source;
+  std::unique_ptr<SerializedMessageSource> source;
 };
 
 class CapturePlan {
@@ -56,9 +57,9 @@ class CapturePlan {
 
 class BagCapturePlanner {
  public:
-  using TransportSourceFactory = std::function<std::unique_ptr<CaptureSource>(
+  using TransportSourceFactory = std::function<std::unique_ptr<SerializedMessageSource>(
       const TopicAdvertisement&, std::string_view driver_name)>;
-  using RuntimeTapSourceFactory = std::function<std::unique_ptr<CaptureSource>(
+  using RuntimeTapSourceFactory = std::function<std::unique_ptr<SerializedMessageSource>(
       const TopicAdvertisement&)>;
 
   explicit BagCapturePlanner(const TopicGraph& graph) : graph_(graph) {}
@@ -76,7 +77,7 @@ class BagCapturePlanner {
     std::string source_name;
     std::string capture_mode;
     TopicAdvertisement advertisement;
-    std::function<std::unique_ptr<CaptureSource>()> create;
+    std::function<std::unique_ptr<SerializedMessageSource>()> create;
   };
 
   std::vector<Candidate> CandidatesFor(

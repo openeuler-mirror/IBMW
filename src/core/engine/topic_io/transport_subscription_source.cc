@@ -1,43 +1,41 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/capture/transport_subscription_source.h"
-
-#include <cstdio>
+#include "engine/topic_io/transport_subscription_source.h"
 
 #include "base/exception.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 TransportSubscriptionSource::TransportSubscriptionSource(
     std::string driver_name,
     ibmw::runtime::core::transport::SerializedTransportDriver& driver,
     TopicAdvertisement advertisement,
-    ibmw::transport::QosDescriptor requested_qos)
+    ibmw::transport::QosDescriptor requested_qos,
+    const ibmw::common::util::LoggerWrapper& logger)
     : driver_name_(std::move(driver_name)),
       driver_(driver),
       advertisement_(std::move(advertisement)),
-      requested_qos_(std::move(requested_qos)) {}
+      requested_qos_(std::move(requested_qos)),
+      logger_(logger) {}
 
 TransportSubscriptionSource::~TransportSubscriptionSource() {
   try {
     Stop();
   } catch (const std::exception& error) {
-    std::fprintf(
-        stderr, "Failed to stop %s subscriber for '%s': %s.\n",
-        driver_name_.c_str(), advertisement_.topic.topic.c_str(),
-        error.what());
+    MW_LOG(logger_, ibmw::common::util::kLogLevelError,
+           "Failed to stop {} subscriber for '{}': {}.", driver_name_,
+           advertisement_.topic.topic, error.what());
   } catch (...) {
-    std::fprintf(
-        stderr,
-        "Failed to stop %s subscriber for '%s' with an unknown error.\n",
-        driver_name_.c_str(), advertisement_.topic.topic.c_str());
+    MW_LOG(logger_, ibmw::common::util::kLogLevelError,
+           "Failed to stop {} subscriber for '{}' with an unknown error.",
+           driver_name_, advertisement_.topic.topic);
   }
 }
 
 void TransportSubscriptionSource::Start(
     ibmw::transport::SerializedMessageCallback callback) {
-  MW_ASSERT(!handle_, "Capture source is already started.");
+  MW_ASSERT(!handle_, "Serialized message source is already started.");
   const auto observed_topic = advertisement_.topic;
   handle_ = driver_.AttachSerializedSubscriber(
       ibmw::runtime::core::transport::SerializedSubscriberOptions{
@@ -70,4 +68,4 @@ std::string TransportSubscriptionSource::Description() const {
          ")";
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

@@ -4,6 +4,7 @@
 #include "engine/runtime_graph/runtime_graph_subsystem.h"
 
 #include <fstream>
+#include <future>
 #include <unistd.h>
 
 #include "engine/engine.h"
@@ -82,7 +83,9 @@ class RuntimeGraphIntegrationTest : public testing::Test {
   }
   void TearDown() override { std::filesystem::remove_all(directory_); }
 
-  RuntimeRegistration Initialize() {
+  RuntimeRegistration Initialize(
+      bool enable_tap = false,
+      std::function<void(Engine&)> check = {}) {
     YAML::Node config = YAML::Load(R"(
 ibmw:
   runtime_graph: {enabled: false}
@@ -100,6 +103,11 @@ ibmw:
     config["ibmw"]["config"]["temp_cfg_path"] = (directory_ / "resolved").string();
     config["ibmw"]["extensions"]["items"][0]["path"] = EXTENSION_V2_FIXTURE_PATH;
     config["ibmw"]["runtime_graph"]["type_support_pkgs"].push_back(TYPE_SUPPORT_V1_FIXTURE_PATH);
+    if (enable_tap) {
+      config["ibmw"].remove("extensions");
+      config["ibmw"]["runtime_graph"]["enabled"] = true;
+      config["ibmw"]["runtime_graph"]["registry_path"] = directory_.string();
+    }
     const auto path = directory_ / "config.yaml";
     std::ofstream(path) << config;
     ibmw::extension::TypeSupportPackageLoader loader;
@@ -125,7 +133,9 @@ ibmw:
       EXPECT_TRUE(engine.GetTransportBus().RegisterSendType(std::move(publisher)));
     });
     engine.Initialize({.cfg_file_path = path.string()});
-    return engine.GetRuntimeGraphSubsystem().Registration();
+    const auto registration = engine.GetRuntimeGraphSubsystem().Registration();
+    if (check) check(engine);
+    return registration;
   }
 
   std::filesystem::path directory_;
@@ -147,6 +157,50 @@ TEST_F(RuntimeGraphIntegrationTest, PreservesDriverCapabilityContract) {
   EXPECT_NE(capability.extension_options_yaml.find("fixture_option"), std::string::npos);
   EXPECT_NE(capability.driver_options_yaml.find("driver_option"), std::string::npos);
   EXPECT_FALSE(topic.capture_capabilities.contains("runtime-tap"));
+}
+
+TEST_F(RuntimeGraphIntegrationTest, ReceivesTapWithoutRecordExtension) {
+  const auto registration = Initialize(true, [](Engine& engine) {
+    const auto* publisher = engine.GetTransportBus().GetTransportCatalog()
+        ->GetSendTypeWrapperPtr("json:fixture.Message", "/test", "core", "test");
+    ASSERT_NE(publisher, nullptr);
+    auto stopped = engine.AsyncStart();
+    const auto& registration = engine.GetRuntimeGraphSubsystem().Registration();
+    ASSERT_EQ(registration.topics.size(), 1u);
+    const auto& topic = registration.topics.front();
+    ASSERT_TRUE(topic.capture_capabilities.contains("runtime-tap"));
+
+    std::promise<ibmw::transport::SerializedMessage> received;
+    auto message = received.get_future();
+    topic_io::UnixRuntimeTapClient client(registration.control_socket);
+    client.StartTap(topic, [&received](auto&& value) {
+      received.set_value(std::move(value));
+    });
+
+    const std::string payload = "{\"value\":7}";
+    ibmw::transport::Context context;
+    transport::MessageFrame frame{
+        .info = publisher->info,
+        .ctx_ref = ibmw::transport::ContextRef(context)};
+    frame.serialization_cache.emplace("json",
+        std::make_shared<ibmw::util::BufferArrayView>(payload.data(), payload.size()));
+    engine.GetTransportBus().Send(std::move(frame));
+
+    const auto ready = message.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(ready, std::future_status::ready);
+    if (ready == std::future_status::ready) {
+      const auto value = message.get();
+      EXPECT_EQ(value.topic.topic, "/test");
+      EXPECT_EQ(value.payload->JoinToString(), payload);
+    }
+    EXPECT_NO_THROW(client.StopTap());
+    engine.Shutdown();
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  });
+  EXPECT_FALSE(std::filesystem::exists(registration.control_socket));
+  EXPECT_FALSE(std::filesystem::exists(
+      ibmw::extension::RuntimeRegistryDirectory(directory_) /
+      (registration.runtime_id + ".json")));
 }
 
 }  // namespace

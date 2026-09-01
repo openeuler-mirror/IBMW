@@ -12,17 +12,22 @@
 #include <unordered_map>
 #include <vector>
 
+#include "base/log_util.h"
 #include "cpp/util/type_support.h"
 #include "engine/transport/transport_driver.h"
-#include "record_playback_ext/capture/capture_source.h"
+#include "engine/topic_io/serialized_message_source.h"
 #include "engine/runtime_graph/topic_advertisement.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
 class CachedTransportSubscriptionRegistry {
  public:
+  explicit CachedTransportSubscriptionRegistry(
+      const ibmw::common::util::LoggerWrapper& logger)
+      : logger_(logger) {}
+
   struct SubscriptionState {
     std::mutex mutex;
     std::condition_variable idle_cv;
@@ -33,10 +38,12 @@ class CachedTransportSubscriptionRegistry {
     std::string driver_name;
     std::exception_ptr error;
     std::atomic<uint64_t> loaned_sequence{0};
+    const ibmw::common::util::LoggerWrapper* logger = nullptr;
   };
 
   std::shared_ptr<SubscriptionState> Attach(
       std::string driver_name,
+      std::string module_name,
       ibmw::runtime::core::transport::TransportDriver& driver,
       const TopicAdvertisement& advertisement,
       ibmw::util::TypeSupportRef type_support,
@@ -44,6 +51,7 @@ class CachedTransportSubscriptionRegistry {
       ibmw::transport::SerializedMessageCallback callback);
 
  private:
+  const ibmw::common::util::LoggerWrapper& logger_;
   std::mutex mutex_;
   std::unordered_map<std::string, std::shared_ptr<SubscriptionState>> states_;
   std::vector<std::unique_ptr<
@@ -53,10 +61,11 @@ class CachedTransportSubscriptionRegistry {
       loaned_handlers_;
 };
 
-class CachedTransportSubscriptionSource final : public CaptureSource {
+class CachedTransportSubscriptionSource final : public SerializedMessageSource {
  public:
   CachedTransportSubscriptionSource(
       std::string driver_name,
+      std::string module_name,
       ibmw::runtime::core::transport::TransportDriver& driver,
       TopicAdvertisement advertisement,
       ibmw::util::TypeSupportRef type_support,
@@ -72,6 +81,7 @@ class CachedTransportSubscriptionSource final : public CaptureSource {
 
  private:
   std::string driver_name_;
+  std::string module_name_;
   ibmw::runtime::core::transport::TransportDriver& driver_;
   TopicAdvertisement advertisement_;
   ibmw::util::TypeSupportRef type_support_;
@@ -81,4 +91,4 @@ class CachedTransportSubscriptionSource final : public CaptureSource {
       state_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

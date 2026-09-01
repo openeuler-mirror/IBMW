@@ -1,16 +1,16 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/recorder/record_payload.h"
+#include "engine/topic_io/serialized_payload.h"
 
 #include "base/exception.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
-std::shared_ptr<ibmw::util::BufferArrayView> AcquireRecordPayload(
+std::shared_ptr<ibmw::util::BufferArrayView> AcquireSerializedPayload(
     ibmw::extension::MessageView& message,
     std::string_view target_serialization_type,
-    RecordTranscodePolicy transcode_policy) {
+    SerializedPayloadPolicy transcode_policy) {
   MW_ASSERT(
       !target_serialization_type.empty(),
       "Target serialization type cannot be empty.");
@@ -22,7 +22,7 @@ std::shared_ptr<ibmw::util::BufferArrayView> AcquireRecordPayload(
   }
 
   MW_ASSERT(
-      transcode_policy == RecordTranscodePolicy::kAllow,
+      transcode_policy == SerializedPayloadPolicy::kAllow,
       "Message only contains serialized formats that do not match target '{}'; "
       "transcoding is disabled.",
       target_serialization_type);
@@ -34,4 +34,4 @@ std::shared_ptr<ibmw::util::BufferArrayView> AcquireRecordPayload(
   return message.acquire_serialized(target_serialization_type);
 }
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

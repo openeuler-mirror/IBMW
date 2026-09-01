@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/runtime/runtime_tap_stream.h"
+#include "engine/topic_io/runtime_tap_stream.h"
 
 #include <chrono>
 #include <cstring>
@@ -19,7 +19,7 @@
 #include "engine/transport/transport_driver_tools.h"
 #include "yaml-cpp/yaml.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 namespace {
 
 using namespace std::chrono_literals;
@@ -167,4 +167,4 @@ publishers:
 }
 
 }  // namespace
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

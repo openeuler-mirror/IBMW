@@ -15,19 +15,18 @@
 #include <thread>
 #include <unordered_map>
 
-#include "record_playback_ext/capture/runtime_tap_source.h"
+#include "base/log_util.h"
+#include "engine/topic_io/runtime_tap_source.h"
 #include "engine/runtime_graph/runtime_graph_client.h"
 #include "extension_api/ibmw_extension_runtime.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 using ibmw::runtime::core::runtime_graph::RuntimeGraphAgentClient;
 using ibmw::runtime::core::runtime_graph::TapSessionDescriptor;
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
-// Host-provided publish tap capability. The frame pointer is intentionally
-// opaque at this boundary; the Core adapter owns conversion to serialized
-// RuntimeTap messages in its implementation unit.
+// The host supplies message views; the stream owns queued serialized payloads.
 class PublishTapCapability {
  public:
   using Callback = std::function<void(ibmw::extension::MessageView&)>;
@@ -41,7 +40,8 @@ class RuntimeTapServer {
   RuntimeTapServer(
       PublishTapCapability& publish_tap,
       std::string runtime_id,
-      std::filesystem::path socket_directory);
+      std::filesystem::path socket_directory,
+      ibmw::common::util::LoggerWrapper logger = {});
   ~RuntimeTapServer();
 
   RuntimeTapServer(const RuntimeTapServer&) = delete;
@@ -61,6 +61,7 @@ class RuntimeTapServer {
   PublishTapCapability& publish_tap_;
   const std::string runtime_id_;
   const std::filesystem::path socket_directory_;
+  ibmw::common::util::LoggerWrapper logger_;
   std::atomic<bool> started_{false};
   uint64_t publish_tap_handle_ = 0;
   std::mutex sessions_mutex_;
@@ -76,7 +77,8 @@ class UnixRuntimeTapClient final : public RuntimeTapClient {
   explicit UnixRuntimeTapClient(
       std::string control_socket,
       DroppedMessageCallback dropped_message_callback = {},
-      StreamErrorCallback stream_error_callback = {});
+      StreamErrorCallback stream_error_callback = {},
+      ibmw::common::util::LoggerWrapper logger = {});
   ~UnixRuntimeTapClient() override;
 
   void StartTap(
@@ -96,6 +98,7 @@ class UnixRuntimeTapClient final : public RuntimeTapClient {
   RuntimeGraphAgentClient agent_client_;
   DroppedMessageCallback dropped_message_callback_;
   StreamErrorCallback stream_error_callback_;
+  ibmw::common::util::LoggerWrapper logger_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stop_requested_{false};
   std::atomic<bool> terminal_received_{false};
@@ -108,4 +111,4 @@ class UnixRuntimeTapClient final : public RuntimeTapClient {
   std::optional<std::string> stream_error_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

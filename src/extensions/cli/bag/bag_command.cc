@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "record_playback_ext/bag_command.h"
+#include "bag_command.h"
 
 #include <algorithm>
 #include <atomic>
@@ -39,9 +39,9 @@
 #include "engine/transport/serialized_transport_driver.h"
 #include "engine/runtime_graph/type_support_registry.h"
 #include "nlohmann/json.hpp"
-#include "record_playback_ext/capture/cached_transport_subscription_source.h"
-#include "record_playback_ext/capture/runtime_tap_source.h"
-#include "record_playback_ext/capture/transport_subscription_source.h"
+#include "engine/topic_io/cached_transport_subscription_source.h"
+#include "engine/topic_io/runtime_tap_source.h"
+#include "engine/topic_io/transport_subscription_source.h"
 #include "record_playback_ext/coordinator/bag_capture_planner.h"
 #include "record_playback_ext/coordinator/dynamic_capture_controller.h"
 #include "record_playback_ext/coordinator/recorder_coordinator.h"
@@ -50,7 +50,7 @@
 #include "engine/runtime_graph/runtime_registry.h"
 #include "engine/runtime_graph/topic_graph.h"
 #include "record_playback_ext/player/player.h"
-#include "record_playback_ext/runtime/runtime_tap_stream.h"
+#include "engine/topic_io/runtime_tap_stream.h"
 #include "record_playback_ext/storage/bag_reader_factory.h"
 #include "record_playback_ext/storage/mcap_bag_reader.h"
 #include "record_playback_ext/storage/mcap_storage.h"
@@ -63,6 +63,11 @@ using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 using ibmw::runtime::core::runtime_graph::TopicGraph;
 using ibmw::runtime::core::runtime_graph::TransportCaptureCapability;
+using ibmw::runtime::core::topic_io::CachedTransportSubscriptionRegistry;
+using ibmw::runtime::core::topic_io::CachedTransportSubscriptionSource;
+using ibmw::runtime::core::topic_io::RuntimeTapSource;
+using ibmw::runtime::core::topic_io::TransportSubscriptionSource;
+using ibmw::runtime::core::topic_io::UnixRuntimeTapClient;
 
 namespace {
 
@@ -2245,7 +2250,9 @@ int RunRecord(int argc, const char* const* argv) {
         }
       };
   load_topic_type_support(capture_topics);
-  CachedTransportSubscriptionRegistry cached_subscription_registry;
+  ibmw::common::util::LoggerWrapper fallback_logger;
+  // Subscription callbacks must outlive Engine shutdown, including unwinding.
+  std::unique_ptr<CachedTransportSubscriptionRegistry> cached_subscription_registry;
   std::unique_ptr<EngineGuard> engine_guard;
   std::unordered_map<std::string, runtime::core::transport::TransportDriver*>
       recorder_drivers;
@@ -2263,6 +2270,13 @@ int RunRecord(int argc, const char* const* argv) {
     }
   }
 
+  // Topic subscriptions use the recorder Engine logger when a direct
+  // transport Engine exists.  Otherwise they use the simple logger fallback.
+  const auto& capture_logger =
+      engine_guard ? engine_guard->Get().GetLogger() : fallback_logger;
+  cached_subscription_registry =
+      std::make_unique<CachedTransportSubscriptionRegistry>(capture_logger);
+
   BagCapturePlanner initial_planner(graph);
   BagCapturePlanner dynamic_planner(graph);
   RecorderCoordinator* runtime_tap_coordinator = nullptr;
@@ -2276,12 +2290,12 @@ int RunRecord(int argc, const char* const* argv) {
                   driver)) {
             planner.RegisterTransportSourceFactory(
                 driver_name,
-                [serialized_driver](
+                [serialized_driver, &capture_logger](
                     const TopicAdvertisement& advertisement,
                     std::string_view source_name) {
                   return std::make_unique<TransportSubscriptionSource>(
                       std::string(source_name), *serialized_driver,
-                      advertisement, advertisement.topic.qos);
+                      advertisement, advertisement.topic.qos, capture_logger);
                 });
             continue;
           }
@@ -2312,14 +2326,15 @@ int RunRecord(int argc, const char* const* argv) {
                     advertisement.topic.msg_type,
                     advertisement.type_support_package);
                 return std::make_unique<CachedTransportSubscriptionSource>(
-                    std::string(source_name), *driver, advertisement,
-                    type_support, cached_subscription_registry,
+                    std::string(source_name), "ibmw-bag-recorder", *driver,
+                    advertisement,
+                    type_support, *cached_subscription_registry,
                     advertisement.topic.qos);
               });
         }
         planner.SetRuntimeTapSourceFactory(
             [&runtime_tap_coordinator, &runtime_tap_error_mutex,
-             &runtime_tap_error](
+             &runtime_tap_error, &capture_logger](
                 const TopicAdvertisement& advertisement) {
               return std::make_unique<RuntimeTapSource>(
                   advertisement,
@@ -2339,7 +2354,7 @@ int RunRecord(int argc, const char* const* argv) {
                           }
                         }
                         g_stop_requested = true;
-                      }));
+                      }, capture_logger));
             });
       };
   configure_planner(initial_planner, true);
@@ -2487,7 +2502,8 @@ int RunRecord(int argc, const char* const* argv) {
           g_stop_requested = true;
         }
       };
-  DynamicCaptureController controller(
+  std::optional<DynamicCaptureController> controller;
+  controller.emplace(
       accept_message,
       [](std::string_view topic, std::string_view description, bool started) {
         std::cout << "  " << (started ? "started " : "stopped ") << topic
@@ -2503,7 +2519,7 @@ int RunRecord(int argc, const char* const* argv) {
       -> CapturePlan {
     return dynamic_planner.BuildPlan({std::string(topic)});
   };
-  controller.Reconcile(capture_topics, graph, build_initial_plan);
+  controller->Reconcile(capture_topics, graph, build_initial_plan);
   if (engine_guard) {
     engine_guard->SetFuture(engine_guard->Get().AsyncStart());
   }
@@ -2535,15 +2551,16 @@ int RunRecord(int argc, const char* const* argv) {
       capture_topics.emplace("/clock");
     }
     load_topic_type_support(capture_topics);
-    controller.Reconcile(capture_topics, graph, build_dynamic_plan);
+    controller->Reconcile(capture_topics, graph, build_dynamic_plan);
   }
   std::exception_ptr source_stop_error;
   try {
-    controller.StopAll();
+    controller->StopAll();
   } catch (...) {
     source_stop_error = std::current_exception();
   }
   runtime_tap_coordinator = nullptr;
+  controller.reset();
   std::exception_ptr coordinator_close_error;
   try {
     coordinator.Close();

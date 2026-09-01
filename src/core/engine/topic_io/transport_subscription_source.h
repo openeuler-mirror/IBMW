@@ -3,21 +3,23 @@
 
 #pragma once
 
+#include "base/log_util.h"
 #include "engine/transport/serialized_transport_driver.h"
-#include "record_playback_ext/capture/capture_source.h"
+#include "engine/topic_io/serialized_message_source.h"
 #include "engine/runtime_graph/topic_advertisement.h"
 
-namespace ibmw::extensions::record_playback_extension {
+namespace ibmw::runtime::core::topic_io {
 
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
-class TransportSubscriptionSource final : public CaptureSource {
+class TransportSubscriptionSource final : public SerializedMessageSource {
  public:
   TransportSubscriptionSource(
       std::string driver_name,
       ibmw::runtime::core::transport::SerializedTransportDriver& driver,
       TopicAdvertisement advertisement,
-      ibmw::transport::QosDescriptor requested_qos = {});
+      ibmw::transport::QosDescriptor requested_qos,
+      const ibmw::common::util::LoggerWrapper& logger);
   ~TransportSubscriptionSource() override;
 
   void Start(
@@ -31,7 +33,8 @@ class TransportSubscriptionSource final : public CaptureSource {
   ibmw::runtime::core::transport::SerializedTransportDriver& driver_;
   TopicAdvertisement advertisement_;
   ibmw::transport::QosDescriptor requested_qos_;
+  const ibmw::common::util::LoggerWrapper& logger_;
   ibmw::runtime::core::transport::SerializedSubscriberHandle handle_;
 };
 
-}  // namespace ibmw::extensions::record_playback_extension
+}  // namespace ibmw::runtime::core::topic_io

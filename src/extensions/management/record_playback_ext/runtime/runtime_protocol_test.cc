@@ -26,12 +26,15 @@
 #include "record_playback_ext/runtime/runtime_playback_stream.h"
 #include "record_playback_ext/runtime/runtime_protocol.h"
 #include "engine/runtime_graph/runtime_registry.h"
-#include "record_playback_ext/runtime/runtime_tap_stream.h"
+#include "engine/topic_io/runtime_tap_stream.h"
 #include "yaml-cpp/yaml.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
 using namespace ibmw::runtime::core::runtime_graph;
+using ibmw::runtime::core::topic_io::PublishTapCapability;
+using ibmw::runtime::core::topic_io::RuntimeTapServer;
+using ibmw::runtime::core::topic_io::UnixRuntimeTapClient;
 namespace {
 
 class RuntimeTemporaryDirectory {

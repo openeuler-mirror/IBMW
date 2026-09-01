@@ -20,7 +20,6 @@
 #include "record_playback_ext/record_action.h"
 #include "record_playback_ext/service.h"
 #include "record_playback_ext/runtime/runtime_playback_stream.h"
-#include "record_playback_ext/runtime/runtime_tap_stream.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -58,8 +57,8 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
   void PublishRuntimePlaybackMessage(
       const TopicAdvertisement& advertisement,
       ibmw::transport::SerializedMessage&& message);
-  void StartRuntimeAgent();
-  void StopRuntimeAgent();
+  void StartRuntimePlayback();
+  void StopRuntimePlayback();
 
   Options options_;
   ibmw::extension::RuntimeGraphV1* graph_ = nullptr;
@@ -72,8 +71,6 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
       std::string_view msg_type, std::string_view package_path = {}) const;
   std::string TypeSupportPackage(
       std::string_view msg_type, std::string_view package_path = {}) const;
-  std::unique_ptr<RuntimeTapServer> runtime_tap_server_;
-  std::unique_ptr<PublishTapCapability> publish_tap_capability_;
   std::unique_ptr<RuntimePlaybackServer> runtime_playback_server_;
   std::unordered_map<std::string, ibmw::extension::PublisherHandle>
       runtime_playback_publishers_;
@@ -180,23 +177,6 @@ namespace ibmw::extensions::record_playback_extension {
 namespace {
 
 constexpr std::string_view kRuntimePlaybackModule = "ibmw-bag-agent";
-
-class RuntimePublishTapCapability final : public PublishTapCapability {
- public:
-  explicit RuntimePublishTapCapability(ibmw::extension::RuntimeV1& runtime)
-      : runtime_(runtime) {}
-
-  uint64_t Register(Callback callback) override {
-    return runtime_.RegisterPublishTap(std::move(callback));
-  }
-
-  bool Unregister(uint64_t handle) override {
-    return runtime_.UnregisterPublishTap(handle);
-  }
-
- private:
-  ibmw::extension::RuntimeV1& runtime_;
-};
 
 std::string PlaybackPublisherKey(
     std::string_view topic,
@@ -326,15 +306,6 @@ bool RecordPlaybackExtension::InitializeRuntime(
   }
 
   runtime_graph.HideModulePublishers(std::string(kRuntimePlaybackModule));
-  runtime_graph.SetStartTapHandler(
-      [this](const TopicAdvertisement& advertisement) {
-        MW_REQUIRE(runtime_tap_server_, "Runtime tap server is unavailable.");
-        return runtime_tap_server_->StartSession(advertisement);
-      });
-  runtime_graph.SetStopTapHandler(
-      [this](std::string_view session_id) {
-        return runtime_tap_server_ && runtime_tap_server_->StopSession(session_id);
-      });
   runtime_graph.SetStartPlaybackHandler(
       [this](const TopicAdvertisement& advertisement) {
         MW_REQUIRE(runtime_playback_server_, "Runtime playback server is unavailable.");
@@ -387,13 +358,13 @@ bool RecordPlaybackExtension::InitializeRuntime(
       {ibmw::extension::RuntimePhase::kInitialize,
        ibmw::extension::RuntimeSubsystem::kRuntimeGraph,
        ibmw::extension::RuntimeHookTiming::kAfter},
-      [this] { StartRuntimeAgent(); });
+      [this] { StartRuntimePlayback(); });
 
   runtime_->RegisterHook(
       {ibmw::extension::RuntimePhase::kStopping,
        ibmw::extension::RuntimeSubsystem::kRuntimeGraph,
        ibmw::extension::RuntimeHookTiming::kAfter},
-      [this] { StopRuntimeAgent(); });
+      [this] { StopRuntimePlayback(); });
 
   runtime_->RegisterHook(
       {ibmw::extension::RuntimePhase::kStart,
@@ -447,7 +418,7 @@ void RecordPlaybackExtension::Shutdown() noexcept {
     return;
   }
   try {
-    StopRuntimeAgent();
+    StopRuntimePlayback();
 
     for (auto& itr : playback_action_map_)
       itr.second->Shutdown();
@@ -459,19 +430,13 @@ void RecordPlaybackExtension::Shutdown() noexcept {
   }
 }
 
-void RecordPlaybackExtension::StartRuntimeAgent() {
+void RecordPlaybackExtension::StartRuntimePlayback() {
   auto& runtime_graph = *graph_;
-  if (!runtime_graph.Enabled() || runtime_tap_server_) {
+  if (!runtime_graph.Enabled() || runtime_playback_server_) {
     return;
   }
   const auto& registration = runtime_graph.Registration();
   const auto& runtime_id = registration.runtime_id;
-  publish_tap_capability_ =
-      std::make_unique<RuntimePublishTapCapability>(*runtime_);
-  runtime_tap_server_ = std::make_unique<RuntimeTapServer>(
-      *publish_tap_capability_, runtime_id,
-      runtime_graph.RegistryPath());
-  runtime_tap_server_->Start();
   runtime_playback_server_ = std::make_unique<RuntimePlaybackServer>(
       runtime_id, runtime_graph.RegistryPath(),
       [this](const TopicAdvertisement& advertisement, auto&& message) {
@@ -482,12 +447,7 @@ void RecordPlaybackExtension::StartRuntimeAgent() {
 
 }
 
-void RecordPlaybackExtension::StopRuntimeAgent() {
-  if (runtime_tap_server_) {
-    runtime_tap_server_->Shutdown();
-    runtime_tap_server_.reset();
-  }
-  publish_tap_capability_.reset();
+void RecordPlaybackExtension::StopRuntimePlayback() {
   if (runtime_playback_server_) {
     runtime_playback_server_->Shutdown();
     runtime_playback_server_.reset();

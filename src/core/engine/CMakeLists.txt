@@ -26,7 +26,10 @@ set(shared_runtime_src
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registry.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_advertisement.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_graph.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/type_support_registry.cc)
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/type_support_registry.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/runtime_tap_source.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/runtime_tap_stream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/serialized_payload.cc)
 list(REMOVE_ITEM src ${shared_runtime_src})
 target_sources(ibmw_extension_support PRIVATE ${shared_runtime_src})
 target_include_directories(ibmw_extension_support
