@@ -23,6 +23,30 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 ```
 `doctor` 与 `run` 必须传递相同参数。prefix 优先级是显式 `--dds-prefix`、有效的 `IBMW_ROS2_MINIMAL_SDK_PREFIX`、最后恰好一个规范候选；零个或多个候选必须显式指定。默认模式要求前缀包含完整消息支持（`std_msgs` 配置和生成头文件）；仅 DDS 基础层的 builder 输出必须添加 `--dds-only`。离线默认禁止网络，并要求 complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout；只有用户显式同意时使用 `--allow-network`。
 
+源码 provider 使用以下锁定版本矩阵：
+
+| Provider | Fast DDS | Fast-CDR | foonathan_memory |
+|----------|----------|----------|------------------|
+| `SOURCE_FASTDDS2` | 2.6.12 | 1.0.29 | 0.7.1 |
+| `SOURCE_FASTDDS3` | 3.2.2 | 2.3.0 | 0.7.3 |
+
+Fast DDS 3.2.2 的锁定源码闭包可独立构建：
+```bash
+cmake -S . -B build/source-fastdds3-deps \
+  -DIBMW_DDS_PROVIDER=SOURCE_FASTDDS3 \
+  -DIBMW_THIRD_PARTY_SOURCE_BUILD_ONLY=ON
+cmake --build build/source-fastdds3-deps --target ibmw_third_party_source_prefix -j"$(nproc)"
+bash scripts/tests/test_fastdds_source_dependency_lock.sh
+```
+
+Fast DDS 2.6.12 的锁定源码闭包使用相同流程，仅需选择 `SOURCE_FASTDDS2`：
+```bash
+cmake -S . -B build/source-fastdds2-deps \
+  -DIBMW_DDS_PROVIDER=SOURCE_FASTDDS2 \
+  -DIBMW_THIRD_PARTY_SOURCE_BUILD_ONLY=ON
+cmake --build build/source-fastdds2-deps --target ibmw_third_party_source_prefix -j"$(nproc)"
+```
+
 ## 特性
 
 - **Extension 架构** —— 通信后端、Logger 和服务以共享库 Extension 形式在运行时
@@ -76,7 +100,7 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 | 编译器 | GCC 11+ 或 Clang 14+ | 需 C++20 |
 | CMake | 3.24+ | |
 | ROS 2 Humble | （native 可选） | Native full 构建可仅为 FastDDS/FastCDR 头文件、库与生成器元数据 source ROS 2：`sudo apt install ros-humble-fastrtps`。**不需要** rcl 运行时。AArch64 交叉构建使用[交叉编译指南](docs/guides/cross-compilation.md)中的源码构建 DDS prefix workflow。OHOS 小艺 Humble compile-only 路径见[OHOS 指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md)，不要把 host ROS 2 当作目标依赖来源。 |
-| FastCDR | 2.x | 从源码构建或来自 `_deps/` |
+| Fast DDS / Fast-CDR | 按 provider 锁定 | `SOURCE_FASTDDS2` 使用 2.6.12/1.0.29，`SOURCE_FASTDDS3` 使用 3.2.2/2.3.0；完整矩阵见上文 |
 
 ## 构建
 

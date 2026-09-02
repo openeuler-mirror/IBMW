@@ -1,0 +1,12 @@
+diff --git a/include/cpptoml.h b/include/cpptoml.h
+index b8d41f5..842159e 100644
+--- a/include/cpptoml.h
++++ b/include/cpptoml.h
+@@ -12,6 +12,7 @@
+ #include <clocale>
+ #include <cstdint>
+ #include <cstring>
++#include <limits>
+ #include <fstream>
+ #include <iomanip>
+ #include <map>

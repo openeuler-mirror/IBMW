@@ -1,9 +1,24 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
 
+if(IBMW_DDS_PROVIDER STREQUAL "SOURCE_FASTDDS2")
+  set(_ibmw_fastdds_source_url
+      "https://codeload.github.com/eProsima/Fast-DDS/tar.gz/ac5c7b9014cd5b2bebf9c4b04dc229ca5a0a4338")
+  set(_ibmw_fastdds_source_url_hash
+      "SHA256=017401b2e6749ca382418b08474423c6bf35b8cdc489c69a4aff3b9401231305")
+else()
+  set(_ibmw_fastdds_source_url
+      "https://github.com/eProsima/Fast-DDS/archive/refs/tags/v3.2.2.tar.gz")
+  set(_ibmw_fastdds_source_url_hash
+      "SHA256=243699d3b2f9a97012d74c3369abe705aaab0700712f3d9ecbd9f705a336b044")
+endif()
+
 set(IBMW_FASTDDS_SOURCE_URL
-    "https://github.com/eProsima/Fast-DDS/archive/refs/tags/v3.2.2.tar.gz"
+    "${_ibmw_fastdds_source_url}"
     CACHE STRING "Fast DDS source archive URL for IBMW source-prefix builds.")
+set(IBMW_FASTDDS_SOURCE_URL_HASH
+    "${_ibmw_fastdds_source_url_hash}"
+    CACHE STRING "Fast DDS source archive hash for IBMW source-prefix builds.")
 set(IBMW_FASTDDS_SOURCE_DIR
     ""
     CACHE PATH "Optional local Fast DDS source tree for IBMW source-prefix builds.")
@@ -94,6 +109,7 @@ endif()
 
 ibmw_add_source_prefix_external_project(ibmw_source_fastdds
   URL "${IBMW_FASTDDS_SOURCE_URL}"
+  URL_HASH "${IBMW_FASTDDS_SOURCE_URL_HASH}"
   SOURCE_DIR "${IBMW_FASTDDS_SOURCE_DIR}"
   DEPENDS ibmw_source_tinyxml2 ibmw_source_foonathan_memory ibmw_source_asio ibmw_source_fastcdr
   CMAKE_ARGS

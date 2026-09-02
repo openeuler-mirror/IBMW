@@ -4,6 +4,9 @@
 set(IBMW_ASIO_SOURCE_URL
     "https://github.com/chriskohlhoff/asio/archive/asio-1-30-2.tar.gz"
     CACHE STRING "Asio source archive URL for IBMW source-prefix builds.")
+set(IBMW_ASIO_SOURCE_URL_HASH
+    "SHA256=755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8"
+    CACHE STRING "Asio source archive hash for IBMW source-prefix builds.")
 set(IBMW_ASIO_SOURCE_DIR
     ""
     CACHE PATH "Optional local Asio source tree for IBMW source-prefix builds.")
@@ -52,6 +55,7 @@ endif()
 
 ibmw_add_source_prefix_header_project(ibmw_source_asio
   URL "${IBMW_ASIO_SOURCE_URL}"
+  URL_HASH "${IBMW_ASIO_SOURCE_URL_HASH}"
   SOURCE_DIR "${IBMW_ASIO_SOURCE_DIR}"
   INSTALL_COMMAND
     "${CMAKE_COMMAND}"

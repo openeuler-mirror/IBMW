@@ -18,7 +18,11 @@ else()
   FetchContent_Declare(
     cpptoml
     URL ${cpptoml_DOWNLOAD_URL}
+    URL_HASH SHA256=11b1c07132d23e85071cef3d0fe9bc605de731fcd1b1c3f3d43ed09a6fd7a850
     DOWNLOAD_EXTRACT_TIMESTAMP ON
+    PATCH_COMMAND
+      patch --forward --strip=1
+      --input=${CMAKE_CURRENT_LIST_DIR}/patches/cpptoml-0.1.0-limits.patch
     OVERRIDE_FIND_PACKAGE)
 endif()
 
@@ -28,23 +32,10 @@ function(get_cpptoml)
   if(NOT cpptoml_POPULATED)
     FetchContent_Populate(cpptoml)
 
-    file(READ ${cpptoml_SOURCE_DIR}/include/cpptoml.h CPPTOML_TMP_VAR)
-    string(REPLACE "#include <cstring>" "#include <limits>" CPPTOML_TMP_VAR "${CPPTOML_TMP_VAR}")
-    file(WRITE ${cpptoml_SOURCE_DIR}/include/cpptoml.h "${CPPTOML_TMP_VAR}")
+    set(CPPTOML_BUILD_EXAMPLES OFF CACHE BOOL "Build cpptoml examples" FORCE)
 
-    file(READ ${cpptoml_SOURCE_DIR}/cmake/cpptomlConfig.cmake.in CPPTOML_TMP_VAR)
-    string(REPLACE "\n" ";" CPPTOML_TMP_VAR_LINES "${CPPTOML_TMP_VAR}")
-    list(LENGTH CPPTOML_TMP_VAR_LINES CPPTOML_TMP_VAR_LINES_LENGTH)
-    if(CPPTOML_TMP_VAR_LINES_LENGTH GREATER 1)
-      list(REMOVE_AT CPPTOML_TMP_VAR_LINES 0)
-    endif()
-    string(REPLACE ";" "\n" CPPTOML_TMP_VAR_LINES "${CPPTOML_TMP_VAR_LINES}")
-    file(WRITE ${cpptoml_SOURCE_DIR}/cmake/cpptomlConfig.cmake.in "${CPPTOML_TMP_VAR_LINES}")
-
-    file(READ ${cpptoml_SOURCE_DIR}/CMakeLists.txt CPPTOML_TMP_VAR)
-    string(REPLACE " ON" " OFF" CPPTOML_TMP_VAR "${CPPTOML_TMP_VAR}")
-    file(WRITE ${cpptoml_SOURCE_DIR}/CMakeLists.txt "${CPPTOML_TMP_VAR}")
-
+    # Suppress cpptoml's export(PACKAGE) write.
+    set(CMAKE_EXPORT_NO_PACKAGE_REGISTRY ON)
     add_subdirectory(${cpptoml_SOURCE_DIR} ${cpptoml_BINARY_DIR})
 
   endif()
