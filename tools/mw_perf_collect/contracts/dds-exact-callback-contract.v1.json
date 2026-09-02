@@ -1,0 +1,11 @@
+{
+  "schema": "mw_perf.dds_exact_callback_contract.v1",
+  "capability_id": "dds.ordinary.nonplain.single_driver.sync_callback",
+  "record_schema": "mw_perf.dds_exact_callback.binary.v1",
+  "record_size": 72,
+  "byte_order": "little",
+  "kind": "callback_span",
+  "managed_artifact": {"header_size": 160, "magic": "IBMWDCE\\0", "segment_suffix": ".ibce", "payload_hash": "sha256", "finalization": "meta_and_seal"},
+  "eligibility": ["contract_exact_required", "IBMW_COMM_TRACE_full", "managed", "synchronous_callback", "non_plain", "single_driver", "single_handler", "identity_valid", "callback_registration_id_nonzero"],
+  "fail_closed": ["inactive_or_sampled", "async", "missing_identity", "missing_callback_registration_id", "multi_driver", "multi_handler", "partial", "hash_or_seal_failure", "loss_counter_nonzero"]
+}

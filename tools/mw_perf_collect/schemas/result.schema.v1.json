@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ibmw.example/schemas/mw-perf-collect/result.schema.v1.json",
+  "title": "mw-perf-collect run result v1",
+  "type": "object",
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "binaryIdentity": {
+      "type": "object",
+      "properties": {
+        "declared_path": {"type": "string", "minLength": 1},
+        "resolved_path": {"type": "string", "minLength": 1},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 0},
+        "size": {"type": "integer", "minimum": 0},
+        "mtime_ns": {"type": "integer"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "required": ["declared_path", "resolved_path", "device", "inode", "size", "mtime_ns", "sha256"],
+      "additionalProperties": true
+    },
+    "runtimeImageDeclaration": {
+      "type": "object",
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "source": {"enum": ["exe", "maps"]},
+        "expected_path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "required": ["role", "name", "source", "expected_path"],
+      "additionalProperties": true
+    },
+    "runtimeImageObservation": {
+      "type": "object",
+      "properties": {
+        "observation_id": {"$ref": "#/$defs/sha256"},
+        "run_id": {"type": "string"},
+        "pid": {"type": "integer", "minimum": 1},
+        "start_time_ticks": {"type": "integer", "minimum": 0},
+        "source": {"enum": ["exe", "maps"]},
+        "identity_source": {"enum": ["proc_exe", "proc_map_file", "proc_root_path"]},
+        "resolved_path": {"type": "string", "minLength": 1},
+        "device": {"type": "integer", "minimum": 0},
+        "inode": {"type": "integer", "minimum": 0},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "mapping": {"type": "object"}
+      },
+      "required": ["observation_id", "run_id", "pid", "start_time_ticks", "source", "identity_source", "resolved_path", "device", "inode", "size", "sha256"],
+      "additionalProperties": true
+    },
+    "runtimeImageMatch": {
+      "type": "object",
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "source": {"enum": ["exe", "maps"]},
+        "expected_path": {"type": "string", "minLength": 1},
+        "expected_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "observed": {"type": "array", "items": {"$ref": "#/$defs/sha256"}}
+      },
+      "required": ["role", "name", "source", "expected_path", "observed"],
+      "additionalProperties": true
+    },
+    "runtimeImageEvidence": {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": 1},
+        "run_id": {"type": "string"},
+        "required": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/runtimeImageDeclaration"}},
+        "observations": {"type": "array", "items": {"$ref": "#/$defs/runtimeImageObservation"}},
+        "matches": {"type": "array", "items": {"$ref": "#/$defs/runtimeImageMatch"}},
+        "valid": {"type": "boolean"}
+      },
+      "required": ["schema_version", "run_id", "required", "observations", "matches", "valid"],
+      "additionalProperties": true
+    },
+    "sampleArtifact": {
+      "type": "object",
+      "properties": {
+        "relative_path": {"enum": ["raw/process.jsonl", "raw/network.jsonl"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "record_count": {"type": "integer", "minimum": 0}
+      },
+      "required": ["relative_path", "sha256", "record_count"],
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "schema_version": {"const": 1},
+    "tool_version": {"type": "string"},
+    "run_id": {"type": "string"},
+    "adapter": {"enum": ["generic", "ros2", "ibmw"]},
+    "mode": {"enum": ["managed", "attached"]},
+    "run_status": {"enum": ["completed", "partial", "invalid", "failed", "cancelled", "cleanup_failed"]},
+    "sample_count": {"type": "integer", "minimum": 0},
+    "sample_artifacts": {
+      "type": "object",
+      "properties": {
+        "process": {"$ref": "#/$defs/sampleArtifact"},
+        "network": {"$ref": "#/$defs/sampleArtifact"}
+      },
+      "required": ["process", "network"],
+      "additionalProperties": false
+    },
+    "metrics_valid": {"type": "boolean"},
+    "adapter_readiness": {"type": "boolean"},
+    "scenario_contract_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "scenario_contract": {"type": "object", "minProperties": 1},
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "required": {"type": "boolean"},
+        "binaries": {"type": "array", "items": {"$ref": "#/$defs/binaryIdentity"}},
+        "source": {"type": ["object", "null"]},
+        "build": {"type": "object"}
+      },
+      "required": ["required", "binaries", "source", "build"],
+      "allOf": [
+        {
+          "if": {"properties": {"required": {"const": true}}, "required": ["required"]},
+          "then": {"properties": {"binaries": {"minItems": 1}}}
+        }
+      ]
+    },
+    "runtime_images": {
+      "type": "object",
+      "properties": {
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "evidence": {"$ref": "#/$defs/runtimeImageEvidence"}
+      },
+      "required": ["content_sha256", "evidence"],
+      "additionalProperties": true
+    },
+    "metric_availability": {"enum": ["supported", "unsupported", "estimated", "partial"]},
+    "measurement_kind": {"enum": ["observation", "measurement", "derived", "metadata", "producer_latency", "latency_summary_csv", "stage_only", "exact_correlated"]},
+    "runtime_changed": {"type": "boolean"},
+    "business_unchanged": {"type": "boolean"},
+    "candidate_only": {"type": "boolean"},
+    "dds_comm_trace": {"type": "object"},
+    "start_time": {"type": "number"},
+    "end_time": {"type": "number"},
+    "command": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+    "pid": {"type": "integer", "minimum": 1},
+    "pid_start_time_ticks": {"type": "integer", "minimum": 0},
+    "sut_returncode": {"type": "integer"},
+    "states": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "latency_artifact": {
+      "type": "object",
+      "properties": {
+        "required": {"type": "boolean"},
+        "status": {"enum": ["supported", "unsupported", "stale", "invalid", "partial"]},
+        "record_count": {"type": "integer", "minimum": 0},
+        "topic": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"]},
+        "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "provenance": {"type": "object"}
+      },
+      "required": ["required", "status", "record_count", "topic", "type", "provenance"]
+    },
+    "comparison_schema": {"const": "mw_perf.comparison-metadata.v1"},
+    "contract": {}, "profile": {}, "workload": {}, "resource_scope": {},
+    "order": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["A", "B", "C"]}},
+    "comparison_lane": {"enum": ["A", "B", "C"]},
+    "comparison_block_id": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]},
+    "resource_collection": {"type": "object", "properties": {"include_descendants": {"type": "boolean"}, "network_interfaces": {"type": "array", "items": {"type": "string"}}}, "required": ["include_descendants", "network_interfaces"]},
+    "artifacts": {"type": "object", "properties": {"latency": {"type": "object", "properties": {"schema": {"const": "mw_perf.latency.csv.v1"}, "required": {"type": "boolean"}, "status": {"enum": ["supported", "unsupported", "stale", "invalid"]}, "label": {"type": "string"}, "record_count": {"type": "integer", "minimum": 0}, "content_sha256": {"$ref": "#/$defs/sha256"}, "provenance": {"type": "object"}}, "required": ["schema", "required", "status"]}}}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "type": "object",
+            "properties": {"required": {"const": true}},
+            "required": ["required"]
+          }
+        },
+        "required": ["provenance"]
+      },
+      "then": {"required": ["runtime_images"]}
+    }
+  ],
+  "required": ["schema_version", "tool_version", "run_id", "adapter", "mode", "run_status", "scenario_contract_hash", "metric_availability", "measurement_kind", "start_time", "end_time", "pid", "pid_start_time_ticks", "states", "sample_count", "sample_artifacts", "metrics_valid", "adapter_readiness"],
+  "additionalProperties": true
+}

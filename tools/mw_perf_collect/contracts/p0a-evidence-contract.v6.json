@@ -1,0 +1,73 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v6",
+  "base_contract_version": "mw_perf.p0a_contract.v5",
+  "artifact_schemas": {
+    "mw_perf.comm_event.v2": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "producer", "finalized", "stream_id", "producer_pid", "producer_start_time_ticks", "clock_domain", "inputs", "event_kind", "key_scope", "writer_guid", "sequence_high", "sequence_low", "reader_guid", "callback_registration_id", "start_ns", "end_ns"],
+      "properties": {
+        "schema": {"const": "mw_perf.comm_event.v2"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "producer": {"const": "mw_perf_collect"},
+        "finalized": {"const": true},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "clock_domain": {"const": "producer_monotonic"},
+        "inputs": {"type": "object", "additionalProperties": false, "required": ["identity_trace", "resolution_content_sha256", "hook_callgraph_content_sha256"], "properties": {"identity_trace": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "source_set_sha256", "record_count"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "source_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"type": "integer", "minimum": 1}}}, "resolution_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "hook_callgraph_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "event_kind": {"enum": ["publish", "receive", "dispatch", "callback"]},
+        "key_scope": {"enum": ["sample", "delivery", "callback_delivery"]},
+        "writer_guid": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+        "sequence_high": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647},
+        "sequence_low": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "reader_guid": {"type": ["string", "null"], "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+        "callback_registration_id": {"type": ["integer", "null"], "minimum": 1, "maximum": 18446744073709551615},
+        "start_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "end_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "allOf": [
+        {"if": {"properties": {"event_kind": {"const": "publish"}}}, "then": {"properties": {"key_scope": {"const": "sample"}, "reader_guid": {"const": null}, "callback_registration_id": {"const": null}}}},
+        {"if": {"properties": {"event_kind": {"const": "receive"}}}, "then": {"properties": {"key_scope": {"const": "delivery"}, "reader_guid": {"type": "string"}, "callback_registration_id": {"const": null}}}},
+        {"if": {"properties": {"event_kind": {"const": "dispatch"}}}, "then": {"properties": {"key_scope": {"const": "delivery"}, "reader_guid": {"type": "string"}, "callback_registration_id": {"const": null}}}},
+        {"if": {"properties": {"event_kind": {"const": "callback"}}}, "then": {"properties": {"key_scope": {"const": "callback_delivery"}, "reader_guid": {"type": "string"}, "callback_registration_id": {"type": "integer", "minimum": 1}}}}
+      ],
+      "additionalProperties": false
+    },
+    "mw_perf.latency_sample.v2": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "producer", "finalized", "stream_id", "producer_pid", "producer_start_time_ticks", "clock_domain", "inputs", "measurement", "unit", "writer_guid", "sequence_high", "sequence_low", "reader_guid", "callback_registration_id", "publish_start_ns", "callback_start_ns", "latency_ns"],
+      "properties": {
+        "schema": {"const": "mw_perf.latency_sample.v2"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "producer": {"const": "mw_perf_collect"},
+        "finalized": {"const": true},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "clock_domain": {"const": "producer_monotonic"},
+        "inputs": {"type": "object", "additionalProperties": false, "required": ["identity_trace", "resolution_content_sha256", "hook_callgraph_content_sha256"], "properties": {"identity_trace": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "source_set_sha256", "record_count"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "source_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"type": "integer", "minimum": 1}}}, "resolution_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "hook_callgraph_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "measurement": {"const": "publish_start_to_callback_start"},
+        "unit": {"const": "ns"},
+        "writer_guid": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+        "sequence_high": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647},
+        "sequence_low": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "reader_guid": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+        "callback_registration_id": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "publish_start_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "callback_start_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "latency_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      },
+      "additionalProperties": false
+    }
+  },
+  "artifact_overrides": [
+    {"universe": "collection", "relative_path": "normalized/comm_events.jsonl", "schema_version": "mw_perf.comm_event.v2", "format": "jsonl", "record_count_rule": "physical_lines", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "normalized/latency_samples.jsonl", "schema_version": "mw_perf.latency_sample.v2", "format": "jsonl", "record_count_rule": "physical_lines", "min_record_count": 1, "finalization": "complete"}
+  ]
+}

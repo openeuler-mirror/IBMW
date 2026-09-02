@@ -1,0 +1,69 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v8",
+  "base_contract_version": "mw_perf.p0a_contract.v7",
+  "artifact_schemas": {
+    "mw_perf.trace_quality.v1": {},
+    "mw_perf.communication_delivery.v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "stream_id", "producer_pid", "producer_start_time_ticks", "producer", "finalized", "inputs", "expectations", "observed", "correctness", "scope", "payload_ordinal_claim", "callback_order_basis", "callback_entry_order_claim", "coverage", "conclusion_scope", "conclusion"],
+      "properties": {
+        "schema": {"const": "mw_perf.communication_delivery.v2"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "producer": {"const": "mw_perf_collect"},
+        "finalized": {"const": true},
+        "inputs": {
+          "type": "object", "additionalProperties": false,
+          "required": ["registration_contract_sha256", "raw_source_set_sha256", "resolution_content_sha256", "identity_trace", "hook_callgraph", "comm_events", "latency_samples", "communication_latency"],
+          "properties": {
+            "registration_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "raw_source_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolution_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "identity_trace": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "source_set_sha256", "record_count"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "source_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"const": 1000}}},
+            "hook_callgraph": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "delivery_set_sha256"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "delivery_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+            "comm_events": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "record_count"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"const": 4000}}},
+            "latency_samples": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "record_count"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"const": 1000}}},
+            "communication_latency": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "sample_set_sha256"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sample_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+          }
+        },
+        "expectations": {"type": "object", "additionalProperties": false, "required": ["publish_count", "readers_per_sample", "ordering_policy"], "properties": {"publish_count": {"const": 1000}, "readers_per_sample": {"const": 1}, "ordering_policy": {"const": "dds_identity_monotonic_stage_and_callback_completion_records"}}},
+        "observed": {
+          "type": "object", "additionalProperties": false,
+          "required": ["publish", "receive", "dispatch", "callback", "unique_sample_keys", "unique_delivery_keys", "distinct_reader_guids", "sample_set", "delivery_set"],
+          "properties": {
+            "publish": {"const": 1000}, "receive": {"const": 1000}, "dispatch": {"const": 1000}, "callback": {"const": 1000},
+            "unique_sample_keys": {"const": 1000}, "unique_delivery_keys": {"const": 1000}, "distinct_reader_guids": {"const": 1},
+            "sample_set": {"type": "object", "additionalProperties": false, "required": ["count", "sha256"], "properties": {"count": {"const": 1000}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+            "delivery_set": {"type": "object", "additionalProperties": false, "required": ["count", "sha256"], "properties": {"count": {"const": 1000}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+          }
+        },
+        "correctness": {
+          "type": "object", "additionalProperties": false,
+          "required": ["complete_stage_set_equality", "complete_callback_set_equality", "unique_identities", "exactly_one_reader_per_sample", "publish_raw_order_monotonic", "receive_raw_order_monotonic", "dispatch_raw_order_monotonic", "callback_completion_record_order_monotonic", "missing_count", "duplicate_count", "out_of_order_count", "nonzero_status_count", "trace_loss_and_exclusions_count"],
+          "properties": {
+            "complete_stage_set_equality": {"const": true}, "complete_callback_set_equality": {"const": true}, "unique_identities": {"const": true}, "exactly_one_reader_per_sample": {"const": true},
+            "publish_raw_order_monotonic": {"const": true}, "receive_raw_order_monotonic": {"const": true}, "dispatch_raw_order_monotonic": {"const": true}, "callback_completion_record_order_monotonic": {"const": true},
+            "missing_count": {"const": 0}, "duplicate_count": {"const": 0}, "out_of_order_count": {"const": 0}, "nonzero_status_count": {"const": 0}, "trace_loss_and_exclusions_count": {"const": 0}
+          }
+        },
+        "scope": {"const": "transport_identity_events_only"},
+        "payload_ordinal_claim": {"const": "none"},
+        "callback_order_basis": {"const": "exact_record_submission_at_callback_exit"},
+        "callback_entry_order_claim": {"const": "none"},
+        "coverage": {"const": "full"},
+        "conclusion_scope": {"const": "run_scoped_transport_delivery_correctness"},
+        "conclusion": {"const": "pass"}
+      }
+    }
+  },
+  "artifact_overrides": [
+    {"universe": "collection", "relative_path": "validation/communication_delivery.json", "schema_version": "mw_perf.communication_delivery.v2", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "validation/trace_quality.json", "schema_version": "mw_perf.trace_quality.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"}
+  ]
+}

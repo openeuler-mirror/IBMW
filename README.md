@@ -52,6 +52,10 @@ all with DDS IDL / FastCDR as the primary type system.
 | [ROS2 Action DDS-only Adapter Guide](docs/experimental/ros2-action-dds-only-adapter-guide.md) | Experimental low-code developer guide for DDS-only Action servers |
 | [API Reference](docs/reference/api-reference.md) | Complete C++ SDK, C ABI, extension, and package API |
 | [Iceoryx Benchmark](docs/guides/transport-benchmark.md) | 7-sample zero-copy vs DDS vs TCP latency tutorial with reproduction recipe |
+| [Performance Collection Guide, Chinese](docs/guides/performance-collection.zh.md) | ROS2/IBMW collection, validation, Core Metrics, artifacts, and A/B/C prototype boundaries |
+| [Performance Observability Design, Chinese](docs/architecture/performance-observability-design.zh.md) | Unified measurement contracts and implemented/planned capability boundaries |
+| [Performance Observability Implementation, Chinese](docs/contributing/performance-observability-implementation.zh.md) | Stable delivery and maintenance boundaries for the three observability workstreams |
+| ROS2 latency clock contract | A producer `completion` record includes `clock_domain`; the only supported value is `producer_monotonic`. Legacy or unknown values are diagnostic-only and produce no metric or comparison conclusion |
 | [Ecosystem Resources](docs/ecosystem/README.md) | Human-facing indexes for public migration and SDK assets |
 | [Release Notes](docs/releases/0.1.0.md) | Public notes and compatibility limits for version 0.1.0 |
 | [ibmw-template](ibmw-template/) | Starter project with 8 demos plus an extension-loading example covering the supported message type systems |

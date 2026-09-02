@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "mw_perf.evidence_campaign_seal.v1",
+  "type": "object", "required": ["schema", "campaign_id", "manifest_sha256", "validation_sha256", "registration_set_sha256", "campaign_root_sha256", "finalized"],
+  "properties": {
+    "schema": {"const": "mw_perf.evidence_campaign_seal.v1"}, "campaign_id": {"type": "string", "minLength": 1},
+    "manifest_sha256": {"$ref": "#/$defs/hash"}, "validation_sha256": {"$ref": "#/$defs/hash"}, "registration_set_sha256": {"$ref": "#/$defs/hash"}, "campaign_root_sha256": {"$ref": "#/$defs/hash"}, "finalized": {"const": true}
+  }, "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false
+}

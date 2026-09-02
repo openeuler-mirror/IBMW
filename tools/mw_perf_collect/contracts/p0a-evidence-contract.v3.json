@@ -1,0 +1,97 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v3",
+  "base_contract_version": "mw_perf.p0a_contract.v2",
+  "artifact_schemas": {
+    "mw_perf.p0a.resolution.v2": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "finalized", "resolved", "conclusion", "producer", "declaration_sha256", "declarations", "observations", "matches"],
+      "properties": {
+        "schema": {"const": "mw_perf.p0a.resolution.v2"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"type": "string", "minLength": 1},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "finalized": {"const": true},
+        "resolved": {"const": true},
+        "conclusion": {"const": "pass"},
+        "producer": {"const": "mw_perf_collect"},
+        "declaration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "declarations": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["role", "name", "source", "expected_path", "sha256", "expected_device", "expected_inode", "expected_size"],
+            "properties": {
+              "role": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "source": {"enum": ["exe", "maps"]},
+              "expected_path": {"type": "string", "pattern": "^/"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "expected_device": {"type": "integer", "minimum": 0},
+              "expected_inode": {"type": "integer", "minimum": 0},
+              "expected_size": {"type": "integer", "minimum": 0}
+            },
+            "additionalProperties": false
+          }
+        },
+        "observations": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["observation_id", "run_id", "pid", "start_time_ticks", "source", "resolved_path", "device", "inode", "size", "sha256", "identity_source"],
+            "properties": {
+              "observation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "run_id": {"type": "string", "minLength": 1},
+              "pid": {"type": "integer", "minimum": 1},
+              "start_time_ticks": {"type": "integer", "minimum": 0},
+              "source": {"enum": ["exe", "maps"]},
+              "resolved_path": {"type": "string", "pattern": "^/"},
+              "device": {"type": "integer", "minimum": 0},
+              "inode": {"type": "integer", "minimum": 0},
+              "size": {"type": "integer", "minimum": 0},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "identity_source": {"enum": ["proc_exe", "proc_map_file", "proc_root_path"]},
+              "mapping": {
+                "type": "object",
+                "required": ["start_address", "end_address", "permissions", "device", "inode", "deleted"],
+                "properties": {
+                  "start_address": {"type": "string", "pattern": "^[0-9a-f]+$"},
+                  "end_address": {"type": "string", "pattern": "^[0-9a-f]+$"},
+                  "permissions": {"type": "string", "pattern": "^[r-][w-]x[ps]$"},
+                  "device": {"type": "string", "pattern": "^[0-9a-f]+:[0-9a-f]+$"},
+                  "inode": {"type": "integer", "minimum": 0},
+                  "deleted": {"type": "boolean"}
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "matches": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["role", "name", "source", "expected_path", "expected_sha256", "expected_device", "expected_inode", "expected_size", "observed"],
+            "properties": {
+              "role": {"type": "string", "minLength": 1},
+              "name": {"type": "string", "minLength": 1},
+              "source": {"enum": ["exe", "maps"]},
+              "expected_path": {"type": "string", "pattern": "^/"},
+              "expected_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "expected_device": {"type": "integer", "minimum": 0},
+              "expected_inode": {"type": "integer", "minimum": 0},
+              "expected_size": {"type": "integer", "minimum": 0},
+              "observed": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "artifact_overrides": [
+    {"universe": "proof", "relative_path": "capability/resolution.json", "schema_version": "mw_perf.p0a.resolution.v2", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"}
+  ]
+}

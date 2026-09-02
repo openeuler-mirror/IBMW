@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.rollback_link_closure.v1",
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "basicIdentity": {"type": "object", "additionalProperties": false, "required": ["identity", "size", "sha256"], "properties": {"identity": {"type": "string", "minLength": 1}, "size": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "fileIdentity": {"type": "object", "additionalProperties": false, "required": ["class", "identity", "size", "sha256"], "properties": {"class": {"enum": ["fresh_object", "fresh_library", "provider_library", "external_provider_library", "system_library", "fresh_output"]}, "identity": {"type": "string", "minLength": 1}, "size": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "token": {"type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": {"kind": {"enum": ["tool", "flag", "output", "input", "argument"]}, "value": {"type": ["string", "integer"]}}},
+    "plan": {"type": "object", "additionalProperties": false, "required": ["target", "image", "plan", "responses", "tokens", "inputs", "output", "closure_sha256"], "properties": {"target": {"enum": ["ibmw_dds_extension", "ibmw_dds_trace_off_business_roundtrip"]}, "image": {"enum": ["extension", "executable"]}, "plan": {"$ref": "#/$defs/basicIdentity"}, "responses": {"type": "array", "items": {"$ref": "#/$defs/basicIdentity"}}, "tokens": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/token"}}, "inputs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/fileIdentity"}}, "output": {"$ref": "#/$defs/fileIdentity"}, "closure_sha256": {"$ref": "#/$defs/hash"}}}
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "plans", "content_sha256"],
+  "properties": {"schema": {"const": "mw_perf.rollback_link_closure.v1"}, "plans": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/plan"}}, "content_sha256": {"$ref": "#/$defs/hash"}}
+}

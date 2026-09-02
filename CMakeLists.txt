@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 include(CMakeDependentOption)
 include(CheckCXXSourceCompiles)
+include(GNUInstallDirs)
 
 # ============================================================================
 # Core options
@@ -468,6 +469,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # Add subdirectory
 # ============================================================================
 add_subdirectory(src)
+add_subdirectory(tools)
 
 # ============================================================================
 # Installation

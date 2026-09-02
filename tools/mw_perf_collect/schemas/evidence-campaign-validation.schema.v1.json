@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "mw_perf.evidence_campaign_validation.v1",
+  "type": "object", "required": ["schema", "campaign_id", "collector_authored", "valid", "classification", "checks"],
+  "properties": {
+    "schema": {"const": "mw_perf.evidence_campaign_validation.v1"}, "campaign_id": {"type": "string", "minLength": 1},
+    "collector_authored": {"const": true}, "valid": {"const": true},
+    "classification": {"type": "object", "required": ["classification", "failure_code", "metric_availability", "valid_for_comparison"], "properties": {"classification": {"const": "candidate"}, "failure_code": {"const": "P0A_ARTIFACT"}, "metric_availability": {"const": "unsupported"}, "valid_for_comparison": {"const": false}}, "additionalProperties": false},
+    "checks": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/check"}}
+  },
+  "$defs": {
+    "check": {"type": "object", "required": ["role", "object_sha256", "generic_valid", "specialized_valid"], "properties": {"role": {"enum": ["exact_anchor", "fault_evidence_tamper", "fault_runtime_matrix", "rollback_trace_off"]}, "object_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "generic_valid": {"const": true}, "specialized_valid": {"const": true}}, "additionalProperties": false}
+  }, "additionalProperties": false
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.rollback_evidence_manifest.v1",
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": ["sha256", "size", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0},
+        "role": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "type": "object",
+  "required": ["schema", "expected_files"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "mw_perf.rollback_evidence_manifest.v1"},
+    "expected_files": {
+      "type": "object",
+      "required": ["build_identity.json", "build_plan.json", "compile_source_inventory.json", "images/executable", "images/extension", "link_closure.json", "provider_identity.json", "rollback_trace_off.json", "runtime_resolution.json", "symbol_audit.json"],
+      "additionalProperties": false,
+      "properties": {
+        "build_identity.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "build_identity"}}}]},
+        "build_plan.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "build_plan"}}}]},
+        "compile_source_inventory.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "compile_inventory"}}}]},
+        "images/executable": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "executable_image"}}}]},
+        "images/extension": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "extension_image"}}}]},
+        "link_closure.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "link_closure"}}}]},
+        "provider_identity.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "provider_identity"}}}]},
+        "rollback_trace_off.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "report"}}}]},
+        "runtime_resolution.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "runtime_resolution"}}}]},
+        "symbol_audit.json": {"allOf": [{"$ref": "#/$defs/entry"}, {"properties": {"role": {"const": "symbol_audit"}}}]}
+      }
+    }
+  }
+}

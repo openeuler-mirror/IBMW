@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ibmw.example/schemas/mw-perf-collect/ros2-preflight.schema.v1.json",
+  "title": "mw-perf ROS 2 P0a preflight v1",
+  "type": "object",
+  "required": ["schema", "pid", "ros2_command", "environment", "ros2_pkg_prefix", "process_identity", "process", "ros2_tracing", "middleware_libraries", "required_runtime_libraries", "claims"],
+  "properties": {
+    "schema": {"const": "mw_perf.ros2.preflight.v1"},
+    "pid": {"type": ["integer", "null"], "minimum": 1},
+    "ros2_command": {"type": "object", "required": ["path", "trusted"], "properties": {"path": {"type": ["string", "null"], "pattern": "^/"}, "trusted": {"type": "boolean"}}, "allOf": [{"if": {"properties": {"trusted": {"const": true}}, "required": ["trusted"]}, "then": {"properties": {"path": {"type": "string", "pattern": "^/"}}}}]},
+    "environment": {"type": "object", "required": ["prefixes"], "properties": {"prefixes": {"type": "array", "items": {"type": "string"}}}},
+    "ros2_pkg_prefix": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+    "process_identity": {"type": "object", "required": ["start_ticks_before", "start_ticks_after", "valid", "reason"], "properties": {"start_ticks_before": {"type": ["integer", "null"]}, "start_ticks_after": {"type": ["integer", "null"]}, "valid": {"type": "boolean"}, "reason": {"type": ["string", "null"]}}},
+    "process": {"type": "object", "required": ["maps", "dynamic_library_resolution", "resolved_libraries"], "properties": {"maps": {"type": "array", "items": {"$ref": "#/$defs/mapping"}}, "dynamic_library_resolution": {"$ref": "#/$defs/command"}, "resolved_libraries": {"type": "array", "items": {"$ref": "#/$defs/library"}}}},
+    "ros2_tracing": {
+      "type": "object",
+      "required": ["commands", "command_available", "session_command_usable", "tracepoints_enumerated", "required_tracepoints_present", "required_tracepoints", "missing_required_tracepoints", "available", "tracepoints"],
+      "properties": {
+        "commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+        "command_available": {"type": "boolean"},
+        "session_command_usable": {"type": "boolean"},
+        "tracepoints_enumerated": {"type": "boolean"},
+        "required_tracepoints_present": {"type": "boolean"},
+        "required_tracepoints": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)+$"}},
+        "missing_required_tracepoints": {"type": "array", "items": {"type": "string"}},
+        "available": {"type": "boolean"},
+        "tracepoints": {"type": ["array", "null"], "items": {"type": "string"}}
+      },
+      "allOf": [{"if": {"properties": {"available": {"const": true}}, "required": ["available"]}, "then": {"properties": {"command_available": {"const": true}, "session_command_usable": {"const": true}, "tracepoints_enumerated": {"const": true}, "required_tracepoints_present": {"const": true}, "required_tracepoints": {"minItems": 1}}}}]
+    },
+    "middleware_libraries": {"type": "array", "items": {"$ref": "#/$defs/library"}},
+    "required_runtime_libraries": {"type": "object", "required": ["configured", "all_capability_verified", "matches"], "properties": {"configured": {"type": "boolean"}, "all_capability_verified": {"type": "boolean"}, "matches": {"type": "array", "items": {"type": "object", "required": ["id", "matched"], "properties": {"id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}, "matched": {"type": "boolean"}, "reason": {"type": "string", "minLength": 1}}}}}},
+    "claims": {"type": "object", "properties": {"exact": {"const": false}, "abi_inferred_from_version_name": {"const": false}}, "required": ["exact", "abi_inferred_from_version_name"]}
+  },
+  "$defs": {
+    "command": {"type": "object", "required": ["name", "metric_availability", "availability"], "properties": {"name": {"type": "string"}, "metric_availability": {"enum": ["supported", "not_available"]}, "availability": {"enum": ["supported", "not_available"]}}},
+    "mapping": {"type": "object", "required": ["path", "address", "perms", "offset", "device", "inode", "deleted"], "properties": {"path": {"type": "string"}, "address": {"type": "string"}, "perms": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "device": {"type": "string", "pattern": "^[0-9a-fA-F]+:[0-9a-fA-F]+$"}, "inode": {"type": "integer", "minimum": 0}, "deleted": {"type": "boolean"}}},
+    "library": {
+      "type": "object",
+      "required": ["path", "status", "verification", "observed_in_proc_maps", "mapping", "mapped_identity_matches", "sha256", "fd_device", "fd_inode", "required", "expected_identity_match", "capability_verified"],
+      "properties": {
+        "path": {"type": "string"},
+        "role": {"const": "fast_dds_or_rmw"},
+        "status": {"enum": ["candidate", "identity_verified", "unverifiable_deleted"]},
+        "verification": {"enum": ["unverified", "identity_verified", "unverifiable_deleted"]},
+        "observed_in_proc_maps": {"const": true},
+        "mapping": {"$ref": "#/$defs/mapping"},
+        "mapped_identity_matches": {"type": "boolean"},
+        "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "fd_device": {"type": ["string", "null"]},
+        "fd_inode": {"type": ["integer", "null"]},
+        "fd_size": {"type": ["integer", "null"], "minimum": 0},
+        "soname": {"type": ["string", "null"]},
+        "build_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]+$"},
+        "elf_metadata_status": {"enum": ["ok", "missing", "failed"]},
+        "elf_metadata_reason": {"type": ["string", "null"]},
+        "detail": {"type": "string"},
+        "reason": {"type": "string"},
+        "required": {"type": "boolean"},
+        "expected_identity_match": {"type": "boolean"},
+        "capability_verified": {"type": "boolean"}
+      },
+      "allOf": [{"if": {"properties": {"capability_verified": {"const": true}}, "required": ["capability_verified"]}, "then": {"properties": {"verification": {"const": "identity_verified"}, "expected_identity_match": {"const": true}}}}],
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.rollback_build_plan.v1",
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "logical_ref": {"type": "string", "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!.*\\\\)(?!.*(^|/)\\.($|/))(?!.*(^|/)\\.\\.($|/))[^\\u0000-\\u0020]+$"},
+    "compile_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "source_kind", "output", "target", "command_sha256"],
+      "properties": {
+        "source": {"$ref": "#/$defs/logical_ref"},
+        "source_kind": {"enum": ["source", "generated", "external"]},
+        "output": {"$ref": "#/$defs/logical_ref"},
+        "target": {"type": ["string", "null"]},
+        "command_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "link_target": {"type": "object", "additionalProperties": false, "required": ["image", "closure_sha256", "output_sha256", "input_count", "response_count"], "properties": {"image": {"enum": ["extension", "executable"]}, "closure_sha256": {"$ref": "#/$defs/hash"}, "output_sha256": {"$ref": "#/$defs/hash"}, "input_count": {"type": "integer", "minimum": 1}, "response_count": {"type": "integer", "minimum": 0}}},
+    "link_summary": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "targets"], "properties": {"content_sha256": {"$ref": "#/$defs/hash"}, "targets": {"type": "object", "additionalProperties": false, "required": ["ibmw_dds_extension", "ibmw_dds_trace_off_business_roundtrip"], "properties": {"ibmw_dds_extension": {"$ref": "#/$defs/link_target"}, "ibmw_dds_trace_off_business_roundtrip": {"$ref": "#/$defs/link_target"}}}}}
+  },
+  "type": "object",
+  "required": ["schema", "build_identity_sha256", "anchor", "compile", "link_closure", "logs"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "mw_perf.rollback_build_plan.v1"},
+    "build_identity_sha256": {"$ref": "#/$defs/hash"},
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_id", "root_manifest_sha256", "evidence_manifest_sha256", "contract_sha256"],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "root_manifest_sha256": {"$ref": "#/$defs/hash"},
+        "evidence_manifest_sha256": {"$ref": "#/$defs/hash"},
+        "contract_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "compile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["records", "record_count", "content_sha256"],
+      "properties": {
+        "records": {"type": "array", "items": {"$ref": "#/$defs/compile_record"}},
+        "record_count": {"type": "integer", "minimum": 2},
+        "content_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "link_closure": {"$ref": "#/$defs/link_summary"},
+    "logs": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/hash"}
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ibmw.example/schemas/mw-perf-collect/validation.schema.v1.json",
+  "title": "mw-perf-collect validation v1",
+  "type": "object",
+  "properties": {
+    "validation_profile": {"enum": ["standard", "p0a"]},
+    "valid_for_collection": {"type": "boolean"},
+    "valid_for_metric": {"type": "boolean"},
+    "valid_for_comparison": {"type": "boolean"},
+    "rules": {"type": "array", "items": {"type": "object", "required": ["name", "passed"]}},
+    "failure_codes": {"type": "array", "items": {"type": "string"}}
+  },
+  "required": ["validation_profile", "valid_for_collection", "valid_for_metric", "valid_for_comparison", "rules", "failure_codes"],
+  "additionalProperties": true
+}

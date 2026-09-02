@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.p0a.runtime_matrix_manifest.v1",
+  "type": "object",
+  "required": ["schema", "matrix_id", "report_sha256", "evidence_manifest_sha256"],
+  "properties": {
+    "schema": {"const": "mw_perf.p0a.runtime_matrix_manifest.v1"},
+    "matrix_id": {"type": "string", "pattern": "^runtime-fault-matrix-[0-9a-f]{24}$"},
+    "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evidence_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

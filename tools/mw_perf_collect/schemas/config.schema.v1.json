@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ibmw.example/schemas/mw-perf-collect/config.schema.v1.json",
+  "title": "mw-perf-collect configuration v1",
+  "type": "object",
+  "properties": {
+    "schema_version": {"const": 1},
+    "sut": {
+      "type": "object",
+      "properties": {
+        "mode": {"enum": ["managed", "attached"]},
+        "command": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+        "pid": {"type": "integer", "minimum": 1},
+        "executable": {"type": "string", "minLength": 1}
+      },
+      "required": ["mode"]
+    },
+    "run": {"type": "object"},
+    "collectors": {"type": "object"},
+    "adapters": {
+      "type": "object",
+      "properties": {
+        "ros2": {
+          "type": "object",
+          "properties": {
+            "ros2_executable": {"type": "string", "pattern": "^/"},
+            "preflight": {"type": "boolean"},
+            "validation_instrumented": {"type": "boolean"},
+            "deployment_mode": {"type": "string"},
+            "required_tracepoints": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)+$"}},
+            "tracing": {"type": "object", "properties": {"required": {"type": "boolean"}}},
+            "required_runtime_libraries": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}, "name": {"type": "string", "minLength": 1}, "path": {"type": "string", "pattern": "^/"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "build_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}, "soname": {"type": "string", "minLength": 1}}, "required": ["id"], "oneOf": [{"required": ["name"], "not": {"required": ["path"]}}, {"required": ["path"], "not": {"required": ["name"]}}], "allOf": [{"anyOf": [{"required": ["sha256"]}, {"required": ["build_id"]}, {"required": ["soname"]}]}]}},
+            "latency_artifact": {
+              "oneOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "object", "properties": {"path": {"type": "string", "minLength": 1}, "directory": {"type": "string", "minLength": 1}, "required": {"type": "boolean"}}, "anyOf": [{"required": ["path"]}, {"required": ["directory"]}]}
+              ]
+            }
+          },
+          "allOf": [{"if": {"anyOf": [{"properties": {"validation_instrumented": {"const": true}}, "required": ["validation_instrumented"]}, {"properties": {"deployment_mode": {"const": "validation_instrumented"}}, "required": ["deployment_mode"]}]}, "then": {"required": ["required_runtime_libraries"]}}, {"if": {"properties": {"tracing": {"properties": {"required": {"const": true}}, "required": ["required"]}}, "required": ["tracing"]}, "then": {"required": ["required_tracepoints"]}}]
+        },
+        "ibmw": {
+          "type": "object",
+          "properties": {
+            "root": {"type": "string", "minLength": 1},
+            "build_dir": {"type": "string", "minLength": 1},
+            "sut_executable": {"type": "string", "minLength": 1},
+            "artifact_binaries": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            "provenance": {
+              "type": "object",
+              "properties": {"required": {"type": "boolean"}, "sut_executable": {"type": "string", "minLength": 1}, "artifact_binaries": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "runtime_images": {"type":"array", "minItems":1, "items":{"type":"object", "properties":{"role":{"type":"string","minLength":1}, "name":{"type":"string","minLength":1}, "source":{"type":"string","enum":["exe","maps"]}, "expected_path":{"type":"string","minLength":1}, "sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}}, "required":["role","name","source","expected_path"]}}},
+              "allOf": [{"if": {"properties": {"required": {"const": true}}, "required": ["required"]}, "then": {"required": ["runtime_images"]}}]
+            },
+            "core_metrics": {
+              "oneOf": [
+                {"type": "string"},
+                {"type": "object", "properties": {"path": {"type": "string"}, "directory": {"type": "string"}, "required": {"type": "boolean"}}, "anyOf": [{"required": ["path"]}, {"required": ["directory"]}]}
+              ]
+            }
+          }
+        }
+      }
+    }
+    ,"scenario_contract": {"type": "object", "minProperties": 1},
+    "comparison": {
+      "type": "object",
+      "properties": {
+        "schema": {"const": "mw_perf.comparison-metadata.v1"},
+        "contract": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+        "profile": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+        "workload": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+        "resource_scope": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+        "order": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["A", "B", "C"]}},
+        "lane": {"enum": ["A", "B", "C"]},
+        "block": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]},
+        "sequence_index": {"type": "integer", "minimum": 0},
+        "order_policy": {"type": "string", "minLength": 1},
+        "order_seed": {"type": "integer", "minimum": 0}
+      },
+      "required": ["schema", "contract", "profile", "workload", "resource_scope", "order", "lane", "block", "sequence_index"]
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "latency": {
+          "type": "object",
+          "properties": {
+            "schema": {"const": "mw_perf.latency.csv.v1"},
+            "format": {"const": "LatencyStats CSV"},
+            "path": {"type": "string", "minLength": 1},
+            "result_path": {"type": "string", "minLength": 1},
+            "required": {"type": "boolean"},
+            "lane": {"enum": ["A", "B", "C"]},
+            "expected_label": {"type": "string", "minLength": 1},
+            "expected_count": {"type": "integer", "minimum": 0}
+          },
+          "required": ["schema", "format", "path", "result_path", "required", "lane", "expected_label", "expected_count"]
+        }
+      }
+    },
+    "p0a_evidence": {"type": "object", "properties": {"run_type": {"type": "string"}, "deployment_mode": {"type": "string"}, "registration_contract_version": {"enum": ["mw_perf.p0a_contract.v1", "mw_perf.p0a_contract.v2", "mw_perf.p0a_contract.v3", "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5", "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8", "mw_perf.p0a_contract.v9"]}, "trace_mode": {"enum": ["sampled", "full"]}, "capability_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}, "path_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"}, "topology_generation": {"type": "string", "minLength": 1}, "measurement_kind": {"enum": ["stage_only", "exact_correlated"]}, "candidate_only": {"type": "boolean"}, "delivery_expectations": {"type": "object", "additionalProperties": false, "properties": {"publish_count": {"const": 1000}, "readers_per_sample": {"const": 1}, "ordering_policy": {"const": "dds_identity_monotonic_stage_and_callback_completion_records"}}, "required": ["publish_count", "readers_per_sample", "ordering_policy"]}, "resolution": {"type": "object", "additionalProperties": false, "properties": {"runtime_images": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "properties": {"role": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}, "source": {"enum": ["exe", "maps"]}, "expected_path": {"type": "string", "pattern": "^/"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "required": ["role", "name", "source", "expected_path", "sha256"]}}, "required": ["runtime_images"]}}}}
+  },
+  "required": ["sut"],
+  "additionalProperties": true,
+  "allOf": [{"if": {"properties": {"p0a_evidence": {"properties": {"run_type": {"const": "p0a_proof"}}, "required": ["run_type"]}, "adapters": {"required": ["ros2"]}}, "required": ["p0a_evidence", "adapters"]}, "then": {"properties": {"adapters": {"properties": {"ros2": {"required": ["required_runtime_libraries"]}}}}}}, {"if": {"required": ["comparison"]}, "then": {"required": ["artifacts"], "properties": {"sut": {"properties": {"mode": {"const": "managed"}}}, "artifacts": {"required": ["latency"]}, "collectors": {"type": "object", "properties": {"process": {"type": "object", "properties": {"include_descendants": {"const": true}}, "required": ["include_descendants"]}, "network": {"type": "object", "properties": {"interfaces": {"const": ["lo"]}}, "required": ["interfaces"]}}, "required": ["process", "network"]}}}}]
+}

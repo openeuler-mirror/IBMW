@@ -1,0 +1,14 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v9",
+  "base_contract_version": "mw_perf.p0a_contract.v8",
+  "run_types": {
+    "formal_p0a": {"universes": ["proof", "collection", "observer", "formal_anchor"]}
+  },
+  "artifact_schemas": {},
+  "artifact_overrides": [
+    {"universe": "formal_anchor", "relative_path": "validation/formal_anchor.json", "schema_version": "mw_perf.formal_anchor.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "validation/trace_quality.json", "schema_version": "mw_perf.trace_quality_formal.v2", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "proof", "relative_path": "validation/fault_injection.json", "schema_version": "mw_perf.fault_injection_formal.v2", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "proof", "relative_path": "validation/rollback.json", "schema_version": "mw_perf.rollback_formal.v2", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"}
+  ]
+}
