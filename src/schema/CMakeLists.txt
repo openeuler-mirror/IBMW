@@ -80,8 +80,8 @@ if(IBMW_BUILD_WITH_ROS2)
 endif()
 
 # DDS extension proto: GenericMsg IDL for DDS extension generic message transport.
-# Gate it on protocols so protocol-free DDS extension builds do not require
-# fastddsgen / IDL codegen.
-if(IBMW_BUILD_DDS_EXTENSION AND IBMW_BUILD_PROTOCOLS)
+# Native DDS extension tests exercise the generated GenericMsg type even in a
+# protocol-free runtime build.
+if(IBMW_BUILD_DDS_EXTENSION AND (IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_TESTS))
   add_subdirectory(extensions/dds_ext_proto)
 endif()

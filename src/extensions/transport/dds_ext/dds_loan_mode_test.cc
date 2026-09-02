@@ -92,7 +92,9 @@ MessageHandlerWrapper MakeHandler(
   handler.info.pkg_path = "pkg";
   handler.info.module_name = std::move(module_name);
   handler.info.msg_type_support_ref = ibmw::util::TypeSupportRef(TestTypeSupport());
-  handler.callback = [observed_value, saw_direct_pointer, calls](auto& frame, auto&& release) {
+  handler.callback = [observed_value, saw_direct_pointer, calls](
+                         auto& frame, auto&& release,
+                         const auto*) {
     ++(*calls);
     *saw_direct_pointer = (frame.msg_ptr != nullptr);
     ibmw::runtime::core::transport::CheckMsg(frame);

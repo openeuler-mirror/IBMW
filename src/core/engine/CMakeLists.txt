@@ -64,8 +64,15 @@ if(IBMW_ENABLE_CORE_METRICS)
   target_sources(${CUR_TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../observability/core_metrics.cc)
   target_compile_definitions(${CUR_TARGET_NAME} PUBLIC IBMW_ENABLE_CORE_METRICS=1)
   if(IBMW_ENABLE_REPORTER_V1)
+    target_sources(${CUR_TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../observability/core_metrics_reporter.cc)
     target_compile_definitions(${CUR_TARGET_NAME} PUBLIC IBMW_ENABLE_REPORTER_V1=1)
+  else()
+    target_sources(${CUR_TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../observability/core_metrics_reporter_stub.cc)
   endif()
+endif()
+if(IBMW_ENABLE_COMM_TRACE)
+  target_sources(${CUR_TARGET_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../observability/comm_trace.cc)
+  target_compile_definitions(${CUR_TARGET_NAME} PUBLIC IBMW_ENABLE_COMM_TRACE=1)
 endif()
 
 # Set head files of target
@@ -216,4 +223,30 @@ if(IBMW_BUILD_TESTS AND test_files)
       "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""
       "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\""
       "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\"")
+
+  set(COMM_TRACE_COMPILE_OUT_TEST_TARGET
+      ${CUR_TARGET_NAME}_comm_trace_compile_out_test)
+  add_executable(
+    ${COMM_TRACE_COMPILE_OUT_TEST_TARGET}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../observability/comm_trace_compile_out_test.cc)
+  target_link_libraries(${COMM_TRACE_COMPILE_OUT_TEST_TARGET}
+                        PRIVATE GTest::gtest_main)
+  target_include_directories(
+    ${COMM_TRACE_COMPILE_OUT_TEST_TARGET}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  add_test(NAME ${COMM_TRACE_COMPILE_OUT_TEST_TARGET}
+           COMMAND $<TARGET_FILE:${COMM_TRACE_COMPILE_OUT_TEST_TARGET}>)
+
+  if(IBMW_ENABLE_COMM_TRACE)
+    set(COMM_TRACE_TEST_TARGET ${CUR_TARGET_NAME}_comm_trace_test)
+    add_executable(
+      ${COMM_TRACE_TEST_TARGET}
+      ${CMAKE_CURRENT_SOURCE_DIR}/../observability/comm_trace_test.cc)
+    target_compile_definitions(${COMM_TRACE_TEST_TARGET}
+                               PRIVATE IBMW_ENABLE_COMM_TRACE=1)
+    target_link_libraries(${COMM_TRACE_TEST_TARGET}
+                          PRIVATE ${CUR_TARGET_NAME} GTest::gtest_main)
+    add_test(NAME ${COMM_TRACE_TEST_TARGET}
+             COMMAND $<TARGET_FILE:${COMM_TRACE_TEST_TARGET}>)
+  endif()
 endif()

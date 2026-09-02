@@ -13,6 +13,7 @@ import signal
 import stat
 import subprocess
 import tarfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -81,12 +82,52 @@ _TRACE_SYMBOL = re.compile(
 _HANDSHAKE_TIMEOUT = 30.0
 _EXIT_TIMEOUT = 30.0
 _LINK_RESPONSE_DEPTH = 8
+_NINJA_COMMAND_TIMEOUT = 30.0
+_MAX_NINJA_COMMAND_OUTPUT = 16 * 1024 * 1024
+_MAX_DEPENDENCY_COUNT = 128
+_MAX_DEPENDENCY_ENTRIES = 500_000
+_MAX_DEPENDENCY_FILE_SIZE = 1024 * 1024 * 1024
+_MAX_DEPENDENCY_BYTES = 16 * 1024 * 1024 * 1024
+_MAX_DEPENDENCY_FILES = _MAX_DEPENDENCY_ENTRIES
+_MAX_DEPENDENCY_DIRECTORIES = _MAX_DEPENDENCY_ENTRIES
+_MAX_DEPENDENCY_TOTAL_BYTES = _MAX_DEPENDENCY_BYTES
+_MAX_DEPENDENCY_DEPTH = 128
+_DEPENDENCY_CHECKPOINTS = (
+    "anchor_before_staging", "staged_after_copy", "anchor_after_staging",
+    "staged_after_configure", "anchor_after_configure", "staged_after_build",
+    "anchor_after_build",
+)
 _LINK_TARGET_IMAGES = {
     "ibmw_dds_extension": "extension",
     "ibmw_dds_trace_off_business_roundtrip": "executable",
 }
 _LINK_FILE_RE = re.compile(
     r"(?:\.o|\.obj|\.a|\.lib|\.dylib|\.dll|\.so(?:\.[0-9A-Za-z._-]+)*)$", re.I)
+_PATH_ARGUMENT_OPTIONS = frozenset({
+    "-I", "-F", "-isystem", "-iquote", "-idirafter", "-include-pch",
+    "-include", "-imacros", "-isysroot", "-iframework",
+    "-iframeworkwithsysroot", "-iprefix", "-iwithprefix",
+    "-iwithprefixbefore", "-B",
+    "--include-directory", "--include-directory-after", "--include", "--imacros",
+    "--sysroot", "--include-prefix", "--include-with-prefix",
+    "--include-with-prefix-before", "--prefix", "--gcc-toolchain",
+    "-fplugin", "-specs", "-L", "--library-path", "-R", "-rpath",
+    "--rpath", "-rpath-link", "--rpath-link", "-syslibroot",
+})
+_PATH_ARGUMENT_JOINED_FORMS = tuple(sorted({
+    "--include-directory=", "--include-directory-after=", "--include=", "--imacros=",
+    "--sysroot=", "--include-prefix=", "--include-with-prefix=",
+    "--include-with-prefix-before=", "--prefix=", "--gcc-toolchain=",
+    "--library-path=", "--rpath-link=", "--rpath=",
+    "-iframeworkwithsysroot", "-iwithprefixbefore", "-include-pch=",
+    "-include-pch", "-iframework", "-iwithprefix", "-rpath-link=",
+    "-idirafter", "-isystem=", "-isystem", "-isysroot", "-iquote",
+    "-imacros", "-iprefix", "-include=", "-include", "-syslibroot=",
+    "-fplugin=", "-specs=", "-rpath=", "-I=", "-F=", "-B=", "-L=", "-R=",
+    "-I", "-F", "-B", "-L", "-R",
+}, key=len, reverse=True))
+_FORWARDED_OPTION_MARKERS = frozenset({"-Xclang", "-Xpreprocessor", "-Xlinker"})
+_COMMA_FORWARDED_PREFIXES = ("-Wl,", "-Wp,")
 
 
 def parse_cmake_cache(value: str | Path) -> dict[str, dict[str, str]]:
@@ -119,8 +160,122 @@ def option_delta(anchor: Mapping[str, str], fresh: Mapping[str, str]) -> dict[st
             for name in sorted(set(anchor) | set(fresh)) if anchor.get(name) != fresh.get(name)}
 
 
+def _canonical_argument_path(raw: str, directory: Path) -> Path:
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = directory / candidate
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"command path cannot be resolved: {raw}") from exc
+
+
+def _audit_command_tokens(tokens: Sequence[str], *, directory: Path, anchor_base: Path,
+                          label: str, response_depth: int = 0,
+                          response_stack: tuple[Path, ...] = (),
+                          forwarding_depth: int = 0) -> None:
+    """Reject command path operands that canonically enter the anchor dependency base."""
+    if response_depth > _LINK_RESPONSE_DEPTH:
+        raise RuntimeError(f"{label} response-file expansion depth exceeded")
+    if forwarding_depth > _LINK_RESPONSE_DEPTH:
+        raise RuntimeError(f"{label} forwarded-option expansion depth exceeded")
+    directory = directory.resolve(strict=False)
+    direct_tokens: list[str] = []
+    forwarded: dict[str, list[str]] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _FORWARDED_OPTION_MARKERS:
+            if index + 1 >= len(tokens):
+                raise RuntimeError(f"{label} contains a forwarding option without an operand")
+            forwarded.setdefault(token, []).append(tokens[index + 1])
+            index += 2
+            continue
+        comma_prefix = next((prefix for prefix in _COMMA_FORWARDED_PREFIXES
+                             if token.startswith(prefix)), None)
+        if comma_prefix is not None:
+            components = token[len(comma_prefix):].split(",")
+            if not components or any(not component for component in components):
+                raise RuntimeError(f"{label} contains an empty forwarded option")
+            forwarded.setdefault(comma_prefix, []).extend(components)
+        else:
+            direct_tokens.append(token)
+        index += 1
+
+    pending_path = False
+    for token in direct_tokens:
+        operands: list[tuple[str, bool]] = []
+        if pending_path:
+            operands.append((token, False))
+            pending_path = False
+        elif token in _PATH_ARGUMENT_OPTIONS:
+            pending_path = True
+            continue
+        elif token.startswith("@") and token != "@":
+            operands.append((token[1:], True))
+        else:
+            matched = False
+            for prefix in _PATH_ARGUMENT_JOINED_FORMS:
+                if token.startswith(prefix) and len(token) > len(prefix):
+                    operands.append((token[len(prefix):], False))
+                    matched = True
+                    break
+            if not matched:
+                if not token.startswith("-"):
+                    operands.append((token, False))
+                elif "=" in token:
+                    assigned = token.split("=", 1)[1]
+                    if assigned and (Path(assigned).is_absolute() or "/" in assigned):
+                        operands.append((assigned, False))
+        for raw, response in operands:
+            if not raw:
+                raise RuntimeError(f"{label} contains an empty path operand")
+            for path_value in raw.split(os.pathsep) if not response else (raw,):
+                canonical = _canonical_argument_path(path_value, directory)
+                if _within(canonical, anchor_base):
+                    raise RuntimeError(
+                        f"{label} references anchor dependency base: {path_value}")
+                if not response:
+                    continue
+                if canonical in response_stack:
+                    raise RuntimeError(f"{label} response-file cycle detected")
+                try:
+                    data, _identity = _read_immutable_file(
+                        canonical, f"{label} response file", max_size=16 * 1024 * 1024)
+                    response_tokens = shlex.split(data.decode("utf-8"), posix=True)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    raise RuntimeError(f"{label} response file cannot be audited: {path_value}") from exc
+                _audit_command_tokens(
+                    response_tokens, directory=directory, anchor_base=anchor_base, label=label,
+                    response_depth=response_depth + 1,
+                    response_stack=response_stack + (canonical,),
+                    forwarding_depth=forwarding_depth)
+    if pending_path:
+        raise RuntimeError(f"{label} contains a path option without an operand")
+    for forwarded_tokens in forwarded.values():
+        _audit_command_tokens(
+            forwarded_tokens, directory=directory, anchor_base=anchor_base,
+            label=label, response_depth=response_depth,
+            response_stack=response_stack, forwarding_depth=forwarding_depth + 1)
+
+
+def _audit_replayed_controls(controls: Mapping[str, str], *, directory: Path,
+                             anchor_base: Path) -> None:
+    for name, value in sorted(controls.items()):
+        try:
+            tokens = [component for token in shlex.split(value, posix=True)
+                      for component in token.split(";") if component]
+        except ValueError as exc:
+            raise RuntimeError(f"replayed control {name} has invalid command quoting") from exc
+        _audit_command_tokens(tokens, directory=directory, anchor_base=anchor_base,
+                              label=f"replayed control {name}")
+
+
 def parse_compile_inventory(value: str | Path, source_root: str | Path | None = None,
-                            build_root: str | Path | None = None) -> dict[str, Any]:
+                            build_root: str | Path | None = None,
+                            anchor_dependency_base: str | Path | None = None,
+                            dependency_source_roots: Mapping[str, str | Path] | None = None
+                            ) -> dict[str, Any]:
     text = value.read_text(encoding="utf-8") if isinstance(value, Path) else value
     records = json.loads(text)
     if not isinstance(records, list) or not records:
@@ -130,6 +285,17 @@ def parse_compile_inventory(value: str | Path, source_root: str | Path | None = 
         raise RuntimeError("strict compile inventory validation requires source and build roots")
     source = Path(source_root).resolve(strict=True) if source_root is not None else None
     build = Path(build_root).resolve(strict=True) if build_root is not None else None
+    anchor_base = (Path(anchor_dependency_base).resolve(strict=True)
+                   if anchor_dependency_base is not None else None)
+    raw_dependency_roots = dependency_source_roots or {}
+    if (not isinstance(raw_dependency_roots, Mapping)
+            or any(not isinstance(name, str)
+                   or not re.fullmatch(r"[A-Za-z0-9_+.-]+", name)
+                   for name in raw_dependency_roots)):
+        raise RuntimeError("compile dependency source name is invalid")
+    dependency_roots = {
+        name: Path(raw_dependency_roots[name]).resolve(strict=True)
+        for name in sorted(raw_dependency_roots)}
     if source_root is not None and Path(source_root) != source:
         raise RuntimeError("source root is not a canonical real path")
     if build_root is not None and Path(build_root) != build:
@@ -152,6 +318,10 @@ def parse_compile_inventory(value: str | Path, source_root: str | Path | None = 
                 raise RuntimeError(f"invalid compile command quoting: {exc}") from exc
         else:
             raise RuntimeError("compile command has neither arguments nor command")
+        if anchor_base is not None:
+            _audit_command_tokens(tokens, directory=Path(record.get("directory", ".")),
+                                  anchor_base=anchor_base,
+                                  label="fresh compile command")
         if any(token == "-DIBMW_ENABLE_COMM_TRACE" or
                token.startswith("-DIBMW_ENABLE_COMM_TRACE=") for token in tokens):
             raise RuntimeError("trace enable token remains in compile commands")
@@ -190,7 +360,25 @@ def parse_compile_inventory(value: str | Path, source_root: str | Path | None = 
                     source_name = "build/" + source_path.relative_to(build).as_posix()
                     source_kind = "generated"
                 except ValueError:
-                    source_name = str(source_path)
+                    matches = []
+                    for name, root in dependency_roots.items():
+                        try:
+                            relative = source_path.relative_to(root)
+                        except ValueError:
+                            continue
+                        matches.append((name, relative))
+                    if len(matches) > 1:
+                        raise RuntimeError("compile source matches multiple dependency roots")
+                    if matches:
+                        name, relative = matches[0]
+                        if not relative.parts:
+                            raise RuntimeError("compile source is a dependency directory")
+                        source_name = f"dependency:{name}/{relative.as_posix()}"
+                    elif dependency_roots:
+                        raise RuntimeError(
+                            f"external compile source is outside registered dependency roots: {source_path}")
+                    else:
+                        source_name = str(source_path)
         elif source_path.name in {"dds_transport_driver.cc", "dds_managed_exact_candidate.cc"}:
             source_name = source_path.name
         else:
@@ -278,9 +466,25 @@ def parse_compile_inventory(value: str | Path, source_root: str | Path | None = 
         else:
             stored_output = str(output_path) if output_path else ""
         stored_source = source_name
+        normalized_tokens = list(tokens)
+        if strict_roots:
+            logical_roots = [(dependency_root, f"dependency:{name}")
+                             for name, dependency_root in dependency_roots.items()]
+            assert source is not None and build is not None
+            logical_roots.extend(((source, "source"), (build, "build")))
+            for token_index, command_token in enumerate(normalized_tokens):
+                for root, logical in sorted(logical_roots,
+                                            key=lambda item: len(str(item[0])), reverse=True):
+                    root_text = str(root)
+                    command_token = command_token.replace(
+                        root_text + os.sep, logical + "/")
+                    if command_token.endswith(root_text):
+                        command_token = command_token[:-len(root_text)] + logical
+                normalized_tokens[token_index] = command_token
         item = {"source": stored_source, "source_kind": source_kind,
                 "output": stored_output, "target": target,
-                "command_sha256": hashlib.sha256("\0".join(tokens).encode()).hexdigest()}
+                "command_sha256": hashlib.sha256(
+                    "\0".join(normalized_tokens).encode()).hexdigest()}
         inventory.append(item)
         (registered_inventory if target in _REGISTERED_TARGETS else other_inventory).append(item)
     for required, expected_target_dir in _REQUIRED_SOURCES.items():
@@ -381,10 +585,71 @@ def _run(argv: Sequence[str], log_base: Path, timeout: float, *, env: Mapping[st
 
 
 def _regular_unique(root: Path, name: str) -> Path:
-    matches = [path for path in root.rglob(name) if path.is_file() and not path.is_symlink()]
+    declared_root = Path(root)
+    try:
+        root_info = declared_root.lstat()
+        canonical_root = declared_root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"regular {name} search root is unavailable") from exc
+    if (stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode)
+            or canonical_root != declared_root):
+        raise RuntimeError(f"regular {name} search root is not a real directory")
+
+    matches: list[Path] = []
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+    # Keep every directory component open while walking.  Path/rglob and
+    # os.walk both have a check/use window in which a replaced parent can
+    # redirect discovery outside the freshly validated root.
+    def walk(directory_fd: int, relative: tuple[str, ...]) -> None:
+        try:
+            with os.scandir(directory_fd) as entries:
+                children = list(entries)
+        except OSError as exc:
+            raise RuntimeError(f"regular {name} search is unavailable") from exc
+        for entry in children:
+            try:
+                info = os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(f"regular {name} match is unavailable or contains a symlink") from exc
+            child_relative = relative + (entry.name,)
+            if stat.S_ISLNK(info.st_mode):
+                raise RuntimeError(f"regular {name} search contains a symlink component")
+            if stat.S_ISDIR(info.st_mode):
+                try:
+                    child_fd = os.open(entry.name, flags | nofollow, dir_fd=directory_fd)
+                except OSError as exc:
+                    raise RuntimeError(f"regular {name} search contains a symlink component") from exc
+                try:
+                    walk(child_fd, child_relative)
+                finally:
+                    os.close(child_fd)
+            elif entry.name == name and stat.S_ISREG(info.st_mode):
+                try:
+                    file_fd = os.open(entry.name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow,
+                                      dir_fd=directory_fd)
+                    try:
+                        opened = os.fstat(file_fd)
+                    finally:
+                        os.close(file_fd)
+                except OSError as exc:
+                    raise RuntimeError(f"regular {name} match is unavailable or contains a symlink") from exc
+                if not stat.S_ISREG(opened.st_mode):
+                    raise RuntimeError(f"regular {name} match is not a regular file")
+                matches.append(canonical_root.joinpath(*child_relative))
+
+    try:
+        root_fd = os.open(canonical_root, flags | nofollow)
+    except OSError as exc:
+        raise RuntimeError(f"regular {name} search root is unavailable") from exc
+    try:
+        walk(root_fd, ())
+    finally:
+        os.close(root_fd)
     if len(matches) != 1:
         raise RuntimeError(f"expected one regular {name}, found {len(matches)}")
-    return matches[0].resolve(strict=True)
+    return matches[0]
 
 
 def _tool_identity(command: str) -> dict[str, Any]:
@@ -419,73 +684,442 @@ def _require_same_source_identity(before: Mapping[str, Any], after: Mapping[str,
         raise RuntimeError("source identity changed during rollback evaluation")
 
 
-def _external_source_identity(root: Path) -> dict[str, Any]:
-    """Hash a real, symlink-free external source tree without build artifacts."""
-    declared = Path(root)
+def _open_directory_chain(path: Path) -> tuple[int, Path]:
+    """Open an absolute directory one no-follow component at a time."""
+    declared = Path(path)
+    if not declared.is_absolute() or declared != Path(os.path.abspath(declared)):
+        raise RuntimeError("external dependency source is not a canonical absolute path")
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open("/", flags)
     try:
-        root_info = declared.lstat()
-        canonical = declared.resolve(strict=True)
-    except OSError as exc:
-        raise RuntimeError(f"external dependency source is unavailable: {declared}") from exc
-    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
-        raise RuntimeError("external dependency source must be a real directory, not a symlink")
-    if canonical != declared:
-        raise RuntimeError("external dependency source is not a canonical real path")
-    cmakelists = canonical / "CMakeLists.txt"
-    try:
-        cmake_info = cmakelists.lstat()
-    except OSError as exc:
-        raise RuntimeError("external dependency source lacks CMakeLists.txt") from exc
-    if stat.S_ISLNK(cmake_info.st_mode) or not stat.S_ISREG(cmake_info.st_mode):
-        raise RuntimeError("external dependency source CMakeLists.txt is not a regular file")
+        for component in declared.parts[1:]:
+            next_fd = os.open(component, flags | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd, declared
+    except BaseException:
+        os.close(fd)
+        raise
 
+
+def _stable_stat(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _dependency_tree(root: Path, destination: Path | None = None, *,
+                     max_entries: int = _MAX_DEPENDENCY_ENTRIES,
+                     max_files: int = _MAX_DEPENDENCY_FILES,
+                     max_directories: int = _MAX_DEPENDENCY_DIRECTORIES,
+                     max_bytes: int = _MAX_DEPENDENCY_BYTES) -> dict[str, Any]:
+    """Hash, and optionally snapshot, a tree through pinned directory descriptors."""
+    try:
+        root_fd, canonical = _open_directory_chain(root)
+    except OSError as exc:
+        raise RuntimeError(f"external dependency source is unavailable or contains a symlink: {root}") from exc
     records: list[dict[str, Any]] = []
-    for path in sorted(canonical.rglob("*"), key=lambda item: item.relative_to(canonical).as_posix()):
-        relative = path.relative_to(canonical).as_posix()
-        before = path.lstat()
-        if stat.S_ISLNK(before.st_mode):
-            raise RuntimeError(f"external dependency source contains a symlink: {relative}")
-        if stat.S_ISDIR(before.st_mode):
-            records.append({"name": relative, "kind": "directory"})
-            continue
-        if not stat.S_ISREG(before.st_mode):
-            raise RuntimeError(f"external dependency source contains a special file: {relative}")
-        data = path.read_bytes()
-        after = path.lstat()
-        stable = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_size,
-                               info.st_mtime_ns, info.st_ctime_ns)
-        if stable(before) != stable(after):
-            raise RuntimeError(f"external dependency source changed while hashing: {relative}")
-        records.append({"name": relative, "kind": "file", "size": len(data),
-                        "sha256": hashlib.sha256(data).hexdigest()})
+    total_bytes = 0
+    file_count = 0
+    directory_count = 0
+    destination_fd: int | None = None
+    try:
+        root_before = os.fstat(root_fd)
+        directory_count += 1
+        if max_directories < directory_count:
+            raise RuntimeError("external dependency source directory limit exceeded")
+        if destination is not None:
+            destination.mkdir(mode=stat.S_IMODE(root_before.st_mode))
+            destination_fd, _ = _open_directory_chain(destination)
+            os.fchmod(destination_fd, stat.S_IMODE(root_before.st_mode))
+        records.append({"name": ".", "kind": "directory",
+                        "mode": stat.S_IMODE(root_before.st_mode)})
+
+        def walk(source_fd: int, target_fd: int | None, prefix: str, depth: int) -> None:
+            nonlocal total_bytes, file_count, directory_count
+            if depth > _MAX_DEPENDENCY_DEPTH:
+                raise RuntimeError("external dependency source depth limit exceeded")
+            try:
+                names = sorted(os.listdir(source_fd))
+            except OSError as exc:
+                raise RuntimeError("external dependency source changed while traversing") from exc
+            for name in names:
+                if not name or name in {".", ".."} or "/" in name:
+                    raise RuntimeError("external dependency source contains an invalid entry name")
+                if len(records) >= max_entries:
+                    raise RuntimeError("external dependency source entry limit exceeded")
+                relative = f"{prefix}/{name}" if prefix else name
+                before = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+                mode = stat.S_IMODE(before.st_mode)
+                if stat.S_ISLNK(before.st_mode):
+                    raise RuntimeError(f"external dependency source contains a symlink: {relative}")
+                if stat.S_ISDIR(before.st_mode):
+                    if directory_count >= max_directories:
+                        raise RuntimeError("external dependency source directory limit exceeded")
+                    child_flags = (os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+                                   | getattr(os, "O_NOFOLLOW", 0))
+                    try:
+                        child_fd = os.open(name, child_flags, dir_fd=source_fd)
+                    except OSError as exc:
+                        raise RuntimeError(
+                            f"external dependency source changed or contains a symlink: {relative}") from exc
+                    target_child = None
+                    try:
+                        if _stable_stat(os.fstat(child_fd)) != _stable_stat(before):
+                            raise RuntimeError(f"external dependency source changed while opening: {relative}")
+                        if target_fd is not None:
+                            os.mkdir(name, mode, dir_fd=target_fd)
+                            target_child = os.open(name, child_flags, dir_fd=target_fd)
+                            os.fchmod(target_child, mode)
+                        records.append({"name": relative, "kind": "directory", "mode": mode})
+                        directory_count += 1
+                        walk(child_fd, target_child, relative, depth + 1)
+                        linked = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+                        if _stable_stat(os.fstat(child_fd)) != _stable_stat(linked):
+                            raise RuntimeError(f"external dependency source changed while copying: {relative}")
+                    finally:
+                        if target_child is not None:
+                            os.close(target_child)
+                        os.close(child_fd)
+                    continue
+                if not stat.S_ISREG(before.st_mode):
+                    raise RuntimeError(f"external dependency source contains a special file: {relative}")
+                if before.st_size > _MAX_DEPENDENCY_FILE_SIZE:
+                    raise RuntimeError(f"external dependency source file size limit exceeded: {relative}")
+                if file_count >= max_files:
+                    raise RuntimeError("external dependency source file count limit exceeded")
+                if total_bytes + before.st_size > max_bytes:
+                    raise RuntimeError("external dependency source byte limit exceeded")
+                try:
+                    source_file = os.open(name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                                          | getattr(os, "O_NOFOLLOW", 0), dir_fd=source_fd)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"external dependency source changed or contains a symlink: {relative}") from exc
+                target_file = None
+                digest = hashlib.sha256()
+                size = 0
+                try:
+                    if _stable_stat(os.fstat(source_file)) != _stable_stat(before):
+                        raise RuntimeError(f"external dependency source changed while opening: {relative}")
+                    if target_fd is not None:
+                        target_file = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                              | getattr(os, "O_CLOEXEC", 0)
+                                              | getattr(os, "O_NOFOLLOW", 0), mode,
+                                              dir_fd=target_fd)
+                        os.fchmod(target_file, mode)
+                    while True:
+                        remaining = min(before.st_size - size, max_bytes - total_bytes - size)
+                        chunk = os.read(source_file, min(1024 * 1024, max(0, remaining) + 1))
+                        if not chunk:
+                            break
+                        if len(chunk) > remaining:
+                            raise RuntimeError(
+                                f"external dependency source grew beyond declared byte budget: {relative}")
+                        size += len(chunk); digest.update(chunk)
+                        if target_file is not None:
+                            view = memoryview(chunk)
+                            while view:
+                                written = os.write(target_file, view)
+                                if written <= 0:
+                                    raise OSError("dependency snapshot write made no progress")
+                                view = view[written:]
+                    linked = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+                    if (_stable_stat(os.fstat(source_file)) != _stable_stat(before)
+                            or _stable_stat(linked) != _stable_stat(before)):
+                        raise RuntimeError(f"external dependency source changed while copying: {relative}")
+                finally:
+                    if target_file is not None:
+                        os.close(target_file)
+                    os.close(source_file)
+                total_bytes += size
+                if total_bytes > max_bytes:
+                    raise RuntimeError("external dependency source byte limit exceeded")
+                records.append({"name": relative, "kind": "file", "mode": mode,
+                                "size": size, "sha256": digest.hexdigest()})
+                file_count += 1
+
+        walk(root_fd, destination_fd, "", 1)
+        if _stable_stat(os.fstat(root_fd)) != _stable_stat(root_before):
+            raise RuntimeError("external dependency source root changed while traversing")
+    finally:
+        if destination_fd is not None:
+            os.close(destination_fd)
+        os.close(root_fd)
+    if file_count < 1:
+        raise RuntimeError("external dependency source contains no regular files")
     return {"path": str(canonical),
-            "file_count": sum(item["kind"] == "file" for item in records),
-            "directory_count": sum(item["kind"] == "directory" for item in records),
+            "file_count": file_count,
+            "directory_count": directory_count,
+            "byte_count": total_bytes,
             "tree_sha256": hashlib.sha256(core._canonical_json_bytes(records)).hexdigest()}
 
 
-def _googletest_source_identity(anchor: Path) -> dict[str, Any]:
-    source = anchor / "_deps" / "googletest-src"
-    return _external_source_identity(source)
+def _external_source_identity(root: Path) -> dict[str, Any]:
+    return _dependency_tree(root)
 
 
-def _require_googletest_cache(cache: Mapping[str, Mapping[str, str]],
-                              canonical_source: Path) -> None:
-    raw = cache.get("googletest_LOCAL_SOURCE", {}).get("value", "")
-    if raw != str(canonical_source):
-        raise RuntimeError("fresh googletest_LOCAL_SOURCE cache mismatch")
+def _canonical_cache_directory(cache: Mapping[str, Mapping[str, str]], name: str,
+                               label: str) -> Path:
+    raw = cache.get(name, {}).get("value", "")
+    if not raw:
+        raise RuntimeError(f"{label} {name} is missing or invalid")
+    declared = Path(raw)
     try:
-        resolved = Path(raw).resolve(strict=True)
-    except OSError as exc:
-        raise RuntimeError("fresh googletest_LOCAL_SOURCE is unavailable") from exc
-    if resolved != canonical_source or Path(raw) != resolved:
-        raise RuntimeError("fresh googletest_LOCAL_SOURCE is not the canonical source")
+        info = declared.lstat()
+        canonical = declared.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"{label} {name} is missing or invalid") from exc
+    if (not raw or not declared.is_absolute() or stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode) or canonical != declared):
+        raise RuntimeError(f"{label} {name} is not a canonical real directory")
+    return canonical
+
+
+def _dependency_override(name: str) -> str:
+    normalized = name.upper()
+    if not re.fullmatch(r"[A-Z0-9_.+-]+", normalized):
+        raise RuntimeError("FetchContent dependency name cannot be normalized safely")
+    return "FETCHCONTENT_SOURCE_DIR_" + normalized
+
+
+def _valid_dependency_relative(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value or value.startswith("/"):
+        return False
+    if value == ".":
+        return True
+    parts = value.split("/")
+    return all(part not in {"", ".", ".."}
+               and re.fullmatch(r"[A-Za-z0-9_+.-]+", part) is not None
+               for part in parts)
+
+
+def _require_remaining_dependency_budget(files: int, directories: int,
+                                         entries: int, byte_count: int) -> None:
+    if files >= _MAX_DEPENDENCY_FILES:
+        raise RuntimeError("external dependency aggregate file count limit exceeded")
+    if directories >= _MAX_DEPENDENCY_DIRECTORIES:
+        raise RuntimeError("external dependency aggregate directory count limit exceeded")
+    if entries >= _MAX_DEPENDENCY_ENTRIES:
+        raise RuntimeError("external dependency aggregate entry limit exceeded")
+    if byte_count >= _MAX_DEPENDENCY_TOTAL_BYTES:
+        raise RuntimeError("external dependency aggregate byte limit exceeded")
+
+
+def _anchor_dependency_sources(cache: Mapping[str, Mapping[str, str]]) -> tuple[Path, list[dict[str, Any]]]:
+    base = _canonical_cache_directory(cache, "FETCHCONTENT_BASE_DIR", "anchor")
+    candidates = sorted((item for item in base.iterdir() if item.name.endswith("-src")),
+                        key=lambda item: item.name)
+    if not candidates:
+        raise RuntimeError("anchor FETCHCONTENT_BASE_DIR contains no dependency source trees")
+    if len(candidates) > _MAX_DEPENDENCY_COUNT:
+        raise RuntimeError("anchor dependency source count limit exceeded")
+    dependencies: list[dict[str, Any]] = []
+    overrides: set[str] = set()
+    aggregate_files = aggregate_directories = aggregate_entries = aggregate_bytes = 0
+    for path in candidates:
+        _require_remaining_dependency_budget(
+            aggregate_files, aggregate_directories, aggregate_entries, aggregate_bytes)
+        name = path.name[:-4]
+        override = _dependency_override(name)
+        if override in overrides:
+            raise RuntimeError("FetchContent dependency override collision")
+        overrides.add(override)
+        bindings = []
+        for variable, item in sorted(cache.items()):
+            raw = item.get("value", "")
+            if not variable.endswith(("_SOURCE_DIR", "_LOCAL_SOURCE")) or not raw:
+                continue
+            candidate = Path(raw)
+            try:
+                resolved = candidate.resolve(strict=True)
+                relative = resolved.relative_to(path)
+            except (OSError, ValueError):
+                continue
+            if candidate != resolved:
+                raise RuntimeError(f"anchor {variable} is not a canonical source binding")
+            bindings.append({"variable": variable, "relative": relative.as_posix()})
+        identity = _dependency_tree(
+            path,
+            max_entries=_MAX_DEPENDENCY_ENTRIES - aggregate_entries,
+            max_files=_MAX_DEPENDENCY_FILES - aggregate_files,
+            max_directories=_MAX_DEPENDENCY_DIRECTORIES - aggregate_directories,
+            max_bytes=_MAX_DEPENDENCY_TOTAL_BYTES - aggregate_bytes)
+        aggregate_files += identity["file_count"]
+        aggregate_directories += identity["directory_count"]
+        aggregate_entries += identity["file_count"] + identity["directory_count"]
+        aggregate_bytes += identity["byte_count"]
+        dependencies.append({"name": name, "override_variable": override,
+                             "cache_bindings": bindings,
+                             "anchor_source": str(path),
+                             "identity": {"anchor_before_staging": identity}})
+    return base, dependencies
+
+
+def _aggregate_dependency_identity(dependencies: Sequence[Mapping[str, Any]], checkpoint: str
+                                   ) -> dict[str, Any]:
+    records = []
+    for dependency in sorted(dependencies, key=lambda item: str(item["name"])):
+        identity = dependency["identity"][checkpoint]
+        records.append({"name": dependency["name"],
+                        "override_variable": dependency["override_variable"],
+                        "cache_bindings": dependency["cache_bindings"],
+                        "file_count": identity["file_count"],
+                        "directory_count": identity["directory_count"],
+                        "byte_count": identity["byte_count"],
+                        "tree_sha256": identity["tree_sha256"]})
+    aggregate = {"dependency_count": len(records),
+                 "file_count": sum(item["file_count"] for item in records),
+                 "directory_count": sum(item["directory_count"] for item in records),
+                 "byte_count": sum(item["byte_count"] for item in records),
+                 "aggregate_sha256": hashlib.sha256(core._canonical_json_bytes(records)).hexdigest()}
+    _require_aggregate_dependency_limits(aggregate)
+    return aggregate
+
+
+def _require_aggregate_dependency_limits(identity: Mapping[str, Any]) -> None:
+    if identity["file_count"] > _MAX_DEPENDENCY_FILES:
+        raise RuntimeError("external dependency aggregate file count limit exceeded")
+    if identity["directory_count"] > _MAX_DEPENDENCY_DIRECTORIES:
+        raise RuntimeError("external dependency aggregate directory count limit exceeded")
+    if identity["file_count"] + identity["directory_count"] > _MAX_DEPENDENCY_ENTRIES:
+        raise RuntimeError("external dependency aggregate entry limit exceeded")
+    if identity["byte_count"] > _MAX_DEPENDENCY_TOTAL_BYTES:
+        raise RuntimeError("external dependency aggregate byte limit exceeded")
+
+
+def _dependency_content_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
+    return {name: identity[name] for name in (
+        "file_count", "directory_count", "byte_count", "tree_sha256")}
+
+
+def _require_dependency_checkpoint(dependencies: Sequence[Mapping[str, Any]], checkpoint: str,
+                                   baseline: str = "anchor_before_staging") -> None:
+    for dependency in dependencies:
+        if (_dependency_content_identity(dependency["identity"][checkpoint]) !=
+                _dependency_content_identity(dependency["identity"][baseline])):
+            raise RuntimeError(
+                f"dependency source identity changed at {checkpoint}: {dependency['name']}")
+
+
+def _record_dependency_checkpoint(dependencies: list[dict[str, Any]], checkpoint: str,
+                                   source_field: str) -> dict[str, Any]:
+    aggregate_files = aggregate_directories = aggregate_entries = aggregate_bytes = 0
+    for dependency in dependencies:
+        _require_remaining_dependency_budget(
+            aggregate_files, aggregate_directories, aggregate_entries, aggregate_bytes)
+        identity = _dependency_tree(
+            Path(dependency[source_field]),
+            max_entries=_MAX_DEPENDENCY_ENTRIES - aggregate_entries,
+            max_files=_MAX_DEPENDENCY_FILES - aggregate_files,
+            max_directories=_MAX_DEPENDENCY_DIRECTORIES - aggregate_directories,
+            max_bytes=_MAX_DEPENDENCY_TOTAL_BYTES - aggregate_bytes)
+        dependency["identity"][checkpoint] = identity
+        aggregate_files += identity["file_count"]
+        aggregate_directories += identity["directory_count"]
+        aggregate_entries += identity["file_count"] + identity["directory_count"]
+        aggregate_bytes += identity["byte_count"]
+    return _aggregate_dependency_identity(dependencies, checkpoint)
+
+
+def _stage_dependency_sources(work: Path, dependencies: list[dict[str, Any]]) -> tuple[Path, Path]:
+    source_cache = work / "source-cache"
+    fresh_base = work / "build" / "_deps"
+    source_cache.mkdir(mode=0o700)
+    fresh_base.mkdir(mode=0o700, parents=True)
+    aggregate_files = aggregate_directories = aggregate_entries = aggregate_bytes = 0
+    for dependency in dependencies:
+        _require_remaining_dependency_budget(
+            aggregate_files, aggregate_directories, aggregate_entries, aggregate_bytes)
+        destination = (source_cache / (dependency["name"] + "-src")).resolve(strict=False)
+        copied = _dependency_tree(
+            Path(dependency["anchor_source"]), destination,
+            max_entries=_MAX_DEPENDENCY_ENTRIES - aggregate_entries,
+            max_files=_MAX_DEPENDENCY_FILES - aggregate_files,
+            max_directories=_MAX_DEPENDENCY_DIRECTORIES - aggregate_directories,
+            max_bytes=_MAX_DEPENDENCY_TOTAL_BYTES - aggregate_bytes)
+        aggregate_files += copied["file_count"]
+        aggregate_directories += copied["directory_count"]
+        aggregate_entries += copied["file_count"] + copied["directory_count"]
+        aggregate_bytes += copied["byte_count"]
+        _require_aggregate_dependency_limits({"file_count": aggregate_files,
+                                              "directory_count": aggregate_directories,
+                                              "byte_count": aggregate_bytes})
+        if (_dependency_content_identity(copied) != _dependency_content_identity(
+                dependency["identity"]["anchor_before_staging"])):
+            raise RuntimeError(f"dependency source changed during private snapshot: {dependency['name']}")
+        source_after = _external_source_identity(Path(dependency["anchor_source"]))
+        if (_dependency_content_identity(source_after) != _dependency_content_identity(copied)):
+            raise RuntimeError(f"dependency source changed after private snapshot: {dependency['name']}")
+        dependency["staged_source"] = str(destination.resolve(strict=True))
+    return source_cache.resolve(strict=True), fresh_base.resolve(strict=True)
+
+
+def _require_dependency_cache(cache: Mapping[str, Mapping[str, str]], fresh_base: Path,
+                              source_cache: Path,
+                              dependencies: Sequence[Mapping[str, Any]],
+                              anchor_base: Path | None = None) -> None:
+    if _canonical_cache_directory(cache, "FETCHCONTENT_BASE_DIR", "fresh") != fresh_base:
+        raise RuntimeError("fresh FETCHCONTENT_BASE_DIR cache mismatch")
+    if cache.get("FETCHCONTENT_FULLY_DISCONNECTED", {}).get("value") != "ON":
+        raise RuntimeError("fresh FETCHCONTENT_FULLY_DISCONNECTED cache mismatch")
+    staged_sources: list[Path] = []
+    staged_root = source_cache.resolve(strict=True)
+    for dependency in dependencies:
+        expected = (staged_root / (str(dependency["name"]) + "-src")).resolve(strict=True)
+        if (Path(str(dependency["staged_source"])) != expected
+                or expected.parent != staged_root):
+            raise RuntimeError(
+                f"claimed staged source is not canonical for dependency: {dependency['name']}")
+        override = str(dependency["override_variable"])
+        raw = cache.get(override, {}).get("value", "")
+        try:
+            resolved = Path(raw).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(f"fresh {override} cache mismatch") from exc
+        if raw != str(expected) or Path(raw) != resolved or resolved != expected:
+            raise RuntimeError(f"fresh {override} cache mismatch")
+        staged_sources.append(expected)
+        for binding in dependency["cache_bindings"]:
+            local_name = str(binding["variable"])
+            local_expected = expected / str(binding["relative"])
+            local = cache.get(local_name, {}).get("value", "")
+            try:
+                local_resolved = Path(local).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(f"fresh {local_name} cache mismatch") from exc
+            if local != str(local_expected) or Path(local) != local_resolved:
+                raise RuntimeError(f"fresh {local_name} cache mismatch")
+    if anchor_base is None:
+        anchor_base = Path(str(dependencies[0]["anchor_source"])).parent
+    for variable, item in sorted(cache.items()):
+        if item.get("type") not in {"PATH", "FILEPATH"}:
+            continue
+        for raw in item.get("value", "").split(";"):
+            if not raw or raw.endswith("-NOTFOUND") or not Path(raw).is_absolute():
+                continue
+            try:
+                candidate = Path(raw)
+                if candidate != Path(os.path.abspath(candidate)):
+                    raise RuntimeError("noncanonical path")
+                resolved_candidate = candidate.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(f"fresh path-valued cache entry cannot be resolved: {variable}") from exc
+            if _within(resolved_candidate, anchor_base):
+                raise RuntimeError(f"fresh path-valued cache entry references anchor dependency base: {variable}")
+            if (candidate != resolved_candidate
+                    and (_within(candidate, staged_root)
+                         or _within(resolved_candidate, staged_root))):
+                raise RuntimeError(f"fresh path-valued cache entry uses an aliased path: {variable}")
+            if (_within(resolved_candidate, staged_root)
+                    and not any(_within(resolved_candidate, source)
+                                for source in staged_sources)):
+                raise RuntimeError(f"fresh path-valued cache entry is not an authorized staged source: {variable}")
 
 
 def _configure_argv(cmake: str, source: Path, build: Path,
                     anchor_cache: Mapping[str, Mapping[str, str]],
                     anchor_toolchain: Mapping[str, str], anchor_selected: Mapping[str, str],
-                    googletest_source: Path) -> list[str]:
+                    fresh_base: Path, dependencies: Sequence[Mapping[str, Any]]) -> list[str]:
     argv = [cmake, "-S", str(source), "-B", str(build)]
     generator = anchor_cache.get("CMAKE_GENERATOR", {}).get("value", "")
     if generator:
@@ -499,8 +1133,11 @@ def _configure_argv(cmake: str, source: Path, build: Path,
     for name, value in {**anchor_toolchain, **anchor_selected}.items():
         if name not in {"CMAKE_GENERATOR_PLATFORM", "CMAKE_GENERATOR_TOOLSET"}:
             argv.append(f"-D{name}={value}")
-    argv.extend((f"-Dgoogletest_LOCAL_SOURCE={googletest_source}",
-                 "-DIBMW_ENABLE_COMM_TRACE=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"))
+    argv.extend((f"-DFETCHCONTENT_BASE_DIR={fresh_base}",
+                 "-DFETCHCONTENT_FULLY_DISCONNECTED=ON"))
+    argv.extend(f"-D{item['override_variable']}={item['staged_source']}"
+                for item in sorted(dependencies, key=lambda value: str(value["name"])))
+    argv.extend(("-DIBMW_ENABLE_COMM_TRACE=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"))
     return argv
 
 
@@ -621,10 +1258,11 @@ def _normalize_link_argument(token: str, build: Path,
 
 
 def _expand_link_tokens(plan: Path, *, max_depth: int = _LINK_RESPONSE_DEPTH,
-                        plan_data: bytes | None = None
+                        plan_data: bytes | None = None, command_dir: Path | None = None,
+                        command_tokens: Sequence[str] | None = None
                         ) -> tuple[list[str], list[dict[str, Any]]]:
-    plan_dir = (plan.parent.parent.parent
-                if plan.parent.parent.name == "CMakeFiles" else plan.parent)
+    plan_dir = (command_dir.resolve(strict=True) if command_dir is not None else
+                plan.parent.parent.parent if plan.parent.parent.name == "CMakeFiles" else plan.parent)
     responses: list[dict[str, Any]] = []
     seen_identities: dict[Path, str] = {}
 
@@ -657,11 +1295,185 @@ def _expand_link_tokens(plan: Path, *, max_depth: int = _LINK_RESPONSE_DEPTH,
                                  stack + (response,)))
         return result
 
-    if plan_data is None:
+    if command_tokens is not None:
+        if plan_data is not None:
+            raise RuntimeError("link command tokens and plan bytes are mutually exclusive")
+        initial = list(command_tokens)
+    elif plan_data is None:
         raw, _opened = _read_immutable_file(plan, "link plan", max_size=16 * 1024 * 1024)
+        initial = parse(raw, "link plan")
     else:
         raw = plan_data
-    return expand(parse(raw, "link plan"), 0, ()), responses
+        initial = parse(raw, "link plan")
+    return expand(initial, 0, ()), responses
+
+
+def _run_bounded_command(argv: Sequence[str], *, timeout: float, max_output: int) -> bytes:
+    """Run a trusted argv while bounding its combined captured output."""
+    process = subprocess.Popen(list(argv), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    assert process.stdout is not None and process.stderr is not None
+    stdout_fd = process.stdout.fileno()
+    streams = {stdout_fd, process.stderr.fileno()}
+    stdout_chunks: list[bytes] = []
+    size = 0
+    deadline = time.monotonic() + timeout
+    try:
+        while streams:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"command timed out: {argv[0]}")
+            readable, _, _ = select.select(list(streams), [], [], remaining)
+            if not readable:
+                continue
+            for fd in readable:
+                chunk = os.read(fd, min(64 * 1024, max_output - size + 1))
+                if not chunk:
+                    streams.remove(fd)
+                    continue
+                size += len(chunk)
+                if size > max_output:
+                    raise RuntimeError(f"command output exceeds limit: {argv[0]}")
+                if fd == stdout_fd:
+                    stdout_chunks.append(chunk)
+        returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        if returncode != 0:
+            raise RuntimeError(f"command failed ({returncode}): {argv[0]}")
+        return b"".join(stdout_chunks)
+    except BaseException:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+        raise
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+
+
+def _parse_ninja_command_line(line: str, build: Path) -> list[tuple[list[str], Path, bool]]:
+    try:
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid Ninja command quoting: {exc}") from exc
+    segments: list[tuple[list[str], Path, bool]] = []
+    command_dir = build
+    canonical_command_dir = True
+    current: list[str] = []
+    for token in tokens + ["&&"]:
+        if token == "&&":
+            if current:
+                if current[0] == "cd":
+                    if len(current) != 2:
+                        raise RuntimeError("Ninja command has an ambiguous working directory")
+                    declared = Path(current[1])
+                    if not declared.is_absolute():
+                        declared = command_dir / declared
+                    try:
+                        resolved = declared.resolve(strict=True)
+                    except (OSError, RuntimeError) as exc:
+                        raise RuntimeError("Ninja command working directory is unavailable") from exc
+                    if not resolved.is_dir():
+                        raise RuntimeError("Ninja command working directory is unavailable")
+                    canonical_command_dir = canonical_command_dir and declared == resolved
+                    command_dir = resolved
+                elif current != [":"]:
+                    segments.append((current, command_dir, canonical_command_dir))
+                current = []
+            continue
+        if token in {";", "&", "|", "||", "<", ">", "<<", ">>"}:
+            raise RuntimeError("Ninja command contains unsupported shell control syntax")
+        current.append(token)
+    return segments
+
+
+def _command_outputs(tokens: Sequence[str], directory: Path) -> list[Path]:
+    outputs: list[Path] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-o":
+            if index + 1 >= len(tokens) or not tokens[index + 1]:
+                raise RuntimeError("Ninja command has an incomplete -o")
+            outputs.append(_canonical_argument_path(tokens[index + 1], directory))
+            index += 2
+            continue
+        index += 1
+    return outputs
+
+
+def _ninja_link_command(output: bytes, build: Path, expected_output: Path,
+                        target: str) -> tuple[list[str], Path]:
+    try:
+        text = output.decode("utf-8")
+    except UnicodeError as exc:
+        raise RuntimeError(f"Ninja command output for {target} is not UTF-8") from exc
+    matching: list[tuple[list[str], Path]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        for tokens, directory, canonical_directory in _parse_ninja_command_line(line, build):
+            if "-c" in tokens:
+                continue
+            outputs = _command_outputs(tokens, directory)
+            if expected_output not in outputs:
+                continue
+            if len(outputs) != 1:
+                raise RuntimeError(f"Ninja final link command for {target} has multiple outputs")
+            if not _within(directory, build):
+                raise RuntimeError(
+                    f"Ninja final link command for {target} works outside fresh build root")
+            if not canonical_directory:
+                raise RuntimeError(
+                    f"Ninja final link command for {target} uses an aliased working directory")
+            matching.append((tokens, directory))
+    if len(matching) != 1:
+        raise RuntimeError(
+            f"expected exactly one Ninja final link command for {target}, found {len(matching)}")
+    return matching[0]
+
+
+def _ninja_plan_source(build: Path, cache: Mapping[str, Mapping[str, str]], target: str,
+                       expected_output: Path) -> tuple[Path, bytes, dict[str, Any],
+                                                       list[str], Path, list[dict[str, Any]]]:
+    raw_tool = cache.get("CMAKE_MAKE_PROGRAM", {}).get("value", "")
+    declared = Path(raw_tool)
+    try:
+        linked = declared.lstat()
+        tool = declared.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError("fresh CMAKE_MAKE_PROGRAM is unavailable") from exc
+    if (not declared.is_absolute() or declared != tool or stat.S_ISLNK(linked.st_mode)
+            or not stat.S_ISREG(linked.st_mode)):
+        raise RuntimeError("fresh CMAKE_MAKE_PROGRAM is not a canonical regular tool")
+    tool_before = _tool_identity(str(tool))
+    authority = build / "build.ninja"
+    authority_raw, authority_before = _read_immutable_file(
+        authority, "fresh build.ninja", max_size=64 * 1024 * 1024)
+    command_output = _run_bounded_command(
+        [str(tool), "-C", str(build), "-t", "commands", target],
+        timeout=_NINJA_COMMAND_TIMEOUT, max_output=_MAX_NINJA_COMMAND_OUTPUT)
+    authority_after_raw, authority_after = _read_immutable_file(
+        authority, "fresh build.ninja", max_size=64 * 1024 * 1024)
+    tool_after = _tool_identity(str(tool))
+    if authority_after_raw != authority_raw or any(
+            authority_before[key] != authority_after[key]
+            for key in ("device", "inode", "size", "sha256")):
+        raise RuntimeError("fresh build.ninja changed during Ninja command export")
+    _require_same_tool_identity(tool_before, tool_after, "CMAKE_MAKE_PROGRAM")
+    tokens, command_dir = _ninja_link_command(command_output, build, expected_output, target)
+    source_evidence = [
+        {"identity": "ninja-tool", "size": tool_before["size"],
+         "sha256": tool_before["sha256"]},
+        {"identity": f"ninja-commands:{target}", "size": len(command_output),
+         "sha256": hashlib.sha256(command_output).hexdigest()},
+    ]
+    return authority, authority_raw, authority_before, tokens, command_dir, source_evidence
 
 
 def capture_link_closure(build_root: str | Path, anchor_root: str | Path,
@@ -674,18 +1486,42 @@ def capture_link_closure(build_root: str | Path, anchor_root: str | Path,
                       for item in provider.get("library_paths", [])]
     provider_files = {Path(provider[name]["path"]).resolve(strict=True): name
                       for name in ("dds", "cdr")}
+    cache_path = build / "CMakeCache.txt"
+    cache_raw: bytes | None = None
+    cache_open: dict[str, Any] | None = None
+    cache: dict[str, dict[str, str]] = {}
+    if cache_path.is_file() and not cache_path.is_symlink():
+        cache_raw, cache_open = _read_immutable_file(
+            cache_path, "fresh CMakeCache.txt", max_size=16 * 1024 * 1024)
+        try:
+            cache = parse_cmake_cache(cache_raw.decode("utf-8"))
+        except UnicodeError as exc:
+            raise RuntimeError("fresh CMakeCache.txt is not UTF-8") from exc
+    ninja_generator = cache.get("CMAKE_GENERATOR", {}).get("value", "").startswith("Ninja")
     plans: list[dict[str, Any]] = []
     for target, image_name in _LINK_TARGET_IMAGES.items():
-        matches = [path for path in build.rglob("link.txt")
-                   if path.parent.name == target + ".dir" and path.is_file()
-                   and not path.is_symlink()]
-        if len(matches) != 1:
-            raise RuntimeError(f"expected one generated link plan for {target}, found {len(matches)}")
-        plan = matches[0].resolve(strict=True)
-        plan_dir = plan.parent.parent.parent
-        plan_raw, plan_open = _read_immutable_file(plan, f"{target} link plan",
-                                                   max_size=16 * 1024 * 1024)
-        tokens, responses = _expand_link_tokens(plan, plan_data=plan_raw)
+        expected_output = Path(images[image_name]["path"]).resolve(strict=True)
+        if ninja_generator:
+            (plan, plan_raw, plan_open, command_tokens, plan_dir,
+             source_evidence) = _ninja_plan_source(
+                 build, cache, target, expected_output)
+            tokens, responses = _expand_link_tokens(
+                plan, command_tokens=command_tokens, command_dir=plan_dir)
+            responses = source_evidence + responses
+            plan_identity = "ninja:build.ninja"
+        else:
+            matches = [path for path in build.rglob("link.txt")
+                       if path.parent.name == target + ".dir" and path.is_file()
+                       and not path.is_symlink()]
+            if len(matches) != 1:
+                raise RuntimeError(
+                    f"expected one generated link plan for {target}, found {len(matches)}")
+            plan = matches[0].resolve(strict=True)
+            plan_dir = plan.parent.parent.parent
+            plan_raw, plan_open = _read_immutable_file(plan, f"{target} link plan",
+                                                       max_size=16 * 1024 * 1024)
+            tokens, responses = _expand_link_tokens(plan, plan_data=plan_raw)
+            plan_identity = "fresh:" + plan.relative_to(build).as_posix()
         if not tokens:
             raise RuntimeError(f"generated link plan for {target} is empty")
         normalized: list[dict[str, Any]] = []
@@ -750,7 +1586,6 @@ def capture_link_closure(build_root: str | Path, anchor_root: str | Path,
                 normalized.append({"kind": "argument",
                                    "value": _normalize_link_argument(token, build, provider_roots)})
             index += 1
-        expected_output = Path(images[image_name]["path"]).resolve(strict=True)
         if not output_seen or output_path != expected_output:
             raise RuntimeError(f"generated link plan output mismatch for {target}")
         output_identity = _link_file_identity(expected_output, "fresh_output", f"image:{image_name}")
@@ -761,13 +1596,20 @@ def capture_link_closure(build_root: str | Path, anchor_root: str | Path,
         if not own_objects:
             raise RuntimeError(f"generated link plan has no fresh target object for {target}")
         plan_value = {"target": target, "image": image_name,
-                      "plan": {"identity": "fresh:" + plan.relative_to(build).as_posix(),
+                      "plan": {"identity": plan_identity,
                                "size": len(plan_raw), "sha256": plan_open["sha256"]},
                       "responses": responses, "tokens": normalized, "inputs": inputs,
                       "output": output_identity}
         plan_value["closure_sha256"] = hashlib.sha256(
             core._canonical_json_bytes(plan_value)).hexdigest()
         plans.append(plan_value)
+    if cache_raw is not None and cache_open is not None:
+        cache_after_raw, cache_after = _read_immutable_file(
+            cache_path, "fresh CMakeCache.txt", max_size=16 * 1024 * 1024)
+        if cache_after_raw != cache_raw or any(
+                cache_open[key] != cache_after[key]
+                for key in ("device", "inode", "size", "sha256")):
+            raise RuntimeError("fresh CMakeCache.txt changed during link closure capture")
     value = {"schema": "mw_perf.rollback_link_closure.v1", "plans": plans}
     value["content_sha256"] = hashlib.sha256(core._canonical_json_bytes(value)).hexdigest()
     _validate_link_closure(value)
@@ -800,11 +1642,24 @@ def _validate_link_closure(value: Any) -> dict[str, Any]:
             if (not isinstance(identity, dict) or not hash_pattern.fullmatch(str(identity.get("sha256")))
                     or not isinstance(identity.get("size"), int) or identity["size"] < 0):
                 raise ValueError("rollback link closure identity is malformed")
-        if set(plan["plan"]) != {"identity", "size", "sha256"} or not str(
-                plan["plan"]["identity"]).startswith("fresh:"):
+        plan_identity = str(plan["plan"].get("identity", ""))
+        if (set(plan["plan"]) != {"identity", "size", "sha256"}
+                or not (plan_identity.startswith("fresh:")
+                        or plan_identity == "ninja:build.ninja")):
             raise ValueError("rollback link plan identity is invalid")
         if any(set(item) != {"identity", "size", "sha256"} for item in plan["responses"]):
             raise ValueError("rollback response identity is malformed")
+        if plan_identity == "ninja:build.ninja":
+            source = plan["responses"][:2]
+            if (len(source) != 2 or source[0]["identity"] != "ninja-tool"
+                    or source[1]["identity"] != "ninja-commands:" + target
+                    or source[0]["size"] < 1 or source[1]["size"] < 1):
+                raise ValueError("rollback Ninja plan source evidence is malformed")
+            if any(item["identity"].startswith("ninja-")
+                   for item in plan["responses"][2:]):
+                raise ValueError("rollback Ninja plan source evidence is ambiguous")
+        elif any(item["identity"].startswith("ninja-") for item in plan["responses"]):
+            raise ValueError("rollback Makefiles plan has Ninja source evidence")
         allowed_classes = {"fresh_object", "fresh_library", "provider_library",
                            "external_provider_library", "system_library"}
         if any(set(item) != {"class", "identity", "size", "sha256"}
@@ -840,10 +1695,26 @@ def _validate_link_closure(value: Any) -> dict[str, Any]:
             if isinstance(token["value"], str) and (token["value"].startswith("/")
                     or re.match(r"^[A-Za-z]:[\\/]", token["value"]) or "\\" in token["value"]):
                 raise ValueError("rollback normalized link token leaks a host path")
+        output_tokens = [token for token in plan["tokens"] if token["kind"] == "output"]
+        output_flags = [token for token in plan["tokens"]
+                        if token["kind"] == "flag" and token["value"] == "-o"]
+        if (output_tokens != [{"kind": "output", "value": "image:" + plan["image"]}]
+                or len(output_flags) != 1):
+            raise ValueError("rollback normalized link output binding is invalid")
         expected_plan_hash = hashlib.sha256(core._canonical_json_bytes(
             {name: plan[name] for name in required - {"closure_sha256"}})).hexdigest()
         if plan["closure_sha256"] != expected_plan_hash:
             raise ValueError("rollback link closure digest is inconsistent")
+    ninja_plans = [plan for plan in plans
+                   if plan["plan"]["identity"] == "ninja:build.ninja"]
+    if ninja_plans:
+        if len(ninja_plans) != len(plans):
+            raise ValueError("rollback link closure mixes generator plan sources")
+        authority = ninja_plans[0]["plan"]
+        exporter = ninja_plans[0]["responses"][0]
+        if (any(plan["plan"] != authority for plan in ninja_plans[1:])
+                or any(plan["responses"][0] != exporter for plan in ninja_plans[1:])):
+            raise ValueError("rollback Ninja authority changed between target exports")
     expected = hashlib.sha256(core._canonical_json_bytes(
         {"schema": value["schema"], "plans": plans})).hexdigest()
     if value["content_sha256"] != expected:
@@ -858,7 +1729,9 @@ def _link_closure_summary(value: Any) -> dict[str, Any]:
                 "image": plan["image"], "closure_sha256": plan["closure_sha256"],
                 "output_sha256": plan["output"]["sha256"],
                 "input_count": len(plan["inputs"]),
-                "response_count": len(plan["responses"])} for plan in closure["plans"]}}
+                "response_count": sum(item["identity"].startswith("response-")
+                                      for item in plan["responses"])}
+                         for plan in closure["plans"]}}
 
 
 def _validate_link_inventory_binding(closure: Any, inventory: Any) -> None:
@@ -888,6 +1761,12 @@ def _validate_link_tool_binding(closure: Any, tools: Any) -> None:
         linked = [item["value"] for item in plan["tokens"] if item["kind"] == "tool"]
         if len(linked) != 1 or linked[0] not in registered:
             raise ValueError("rollback linker driver is not a registered toolchain identity")
+        if plan["plan"]["identity"] == "ninja:build.ninja":
+            make_program = tools.get("CMAKE_MAKE_PROGRAM")
+            if (not isinstance(make_program, dict)
+                    or plan["responses"][0]["sha256"] != make_program.get("sha256")):
+                raise ValueError(
+                    "rollback Ninja exporter is not the registered CMAKE_MAKE_PROGRAM")
 
 
 def _audit_image(path: Path, logs: Path, nm: str, readelf: str, expected: re.Pattern[str]) -> dict[str, Any]:
@@ -1000,30 +1879,50 @@ def execute_trace_off_build(source_root: str | Path, anchor_build_dir: str | Pat
             if anchor_selected.get(option) != "ON":
                 raise RuntimeError(f"anchor {option} must be ON")
         source_before = source_identity(source)
-        googletest_before = _googletest_source_identity(anchor)
-        googletest_source = Path(googletest_before["path"])
+        anchor_dependency_base, dependencies = _anchor_dependency_sources(anchor_cache)
+        aggregate_identity = {"anchor_before_staging": _aggregate_dependency_identity(
+            dependencies, "anchor_before_staging")}
+        source_cache, fresh_dependency_base = _stage_dependency_sources(work, dependencies)
+        aggregate_identity["staged_after_copy"] = _record_dependency_checkpoint(
+            dependencies, "staged_after_copy", "staged_source")
+        _require_dependency_checkpoint(dependencies, "staged_after_copy")
+        aggregate_identity["anchor_after_staging"] = _record_dependency_checkpoint(
+            dependencies, "anchor_after_staging", "anchor_source")
+        _require_dependency_checkpoint(dependencies, "anchor_after_staging")
 
         cmake = anchor_cache.get("CMAKE_COMMAND", {}).get("value", "")
         if not cmake:
             raise RuntimeError("anchor CMAKE_COMMAND is unavailable")
         anchor_cmake_identity = _tool_identity(cmake)
         anchor_tool_identities = _active_tool_identities(anchor_toolchain)
+        _audit_replayed_controls(
+            {"CMAKE_GENERATOR": anchor_cache.get("CMAKE_GENERATOR", {}).get("value", ""),
+             **anchor_toolchain, **anchor_selected}, directory=build,
+            anchor_base=anchor_dependency_base)
         argv = _configure_argv(cmake, source, build, anchor_cache, anchor_toolchain,
-                               anchor_selected, googletest_source)
+                               anchor_selected, fresh_dependency_base, dependencies)
         _run(argv, logs / "configure", 600)
-        googletest_after_configure = _googletest_source_identity(anchor)
-        if googletest_after_configure != googletest_before:
-            raise RuntimeError("googletest source identity changed during configure")
+        aggregate_identity["staged_after_configure"] = _record_dependency_checkpoint(
+            dependencies, "staged_after_configure", "staged_source")
+        _require_dependency_checkpoint(dependencies, "staged_after_configure")
+        aggregate_identity["anchor_after_configure"] = _record_dependency_checkpoint(
+            dependencies, "anchor_after_configure", "anchor_source")
+        _require_dependency_checkpoint(dependencies, "anchor_after_configure")
         configured_cache = parse_cmake_cache(build / "CMakeCache.txt")
-        _require_googletest_cache(configured_cache, googletest_source)
+        _require_dependency_cache(configured_cache, fresh_dependency_base, source_cache, dependencies,
+                                  anchor_dependency_base)
         _run([cmake, "--build", str(build), "--target", "ibmw_dds_extension",
               "ibmw_dds_trace_off_business_roundtrip", "--", "-j2"], logs / "build", 1800)
-        googletest_after_build = _googletest_source_identity(anchor)
-        if googletest_after_build != googletest_before:
-            raise RuntimeError("googletest source identity changed during build")
+        aggregate_identity["staged_after_build"] = _record_dependency_checkpoint(
+            dependencies, "staged_after_build", "staged_source")
+        _require_dependency_checkpoint(dependencies, "staged_after_build")
+        aggregate_identity["anchor_after_build"] = _record_dependency_checkpoint(
+            dependencies, "anchor_after_build", "anchor_source")
+        _require_dependency_checkpoint(dependencies, "anchor_after_build")
 
         fresh_cache = parse_cmake_cache(build / "CMakeCache.txt")
-        _require_googletest_cache(fresh_cache, googletest_source)
+        _require_dependency_cache(fresh_cache, fresh_dependency_base, source_cache, dependencies,
+                                  anchor_dependency_base)
         _cache_home(fresh_cache, source, "fresh")
         fresh_selected = selected_options(fresh_cache)
         fresh_toolchain = toolchain_options(fresh_cache)
@@ -1054,16 +1953,18 @@ def execute_trace_off_build(source_root: str | Path, anchor_build_dir: str | Pat
         if evidence_control["fresh"] != "ON":
             raise RuntimeError("fresh CMAKE_EXPORT_COMPILE_COMMANDS is not ON")
         dependency_source_control = {
-            "name": "googletest_LOCAL_SOURCE",
-            "provider": "anchor_external_dependency_source",
+            "provider": "anchor_fetchcontent_source_cache",
             "reuse_scope": "source_only",
-            "canonical_source": str(googletest_source),
             "cache_verified": True,
-            "identity": {"before_configure": googletest_before,
-                         "after_configure": googletest_after_configure,
-                         "after_build": googletest_after_build},
+            "anchor_base_dir": str(anchor_dependency_base),
+            "fresh_base_dir": str(fresh_dependency_base),
+            "staged_source_cache": str(source_cache),
+            "dependencies": dependencies,
+            "aggregate_identity": aggregate_identity,
         }
-        inventory = parse_compile_inventory(build / "compile_commands.json", source, build)
+        inventory = parse_compile_inventory(
+            build / "compile_commands.json", source, build, anchor_dependency_base,
+            {item["name"]: item["staged_source"] for item in dependencies})
         extension = _regular_unique(build, "libibmw_dds_transport.so")
         candidate = _regular_unique(build, "ibmw_dds_trace_off_business_roundtrip")
         nm = anchor_cache.get("CMAKE_NM", {}).get("value") or shutil.which("nm")
@@ -1102,7 +2003,7 @@ def execute_trace_off_build(source_root: str | Path, anchor_build_dir: str | Pat
 
 # Packaging is intentionally separate from execute_trace_off_build.  The runner's
 # dictionaries are evidence claims, never authority for bytes or identities.
-_ROLLBACK_SCHEMA = "mw_perf.rollback_trace_off.v1"
+_ROLLBACK_SCHEMA = "mw_perf.rollback_trace_off.v2"
 _ROLLBACK_MANIFEST_SCHEMA = "mw_perf.rollback_evidence_manifest.v1"
 _ROLLBACK_CONTRACT = "mw_perf.p0a_contract.v8"
 _IMAGE_NAMES = {"extension": "images/extension", "executable": "images/executable"}
@@ -1204,34 +2105,160 @@ def _portable_provider(value: Any, label: str) -> dict[str, Any]:
 
 
 def _portable_dependency_source(value: Any) -> dict[str, Any]:
-    required = {"name", "provider", "reuse_scope", "canonical_source",
-                "cache_verified", "identity"}
+    required = {"provider", "reuse_scope", "cache_verified", "anchor_base_dir",
+                "fresh_base_dir", "staged_source_cache", "dependencies",
+                "aggregate_identity"}
     if not isinstance(value, dict) or set(value) != required:
         raise ValueError("rollback dependency source control is incomplete")
-    if (value.get("name") != "googletest_LOCAL_SOURCE"
-            or value.get("provider") != "anchor_external_dependency_source"
+    if (value.get("provider") != "anchor_fetchcontent_source_cache"
             or value.get("reuse_scope") != "source_only"
             or value.get("cache_verified") is not True):
         raise ValueError("rollback dependency source control is invalid")
-    identities = value.get("identity")
-    checkpoints = ("before_configure", "after_configure", "after_build")
-    if (not isinstance(identities, dict) or set(identities) != set(checkpoints)
-            or any(not isinstance(identities[name], dict) for name in checkpoints)
-            or any(identities[name] != identities["before_configure"] for name in checkpoints)):
-        raise ValueError("rollback dependency source identity changed")
-    identity = identities["before_configure"]
-    if (set(identity) != {"path", "file_count", "directory_count", "tree_sha256"}
-            or identity.get("path") != value.get("canonical_source")
-            or not re.fullmatch(r"[0-9a-f]{64}", str(identity.get("tree_sha256")))
-            or not isinstance(identity.get("file_count"), int) or identity["file_count"] < 1
-            or not isinstance(identity.get("directory_count"), int)
-            or identity["directory_count"] < 0):
-        raise ValueError("rollback dependency source identity is malformed")
-    return {"cache_variable": value["name"], "provider": value["provider"],
-            "reuse_scope": value["reuse_scope"], "cache_verified": True,
-            "mutation_checkpoints": list(checkpoints),
-            "source_inventory": {name: identity[name] for name in (
-                "file_count", "directory_count", "tree_sha256")}}
+    dependencies = value.get("dependencies")
+    if (not isinstance(dependencies, list) or not dependencies
+            or len(dependencies) > _MAX_DEPENDENCY_COUNT
+            or dependencies != sorted(dependencies, key=lambda item: str(item.get("name", "")))):
+        raise ValueError("rollback dependency source inventory is invalid")
+    portable_dependencies = []
+    seen_names: set[str] = set()
+    seen_overrides: set[str] = set()
+    identity_fields = {"path", "file_count", "directory_count", "byte_count", "tree_sha256"}
+    for dependency in dependencies:
+        if not isinstance(dependency, dict) or set(dependency) != {
+                "name", "override_variable", "cache_bindings", "anchor_source",
+                "staged_source", "identity"}:
+            raise ValueError("rollback dependency source entry is malformed")
+        name, override = dependency.get("name"), dependency.get("override_variable")
+        if (not isinstance(name, str) or not name or name in seen_names
+                or not isinstance(override, str) or override != _dependency_override(name)
+                or override in seen_overrides):
+            raise ValueError("rollback dependency source name or override is invalid")
+        seen_names.add(name); seen_overrides.add(override)
+        bindings = dependency.get("cache_bindings")
+        if (not isinstance(bindings, list)
+                or bindings != sorted(bindings, key=lambda item: str(item.get("variable", "")))
+                or any(not isinstance(item, dict) or set(item) != {"variable", "relative"}
+                       or not isinstance(item["variable"], str)
+                       or not item["variable"].endswith(("_SOURCE_DIR", "_LOCAL_SOURCE"))
+                       or not _valid_dependency_relative(item["relative"])
+                       for item in bindings)):
+            raise ValueError("rollback dependency cache bindings are invalid")
+        identities = dependency.get("identity")
+        if not isinstance(identities, dict) or set(identities) != set(_DEPENDENCY_CHECKPOINTS):
+            raise ValueError("rollback dependency source checkpoints are incomplete")
+        baseline = None
+        for checkpoint in _DEPENDENCY_CHECKPOINTS:
+            identity = identities.get(checkpoint)
+            expected_path = (dependency["anchor_source"] if checkpoint.startswith("anchor_")
+                             else dependency["staged_source"])
+            if (not isinstance(identity, dict) or set(identity) != identity_fields
+                    or identity.get("path") != expected_path
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(identity.get("tree_sha256")))
+                    or not isinstance(identity.get("file_count"), int)
+                    or identity["file_count"] < 1
+                    or not isinstance(identity.get("directory_count"), int)
+                    or identity["directory_count"] < 0
+                    or not isinstance(identity.get("byte_count"), int)
+                    or identity["byte_count"] < 1):
+                raise ValueError("rollback dependency source identity is malformed")
+            content = _dependency_content_identity(identity)
+            baseline = content if baseline is None else baseline
+            if content != baseline:
+                raise ValueError("rollback dependency source identity changed")
+        assert baseline is not None
+        portable_dependencies.append({"name": name, "override_variable": override,
+                                      "cache_bindings": bindings, **baseline})
+    aggregate = value.get("aggregate_identity")
+    if not isinstance(aggregate, dict) or set(aggregate) != set(_DEPENDENCY_CHECKPOINTS):
+        raise ValueError("rollback aggregate dependency checkpoints are incomplete")
+    expected_aggregates = {checkpoint: _aggregate_dependency_identity(dependencies, checkpoint)
+                           for checkpoint in _DEPENDENCY_CHECKPOINTS}
+    if aggregate != expected_aggregates or len({core._canonical_json_bytes(item)
+                                                for item in aggregate.values()}) != 1:
+        raise ValueError("rollback aggregate dependency identity changed")
+    baseline_aggregate = aggregate["anchor_before_staging"]
+    return {"provider": value["provider"], "reuse_scope": value["reuse_scope"],
+            "cache_verified": True, "dependency_count": len(portable_dependencies),
+            "file_count": baseline_aggregate["file_count"],
+            "directory_count": baseline_aggregate["directory_count"],
+            "byte_count": baseline_aggregate["byte_count"],
+            "aggregate_sha256": baseline_aggregate["aggregate_sha256"],
+            "mutation_checkpoints": list(_DEPENDENCY_CHECKPOINTS),
+            "checkpoint_digests": {name: aggregate[name]["aggregate_sha256"]
+                                   for name in _DEPENDENCY_CHECKPOINTS},
+            "dependencies": portable_dependencies}
+
+
+def _validate_v2_dependency_summary(value: Any) -> None:
+    """Recompute all v2 dependency summary authority from packaged entries."""
+    if not isinstance(value, dict):
+        raise ValueError("rollback v2 dependency summary is malformed")
+    dependencies = value.get("dependencies")
+    if (not isinstance(dependencies, list) or not dependencies
+            or len(dependencies) > _MAX_DEPENDENCY_COUNT):
+        raise ValueError("rollback v2 dependency inventory is malformed")
+    records: list[dict[str, Any]] = []
+    names: set[str] = set()
+    overrides: set[str] = set()
+    required = {"name", "override_variable", "cache_bindings", "file_count",
+                "directory_count", "byte_count", "tree_sha256"}
+    for dependency in dependencies:
+        if not isinstance(dependency, dict) or set(dependency) != required:
+            raise ValueError("rollback v2 dependency entry is malformed")
+        name, override = dependency.get("name"), dependency.get("override_variable")
+        if (not isinstance(name, str) or not name or name in names
+                or not isinstance(override, str) or override != _dependency_override(name)
+                or override in overrides):
+            raise ValueError("rollback v2 dependency identity is invalid")
+        names.add(name); overrides.add(override)
+        bindings = dependency.get("cache_bindings")
+        if (not isinstance(bindings, list)
+                or bindings != sorted(bindings, key=lambda item: str(item.get("variable", "")))
+                or any(not isinstance(item, dict) or set(item) != {"variable", "relative"}
+                       or not isinstance(item.get("variable"), str)
+                       or not item["variable"]
+                       or not item["variable"].endswith(("_SOURCE_DIR", "_LOCAL_SOURCE"))
+                       or not _valid_dependency_relative(item.get("relative"))
+                       for item in bindings)):
+            raise ValueError("rollback v2 dependency bindings are invalid")
+        file_count = dependency.get("file_count")
+        directory_count = dependency.get("directory_count")
+        byte_count = dependency.get("byte_count")
+        if (not isinstance(file_count, int) or isinstance(file_count, bool)
+                or not isinstance(directory_count, int) or isinstance(directory_count, bool)
+                or not isinstance(byte_count, int) or isinstance(byte_count, bool)
+                or file_count < 1 or file_count > _MAX_DEPENDENCY_FILES
+                or directory_count < 0 or directory_count > _MAX_DEPENDENCY_DIRECTORIES
+                or file_count + directory_count > _MAX_DEPENDENCY_ENTRIES
+                or byte_count < 1 or byte_count > _MAX_DEPENDENCY_TOTAL_BYTES
+                or not re.fullmatch(r"[0-9a-f]{64}", str(dependency.get("tree_sha256")))):
+            raise ValueError("rollback v2 dependency resource identity is invalid")
+        records.append({key: dependency[key] for key in (
+            "name", "override_variable", "cache_bindings", "file_count",
+            "directory_count", "byte_count", "tree_sha256")})
+    expected = {
+        "dependency_count": len(records),
+        "file_count": sum(item["file_count"] for item in records),
+        "directory_count": sum(item["directory_count"] for item in records),
+        "byte_count": sum(item["byte_count"] for item in records),
+        "aggregate_sha256": hashlib.sha256(core._canonical_json_bytes(records)).hexdigest(),
+    }
+    if records != sorted(records, key=lambda item: item["name"]):
+        raise ValueError("rollback v2 dependency inventory is not canonically ordered")
+    try:
+        _require_aggregate_dependency_limits(expected)
+    except RuntimeError as exc:
+        raise ValueError("rollback v2 dependency aggregate exceeds resource limits") from exc
+    if any(value.get(key) != item for key, item in expected.items()):
+        raise ValueError("rollback v2 dependency aggregate is inconsistent")
+    if value.get("mutation_checkpoints") != list(_DEPENDENCY_CHECKPOINTS):
+        raise ValueError("rollback v2 dependency checkpoints are inconsistent")
+    checkpoint_digests = value.get("checkpoint_digests")
+    if (not isinstance(checkpoint_digests, dict)
+            or set(checkpoint_digests) != set(_DEPENDENCY_CHECKPOINTS)
+            or any(checkpoint_digests.get(checkpoint) != expected["aggregate_sha256"]
+                   for checkpoint in _DEPENDENCY_CHECKPOINTS)):
+        raise ValueError("rollback v2 dependency checkpoint digest is inconsistent")
 
 
 def _portable_observation(value: Any) -> dict[str, Any]:
@@ -1341,6 +2368,7 @@ def _validate_packaged_inventory(value: Any) -> dict[str, Any]:
             or value.get("registered_records") != subset(registered)
             or value.get("other_records") != subset(other)):
         raise ValueError("rollback compile inventory digest is inconsistent")
+    _path_free(value)
     return value
 
 
@@ -1373,8 +2401,29 @@ def _write_exclusive(path: Path, data: bytes) -> None:
 
 
 def _read_immutable_file(path: Path, label: str, *, max_size: int | None = None) -> tuple[bytes, dict[str, Any]]:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(path, flags)
+    # Do not resolve/open the pathname in one operation.  Pin every directory
+    # component first, then open the leaf through its pinned parent.  This is
+    # the Python equivalent of RESOLVE_NO_SYMLINKS/openat2 for the platforms
+    # supported by this collector (Linux and other POSIX systems with *at()).
+    absolute = Path(os.path.abspath(path))
+    directory_fds: list[tuple[int, Path, os.stat_result]] = []
+    current_fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY |
+                         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    current = Path(os.sep)
+    try:
+        for component in absolute.parts[1:-1]:
+            next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY |
+                              getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                              dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+            current /= component
+            directory_fds.append((current_fd, current, os.fstat(current_fd)))
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(absolute.name, flags, dir_fd=current_fd)
+    except Exception:
+        os.close(current_fd)
+        raise
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode):
@@ -1394,7 +2443,7 @@ def _read_immutable_file(path: Path, label: str, *, max_size: int | None = None)
                     raise ValueError(f"{label} exceeds the size limit")
         data = b"".join(chunks)
         after = os.fstat(fd)
-        linked = os.stat(path, follow_symlinks=False)
+        linked = os.stat(absolute, follow_symlinks=False)
         identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
                                  item.st_mtime_ns, item.st_ctime_ns)
         if identity(before) != identity(after) or identity(after) != identity(linked):
@@ -1403,26 +2452,59 @@ def _read_immutable_file(path: Path, label: str, *, max_size: int | None = None)
                       "sha256": hashlib.sha256(data).hexdigest()}
     finally:
         os.close(fd)
+        os.close(current_fd)
 
 
 def _anchor_binding(anchor_run: Path) -> dict[str, Any]:
     anchor = Path(anchor_run)
-    if not anchor.is_dir() or anchor.is_symlink():
-        raise ValueError("anchor_run must be a real directory")
     try:
-        manifest_raw = (anchor / "manifest.json").read_bytes()
-        evidence_raw = (anchor / "capability/p0a_evidence_manifest.json").read_bytes()
+        anchor_info = anchor.lstat()
+        anchor_real = anchor.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("anchor_run must be a real directory") from exc
+    if (stat.S_ISLNK(anchor_info.st_mode) or not stat.S_ISDIR(anchor_info.st_mode)
+            or anchor_real != anchor):
+        raise ValueError("anchor_run must be a real directory")
+
+    def read_anchor(relative: str, label: str) -> tuple[bytes, dict[str, Any]]:
+        path = anchor / relative
+        try:
+            # _read_immutable_file pins the complete absolute directory chain;
+            # retain this explicit containment check so an anchor replacement
+            # fails closed rather than becoming a different evidence root.
+            path.resolve(strict=True).relative_to(anchor_real)
+            data, identity = _read_immutable_file(path, label)
+            if anchor.lstat().st_ino != anchor_info.st_ino or anchor.lstat().st_dev != anchor_info.st_dev:
+                raise ValueError(f"{label} anchor root changed")
+            return data, identity
+        except (OSError, RuntimeError, ValueError) as exc:
+            if isinstance(exc, ValueError) and str(exc).startswith(label):
+                raise
+            raise ValueError("anchor v8 evidence is unavailable") from exc
+
+    try:
+        manifest_raw, _manifest_identity = read_anchor("manifest.json", "anchor manifest")
+        evidence_raw, _evidence_identity = read_anchor(
+            "capability/p0a_evidence_manifest.json", "anchor evidence")
         evidence = json.loads(evidence_raw)
         manifest = json.loads(manifest_raw)
         contract_version = evidence.get("registration_contract_version")
-        contract_raw = (anchor / "registration/contract.json").read_bytes()
+        contract_raw, _contract_identity = read_anchor(
+            "registration/contract.json", "anchor contract")
         trusted, trusted_raw = core._trusted_p0a_contract(contract_version)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError("anchor v8 evidence is unavailable") from exc
-    validation_raw = (anchor / "validation.json").read_bytes()
-    validation = json.loads(validation_raw)
-    resolution = json.loads((anchor / "registration/resolution_declarations.json").read_bytes())
-    trusted_resolution = json.loads((anchor / "capability/resolution.json").read_bytes())
+    try:
+        validation_raw, _validation_identity = read_anchor("validation.json", "anchor validation")
+        validation = json.loads(validation_raw)
+        resolution_raw, _resolution_identity = read_anchor(
+            "registration/resolution_declarations.json", "anchor resolution")
+        resolution = json.loads(resolution_raw)
+        trusted_resolution_raw, _trusted_resolution_identity = read_anchor(
+            "capability/resolution.json", "anchor trusted resolution")
+        trusted_resolution = json.loads(trusted_resolution_raw)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("anchor v8 evidence is unavailable") from exc
     fresh_validation = core.validate_dir(anchor, profile="p0a")
     nested = validation.get("p0a_evidence", {})
     nested_codes = nested.get("failure_codes", []) if isinstance(nested, dict) else []
@@ -1508,16 +2590,40 @@ def _revalidate_packaging(result: Mapping[str, Any], anchor_run: Path, logs: Pat
     _cache_home(anchor_cache, source, "anchor")
     source_before = source_identity(source)
     fresh_cache = parse_cmake_cache(build / "CMakeCache.txt")
-    googletest_current = _googletest_source_identity(anchor_cache_path.parent)
-    googletest_source = Path(googletest_current["path"])
-    _require_googletest_cache(fresh_cache, googletest_source)
     claimed_dependency = result.get("dependency_source_control")
     _portable_dependency_source(claimed_dependency)
     if not isinstance(claimed_dependency, dict):
         raise ValueError("rollback dependency source control is incomplete")
-    if any(identity != googletest_current
-           for identity in claimed_dependency["identity"].values()):
-        raise ValueError("claimed googletest source identity differs from independent validation")
+    anchor_base, anchor_dependencies = _anchor_dependency_sources(anchor_cache)
+    try:
+        claimed_anchor_base = Path(claimed_dependency["anchor_base_dir"]).resolve(strict=True)
+        fresh_base = Path(claimed_dependency["fresh_base_dir"]).resolve(strict=True)
+        source_cache = Path(claimed_dependency["staged_source_cache"]).resolve(strict=True)
+    except (OSError, RuntimeError, KeyError, TypeError) as exc:
+        raise ValueError("rollback dependency cache paths are invalid") from exc
+    if (claimed_anchor_base != anchor_base or fresh_base != build / "_deps"
+            or source_cache != work / "source-cache"):
+        raise ValueError("rollback dependency cache roots differ from independent validation")
+    dependencies = claimed_dependency["dependencies"]
+    if [(item["name"], item["override_variable"], item["cache_bindings"],
+         item["anchor_source"])
+            for item in dependencies] != [(item["name"], item["override_variable"],
+                                           item["cache_bindings"], item["anchor_source"])
+                                          for item in anchor_dependencies]:
+        raise ValueError("claimed dependency inventory differs from anchor cache")
+    for claimed, current in zip(dependencies, anchor_dependencies):
+        anchor_identity = current["identity"]["anchor_before_staging"]
+        expected_staged = (source_cache / (str(claimed["name"]) + "-src")).resolve(strict=True)
+        if (Path(str(claimed["staged_source"])) != expected_staged
+                or expected_staged.parent != source_cache):
+            raise ValueError("claimed staged source differs from canonical source cache")
+        staged_identity = _external_source_identity(expected_staged)
+        baseline = claimed["identity"]["anchor_before_staging"]
+        if (_dependency_content_identity(anchor_identity) != _dependency_content_identity(baseline)
+                or _dependency_content_identity(staged_identity) !=
+                _dependency_content_identity(baseline)):
+            raise ValueError("claimed dependency source identity differs from independent validation")
+    _require_dependency_cache(fresh_cache, fresh_base, source_cache, dependencies, anchor_base)
     _cache_home(fresh_cache, source, "fresh")
     source_current = source_identity(source)
     _require_same_source_identity(source_before, source_current)
@@ -1541,7 +2647,9 @@ def _revalidate_packaging(result: Mapping[str, Any], anchor_run: Path, logs: Pat
         raise ValueError("fresh executable toolchain controls differ from anchor")
     for name in tools["active_toolchain"]:
         _require_same_tool_identity(anchor_tools["active_toolchain"][name], tools["active_toolchain"][name], name)
-    inventory = parse_compile_inventory(build / "compile_commands.json", source, build)
+    inventory = parse_compile_inventory(
+        build / "compile_commands.json", source, build, anchor_base,
+        {item["name"]: item["staged_source"] for item in dependencies})
     extension = _regular_unique(build, "libibmw_dds_transport.so")
     candidate = _regular_unique(build, "ibmw_dds_trace_off_business_roundtrip")
     nm = fresh_cache.get("CMAKE_NM", {}).get("value") or shutil.which("nm")
@@ -1732,7 +2840,7 @@ def build_trace_off_rollback_companion(result: dict, anchor_run: Path, payload_r
                   "valid_for_comparison": False, "failure_code": "P0A_ARTIFACT"},
               "claim": "trace-off rollback candidate matches selected controls, registered-source inventory, final-link closure, audited images, providers, and one runtime roundtrip except trace delta",
               "limitations": ["candidate-only rollback evidence; no whole-product equivalence or performance claim",
-                              "GoogleTest was configured from identified anchor external dependency source; its compilation is irrelevant to audited output links and is not image-consumption proof"],
+                              "FetchContent dependencies were configured from identified, private source-only copies; their compilation is irrelevant to audited output links and is not image-consumption proof"],
               "anchor": anchor, "source": normalized_source, "product_delta": _path_free(delta),
               "evidence_control": _path_free(result.get("evidence_control", {})),
               "dependency_source_control": normalized_dependency,
@@ -1746,7 +2854,7 @@ def build_trace_off_rollback_companion(result: dict, anchor_run: Path, payload_r
               "provider_summary": normalized_provider,
               "runtime_summary": normalized_runtime,
               "rollback_build_identity_sha256": build_hash}
-    report_schema = json.loads((Path(__file__).parent / "schemas/rollback-trace-off-result.schema.v1.json").read_bytes())
+    report_schema = json.loads((Path(__file__).parent / "schemas/rollback-trace-off-result.schema.v2.json").read_bytes())
     if core._schema_errors(report, report_schema):
         raise ValueError("rollback report schema validation failed")
     if Path(payload_root).exists():
@@ -1868,9 +2976,20 @@ def validate_trace_off_rollback_companion(
                     or entry.get("sha256") != hashlib.sha256(data).hexdigest()):
                 raise ValueError("rollback manifest file binding is invalid")
         report = _strict_json_object(payloads["rollback_trace_off.json"], "rollback report")
-        report_schema = json.loads((Path(__file__).parent / "schemas/rollback-trace-off-result.schema.v1.json").read_bytes())
+        report_schemas: dict[str, str] = {
+            "mw_perf.rollback_trace_off.v1": "rollback-trace-off-result.schema.v1.json",
+            "mw_perf.rollback_trace_off.v2": "rollback-trace-off-result.schema.v2.json",
+        }
+        report_schema_id = report.get("schema")
+        schema_name = report_schemas.get(report_schema_id) if isinstance(
+            report_schema_id, str) else None
+        if schema_name is None:
+            raise ValueError("rollback report schema ID is unsupported")
+        report_schema = json.loads((Path(__file__).parent / "schemas" / schema_name).read_bytes())
         if core._schema_errors(report, report_schema):
             raise ValueError("rollback report schema is invalid")
+        if report.get("schema") == "mw_perf.rollback_trace_off.v2":
+            _validate_v2_dependency_summary(report.get("dependency_source_control"))
         build_identity = _strict_json_object(payloads["build_identity.json"], "build identity")
         build_plan = _strict_json_object(payloads["build_plan.json"], "build plan")
         _validate_build_plan(build_plan)

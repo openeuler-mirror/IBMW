@@ -6,6 +6,9 @@
 #include "dds_ext/dds_rpc_driver.h"
 #include "dds_ext/global.h"
 #include "yaml-cpp/yaml.h"
+#ifdef IBMW_ENABLE_COMM_TRACE
+#include "dds_ext/internal/dds_comm_trace.h"
+#endif
 
 namespace {
 
@@ -184,6 +187,15 @@ bool DdsExtension::OnInit(runtime::core::Engine* core_ptr) {
   extension_options_node = options_;
   core_ptr_->GetExtensionBus().UpdateExtensionOptionsNode(Name(), extension_options_node);
 
+#ifdef IBMW_ENABLE_COMM_TRACE
+  // Open trace production only after extension configuration has succeeded.
+  if (!comm_trace::Initialize()) {
+    MW_ERROR("DDS communication trace initialization failed.");
+    return false;
+  }
+  comm_trace_owner_ = comm_trace::active();
+#endif
+
   return true;
 }
 
@@ -195,6 +207,15 @@ void DdsExtension::OnShutdown() {
   }
 
   SetDdsTransportDriver(nullptr);
+
+#ifdef IBMW_ENABLE_COMM_TRACE
+  // Driver shutdown has detached readers and quiesced callbacks before the
+  // extension lifecycle reaches this point.
+  if (comm_trace_owner_) {
+    comm_trace::Shutdown();
+    comm_trace_owner_ = false;
+  }
+#endif
 
   MW_INFO("DDS extension shutdown.");
 }

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "engine/transport/transport_catalog.h"
+#include "observability/comm_trace.h"
 
 namespace ibmw::runtime::core::transport {
 
@@ -28,6 +29,20 @@ class MessageHandlerTool {
       const std::shared_ptr<ibmw::transport::Context>& ctx_ptr,
       const runtime::core::transport::MessageHandlerWrapper& msg_msg_handler,
       const std::shared_ptr<void>& msg_ptr) const {
+    DoMessageCallbackWithInvoker(
+        ctx_ptr, msg_msg_handler, msg_ptr,
+        [](const runtime::core::transport::MessageHandlerWrapper& handler,
+           auto&& invoke) { invoke(handler, nullptr); });
+  }
+
+  // Internal transport hook for authoritative delivery identity. The identity
+  // stays out of MessageFrame and all public transport ABIs.
+  template <typename CallbackInvoker>
+  void DoMessageCallbackWithInvoker(
+      const std::shared_ptr<ibmw::transport::Context>& ctx_ptr,
+      const runtime::core::transport::MessageHandlerWrapper& msg_msg_handler,
+      const std::shared_ptr<void>& msg_ptr,
+      CallbackInvoker&& callback_invoker) const {
     MW_ASSERT(&msg_msg_handler == msg_handler_vec_[0], "Unexpected errors.");
 
     runtime::core::transport::MessageFrame sub_msg_wrapper{
@@ -37,7 +52,14 @@ class MessageHandlerTool {
 
     sub_msg_wrapper.msg_cache_ptr = msg_ptr;
 
-    msg_msg_handler.callback(sub_msg_wrapper, [ctx_ptr]() {});
+    {
+      IBMW_COMM_TRACE_CALLBACK_REGISTRATION_SCOPE(
+          msg_msg_handler.callback_registration_id);
+      callback_invoker(msg_msg_handler, [&](const auto& handler,
+          const internal::CallbackInvocationEnvelopeV1* envelope) {
+        handler.callback(sub_msg_wrapper, [ctx_ptr]() {}, envelope);
+      });
+    }
 
     if (msg_handler_vec_.size() == 1) return;
 
@@ -66,9 +88,16 @@ class MessageHandlerTool {
 
       sub_msg_wrapper.serialization_cache.emplace(serialization_type, buffer_array_view_ptr);
 
-      msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+      IBMW_COMM_TRACE_CALLBACK_REGISTRATION_SCOPE(
+          msg_handler_ptr->callback_registration_id);
+      callback_invoker(*msg_handler_ptr, [&](const auto& handler,
+          const internal::CallbackInvocationEnvelopeV1* envelope) {
+        handler.callback(sub_msg_wrapper, [ctx_ptr]() {}, envelope);
+      });
     }
   }
+
+  size_t MessageHandlerCount() const noexcept { return msg_handler_vec_.size(); }
 
   void DoMessageCallback(
       const std::shared_ptr<ibmw::transport::Context>& ctx_ptr,
@@ -145,7 +174,9 @@ class MessageHandlerTool {
 
       sub_msg_wrapper.msg_cache_ptr = msg_ptr;
 
-      msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+      IBMW_COMM_TRACE_CALLBACK_REGISTRATION_SCOPE(
+          msg_handler_ptr->callback_registration_id);
+      msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
     }
   }
 
@@ -161,7 +192,9 @@ class MessageHandlerTool {
 
       sub_msg_wrapper.serialization_cache.emplace(serialization_type, buffer_array_view_ptr);
 
-      msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+      IBMW_COMM_TRACE_CALLBACK_REGISTRATION_SCOPE(
+          msg_handler_ptr->callback_registration_id);
+      msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
     }
   }
 

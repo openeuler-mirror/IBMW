@@ -9,30 +9,40 @@
 #include <system_error>
 #include <chrono>
 #include <unordered_set>
+#include <iterator>
 namespace ibmw::runtime::core::observability { namespace {
 std::string Key(std::string_view a,std::string_view b,std::string_view c={}){return std::string(a)+'\x1f'+std::string(b)+'\x1f'+std::string(c);}
 std::string FrameworkKey(std::string_view pkg,std::string_view module,std::string_view topic,std::string_view type){return Key(pkg,module,topic)+'\x1f'+std::string(type);}
 std::string Json(std::string_view v){std::string o="\"";for(unsigned char c:v){switch(c){case '"':o+="\\\"";break;case '\\':o+="\\\\";break;case '\b':o+="\\b";break;case '\f':o+="\\f";break;case '\n':o+="\\n";break;case '\r':o+="\\r";break;case '\t':o+="\\t";break;default:if(c<0x20){static constexpr char h[]="0123456789abcdef";o+="\\u00";o+=h[c>>4];o+=h[c&15];}else{o+=static_cast<char>(c);}}}return o+'"';}
 }
+Registry::Registry() = default;
+Registry::~Registry(){DestroyReporter();}
 void Registry::Reset(){std::lock_guard l(mutex_);logical_slots_.clear();driver_slots_.clear();pod_logical_slots_.clear();pod_driver_slots_.clear();loaned_receive_slots_.clear();logical_storage_.clear();driver_storage_.clear();pod_logical_storage_.clear();pod_driver_storage_.clear();
-#ifdef IBMW_ENABLE_REPORTER_V1
-// V1 exposes raw slots without unregister or generation validation. Keep their
-// backing storage for the process lifetime so late extension adds stay valid;
-// only the active snapshot view is generation-scoped.
-reporter_slots_.clear();
-#endif
+ResetReporterLocked();
 logical_.clear();drivers_.clear();loan_drivers_.clear();pod_logical_.clear();pod_drivers_.clear();frozen_.store(false,std::memory_order_release);}
 ObservationMode Runtime::ModeFromEnvironment(){const char* v=std::getenv("IBMW_CORE_METRICS");return v&&std::strcmp(v,"counters")==0?ObservationMode::kCounters:ObservationMode::kOff;}
 Registry::LogicalSlot* Registry::RegisterLogicalSlot(std::string_view t,std::string_view y,std::string_view p,std::string_view m){std::lock_guard l(mutex_);if(frozen_)return nullptr;auto k=FrameworkKey(p,m,t,y);if(auto i=logical_.find(k);i!=logical_.end())return i->second;auto slot=std::make_unique<LogicalSlot>(std::string(p),std::string(m),std::string(t),std::string(y));auto r=slot.get();logical_storage_.push_back(std::move(slot));logical_slots_.push_back(r);logical_.emplace(std::move(k),r);return r;}
 Registry::DriverSlot* Registry::RegisterDriverSlot(std::string_view t,std::string_view y,std::string_view d,std::string_view p,std::string_view m){std::lock_guard l(mutex_);if(frozen_)return nullptr;auto k=FrameworkKey(p,m,t,y)+'\x1f'+std::string(d);if(auto i=drivers_.find(k);i!=drivers_.end())return i->second;auto slot=std::make_unique<DriverSlot>(std::string(p),std::string(m),std::string(t),std::string(y),std::string(d));auto r=slot.get();driver_storage_.push_back(std::move(slot));driver_slots_.push_back(r);drivers_.emplace(std::move(k),r);return r;}
 Registry::DriverSlot* Registry::RegisterLoanDriverSlot(std::string_view d){std::lock_guard l(mutex_);if(frozen_)return nullptr;auto k=std::string(d);if(auto i=loan_drivers_.find(k);i!=loan_drivers_.end())return i->second;auto slot=std::make_unique<DriverSlot>("","","","",std::string(d));auto r=slot.get();driver_storage_.push_back(std::move(slot));driver_slots_.push_back(r);loan_drivers_.emplace(std::move(k),r);return r;}
+Registry::RegistrationMark Registry::MarkRegistration() const { std::lock_guard l(mutex_); return {logical_storage_.size(), driver_storage_.size()}; }
+void Registry::RollbackRegistration(RegistrationMark mark) noexcept {
+  std::lock_guard l(mutex_);
+  if (mark.logical > logical_storage_.size() || mark.driver > driver_storage_.size()) return;
+  for (size_t i = mark.logical; i < logical_storage_.size(); ++i) {
+    auto* slot = logical_storage_[i].get();
+    for (auto it = logical_.begin(); it != logical_.end();) it = it->second == slot ? logical_.erase(it) : std::next(it);
+  }
+  for (size_t i = mark.driver; i < driver_storage_.size(); ++i) {
+    auto* slot = driver_storage_[i].get();
+    for (auto it = drivers_.begin(); it != drivers_.end();) it = it->second == slot ? drivers_.erase(it) : std::next(it);
+    for (auto it = loan_drivers_.begin(); it != loan_drivers_.end();) it = it->second == slot ? loan_drivers_.erase(it) : std::next(it);
+  }
+  logical_slots_.resize(mark.logical); logical_storage_.resize(mark.logical);
+  driver_slots_.resize(mark.driver); driver_storage_.resize(mark.driver);
+}
 Registry::PodLogicalSlot* Registry::RegisterPodLogicalSlot(std::string_view t,std::string_view y){std::lock_guard l(mutex_);if(frozen_)return nullptr;auto k=Key(t,y);if(auto i=pod_logical_.find(k);i!=pod_logical_.end())return i->second;auto p=std::make_unique<PodLogicalSlot>(std::string(t),std::string(y));auto r=p.get();pod_logical_storage_.push_back(std::move(p));pod_logical_slots_.push_back(r);pod_logical_.emplace(std::move(k),r);return r;}
 Registry::PodDriverSlot* Registry::RegisterPodDriverSlot(std::string_view t,std::string_view y,std::string_view d){std::lock_guard l(mutex_);if(frozen_)return nullptr;auto k=Key(t,y,d);if(auto i=pod_drivers_.find(k);i!=pod_drivers_.end())return i->second;auto p=std::make_unique<PodDriverSlot>(std::string(t),std::string(y),std::string(d));auto r=p.get();pod_driver_storage_.push_back(std::move(p));pod_driver_slots_.push_back(r);pod_drivers_.emplace(std::move(k),r);return r;}
 std::shared_ptr<Registry::LoanedReceiveSlot> Registry::RegisterLoanedReceiveSlot(std::string_view t,std::string_view y,std::string_view d){std::lock_guard l(mutex_);if(frozen_)return {};auto p=std::make_shared<LoanedReceiveSlot>(std::string(t),std::string(y),std::string(d));loaned_receive_slots_.push_back(p);return p;}
-#ifdef IBMW_ENABLE_REPORTER_V1
-namespace { std::string ReporterString(ibmw_reporter_string_view_v1 v){return v.data&&v.size?std::string(v.data,static_cast<size_t>(v.size)):std::string();} }
-Registry::ReporterSlot* Registry::RegisterReporterSlot(const ibmw_reporter_slot_descriptor_v1* d){if(!d||d->abi_version!=IBMW_REPORTER_ABI_VERSION_V1||d->struct_size<offsetof(ibmw_reporter_slot_descriptor_v1,reserved))return nullptr;std::lock_guard l(mutex_);if(frozen_)return nullptr;auto p=std::make_unique<ReporterSlot>();p->kind=ReporterString(d->kind);p->metric=ReporterString(d->metric);p->topic=ReporterString(d->topic);p->type=ReporterString(d->type);p->driver=ReporterString(d->driver);if(p->kind.empty()||p->metric.empty())return nullptr;auto* out=p.get();reporter_storage_.push_back(std::move(p));reporter_slots_.push_back(out);return out;}
-#endif
 bool Registry::RegisterLogical(std::string_view t,std::string_view y){return RegisterLogicalSlot(t,y)!=nullptr;}
 bool Registry::RegisterDriver(std::string_view t,std::string_view y,std::string_view d){return RegisterDriverSlot(t,y,d)!=nullptr;}
 void Registry::Freeze(){std::lock_guard l(mutex_);frozen_.store(true,std::memory_order_release);}
@@ -105,26 +115,7 @@ std::string Registry::SerializeJsonl(bool include_core, bool include_reporter,
     }
   }
   }
-#ifdef IBMW_ENABLE_REPORTER_V1
-  if (include_reporter) for (const auto& i : reporter_slots_) {
-    const auto value = i->value.load(std::memory_order_relaxed);
-    o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":"
-      << n++ << ",\"kind\":" << Json(i->kind)
-      << ",\"metric\":" << Json(i->metric)
-      << ",\"topic\":" << Json(i->topic)
-      << ",\"type\":" << Json(i->type)
-      << ",\"driver\":" << Json(i->driver)
-      << ",\"value\":" << value
-      << ",\"cumulative\":{\"metric\":" << Json(i->metric)
-      << ",\"topic\":" << Json(i->topic)
-      << ",\"type\":" << Json(i->type)
-      << ",\"driver\":" << Json(i->driver)
-      << ",\"value\":" << value << "}"
-      << ",\"complete\":true}\n";
-  }
-#else
-  (void)include_reporter;
-#endif
+  if (include_reporter) AppendReporterJsonlLocked(o, n);
   return o.str();
 }
 std::string Registry::SnapshotJsonl() const {
@@ -138,9 +129,7 @@ size_t Registry::StorageSizeForTesting() const {
   size_t size = logical_storage_.size() + driver_storage_.size() +
                 pod_logical_storage_.size() + pod_driver_storage_.size() +
                 loaned_receive_slots_.size();
-#ifdef IBMW_ENABLE_REPORTER_V1
-  size += reporter_storage_.size();
-#endif
+  size += ReporterStorageSizeLocked();
   return size;
 }
 bool Registry::WriteSnapshot(const std::string& dir)const{try{const auto path=std::filesystem::path(dir)/"metrics.jsonl";std::filesystem::create_directories(dir);const auto tmp=path.string()+".tmp."+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());{std::ofstream f(tmp,std::ios::trunc);if(!f)return false;f<<SnapshotJsonl();if(!f.good())return false;}std::error_code ec;std::filesystem::rename(tmp,path,ec);if(ec){std::filesystem::remove(tmp);return false;}return true;}catch(...){return false;}}
@@ -208,17 +197,22 @@ void Controller::Initialize(const void* identity) {
       DrainState().disabled_dispatchers.clear();
       DrainState().draining_registrations.clear();
       dispatcher_drains_.clear();
+      cached_entry_dispatchers_.clear();
+      cached_metric_gates_.clear();
     }
     lifecycles_[identity] = {true, false};
   }
 }
-void Controller::Start(const void* identity){std::lock_guard l(mutex_);auto lifecycle=lifecycles_.find(identity);if(lifecycle==lifecycles_.end()||!lifecycle->second.initialized||lifecycle->second.started)return;if(state_==State::kInitialized){runtime_.Start();state_=State::kStarted;}if(state_==State::kStarted){lifecycle->second.started=true;++active_instances_;}}
-bool Controller::FinalizeSnapshot(const void* identity){std::lock_guard l(mutex_);auto lifecycle=lifecycles_.find(identity);if(lifecycle==lifecycles_.end())return true;if(!lifecycle->second.started){lifecycles_.erase(lifecycle);if(lifecycles_.empty()&&active_instances_==0)state_=State::kStopped;return true;}lifecycles_.erase(lifecycle);--active_instances_;if(active_instances_!=0)return true;state_=State::kStopped;const bool result=runtime_.FinalizeSnapshot();entries_.clear();entry_storage_.clear();pod_entry_storage_.clear();dispatcher_drains_.clear();loan_drivers_.clear();lifecycles_.clear();DrainState().disabled_dispatchers.clear();DrainState().draining_registrations.clear();runtime_.registry().Reset();return result;}
+void Controller::Start(const void* identity){std::lock_guard l(mutex_);auto lifecycle=lifecycles_.find(identity);if(lifecycle==lifecycles_.end()||!lifecycle->second.initialized||lifecycle->second.started)return;if(state_==State::kInitialized){
+if(runtime_.registry().HasPendingReporterBatches())return;
+runtime_.Start();state_=State::kStarted;}if(state_==State::kStarted){lifecycle->second.started=true;++active_instances_;}}
+bool Controller::FinalizeSnapshot(const void* identity){std::lock_guard l(mutex_);auto lifecycle=lifecycles_.find(identity);if(lifecycle==lifecycles_.end())return true;if(!lifecycle->second.started){lifecycles_.erase(lifecycle);if(lifecycles_.empty()&&active_instances_==0)state_=State::kStopped;return true;}if(active_instances_==1&&!cached_entry_dispatchers_.empty())return false;lifecycles_.erase(lifecycle);--active_instances_;if(active_instances_!=0)return true;state_=State::kStopped;const bool result=runtime_.FinalizeSnapshot();entries_.clear();entry_storage_.clear();pod_entry_storage_.clear();dispatcher_drains_.clear();cached_entry_dispatchers_.clear();loan_drivers_.clear();lifecycles_.clear();DrainState().disabled_dispatchers.clear();DrainState().draining_registrations.clear();runtime_.registry().Reset();return result;}
 void Controller::Initialize(){Initialize(nullptr);}
 void Controller::Start(){Start(nullptr);}
 bool Controller::FinalizeSnapshot(){return FinalizeSnapshot(nullptr);}
 void Controller::ResetForTesting() {
   std::vector<std::shared_ptr<LoanedReceiveGate>> gates;
+  std::vector<std::shared_ptr<CachedMetricsGate>> cached_gates;
   {
     std::lock_guard lock(mutex_);
     for (auto& [dispatcher, entries] : entries_) {
@@ -227,9 +221,21 @@ void Controller::ResetForTesting() {
         if (auto gate = entry.gate.lock()) gates.push_back(std::move(gate));
       }
     }
+    for (const auto& [_, gate] : cached_metric_gates_) {
+      gate->state.fetch_or(CachedMetricsGate::kClosed,
+                           std::memory_order_acq_rel);
+      cached_gates.push_back(gate);
+    }
     state_ = State::kStopped;
   }
   DisableGates(gates);
+  for (const auto& gate : cached_gates) {
+    std::unique_lock lock(gate->mutex);
+    gate->drained.wait(lock, [&] {
+      return (gate->state.load(std::memory_order_acquire) &
+              CachedMetricsGate::kReaders) == 0;
+    });
+  }
   {
     std::lock_guard lock(mutex_);
     entries_.clear();
@@ -243,15 +249,68 @@ void Controller::ResetForTesting() {
     DrainState().disabled_dispatchers.clear();
     DrainState().draining_registrations.clear();
     dispatcher_drains_.clear();
+    cached_entry_dispatchers_.clear();
+    cached_metric_gates_.clear();
   }
 }
 bool Controller::Enabled()const noexcept{return runtime_.mode()==ObservationMode::kCounters;}
 bool Controller::ReporterAvailable()const noexcept{std::lock_guard l(mutex_);return Enabled()&&(state_==State::kInitialized||state_==State::kStarted);}
+void Controller::InvalidateCachedEntries(const void* dispatcher) noexcept {
+  if (!Enabled()) return;
+  std::shared_ptr<CachedMetricsGate> gate;
+  {
+    std::lock_guard lock(mutex_);
+    auto gate_it = cached_metric_gates_.find(dispatcher);
+    if (gate_it != cached_metric_gates_.end()) gate = gate_it->second;
+    if (gate)
+      gate->state.fetch_or(CachedMetricsGate::kClosed,
+                           std::memory_order_acq_rel);
+  }
+  if (gate) {
+    std::unique_lock lock(gate->mutex);
+    gate->drained.wait(lock, [&] {
+      return (gate->state.load(std::memory_order_acquire) &
+              CachedMetricsGate::kReaders) == 0;
+    });
+  }
+  std::lock_guard lock(mutex_);
+  auto found = entries_.find(dispatcher);
+  if (found != entries_.end())
+    for (const auto& [wrapper, _] : found->second.access)
+      const_cast<transport::SendTypeWrapper*>(wrapper)->cached_metrics = nullptr;
+  cached_entry_dispatchers_.erase(dispatcher);
+}
+std::shared_ptr<CachedMetricsGate> Controller::GetCachedMetricsGate(const void* dispatcher) {
+  if (!Enabled()) return nullptr;
+  std::lock_guard lock(mutex_);
+  if (!Enabled()) return nullptr;
+  auto& gate = cached_metric_gates_[dispatcher];
+  if (!gate) gate = std::make_shared<CachedMetricsGate>();
+  return gate;
+}
 size_t Controller::StorageSizeForTesting()const{std::lock_guard l(mutex_);return entry_storage_.size()+pod_entry_storage_.size()+runtime_.registry().StorageSizeForTesting();}
-bool Controller::Register(const void* dispatcher,const transport::SendTypeWrapper* wrapper,std::string_view pkg,std::string_view module,std::string_view topic,std::string_view type,const std::vector<transport::TransportDriver*>& drivers){
+bool Controller::Register(const void* dispatcher,const transport::SendTypeWrapper* wrapper,std::string_view pkg,std::string_view module,std::string_view topic,std::string_view type,const std::vector<transport::TransportDriver*>& drivers,MetricsEntry** cached_entry){
+  if (cached_entry) *cached_entry = nullptr;
   if (!Enabled()) return true;
   std::lock_guard controller_lock(mutex_);
   if (state_ != State::kInitialized || runtime_.registry().IsFrozen()) return true;
+  const auto registry_mark = runtime_.registry().MarkRegistration();
+  const auto entry_storage_mark = entry_storage_.size();
+  std::vector<const transport::TransportDriver*> added_loan_drivers;
+  auto rollback = [&] {
+    for (auto* driver : added_loan_drivers) loan_drivers_.erase(driver);
+    runtime_.registry().RollbackRegistration(registry_mark);
+    entry_storage_.resize(entry_storage_mark);
+    auto it = entries_.find(dispatcher);
+    if (it != entries_.end() && it->second.access.empty() && it->second.framework.empty())
+      entries_.erase(it);
+  };
+  bool committed = false;
+  struct RegistrationGuard {
+    decltype(rollback)& action;
+    bool& committed;
+    ~RegistrationGuard() { if (!committed) action(); }
+  } registration_guard{rollback, committed};
   auto values_it = entries_.find(dispatcher);
   if (values_it == entries_.end()) values_it = entries_.emplace(dispatcher, Entries{}).first;
   auto& values = values_it->second;
@@ -260,17 +319,18 @@ bool Controller::Register(const void* dispatcher,const transport::SendTypeWrappe
       values.framework.find(framework_key)!=values.framework.end()) return false;
   auto entry = std::make_unique<MetricsEntry>();
   entry->logical = runtime_.registry().RegisterLogicalSlot(topic, type, pkg, module);
-  if (!entry->logical) { if (values.access.empty() && values.framework.empty()) entries_.erase(values_it); return true; }
+  if (!entry->logical) { rollback(); return true; }
   entry->drivers.reserve(drivers.size());
   for (auto* driver : drivers) {
     auto* slot = runtime_.registry().RegisterDriverSlot(topic, type, driver->Name(), pkg, module);
-    if (!slot) { if (values.access.empty() && values.framework.empty()) entries_.erase(values_it); return true; }
+    if (!slot) { rollback(); return true; }
     entry->drivers.push_back(slot);
     auto* loan_slot = runtime_.registry().RegisterLoanDriverSlot(driver->Name());
-    if (!loan_slot) return true;
-    loan_drivers_.emplace(driver, loan_slot);
+    if (!loan_slot) { rollback(); return true; }
+    if (loan_drivers_.emplace(driver, loan_slot).second)
+      added_loan_drivers.push_back(driver);
   }
-  if (entry->drivers.size() != drivers.size()) return true;
+  if (entry->drivers.size() != drivers.size()) { rollback(); return true; }
   values.access.reserve(values.access.size()+(wrapper?1:0));
   values.framework.reserve(values.framework.size()+1);
   auto* entry_ptr=entry.get();
@@ -278,15 +338,15 @@ bool Controller::Register(const void* dispatcher,const transport::SendTypeWrappe
   const auto framework_result=values.framework.emplace(framework_key,entry_ptr);
   if(!framework_result.second)return false;
   if(wrapper){try{if(!values.access.emplace(wrapper,entry_ptr).second){values.framework.erase(framework_result.first);return false;}}catch(...){values.framework.erase(framework_result.first);throw;}}
+  if (cached_entry) *cached_entry = entry_ptr;
+  if (cached_entry) cached_entry_dispatchers_.insert(dispatcher);
+  committed = true;
   return true;
 }
 MetricsEntry* Controller::Find(const void* dispatcher,const transport::SendTypeWrapper* wrapper)noexcept{std::lock_guard l(mutex_);auto d=entries_.find(dispatcher);if(d==entries_.end())return nullptr;auto i=d->second.access.find(wrapper);return i==d->second.access.end()?nullptr:i->second;}
 MetricsEntry* Controller::Find(const void* dispatcher,std::string_view pkg,std::string_view module,std::string_view topic,std::string_view type)noexcept{std::lock_guard l(mutex_);auto d=entries_.find(dispatcher);if(d==entries_.end())return nullptr;auto i=d->second.framework.find(Key{std::string(pkg),std::string(module),std::string(topic),std::string(type)});return i==d->second.framework.end()?nullptr:i->second;}
 Registry::DriverSlot* Controller::FindLoanDriver(const transport::TransportDriver* driver)noexcept{std::lock_guard l(mutex_);auto i=loan_drivers_.find(driver);return i==loan_drivers_.end()?nullptr:i->second;}
 bool Controller::RegisterPod(const void* dispatcher,const void* registration,std::string_view topic,std::string_view type,const transport::TransportDriver* driver){if(!Enabled())return true;std::lock_guard l(mutex_);if(state_!=State::kInitialized||runtime_.registry().IsFrozen())return true;auto& pod=entries_[dispatcher].pod;if(pod.find(registration)!=pod.end())return false;auto out=std::make_unique<PodMetricsEntry>();out->logical=runtime_.registry().RegisterPodLogicalSlot(topic,type);out->driver=runtime_.registry().RegisterPodDriverSlot(topic,type,driver->Name());if(!out->logical||!out->driver)return true;auto* out_ptr=out.get();pod_entry_storage_.push_back(std::move(out));return pod.emplace(registration,out_ptr).second;}
-#ifdef IBMW_ENABLE_REPORTER_V1
-Registry::ReporterSlot* Controller::RegisterReporterSlot(const ibmw_reporter_slot_descriptor_v1* d) noexcept{try{std::lock_guard l(mutex_);if(state_!=State::kInitialized||!Enabled())return nullptr;return runtime_.registry().RegisterReporterSlot(d);}catch(...){return nullptr;}}
-#endif
 void Controller::UnregisterPod(const void* dispatcher,const void* registration)noexcept{if(!Enabled())return;std::lock_guard l(mutex_);auto d=entries_.find(dispatcher);if(d!=entries_.end())d->second.pod.erase(registration);}
 PodMetricsEntry* Controller::FindPod(const void* dispatcher,const void* registration)noexcept{std::lock_guard l(mutex_);auto d=entries_.find(dispatcher);if(d==entries_.end())return nullptr;auto i=d->second.pod.find(registration);return i==d->second.pod.end()?nullptr:i->second;}
 std::shared_ptr<Registry::LoanedReceiveSlot> Controller::RegisterLoanedReceive(const void* dispatcher,const void* registration,std::string_view topic,std::string_view type,std::string_view driver,const std::shared_ptr<LoanedReceiveGate>& gate){
@@ -378,7 +438,3 @@ void Controller::DisableLoanedReceive(const void* dispatcher)noexcept{
 }
 Controller& CoreMetricsController(){return Controller::Instance();}
 }
-#ifdef IBMW_ENABLE_REPORTER_V1
-namespace { ibmw_reporter_slot_v1* ReporterRegister(void* owner,const ibmw_reporter_slot_descriptor_v1* d){return reinterpret_cast<ibmw_reporter_slot_v1*>(static_cast<ibmw::runtime::core::observability::Controller*>(owner)->RegisterReporterSlot(d));} void ReporterAdd(void*,ibmw_reporter_slot_v1* slot,uint64_t value){if(slot)reinterpret_cast<ibmw::runtime::core::observability::Registry::ReporterSlot*>(slot)->value.fetch_add(value,std::memory_order_relaxed);} void ReporterAddSigned(void*,ibmw_reporter_slot_v1* slot,int64_t delta){if(!slot)return;auto& value=reinterpret_cast<ibmw::runtime::core::observability::Registry::ReporterSlot*>(slot)->value;if(delta>=0){value.fetch_add(static_cast<uint64_t>(delta),std::memory_order_relaxed);return;}const uint64_t decrement=static_cast<uint64_t>(-(delta+1))+1;uint64_t current=value.load(std::memory_order_relaxed);while(!value.compare_exchange_weak(current,current<decrement?0:current-decrement,std::memory_order_relaxed)){} } }
-extern "C" const ibmw_reporter_v1* ibmw_reporter_query_enabled_v1(void){auto& c=ibmw::runtime::core::observability::CoreMetricsController();if(!c.ReporterAvailable())return nullptr;static const ibmw_reporter_v1 api{IBMW_REPORTER_ABI_VERSION_V1,sizeof(ibmw_reporter_v1),&c,&ReporterRegister,&ReporterAdd,{0},&ReporterAddSigned};return &api;}
-#endif

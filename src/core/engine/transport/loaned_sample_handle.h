@@ -19,7 +19,8 @@
 //
 // Wire-format modes
 // -----------------
-// LoanedSampleHandle carries a `mode` enum. Two modes are currently defined:
+// LoanedSampleHandle carries a `mode` enum. Two modes are public wire-format
+// requests:
 //   - kPodOnly      : the loaned region holds only the user payload bytes.
 //                     The receiver MUST reinterpret_cast to the same trivially-
 //                     copyable T. ctx-meta and the IBMW serialization framework
@@ -49,6 +50,10 @@ class TransportDriver;  // forward decl; included in transport_driver.h
 enum class LoanMode : uint8_t {
   kPodOnly = 0,                ///< raw payload, no header
   kCtxMetaThenPayload = 1,     ///< driver-private header followed by payload
+  // Internal completion discriminator used by transports whose reported and
+  // unreported ctx-meta loans have different driver-token layouts. Callers
+  // must continue to request kCtxMetaThenPayload.
+  kCtxMetaThenPayloadUnreported = 2,
 };
 
 /**

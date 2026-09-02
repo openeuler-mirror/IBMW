@@ -12,6 +12,14 @@
 #endif
 
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
+#include <fastdds/dds/subscriber/SampleInfo.hpp>
+#include <fastdds/dds/publisher/DataWriter.hpp>
+
+#if __has_include(<fastdds/rtps/common/WriteParams.hpp>)
+#include <fastdds/rtps/common/WriteParams.hpp>
+#else
+#include <fastdds/rtps/common/WriteParams.h>
+#endif
 
 #if defined(FASTDDS_VERSION_MAJOR) && FASTDDS_VERSION_MAJOR >= 3
 #define IBMW_FASTDDS_V3_PLUS 1
@@ -48,5 +56,27 @@ inline constexpr auto kReturnCodeOk = eprosima::fastrtps::types::ReturnCode_t::R
 inline constexpr auto kReturnCodeNoData = eprosima::fastrtps::types::ReturnCode_t::RETCODE_NO_DATA;
 inline constexpr auto kReturnCodePreconditionNotMet = eprosima::fastrtps::types::ReturnCode_t::RETCODE_PRECONDITION_NOT_MET;
 #endif
+
+using SampleIdentity = rtps::SampleIdentity;
+using WriteParams = rtps::WriteParams;
+
+inline bool WriteWithParams(eprosima::fastdds::dds::DataWriter* writer,
+                            void* sample, WriteParams& params) {
+#if IBMW_FASTDDS_V3_PLUS
+  return writer->write(sample, params) == kReturnCodeOk;
+#else
+  return writer->write(sample, params);
+#endif
+}
+
+inline const SampleIdentity& WrittenSampleIdentity(
+    const WriteParams& params) noexcept {
+  return params.sample_identity();
+}
+
+inline const SampleIdentity& ReceivedSampleIdentity(
+    const eprosima::fastdds::dds::SampleInfo& info) noexcept {
+  return info.sample_identity;
+}
 
 }  // namespace ibmw::extensions::dds_extension::fastdds_compat

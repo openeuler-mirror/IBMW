@@ -28,6 +28,9 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "engine/transport/transport_driver.h"
+#ifdef IBMW_ENABLE_COMM_TRACE
+#include "engine/transport/internal/comm_trace_send_overlay.h"
+#endif
 #include "engine/transport/transport_driver_tools.h"
 #include "engine/transport/serialized_transport_driver.h"
 #include "dds_ext/dds_loan_bus.h"
@@ -82,7 +85,11 @@ struct ZeroCopyStats {
  */
 class __attribute__((visibility("default"))) DdsTransportDriver
     : public runtime::core::transport::TransportDriver,
-      public runtime::core::transport::SerializedTransportDriver {
+      public runtime::core::transport::SerializedTransportDriver
+#ifdef IBMW_ENABLE_COMM_TRACE
+    , public runtime::core::transport::internal::CommTraceSendOverlayV1
+#endif
+{
  public:
   // QoS configuration
   struct QosOptions {
@@ -140,6 +147,14 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   bool OnMessage(
       const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept override;
   void Send(runtime::core::transport::MessageFrame& msg_wrapper) noexcept override;
+#ifdef IBMW_ENABLE_COMM_TRACE
+  const runtime::core::transport::internal::OverlayDescriptorV1&
+  Descriptor() const noexcept override;
+  void SendObserved(
+      runtime::core::transport::MessageFrame& msg_wrapper,
+      const runtime::core::transport::internal::PublishEnvelopeV1& envelope)
+      noexcept override;
+#endif
 
   runtime::core::transport::SerializedSubscriberHandle
   AttachSerializedSubscriber(
@@ -218,11 +233,13 @@ class __attribute__((visibility("default"))) DdsTransportDriver
     DdsDataReaderListener(
         std::shared_ptr<runtime::core::transport::MessageHandlerTool> message_handler_tool,
         const runtime::core::transport::MessageHandlerWrapper& message_handler,
+        std::string dds_topic_name,
         bool is_plain,
         ibmw::executor::ExecutorHandle executor,
         LoanMode loan_mode)
         : message_handler_tool_(std::move(message_handler_tool)),
           message_handler_(message_handler),
+          dds_topic_name_(std::move(dds_topic_name)),
           is_plain_(is_plain),
           executor_(executor),
           loan_mode_(loan_mode) {}
@@ -301,6 +318,7 @@ class __attribute__((visibility("default"))) DdsTransportDriver
 
     std::shared_ptr<runtime::core::transport::MessageHandlerTool> message_handler_tool_;
     const runtime::core::transport::MessageHandlerWrapper& message_handler_;
+    std::string dds_topic_name_;
     bool is_plain_;
     ibmw::executor::ExecutorHandle executor_;
     LoanMode loan_mode_;
@@ -378,7 +396,17 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   void SendNonPlainType(
       runtime::core::transport::MessageFrame& msg_wrapper,
       PublisherInfo& pub_info,
-      const std::string& dds_topic_name);
+      const std::string& dds_topic_name
+#ifdef IBMW_ENABLE_COMM_TRACE
+      , const runtime::core::transport::internal::PublishEnvelopeV1* envelope
+#endif
+      );
+#ifdef IBMW_ENABLE_COMM_TRACE
+  void SendImpl(
+      runtime::core::transport::MessageFrame& msg_wrapper,
+      const runtime::core::transport::internal::PublishEnvelopeV1* envelope)
+      noexcept;
+#endif
 
   std::pair<ibmw::executor::ExecutorHandle, LoanMode> GetExecutorAndLoanMode(
       const std::string& topic_name) const;

@@ -36,17 +36,53 @@ TEST(IceoryxShutdown, OrdinaryTestThreadIsNotAListenerCallback) {
 }
 
 TEST(SubscriberOptions, LegacyUsesDefaultsAndRetainedIsBounded) {
-  const auto defaults = iox::popo::SubscriberOptions{};
   const auto legacy = MakeSubscriberOptions(false);
-  EXPECT_EQ(legacy.queueCapacity, defaults.queueCapacity);
-  EXPECT_EQ(legacy.queueFullPolicy, defaults.queueFullPolicy);
-  EXPECT_EQ(legacy.historyRequest, defaults.historyRequest);
+  EXPECT_EQ(legacy.queueCapacity, 1u);
+  EXPECT_EQ(legacy.queueFullPolicy,
+            iox::popo::QueueFullPolicy::DISCARD_OLDEST_DATA);
+  EXPECT_EQ(legacy.historyRequest, 0u);
 
   const auto retained = MakeSubscriberOptions(true);
   EXPECT_EQ(retained.queueCapacity, 1u);
   EXPECT_EQ(retained.queueFullPolicy,
             iox::popo::QueueFullPolicy::DISCARD_OLDEST_DATA);
   EXPECT_EQ(retained.historyRequest, 0u);
+
+  const auto lossless = MakeSubscriberOptions(
+      false, IoxDeliveryOptions{.lossless = true, .queue_capacity = 256});
+  EXPECT_EQ(lossless.queueCapacity, 256u);
+  EXPECT_EQ(lossless.queueFullPolicy, iox::popo::QueueFullPolicy::BLOCK_PRODUCER);
+  EXPECT_EQ(lossless.historyRequest, 0u);
+}
+
+TEST(DeliveryProfile, RejectsUnknownPartialAndOneSidedControls) {
+  IceoryxTransportDriver::Options legacy;
+  const auto defaults = IceoryxTransportDriver::ResolveDeliveryOptions(legacy);
+  ASSERT_TRUE(defaults);
+  EXPECT_FALSE(defaults->lossless);
+
+  IceoryxTransportDriver::Options exact;
+  exact.benchmark_profile = "core_metrics_e2e_lossless_v1";
+  exact.publisher_too_slow_policy = "WAIT_FOR_CONSUMER";
+  exact.subscriber_queue_full_policy = "BLOCK_PRODUCER";
+  exact.subscriber_queue_capacity = 256;
+  const auto lossless = IceoryxTransportDriver::ResolveDeliveryOptions(exact);
+  ASSERT_TRUE(lossless);
+  EXPECT_TRUE(lossless->lossless);
+  EXPECT_EQ(lossless->queue_capacity, 256u);
+
+  for (const auto& invalid : {
+           IceoryxTransportDriver::Options{.benchmark_profile = "unknown"},
+           IceoryxTransportDriver::Options{
+               .benchmark_profile = "core_metrics_e2e_lossless_v1",
+               .publisher_too_slow_policy = "WAIT_FOR_CONSUMER"},
+           IceoryxTransportDriver::Options{
+               .benchmark_profile = "core_metrics_e2e_lossless_v1",
+               .subscriber_queue_capacity = 256,
+               .publisher_too_slow_policy = "WAIT_FOR_CONSUMER",
+               .subscriber_queue_full_policy = "DISCARD_OLDEST_DATA"}}) {
+    EXPECT_FALSE(IceoryxTransportDriver::ResolveDeliveryOptions(invalid));
+  }
 }
 
 TEST(IoxReleaseToken, DestructorFallbackAndExplicitReleaseAreExactlyOnce) {
@@ -285,6 +321,50 @@ TEST(IoxAsyncStop, DetachAndQuiescenceFinishBeforeDeregister) {
             std::future_status::ready);
 }
 
+TEST(IoxSubscriptionTeardown, FailedWaitsRetainStateUntilEveryGateIsQuiescent) {
+  IoxNotificationGate callback_gate;
+  ASSERT_TRUE(callback_gate.TryEnter());
+  std::promise<void> subscription_quiescent_promise;
+  auto subscription_quiescent =
+      subscription_quiescent_promise.get_future().share();
+  std::promise<void> detached_promise;
+  auto detached = detached_promise.get_future();
+  std::promise<void> cleaned_promise;
+  auto cleaned = cleaned_promise.get_future();
+  std::atomic_size_t callback_waits{0};
+  std::atomic_size_t subscription_waits{0};
+
+  auto teardown = std::async(std::launch::async, [&] {
+    internal::RunIoxSubscriptionTeardown(
+        [&] { callback_gate.Close(); },
+        [&] { detached_promise.set_value(); },
+        [&] {
+          ++callback_waits;
+          return callback_gate.WaitForQuiescence(std::chrono::milliseconds(5));
+        },
+        [&] {
+          ++subscription_waits;
+          return subscription_quiescent.wait_for(std::chrono::milliseconds(5)) ==
+                 std::future_status::ready;
+        },
+        [&] { cleaned_promise.set_value(); });
+  });
+
+  ASSERT_EQ(detached.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  while (callback_waits.load() < 2) std::this_thread::yield();
+  EXPECT_EQ(cleaned.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  callback_gate.Exit();
+  while (subscription_waits.load() < 2) std::this_thread::yield();
+  EXPECT_EQ(cleaned.wait_for(std::chrono::milliseconds(0)),
+            std::future_status::timeout);
+  subscription_quiescent_promise.set_value();
+  EXPECT_EQ(cleaned.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  teardown.get();
+}
+
 TEST(IoxNotificationGate, CloseRejectsNewEntrancesAndWaitsForActiveCallback) {
   IoxNotificationGate gate;
   ASSERT_TRUE(gate.TryEnter());
@@ -293,14 +373,59 @@ TEST(IoxNotificationGate, CloseRejectsNewEntrancesAndWaitsForActiveCallback) {
   EXPECT_EQ(gate.Active(), 1u);
 
   auto wait = std::async(std::launch::async, [&] {
-    gate.WaitForQuiescence();
-    return true;
+    return gate.WaitForQuiescence(std::chrono::seconds(1));
   });
   EXPECT_EQ(wait.wait_for(std::chrono::milliseconds(20)),
             std::future_status::timeout);
   gate.Exit();
   EXPECT_TRUE(wait.get());
   EXPECT_EQ(gate.Active(), 0u);
+}
+
+TEST(IoxNotificationGate, QuiescenceTimeoutIsBoundedAndFailsClosed) {
+  IoxNotificationGate gate;
+  ASSERT_TRUE(gate.TryEnter());
+  gate.Close();
+  const auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(gate.WaitForQuiescence(std::chrono::milliseconds(10)));
+  EXPECT_LT(std::chrono::steady_clock::now() - begin,
+            std::chrono::milliseconds(200));
+  gate.Exit();
+  EXPECT_TRUE(gate.WaitForQuiescence(std::chrono::milliseconds(10)));
+}
+
+TEST(IoxNotificationGate, SaturatedPackedCountRejectsEntryWithoutOverflow) {
+  IoxNotificationGate gate;
+  constexpr size_t kSaturatedOpenState =
+      std::numeric_limits<size_t>::max() - 1;
+  internal::IoxNotificationGateTestAccess::SetPackedState(
+      gate, kSaturatedOpenState);
+
+  EXPECT_FALSE(gate.TryEnter());
+  EXPECT_EQ(internal::IoxNotificationGateTestAccess::PackedState(gate),
+            kSaturatedOpenState);
+  EXPECT_FALSE(gate.Closed());
+
+  gate.Close();
+  EXPECT_FALSE(gate.TryEnter());
+  EXPECT_EQ(internal::IoxNotificationGateTestAccess::PackedState(gate),
+            std::numeric_limits<size_t>::max());
+  EXPECT_TRUE(gate.Closed());
+}
+
+TEST(IoxNotificationGate, WaitReturnAllowsImmediateDestructionAfterLastExit) {
+  constexpr size_t kIterations = 1000;
+  for (size_t i = 0; i < kIterations; ++i) {
+    auto gate = std::make_unique<IoxNotificationGate>();
+    ASSERT_TRUE(gate->TryEnter());
+    gate->Close();
+
+    auto* const exiting_gate = gate.get();
+    std::thread exit([exiting_gate] { exiting_gate->Exit(); });
+    ASSERT_TRUE(gate->WaitForQuiescence(std::chrono::seconds(1)));
+    gate.reset();
+    exit.join();
+  }
 }
 
 // -----------------------------------------------------------------

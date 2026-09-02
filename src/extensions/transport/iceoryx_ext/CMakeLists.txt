@@ -32,6 +32,14 @@ set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM src ${test_files})
+list(REMOVE_ITEM src
+  ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge_stub.cc)
+if(IBMW_ENABLE_REPORTER_V1)
+  list(APPEND src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge.cc)
+else()
+  list(APPEND src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge_stub.cc)
+endif()
 set(REPORTER_HOST_BOUNDARY_TEST_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/reporter_host_boundary_test.cc)
 list(REMOVE_ITEM test_files ${REPORTER_HOST_BOUNDARY_TEST_SRC})

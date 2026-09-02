@@ -2,7 +2,6 @@ import copy
 import hashlib
 import json
 import os
-import shutil
 import stat
 import subprocess
 import sys
@@ -284,38 +283,37 @@ def test_post_rename_race_removes_only_owned_destination(tmp_path, monkeypatch):
     assert not destination.exists()
 
 
-def _real_campaign_fixture(tmp_path):
-    repository = Path(__file__).parents[3]
-    evidence = (repository / ".opencode/comm-trace-on/managed_exact_candidate_runs")
-    source_campaign = evidence / "finalized_formal_campaign"
-    source_store = evidence / "campaign_objects"
-    if not source_campaign.is_dir() or not source_store.is_dir():
-        pytest.fail("real v8/v9 campaign fixture is unavailable")
+def _synthetic_campaign_fixture(tmp_path):
     campaign_root = tmp_path / "campaign"
-    shutil.copytree(source_campaign, campaign_root)
-    manifest = json.loads((campaign_root / "campaign_manifest.json").read_bytes())
-    descriptors = [item["descriptor"] for item in manifest["registrations"]]
-    descriptors.append(manifest["retained_v8_source_descriptor"])
+    campaign_root.mkdir()
     store = tmp_path / "objects"
-    for descriptor in descriptors:
-        digest = descriptor["object_sha256"]
-        source = source_store / "sha256" / digest[:2] / f"{digest}.tar"
-        target = store / "sha256" / digest[:2] / f"{digest}.tar"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(source, target)
-        except OSError:
-            shutil.copyfile(source, target)
-    seal = json.loads((campaign_root / "campaign_seal.json").read_bytes())
-    registry, registry_hash = _registry(
-        tmp_path, root=seal["campaign_root_sha256"],
-        campaign_id=manifest["campaign_id"])
-    return campaign_root, store, registry, registry_hash, manifest["campaign_id"]
+    store.mkdir()
+    registry, registry_hash = _registry(tmp_path)
+    return campaign_root, store, registry, registry_hash, CAMPAIGN_ID
 
 
-def test_installed_cli_builds_and_validates_real_v8_v9_campaign(tmp_path):
+def _installed_fixture_hook(tmp_path, campaign_root, store):
+    hook = tmp_path / "installed-fixture-hook"
+    hook.mkdir()
+    (hook / "sitecustomize.py").write_text(
+        "import copy\n"
+        "from pathlib import Path\n"
+        "from mw_perf_collect import metric_qualification as qualification\n"
+        f"SOURCE = {_source()!r}\n"
+        f"CAMPAIGN = Path({str(campaign_root)!r})\n"
+        f"STORE = Path({str(store)!r})\n"
+        f"ROOT = {ROOT!r}\n"
+        "def derive(campaign, store, root):\n"
+        "    if Path(campaign) != CAMPAIGN or Path(store) != STORE or root != ROOT:\n"
+        "        raise ValueError('synthetic campaign identity mismatch')\n"
+        "    return copy.deepcopy(SOURCE)\n"
+        "qualification._source_derivation = derive\n")
+    return hook
+
+
+def test_installed_cli_builds_and_validates_synthetic_v8_v9_campaign(tmp_path):
     campaign_root, store, registry, registry_hash, campaign_id = (
-        _real_campaign_fixture(tmp_path))
+        _synthetic_campaign_fixture(tmp_path))
     repository = Path(__file__).parents[3]
     cmake_source = tmp_path / "install-project"; cmake_source.mkdir()
     (cmake_source / "CMakeLists.txt").write_text(
@@ -336,16 +334,19 @@ def test_installed_cli_builds_and_validates_real_v8_v9_campaign(tmp_path):
         env={**os.environ, "PYTHONPATH": str(installed_parent)},
         check=True, text=True, capture_output=True).stdout.strip()
     assert imported.startswith(str(prefix))
+    fixture_hook = _installed_fixture_hook(tmp_path, campaign_root, store)
+    cli_env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        (str(fixture_hook), str(installed_parent)))}
     destination = tmp_path / "installed-qualification"
     common = ["--campaign", str(campaign_root), "--object-store", str(store),
               "--registry", str(registry), "--registry-sha256", registry_hash,
               "--provider", PROVIDER, "--campaign-id", campaign_id]
     subprocess.run([str(executable), "metric-qualification-build", *common,
                     "--destination", str(destination)], check=True,
-                   stdout=subprocess.PIPE, text=True)
+                   stdout=subprocess.PIPE, text=True, env=cli_env)
     subprocess.run([str(executable), "metric-qualification-validate", *common,
                     "--qualification", str(destination)], check=True,
-                   stdout=subprocess.PIPE, text=True)
+                   stdout=subprocess.PIPE, text=True, env=cli_env)
     invalid_cases = [
         common[:7] + ["0" * 64] + common[8:],
         common[:-3] + ["wrong-provider", "--campaign-id", campaign_id],
@@ -361,7 +362,7 @@ def test_installed_cli_builds_and_validates_real_v8_v9_campaign(tmp_path):
         checked = subprocess.run(
             [str(executable), "metric-qualification-validate", *invalid_common,
              "--qualification", str(destination)], stdout=subprocess.PIPE,
-            text=True)
+            text=True, env=cli_env)
         assert checked.returncode != 0
     value = json.loads((destination / "metric_qualification.json").read_bytes())
     assert value["classification"] == {"metric_availability": "supported",

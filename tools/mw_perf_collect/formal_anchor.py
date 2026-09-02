@@ -20,10 +20,10 @@ _EVIDENCE = "capability/p0a_evidence_manifest.json"
 _CONTRACT = "registration/contract.json"
 _FORMAL_AXIS_RULES = {"candidate_only", "metric_available", "p0a_evidence"}
 _KNOWN_VALIDATION_RULES = (
-    "required_fields", "manifest_schema", "sample_artifacts", "candidate_only",
-    "run_completed", "samples_present", "metrics_valid", "adapter_ready",
-    "metric_available", "scenario_contract", "ibmw_provenance", "runtime_images",
-    "core_metrics_required", "latency_artifact_required",
+    "resource_integrity", "required_fields", "manifest_schema", "sample_artifacts",
+    "candidate_only", "run_completed", "samples_present", "metrics_valid",
+    "adapter_ready", "metric_available", "scenario_contract", "ibmw_provenance",
+    "runtime_images", "core_metrics_required", "latency_artifact_required",
     "collector_managed_comparison", "comparison_metadata", "comparison_resources",
     "comparison_latency_csv", "p0a_profile_marker", "p0a_evidence",
     "dds_comm_trace_summary")

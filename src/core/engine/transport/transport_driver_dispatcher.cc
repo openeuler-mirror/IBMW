@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "base/log_util.h"
+#include "observability/comm_trace.h"
 #ifdef IBMW_ENABLE_CORE_METRICS
 #include "observability/core_metrics.h"
 #endif
@@ -26,9 +27,14 @@ bool IsTransportShutdownProfileEnabled() {
 }  // namespace
 
 void TransportDriverDispatcher::Initialize() {
+  IBMW_COMM_TRACE_INITIALIZE();
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
       "Transport driver bus can only be initialized once.");
+#ifdef IBMW_ENABLE_CORE_METRICS
+  cached_metrics_gate_ =
+      observability::CoreMetricsController().GetCachedMetricsGate(this);
+#endif
 }
 
 void TransportDriverDispatcher::Start() {
@@ -91,6 +97,10 @@ void TransportDriverDispatcher::Shutdown() {
       MW_INFO("Transport shutdown profile [driver-done]: {}", driver->Name());
     }
   }
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // Close metrics admission and wait for all raw slot users before invalidation.
+  observability::CoreMetricsController().InvalidateCachedEntries(this);
+#endif
   owned_legacy_message_handler_pool_.clear();
   if (error_count != 0) {
     MW_ERROR("Transport driver shutdown completed with {} error(s); first error: {}",

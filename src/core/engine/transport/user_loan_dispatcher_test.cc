@@ -159,6 +159,7 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
   EXPECT_NE(json.find("\"loan_succeeded\":2"), std::string::npos);
   EXPECT_NE(json.find("\"loan_publish_called\":1"), std::string::npos);
   EXPECT_NE(json.find("\"loan_release_called\":1"), std::string::npos);
+  dispatcher.Shutdown();
   EXPECT_TRUE(metrics.FinalizeSnapshot(&dispatcher));
   unsetenv("IBMW_CORE_METRICS");
 #endif

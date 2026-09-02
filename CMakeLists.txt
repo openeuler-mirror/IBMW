@@ -100,6 +100,7 @@ cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deli
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
 option(IBMW_ENABLE_CORE_METRICS "Build Core Metrics V1 instrumentation." OFF)
+option(IBMW_ENABLE_COMM_TRACE "Build internal P0a communication trace skeleton." OFF)
 cmake_dependent_option(IBMW_ENABLE_REPORTER_V1
   "Build Reporter V1 ABI runtime (requires Core Metrics)." OFF
   "IBMW_ENABLE_CORE_METRICS" OFF)

@@ -184,6 +184,9 @@ def test_materialize_formal_anchor_happy_path(tmp_path, monkeypatch):
     assert validation["valid_for_p0a_completion"] is True
     assert validation["failure_codes"] == ["METRIC_AVAILABLE"]
     assert validation["p0a_evidence"] == {"valid": True, "failure_codes": []}
+    assert [item["name"] for item in validation["rules"]] == list(
+        formal_anchor._KNOWN_VALIDATION_RULES)
+    assert validation["rules"][0] == {"name": "resource_integrity", "passed": True}
     states = {item["name"]: item["passed"] for item in validation["rules"]}
     assert states["candidate_only"] is True
     assert states["metric_available"] is False
@@ -520,6 +523,33 @@ def test_formal_validation_transform_rejects_unrelated_failure_and_is_exact():
     formal["failure_codes"].append("EXTRA_FORMAL_FAILURE")
     with pytest.raises(ValueError):
         formal_anchor._validate_formal_validation(formal)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda rules: rules.pop(0),
+    lambda rules: rules.__setitem__(slice(0, 2), reversed(rules[:2])),
+    lambda rules: rules[0].update(passed=False),
+    lambda rules: rules.insert(0, {"name": "unknown_rule", "passed": True}),
+])
+def test_formal_validation_rejects_missing_reordered_failed_or_unknown_rules(mutate):
+    source = {"validation_profile": "p0a", "valid_for_collection": True,
+              "valid_for_metric": False, "valid_for_comparison": False,
+              "failure_codes": ["CANDIDATE_ONLY", "METRIC_AVAILABLE", "P0A_EVIDENCE"],
+              "rules": [{"name": name, "passed": name not in {
+                  "candidate_only", "metric_available", "p0a_evidence"}}
+                        for name in formal_anchor._KNOWN_VALIDATION_RULES],
+              "p0a_evidence": {"valid": False,
+                               "failure_codes": ["P0A_ARTIFACT"]}}
+    formal = formal_anchor._formalize_validation(source)
+    changed_source = json.loads(json.dumps(source))
+    changed_formal = json.loads(json.dumps(formal))
+    mutate(changed_source["rules"])
+    mutate(changed_formal["rules"])
+
+    with pytest.raises(ValueError):
+        formal_anchor._formalize_validation(changed_source)
+    with pytest.raises(ValueError):
+        formal_anchor._validate_formal_validation(changed_formal)
 
 
 def test_v8_exact_archive_allows_only_immutable_companion_placeholders(tmp_path):

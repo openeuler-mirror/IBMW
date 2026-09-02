@@ -4,10 +4,17 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <filesystem>
+#include <array>
+#include <atomic>
+#include <thread>
+#include <vector>
 #include <gtest/gtest.h>
 
 #ifdef IBMW_ENABLE_CORE_METRICS
 #include "observability/core_metrics.h"
+#endif
+#ifdef IBMW_ENABLE_REPORTER_V1
+#include "internal/reporter_sidecar.h"
 #endif
 
 namespace {
@@ -72,6 +79,7 @@ TEST_F(ReporterHostBoundary, RuntimeOffIsSafeNull) {
   ibmw::runtime::core::observability::Controller::Instance().Initialize();
 #endif
   EXPECT_EQ(ibmw_reporter_query_v1(), nullptr);
+  EXPECT_EQ(ibmw_reporter_query_batch_v1(), nullptr);
 }
 
 #if defined(IBMW_ENABLE_CORE_METRICS) && defined(IBMW_ENABLE_REPORTER_V1)
@@ -87,10 +95,12 @@ TEST_F(ReporterHostBoundary, QueryTracksControllerLifecycle) {
   EXPECT_EQ(ibmw_reporter_query_v1(), nullptr);
   controller.Initialize();
   EXPECT_NE(ibmw_reporter_query_v1(), nullptr);
+  EXPECT_NE(ibmw_reporter_query_batch_v1(), nullptr);
   controller.Start();
   EXPECT_NE(ibmw_reporter_query_v1(), nullptr);
   EXPECT_TRUE(controller.FinalizeSnapshot());
   EXPECT_EQ(ibmw_reporter_query_v1(), nullptr);
+  EXPECT_EQ(ibmw_reporter_query_batch_v1(), nullptr);
 
   unsetenv("IBMW_OBSERVABILITY_OUTPUT_DIR");
   std::filesystem::remove_all(dir);
@@ -148,6 +158,259 @@ TEST_F(ReporterHostBoundary, RetiredSlotsRemainSafeAndGenerationIsolated) {
   controller.Start();
   EXPECT_TRUE(controller.FinalizeSnapshot());
   std::filesystem::remove_all(dir);
+}
+
+TEST_F(ReporterHostBoundary,
+       RetainedReceiveSnapshotsAllMetricsAndCallbackConservation) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller =
+      ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* api = ibmw_reporter_query_v1();
+  ASSERT_NE(api, nullptr);
+
+  ibmw::extensions::iceoryx_extension::IoxReceiveReporter reporter;
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(batch, nullptr);
+  ASSERT_TRUE(ibmw::extensions::iceoryx_extension::RegisterIoxReceiveReporterSlots(
+      api, batch, reporter, "retained/topic", "RetainedType"));
+
+  constexpr uint64_t kEntered = 4;
+  constexpr uint64_t kCompleted = 2;
+  constexpr uint64_t kThrewStd = 1;
+  constexpr uint64_t kThrewNonstd = 1;
+  api->add(api->owner, reporter.delivered, 4);
+  api->add(api->owner, reporter.callback_entered, kEntered);
+  api->add(api->owner, reporter.callback_completed, kCompleted);
+  api->add(api->owner, reporter.callback_threw_std, kThrewStd);
+  api->add(api->owner, reporter.callback_threw_nonstd, kThrewNonstd);
+  api->add(api->owner, reporter.released, 3);
+  api->add_signed(api->owner, reporter.outstanding, 2);
+  api->add_signed(api->owner, reporter.outstanding, -1);
+  api->add(api->owner, reporter.outstanding_peak, 2);
+  api->add(api->owner, reporter.limit_drop, 1);
+
+  const auto snapshot = controller.registry().ReporterSnapshotJsonl();
+  const auto expect_metric = [&](std::string_view metric, uint64_t value) {
+    const auto record = std::string("\"metric\":\"") +
+                        std::string(metric) +
+                        "\",\"topic\":\"retained/topic\",\"type\":"
+                        "\"RetainedType\",\"driver\":\"iceoryx\",\"value\":" +
+                        std::to_string(value);
+    EXPECT_NE(snapshot.find(record), std::string::npos) << metric;
+  };
+
+  size_t retained_records = 0;
+  for (size_t pos = 0;
+       (pos = snapshot.find("\"kind\":\"retained_iceoryx_receive\"", pos)) !=
+       std::string::npos;
+       ++retained_records, ++pos) {
+  }
+  EXPECT_EQ(retained_records, 9u);
+  expect_metric("receive_delivered", 4);
+  expect_metric("callback_entered", kEntered);
+  expect_metric("callback_completed", kCompleted);
+  expect_metric("callback_threw_std", kThrewStd);
+  expect_metric("callback_threw_nonstd", kThrewNonstd);
+  expect_metric("receive_released", 3);
+  expect_metric("outstanding_current", 1);
+  expect_metric("outstanding_peak", 2);
+  expect_metric("limit_drop", 1);
+  EXPECT_EQ(kEntered, kCompleted + kThrewStd + kThrewNonstd);
+}
+#endif
+
+#if defined(IBMW_ENABLE_CORE_METRICS) && defined(IBMW_ENABLE_REPORTER_V1)
+TEST_F(ReporterHostBoundary, BatchVisibilityRollbackAndIndependence) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* v1 = ibmw_reporter_query_v1();
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(v1, nullptr);
+  ASSERT_NE(batch, nullptr);
+  ASSERT_EQ(batch->owner, v1->owner);
+
+  static constexpr std::array<const char*, 9> metrics{
+      "m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"};
+  const auto make_descriptors = [&](size_t count, const char* kind) {
+    std::vector<ibmw_reporter_slot_descriptor_v1> descriptors(count);
+    for (size_t i = 0; i < count; ++i) {
+      descriptors[i].abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+      descriptors[i].struct_size = sizeof(descriptors[i]);
+      descriptors[i].kind = {kind, std::strlen(kind)};
+      descriptors[i].metric = {metrics[i], 2};
+    }
+    return descriptors;
+  };
+  const auto count_kind = [&](std::string_view kind) {
+    const auto snapshot = controller.registry().ReporterSnapshotJsonl();
+    const std::string needle = "\"kind\":\"" + std::string(kind) + "\"";
+    size_t count = 0;
+    for (size_t pos = 0; (pos = snapshot.find(needle, pos)) != std::string::npos;
+         ++count, ++pos) {}
+    return count;
+  };
+
+  auto six = make_descriptors(6, "batch_six");
+  std::array<ibmw_reporter_slot_v1*, 6> six_slots{};
+  ibmw_reporter_batch_transaction_v1* transaction = nullptr;
+  ASSERT_TRUE(batch->prepare(batch->owner, six.data(), six.size(),
+                             six_slots.data(), &transaction));
+  EXPECT_EQ(count_kind("batch_six"), 0u);
+  batch->abort(batch->owner, transaction);
+  EXPECT_EQ(count_kind("batch_six"), 0u);
+
+  for (size_t fail_at = 0; fail_at < six.size(); ++fail_at) {
+    auto invalid = six;
+    invalid[fail_at].metric = {nullptr, 0};
+    transaction = nullptr;
+    EXPECT_FALSE(batch->prepare(batch->owner, invalid.data(), invalid.size(),
+                                six_slots.data(), &transaction));
+    EXPECT_EQ(transaction, nullptr);
+    EXPECT_EQ(count_kind("batch_six"), 0u);
+  }
+
+  ASSERT_TRUE(batch->prepare(batch->owner, six.data(), six.size(),
+                             six_slots.data(), &transaction));
+  ASSERT_TRUE(batch->commit(batch->owner, transaction));
+  EXPECT_EQ(count_kind("batch_six"), 6u);
+
+  auto nine = make_descriptors(9, "batch_nine");
+  std::array<ibmw_reporter_slot_v1*, 9> nine_slots{};
+  ASSERT_TRUE(batch->prepare(batch->owner, nine.data(), nine.size(),
+                             nine_slots.data(), &transaction));
+  EXPECT_EQ(count_kind("batch_nine"), 0u);
+  ASSERT_TRUE(batch->commit(batch->owner, transaction));
+  EXPECT_EQ(count_kind("batch_nine"), 9u);
+
+  auto first = six_slots;
+  ASSERT_TRUE(batch->prepare(batch->owner, six.data(), six.size(),
+                             six_slots.data(), &transaction));
+  ASSERT_TRUE(batch->commit(batch->owner, transaction));
+  EXPECT_NE(first[0], six_slots[0]);
+  EXPECT_EQ(count_kind("batch_six"), 12u);
+}
+
+TEST_F(ReporterHostBoundary, BatchOwnerMismatchAndOrdinaryV1FailClosed) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* v1 = ibmw_reporter_query_v1();
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(v1, nullptr);
+  ASSERT_NE(batch, nullptr);
+  ibmw_reporter_slot_descriptor_v1 descriptor{};
+  descriptor.abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.kind = {"ordinary", 8};
+  descriptor.metric = {"count", 5};
+  EXPECT_NE(v1->register_slot(v1->owner, &descriptor),
+            v1->register_slot(v1->owner, &descriptor));
+
+  auto invalid = *batch;
+  invalid.owner = &invalid;
+  ibmw_reporter_slot_v1* slot = nullptr;
+  ibmw_reporter_batch_transaction_v1* transaction = nullptr;
+  EXPECT_FALSE(invalid.prepare(invalid.owner, &descriptor, 1, &slot,
+                               &transaction));
+  EXPECT_EQ(transaction, nullptr);
+}
+
+TEST_F(ReporterHostBoundary, BatchCommitAfterFreezeIsRejectedAndAbortIsSafe) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(batch, nullptr);
+  ibmw_reporter_slot_descriptor_v1 descriptor{};
+  descriptor.abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.kind = {"lifecycle", 9};
+  descriptor.metric = {"count", 5};
+  ibmw_reporter_slot_v1* slot = nullptr;
+  ibmw_reporter_batch_transaction_v1* transaction = nullptr;
+  ASSERT_TRUE(batch->prepare(batch->owner, &descriptor, 1, &slot, &transaction));
+  ASSERT_NE(transaction, nullptr);
+  controller.registry().Freeze();
+  EXPECT_FALSE(batch->commit(batch->owner, transaction));
+  batch->abort(batch->owner, transaction);
+  EXPECT_EQ(controller.registry().ReporterSnapshotJsonl().find("lifecycle"),
+            std::string::npos);
+}
+
+TEST_F(ReporterHostBoundary, InvalidTokenAndCommitAfterStartFailClosed) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(batch, nullptr);
+  auto* invalid = reinterpret_cast<ibmw_reporter_batch_transaction_v1*>(
+      static_cast<uintptr_t>(0x1234));
+  EXPECT_FALSE(batch->commit(batch->owner, invalid));
+  batch->abort(batch->owner, invalid);
+  controller.Start();
+  EXPECT_FALSE(batch->commit(batch->owner, invalid));
+}
+
+TEST_F(ReporterHostBoundary, ResetRetiresStagedSlotsAndInvalidatesToken) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* v1 = ibmw_reporter_query_v1();
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(v1, nullptr);
+  ASSERT_NE(batch, nullptr);
+  ibmw_reporter_slot_descriptor_v1 descriptor{};
+  descriptor.abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.kind = {"reset_staged", 12};
+  descriptor.metric = {"count", 5};
+  ibmw_reporter_slot_v1* slot = nullptr;
+  ibmw_reporter_batch_transaction_v1* transaction = nullptr;
+  ASSERT_TRUE(batch->prepare(batch->owner, &descriptor, 1, &slot, &transaction));
+  controller.ResetForTesting();
+  v1->add(v1->owner, slot, 1);
+  EXPECT_FALSE(batch->commit(batch->owner, transaction));
+  batch->abort(batch->owner, transaction);
+}
+
+TEST_F(ReporterHostBoundary, ConcurrentSnapshotSeesZeroOrWholeBatch) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = ibmw::runtime::core::observability::Controller::Instance();
+  controller.Initialize();
+  const auto* batch = ibmw_reporter_query_batch_v1();
+  ASSERT_NE(batch, nullptr);
+  constexpr size_t kCount = 9;
+  std::array<ibmw_reporter_slot_descriptor_v1, kCount> descriptors{};
+  std::array<ibmw_reporter_slot_v1*, kCount> slots{};
+  static constexpr std::array<const char*, kCount> metrics{
+      "m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"};
+  for (size_t i = 0; i < kCount; ++i) {
+    descriptors[i].abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+    descriptors[i].struct_size = sizeof(descriptors[i]);
+    descriptors[i].kind = {"atomic_batch", 12};
+    descriptors[i].metric = {metrics[i], 2};
+  }
+  ibmw_reporter_batch_transaction_v1* transaction = nullptr;
+  ASSERT_TRUE(batch->prepare(batch->owner, descriptors.data(), kCount,
+                             slots.data(), &transaction));
+  std::atomic_bool committed{false};
+  std::thread commit([&] {
+    EXPECT_TRUE(batch->commit(batch->owner, transaction));
+    committed.store(true, std::memory_order_release);
+  });
+  do {
+    const auto snapshot = controller.registry().ReporterSnapshotJsonl();
+    size_t count = 0;
+    for (size_t pos = 0;
+         (pos = snapshot.find("\"kind\":\"atomic_batch\"", pos)) !=
+         std::string::npos;
+         ++count, ++pos) {
+    }
+    EXPECT_TRUE(count == 0 || count == kCount) << count;
+  } while (!committed.load(std::memory_order_acquire));
+  commit.join();
 }
 #endif
 }  // namespace

@@ -268,11 +268,11 @@ def test_missing_comparison_flag_is_allowed_but_true_is_rejected(tmp_path):
                                  validator=_validator())
 
 
-def test_real_candidate_manifest_shape_allows_absent_flag_and_rejects_true():
-    repository = Path(__file__).parents[3]
-    manifests = sorted((repository / "managed_exact_candidate_runs/runs").glob("*/manifest.json"))
-    assert manifests
-    root_raw = manifests[-1].read_bytes()
+def test_real_candidate_manifest_shape_allows_absent_flag_and_rejects_true(tmp_path):
+    manifest_path = _anchor(tmp_path) / "manifest.json"
+    root = json.loads(manifest_path.read_bytes())
+    del root["valid_for_comparison"]
+    root_raw = _canonical_json_bytes(root, newline=True)
     root = json.loads(root_raw)
     assert "valid_for_comparison" not in root
     version = root["dds_comm_trace"]["registration_contract_version"]

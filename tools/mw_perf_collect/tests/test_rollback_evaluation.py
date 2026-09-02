@@ -2,7 +2,9 @@ import json
 import hashlib
 import os
 import signal
+import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
@@ -57,72 +59,601 @@ def test_source_identity_drift_is_rejected():
         rollback._require_same_source_identity({"sha256": "before"}, {"sha256": "after"})
 
 
-def _googletest_fixture(tmp_path):
-    anchor = (tmp_path / "anchor").resolve()
-    source = anchor / "_deps" / "googletest-src"
-    source.mkdir(parents=True)
-    (source / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
-    (source / "googletest").mkdir()
-    (source / "googletest" / "gtest.cc").write_text("// external source\n")
-    return anchor, source
+def _dependency_fixture(tmp_path):
+    base = (tmp_path / "anchor" / "_deps").resolve(); base.mkdir(parents=True)
+    for name in ("backward", "googletest"):
+        source = base / f"{name}-src"; source.mkdir()
+        (source / "CMakeLists.txt").write_text(f"project({name})\n")
+        (source / f"{name}.cc").write_text(f"// {name}\n")
+    cache = {"FETCHCONTENT_BASE_DIR": {"value": str(base)}}
+    return base, cache
 
 
-def test_configure_argv_reuses_only_canonical_googletest_source(tmp_path):
-    anchor, googletest_source = _googletest_fixture(tmp_path)
+def _staged_dependency_control(tmp_path):
+    base, cache = _dependency_fixture(tmp_path)
+    _base, dependencies = rollback._anchor_dependency_sources(cache)
+    work = (tmp_path / "work").resolve(); work.mkdir()
+    source_cache, fresh_base = rollback._stage_dependency_sources(work, dependencies)
+    aggregate = {}
+    for checkpoint in rollback._DEPENDENCY_CHECKPOINTS:
+        field = "anchor_source" if checkpoint.startswith("anchor_") else "staged_source"
+        aggregate[checkpoint] = rollback._record_dependency_checkpoint(
+            dependencies, checkpoint, field)
+    return {"provider": "anchor_fetchcontent_source_cache", "reuse_scope": "source_only",
+            "cache_verified": True, "anchor_base_dir": str(base),
+            "fresh_base_dir": str(fresh_base), "staged_source_cache": str(source_cache),
+            "dependencies": dependencies, "aggregate_identity": aggregate}
+
+
+def test_configure_argv_uses_fresh_disconnected_cache_and_all_overrides(tmp_path):
+    control = _staged_dependency_control(tmp_path)
     source = (tmp_path / "product-source").resolve(); source.mkdir()
     build = (tmp_path / "fresh" / "build").resolve()
     argv = rollback._configure_argv(
         "/usr/bin/cmake", source, build, {"CMAKE_GENERATOR": {"value": "Ninja"}},
         {"CMAKE_BUILD_TYPE": "Release"}, {"IBMW_ENABLE_COMM_TRACE": "ON"},
-        googletest_source)
-    local = [item for item in argv if item.startswith("-Dgoogletest_LOCAL_SOURCE=")]
-    assert local == [f"-Dgoogletest_LOCAL_SOURCE={googletest_source}"]
-    assert all("github.com" not in item and "DOWNLOAD_URL" not in item for item in argv)
-    assert all(str(anchor / "_deps" / "googletest-build") not in item for item in argv)
-    assert all(not item.endswith((".o", ".obj", ".a", ".so")) for item in argv)
+        Path(control["fresh_base_dir"]), control["dependencies"])
+    assert f'-DFETCHCONTENT_BASE_DIR={control["fresh_base_dir"]}' in argv
+    assert "-DFETCHCONTENT_FULLY_DISCONNECTED=ON" in argv
+    overrides = [item for item in argv if item.startswith("-DFETCHCONTENT_SOURCE_DIR_")]
+    assert overrides == [
+        f'-DFETCHCONTENT_SOURCE_DIR_BACKWARD={control["dependencies"][0]["staged_source"]}',
+        f'-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST={control["dependencies"][1]["staged_source"]}']
+    assert all("-build" not in item and "-subbuild" not in item for item in argv)
+    assert sorted(path.name for path in Path(control["staged_source_cache"]).iterdir()) == [
+        "backward-src", "googletest-src"]
     assert "-DIBMW_ENABLE_COMM_TRACE=OFF" in argv
 
 
-@pytest.mark.parametrize("condition", ["missing", "symlink", "missing_cmakelists"])
-def test_googletest_source_rejects_missing_symlink_or_incomplete_tree(
-        tmp_path, condition):
-    anchor = (tmp_path / "anchor").resolve(); (anchor / "_deps").mkdir(parents=True)
-    source = anchor / "_deps" / "googletest-src"
-    if condition == "symlink":
-        real = tmp_path / "real-googletest"; real.mkdir()
-        (real / "CMakeLists.txt").write_text("project(gtest)\n")
-        source.symlink_to(real, target_is_directory=True)
-    elif condition == "missing_cmakelists":
-        source.mkdir()
-    with pytest.raises(RuntimeError, match="unavailable|real directory|CMakeLists"):
-        rollback._googletest_source_identity(anchor)
+def test_dependency_override_preserves_cmake_fetchcontent_name_spelling():
+    assert rollback._dependency_override("yaml-cpp") == "FETCHCONTENT_SOURCE_DIR_YAML-CPP"
+    assert rollback._dependency_override("tbb") == "FETCHCONTENT_SOURCE_DIR_TBB"
 
 
-def test_googletest_cache_requires_exact_canonical_source(tmp_path):
-    _anchor, source = _googletest_fixture(tmp_path)
-    rollback._require_googletest_cache(
-        {"googletest_LOCAL_SOURCE": {"value": str(source)}}, source)
-    with pytest.raises(RuntimeError, match="cache mismatch"):
-        rollback._require_googletest_cache(
-            {"googletest_LOCAL_SOURCE": {"value": str(source.parent / "googletest-build")}},
-            source)
-    with pytest.raises(RuntimeError, match="cache mismatch"):
-        rollback._require_googletest_cache({}, source)
+@pytest.mark.parametrize("condition", ["missing_base", "source_symlink", "nested_symlink"])
+def test_dependency_inventory_rejects_missing_or_symlinked_authority(tmp_path, condition):
+    base, cache = _dependency_fixture(tmp_path)
+    if condition == "missing_base":
+        cache = {}
+    elif condition == "source_symlink":
+        source = base / "backward-src"; shutil.rmtree(source)
+        source.symlink_to(base / "googletest-src", target_is_directory=True)
+    else:
+        (base / "backward-src" / "escape").symlink_to(base / "googletest-src")
+    with pytest.raises(RuntimeError, match="missing or invalid|symlink"):
+        rollback._anchor_dependency_sources(cache)
 
 
-def test_googletest_source_mutation_is_rejected_by_dependency_control(tmp_path):
-    anchor, source = _googletest_fixture(tmp_path)
-    before = rollback._googletest_source_identity(anchor)
-    (source / "googletest" / "gtest.cc").write_text("// mutated external source\n")
-    after = rollback._googletest_source_identity(anchor)
-    control = {"name": "googletest_LOCAL_SOURCE",
-               "provider": "anchor_external_dependency_source",
-               "reuse_scope": "source_only", "canonical_source": str(source),
-               "cache_verified": True,
-               "identity": {"before_configure": before, "after_configure": after,
-                            "after_build": after}}
+def test_dependency_fd_traversal_rejects_entry_replaced_after_lstat(tmp_path, monkeypatch):
+    base, _cache = _dependency_fixture(tmp_path)
+    source = base / "backward-src"
+    victim = source / "backward.cc"
+    outside = tmp_path / "outside.cc"; outside.write_text("outside\n")
+    real_open = rollback.os.open
+    replaced = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal replaced
+        if path == "backward.cc" and dir_fd is not None and not replaced:
+            replaced = True
+            victim.rename(source / "original.cc")
+            victim.symlink_to(outside)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(rollback.os, "open", racing_open)
+    with pytest.raises(RuntimeError, match="symlink|changed|unavailable"):
+        rollback._external_source_identity(source)
+
+
+def test_dependency_copy_rejects_growth_before_writing_excess_bytes(tmp_path, monkeypatch):
+    source = (tmp_path / "source").resolve(); source.mkdir()
+    (source / "data.bin").write_bytes(b"declared")
+    destination = (tmp_path / "destination").resolve()
+    real_read = rollback.os.read
+    injected = False
+
+    def growing_read(fd, count):
+        nonlocal injected
+        chunk = real_read(fd, count)
+        if not chunk and not injected:
+            injected = True
+            return b"growth"
+        return chunk
+
+    monkeypatch.setattr(rollback.os, "read", growing_read)
+    with pytest.raises(RuntimeError, match="grew beyond declared byte budget"):
+        rollback._dependency_tree(source, destination, max_bytes=1024)
+    assert (destination / "data.bin").read_bytes() == b"declared"
+
+
+@pytest.mark.parametrize("operation", ["discovery", "checkpoint"])
+def test_dependency_aggregate_exhaustion_stops_second_tree_scan(
+        tmp_path, monkeypatch, operation):
+    base, cache = _dependency_fixture(tmp_path)
+    dependencies = None
+    if operation == "checkpoint":
+        _base, dependencies = rollback._anchor_dependency_sources(cache)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_FILES", 2)
+    second_tree_stats = 0
+    first_tree_complete = False
+    first_file_stats = 0
+    real_stat = rollback.os.stat
+
+    def instrumented_stat(path, *args, **kwargs):
+        nonlocal first_file_stats, first_tree_complete, second_tree_stats
+        if first_tree_complete:
+            second_tree_stats += 1
+        if path == "backward.cc":
+            first_file_stats += 1
+            first_tree_complete = first_file_stats == 2
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(rollback.os, "stat", instrumented_stat)
+    with pytest.raises(RuntimeError, match="file count limit"):
+        if operation == "discovery":
+            rollback._anchor_dependency_sources(cache)
+        else:
+            assert dependencies is not None
+            rollback._record_dependency_checkpoint(
+                dependencies, "anchor_after_staging", "anchor_source")
+    assert second_tree_stats == 0
+
+
+@pytest.mark.parametrize("omission", ["base", "disconnected", "backward_override"])
+def test_dependency_cache_requires_exact_base_disconnected_and_every_override(tmp_path, omission):
+    control = _staged_dependency_control(tmp_path)
+    cache = {"FETCHCONTENT_BASE_DIR": {"value": control["fresh_base_dir"]},
+             "FETCHCONTENT_FULLY_DISCONNECTED": {"value": "ON"}}
+    for dependency in control["dependencies"]:
+        cache[dependency["override_variable"]] = {"value": dependency["staged_source"]}
+    key = {"base": "FETCHCONTENT_BASE_DIR", "disconnected": "FETCHCONTENT_FULLY_DISCONNECTED",
+           "backward_override": "FETCHCONTENT_SOURCE_DIR_BACKWARD"}[omission]
+    broken = dict(cache); broken.pop(key)
+    with pytest.raises(RuntimeError, match="FETCHCONTENT"):
+        rollback._require_dependency_cache(
+            broken, Path(control["fresh_base_dir"]), Path(control["staged_source_cache"]),
+            control["dependencies"])
+
+
+def test_dependency_cache_rejects_generated_local_source_binding_mismatch(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    dependency = control["dependencies"][0]
+    dependency["cache_bindings"] = [{"variable": "backward_SOURCE_DIR", "relative": "."}]
+    cache = {"FETCHCONTENT_BASE_DIR": {"value": control["fresh_base_dir"]},
+             "FETCHCONTENT_FULLY_DISCONNECTED": {"value": "ON"},
+             "backward_SOURCE_DIR": {"value": dependency["anchor_source"]}}
+    for item in control["dependencies"]:
+        cache[item["override_variable"]] = {"value": item["staged_source"]}
+    with pytest.raises(RuntimeError, match="backward_SOURCE_DIR cache mismatch"):
+        rollback._require_dependency_cache(
+            cache, Path(control["fresh_base_dir"]), Path(control["staged_source_cache"]),
+            control["dependencies"])
+
+
+def test_dependency_cache_rejects_forged_alternate_staged_copy(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    canonical_cache = Path(control["staged_source_cache"])
+    alternate_cache = (tmp_path / "alternate-cache").resolve()
+    shutil.copytree(canonical_cache, alternate_cache)
+    cache = {
+        "FETCHCONTENT_BASE_DIR": {"value": control["fresh_base_dir"]},
+        "FETCHCONTENT_FULLY_DISCONNECTED": {"value": "ON"},
+    }
+    for dependency in control["dependencies"]:
+        forged = alternate_cache / (dependency["name"] + "-src")
+        dependency["staged_source"] = str(forged)
+        cache[dependency["override_variable"]] = {"value": str(forged)}
+    with pytest.raises(RuntimeError, match="not canonical"):
+        rollback._require_dependency_cache(
+            cache, Path(control["fresh_base_dir"]), canonical_cache,
+            control["dependencies"])
+
+
+def test_dependency_source_mutation_is_rejected_by_aggregate_control(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    Path(control["dependencies"][0]["staged_source"], "backward.cc").write_text("mutated\n")
+    control["dependencies"][0]["identity"]["staged_after_build"] = \
+        rollback._external_source_identity(Path(control["dependencies"][0]["staged_source"]))
+    control["aggregate_identity"]["staged_after_build"] = rollback._aggregate_dependency_identity(
+        control["dependencies"], "staged_after_build")
     with pytest.raises(ValueError, match="identity changed"):
         rollback._portable_dependency_source(control)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_dependency_permission_mutation_is_rejected(tmp_path, kind):
+    control = _staged_dependency_control(tmp_path)
+    source = Path(control["dependencies"][0]["staged_source"])
+    target = source / ("backward.cc" if kind == "file" else ".")
+    target.chmod(0o600 if kind == "file" else 0o700)
+    changed = rollback._external_source_identity(source)
+    assert changed["tree_sha256"] != control["dependencies"][0]["identity"][
+        "anchor_before_staging"]["tree_sha256"]
+    control["dependencies"][0]["identity"]["staged_after_build"] = changed
+    control["aggregate_identity"]["staged_after_build"] = rollback._aggregate_dependency_identity(
+        control["dependencies"], "staged_after_build")
+    with pytest.raises(ValueError, match="identity changed"):
+        rollback._portable_dependency_source(control)
+
+
+def test_portable_dependency_control_is_deterministic_and_path_free(tmp_path):
+    portable = rollback._portable_dependency_source(_staged_dependency_control(tmp_path))
+    assert [item["name"] for item in portable["dependencies"]] == ["backward", "googletest"]
+    assert portable["dependency_count"] == 2
+    assert len(portable["aggregate_sha256"]) == 64
+    _assert_no_paths(portable)
+
+
+@pytest.mark.parametrize("location", ["anchor_build", "anchor_subbuild", "anchor_other",
+                                       "staged_sibling"])
+def test_dependency_cache_rejects_all_unauthorized_path_entries(tmp_path, location):
+    control = _staged_dependency_control(tmp_path)
+    anchor_base = Path(control["anchor_base_dir"])
+    staged_root = Path(control["staged_source_cache"])
+    cache = {
+        "FETCHCONTENT_BASE_DIR": {"type": "PATH", "value": control["fresh_base_dir"]},
+        "FETCHCONTENT_FULLY_DISCONNECTED": {"type": "BOOL", "value": "ON"},
+    }
+    for dependency in control["dependencies"]:
+        cache[dependency["override_variable"]] = {
+            "type": "PATH", "value": dependency["staged_source"]}
+    bad = {
+        "anchor_build": anchor_base / "backward-build",
+        "anchor_subbuild": anchor_base / "backward-subbuild",
+        "anchor_other": anchor_base / "unrelated",
+        "staged_sibling": staged_root / "unregistered-src" / "CMakeFiles",
+    }[location]
+    cache["UNAUTHORIZED_PATH"] = {"type": "PATH", "value": str(bad)}
+    with pytest.raises(RuntimeError, match="anchor dependency base|authorized staged source"):
+        rollback._require_dependency_cache(cache, Path(control["fresh_base_dir"]), staged_root,
+                                           control["dependencies"], anchor_base)
+
+
+def test_dependency_cache_rejects_symlink_alias_into_anchor_base(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    anchor_base = Path(control["anchor_base_dir"])
+    alias = tmp_path / "alias"
+    alias.symlink_to(anchor_base, target_is_directory=True)
+    cache = {
+        "FETCHCONTENT_BASE_DIR": {"type": "PATH", "value": control["fresh_base_dir"]},
+        "FETCHCONTENT_FULLY_DISCONNECTED": {"type": "BOOL", "value": "ON"},
+    }
+    for dependency in control["dependencies"]:
+        cache[dependency["override_variable"]] = {
+            "type": "PATH", "value": dependency["staged_source"]}
+    cache["ALIAS_PATH"] = {"type": "PATH", "value": str(alias / "dep-build")}
+    with pytest.raises(RuntimeError, match="anchor dependency base"):
+        rollback._require_dependency_cache(cache, Path(control["fresh_base_dir"]),
+                                           Path(control["staged_source_cache"]),
+                                           control["dependencies"], anchor_base)
+
+
+def test_dependency_cache_allows_generated_descendant_of_exact_staged_source(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    staged_root = Path(control["staged_source_cache"])
+    iceoryx_source = Path(control["dependencies"][0]["staged_source"])
+    platform = iceoryx_source / "iceoryx_platform" / "linux"
+    platform.mkdir(parents=True)
+    cache = {
+        "FETCHCONTENT_BASE_DIR": {"type": "PATH", "value": control["fresh_base_dir"]},
+        "FETCHCONTENT_FULLY_DISCONNECTED": {"type": "BOOL", "value": "ON"},
+        "ICEORYX_PLATFORM": {"type": "PATH", "value": str(platform)},
+    }
+    for dependency in control["dependencies"]:
+        cache[dependency["override_variable"]] = {
+            "type": "PATH", "value": dependency["staged_source"]}
+
+    rollback._require_dependency_cache(
+        cache, Path(control["fresh_base_dir"]), staged_root, control["dependencies"],
+        anchor_base=Path(control["anchor_base_dir"]))
+
+
+def test_dependency_cache_rejects_symlink_alias_into_exact_staged_source(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    staged_root = Path(control["staged_source_cache"])
+    platform = Path(control["dependencies"][0]["staged_source"]) / "iceoryx_platform" / "linux"
+    platform.mkdir(parents=True)
+    alias = tmp_path / "iceoryx-platform-alias"
+    alias.symlink_to(platform, target_is_directory=True)
+    cache = {
+        "FETCHCONTENT_BASE_DIR": {"type": "PATH", "value": control["fresh_base_dir"]},
+        "FETCHCONTENT_FULLY_DISCONNECTED": {"type": "BOOL", "value": "ON"},
+        "ICEORYX_PLATFORM": {"type": "PATH", "value": str(alias)},
+    }
+    for dependency in control["dependencies"]:
+        cache[dependency["override_variable"]] = {
+            "type": "PATH", "value": dependency["staged_source"]}
+
+    with pytest.raises(RuntimeError, match="aliased path"):
+        rollback._require_dependency_cache(
+            cache, Path(control["fresh_base_dir"]), staged_root, control["dependencies"],
+            anchor_base=Path(control["anchor_base_dir"]))
+
+
+def test_dependency_cache_allows_canonical_staged_and_fresh_paths(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    fresh_base = Path(control["fresh_base_dir"])
+    cache = {
+        "FETCHCONTENT_BASE_DIR": {"type": "PATH", "value": str(fresh_base)},
+        "FETCHCONTENT_FULLY_DISCONNECTED": {"type": "BOOL", "value": "ON"},
+        "GENERATED_DEP_BUILD": {"type": "PATH", "value": str(fresh_base / "dep-build")},
+    }
+    for dependency in control["dependencies"]:
+        cache[dependency["override_variable"]] = {
+            "type": "PATH", "value": dependency["staged_source"]}
+    rollback._require_dependency_cache(
+        cache, fresh_base, Path(control["staged_source_cache"]), control["dependencies"],
+        anchor_base=Path(control["anchor_base_dir"]))
+
+
+def test_replayed_cmake_cxx_flags_rejects_anchor_dependency_build(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    anchor_base = Path(control["anchor_base_dir"])
+    value = f"-O2 -I{anchor_base}/backward-build/include"
+    with pytest.raises(RuntimeError, match="replayed control CMAKE_CXX_FLAGS.*anchor dependency base"):
+        rollback._audit_replayed_controls(
+            {"CMAKE_CXX_FLAGS": value}, directory=tmp_path,
+            anchor_base=anchor_base)
+
+
+def test_replayed_control_rejects_symlink_alias_into_anchor_dependency_base(tmp_path):
+    control = _staged_dependency_control(tmp_path)
+    anchor_base = Path(control["anchor_base_dir"])
+    alias = tmp_path / "anchor-deps-alias"
+    alias.symlink_to(anchor_base, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="anchor dependency base"):
+        rollback._audit_replayed_controls(
+            {"CMAKE_CXX_FLAGS": f"-isystem {alias}/backward-subbuild/include"},
+            directory=tmp_path, anchor_base=anchor_base)
+
+
+@pytest.mark.parametrize("arguments", [
+    lambda path: [f"-I{path}"],
+    lambda path: ["-I", str(path)],
+    lambda path: [f"-isystem{path}"],
+    lambda path: ["-isystem", str(path)],
+    lambda path: ["-include", str(path)],
+    lambda path: [f"--sysroot={path}"],
+    lambda path: ["--sysroot", str(path)],
+    lambda path: [f"-fplugin={path}"],
+    lambda path: [f"-specs={path}"],
+    lambda path: [f"-L{path}"],
+    lambda path: ["-L", str(path)],
+    lambda path: [f"-Wl,-rpath,{path}"],
+    lambda path: [str(path)],
+])
+def test_compile_argument_audit_rejects_joined_separated_and_plain_anchor_paths(
+        tmp_path, arguments):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    anchor_base.mkdir(parents=True)
+    bad = anchor_base / "backward-build" / "include"
+    records[0]["arguments"][1:1] = arguments(bad)
+    with pytest.raises(RuntimeError, match="fresh compile command references anchor dependency base"):
+        rollback.parse_compile_inventory(
+            _compile(records), source, build, anchor_base)
+
+
+_ADDITIONAL_COMPILER_PATH_OPTIONS = (
+    "-iquote", "-idirafter", "-imacros", "-isysroot", "-iprefix",
+    "-iwithprefix", "-iwithprefixbefore", "-include-pch", "-F", "-iframework", "-B",
+)
+
+
+@pytest.mark.parametrize("option", _ADDITIONAL_COMPILER_PATH_OPTIONS)
+@pytest.mark.parametrize("joined", [True, False], ids=["joined", "separated"])
+@pytest.mark.parametrize("alias", [False, True], ids=["direct", "symlink-alias"])
+def test_compile_argument_audit_rejects_additional_anchor_path_options(
+        tmp_path, option, joined, alias):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    bad = anchor_base / "backward-src" / "include"
+    bad.mkdir(parents=True)
+    operand = bad
+    if alias:
+        operand = tmp_path / "dependency-alias"
+        operand.symlink_to(bad, target_is_directory=True)
+    arguments = [f"{option}{operand}"] if joined else [option, str(operand)]
+    records[0]["arguments"][1:1] = arguments
+    with pytest.raises(RuntimeError, match="fresh compile command references anchor dependency base"):
+        rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+
+
+@pytest.mark.parametrize("arguments", [
+    lambda path: ["--include-directory", str(path)],
+    lambda path: [f"--include-directory={path}"],
+    lambda path: ["--include-directory-after", str(path)],
+    lambda path: [f"--include-directory-after={path}"],
+    lambda path: ["--include", str(path)],
+    lambda path: [f"--include={path}"],
+    lambda path: ["--imacros", str(path)],
+    lambda path: [f"--imacros={path}"],
+    lambda path: ["--include-prefix", str(path)],
+    lambda path: [f"--include-prefix={path}"],
+    lambda path: ["--include-with-prefix", str(path)],
+    lambda path: [f"--include-with-prefix={path}"],
+    lambda path: ["--include-with-prefix-before", str(path)],
+    lambda path: [f"--include-with-prefix-before={path}"],
+    lambda path: ["--prefix", str(path)],
+    lambda path: [f"--prefix={path}"],
+    lambda path: [f"--gcc-toolchain={path}"],
+])
+def test_compile_argument_audit_rejects_supported_long_anchor_path_options(
+        tmp_path, arguments):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    bad = anchor_base / "backward-src"
+    bad.mkdir(parents=True)
+    records[0]["arguments"][1:1] = arguments(bad)
+    with pytest.raises(RuntimeError, match="fresh compile command references anchor dependency base"):
+        rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+
+
+@pytest.mark.parametrize("option", _ADDITIONAL_COMPILER_PATH_OPTIONS)
+@pytest.mark.parametrize("joined", [True, False], ids=["joined", "separated"])
+@pytest.mark.parametrize("location", ["fresh", "staged"])
+def test_compile_argument_audit_allows_additional_fresh_and_staged_paths(
+        tmp_path, option, joined, location):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    anchor_base.mkdir(parents=True)
+    root = build if location == "fresh" else tmp_path / "work" / "source-cache"
+    operand = (root / "backward-src" / "include").resolve()
+    operand.mkdir(parents=True)
+    arguments = [f"{option}{operand}"] if joined else [option, str(operand)]
+    records[0]["arguments"][1:1] = arguments
+    result = rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+    assert result["record_count"] == 2
+
+
+def test_command_path_joined_forms_are_longest_first_and_do_not_match_arbitrary_i_tokens(
+        tmp_path):
+    assert rollback._PATH_ARGUMENT_JOINED_FORMS.index("-include-pch") < (
+        rollback._PATH_ARGUMENT_JOINED_FORMS.index("-include"))
+    assert rollback._PATH_ARGUMENT_JOINED_FORMS.index("-iwithprefixbefore") < (
+        rollback._PATH_ARGUMENT_JOINED_FORMS.index("-iwithprefix"))
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    anchor_base.mkdir(parents=True)
+    arbitrary = "-Winvalid-command-line-argument"
+    assert not any(arbitrary.startswith(form) for form in rollback._PATH_ARGUMENT_JOINED_FORMS)
+    rollback._audit_command_tokens(
+        [arbitrary], directory=tmp_path,
+        anchor_base=anchor_base, label="fresh compile command")
+
+
+@pytest.mark.parametrize("arguments", [
+    lambda path: [f"-Wl,-L,{path}"],
+    lambda path: [f"-Wl,-L{path}"],
+    lambda path: [f"-Wp,-I,{path}"],
+    lambda path: [f"-Wp,-I{path}"],
+])
+def test_compile_argument_audit_rejects_latest_comma_forwarding_escapes(
+        tmp_path, arguments):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    bad = anchor_base / "backward-src" / "include"
+    bad.mkdir(parents=True)
+    records[0]["arguments"][1:1] = arguments(bad)
+    with pytest.raises(RuntimeError, match="anchor dependency base"):
+        rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+
+
+@pytest.mark.parametrize("arguments", [
+    lambda path: ["-Xclang", "-include-pch", "-Xclang", str(path)],
+    lambda path: ["-Xpreprocessor", "-iframework", "-Xpreprocessor", str(path)],
+    lambda path: ["-Xlinker", "--library-path", "-Xlinker", str(path)],
+    lambda path: [f"-Wl,--sysroot={path}"],
+    lambda path: [f"-Wp,-isysroot,{path}"],
+])
+def test_compile_argument_audit_rejects_forwarded_path_option_streams(
+        tmp_path, arguments):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    bad = anchor_base / "backward-src" / "frameworks"
+    bad.mkdir(parents=True)
+    records[0]["arguments"][1:1] = arguments(bad)
+    with pytest.raises(RuntimeError, match="anchor dependency base"):
+        rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+
+
+def test_compile_argument_audit_include_pch_does_not_collide_with_include(tmp_path):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    bad = anchor_base / "backward-src" / "prefix.pch"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"pch")
+    records[0]["arguments"][1:1] = [f"-include-pch{bad}", "-Winvalid-pch"]
+    with pytest.raises(RuntimeError, match="anchor dependency base"):
+        rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+
+
+@pytest.mark.parametrize("wrapper", ["-Xclang", "-Xpreprocessor", "-Xlinker"])
+def test_compile_argument_audit_rejects_forwarded_plain_symlink_alias(tmp_path, wrapper):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    bad = anchor_base / "backward-src"
+    bad.mkdir(parents=True)
+    alias = build / "dependency-alias"
+    alias.symlink_to(bad, target_is_directory=True)
+    records[0]["arguments"][1:1] = [wrapper, alias.name]
+    with pytest.raises(RuntimeError, match="anchor dependency base"):
+        rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+
+
+def test_compile_argument_audit_allows_flags_and_forwarded_fresh_staged_paths(tmp_path):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    anchor_base.mkdir(parents=True)
+    fresh = build / "frameworks"
+    staged = tmp_path / "work" / "source-cache" / "backward-src" / "include"
+    fresh.mkdir(); staged.mkdir(parents=True)
+    records[0]["arguments"][1:1] = [
+        "-Winvalid-command-line-argument",
+        "-Wl,-z,now", f"-Wl,-F,{fresh}",
+        "-Xpreprocessor", "-I", "-Xpreprocessor", str(staged),
+        "-Xlinker", "--sysroot", "-Xlinker", str(build),
+    ]
+    result = rollback.parse_compile_inventory(_compile(records), source, build, anchor_base)
+    assert result["record_count"] == 2
+
+
+def test_compile_argument_audit_rejects_anchor_path_in_response_file(tmp_path):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    anchor_base.mkdir(parents=True)
+    response = build / "flags.rsp"
+    response.write_text(f"-O2 -I {anchor_base}/backward-build/include\n")
+    records[0]["arguments"].insert(1, "@flags.rsp")
+    with pytest.raises(RuntimeError, match="fresh compile command references anchor dependency base"):
+        rollback.parse_compile_inventory(
+            _compile(records), source, build, anchor_base)
+
+
+def test_compile_argument_audit_allows_private_staged_include(tmp_path):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    anchor_base = (tmp_path / "anchor" / "_deps").resolve()
+    anchor_base.mkdir(parents=True)
+    staged = (tmp_path / "work" / "source-cache" / "backward-src" / "include").resolve()
+    staged.mkdir(parents=True)
+    records[0]["arguments"][1:1] = ["-isystem", str(staged)]
+    result = rollback.parse_compile_inventory(
+        _compile(records), source, build, anchor_base)
+    assert result["record_count"] == 2
+
+
+def test_dependency_aggregate_limits_allow_boundary_and_reject_exceed(tmp_path, monkeypatch):
+    base, cache = _dependency_fixture(tmp_path)
+    _anchor, dependencies = rollback._anchor_dependency_sources(cache)
+    total_files = sum(item["identity"]["anchor_before_staging"]["file_count"]
+                      for item in dependencies)
+    total_directories = sum(item["identity"]["anchor_before_staging"]["directory_count"]
+                            for item in dependencies)
+    total_bytes = sum(item["identity"]["anchor_before_staging"]["byte_count"]
+                      for item in dependencies)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_FILES", total_files)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_DIRECTORIES", total_directories)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_ENTRIES", total_files + total_directories)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_TOTAL_BYTES", total_bytes)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_BYTES", total_bytes)
+    work = tmp_path / "work"
+    work.mkdir()
+    rollback._stage_dependency_sources(work, dependencies)
+    aggregate = rollback._aggregate_dependency_identity(dependencies, "anchor_before_staging")
+    assert aggregate["file_count"] == total_files
+    assert aggregate["directory_count"] == total_directories
+    assert aggregate["byte_count"] == total_bytes
+
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_FILES", total_files - 1)
+    with pytest.raises(RuntimeError, match="aggregate file count"):
+        rollback._aggregate_dependency_identity(dependencies, "anchor_before_staging")
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_FILES", total_files)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_DIRECTORIES", total_directories - 1)
+    with pytest.raises(RuntimeError, match="aggregate directory count"):
+        rollback._aggregate_dependency_identity(dependencies, "anchor_before_staging")
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_DIRECTORIES", total_directories)
+    monkeypatch.setattr(rollback, "_MAX_DEPENDENCY_TOTAL_BYTES", total_bytes - 1)
+    with pytest.raises(RuntimeError, match="aggregate byte limit"):
+        rollback._aggregate_dependency_identity(dependencies, "anchor_before_staging")
 
 
 def test_tool_identity_replacement_is_rejected(tmp_path):
@@ -232,6 +763,32 @@ def test_compile_inventory_resolves_relative_files_and_checks_target_dirs(tmp_pa
     assert result["other_records"]["record_count"] == 0
     assert "Registered-target source validation excludes" in result["claim"]
     assert "whole compile configuration" in result["claim"]
+
+
+def test_compile_inventory_normalizes_registered_dependency_source(tmp_path):
+    source, build, records = _strict_compile_fixture(tmp_path)
+    dependency = tmp_path / "source-cache" / "fmt-src"
+    dependency_source = dependency / "src/format.cc"
+    dependency_source.parent.mkdir(parents=True)
+    dependency_source.write_text("// dependency\n")
+    output = build / "_deps/fmt-build/CMakeFiles/fmt.dir/src/format.cc.o"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"object")
+    records.append({"directory": str(build), "file": str(dependency_source),
+                    "arguments": ["c++", "-I" + str(dependency / "include"), "-c",
+                                  str(dependency_source), "-o", str(output)]})
+
+    result = rollback.parse_compile_inventory(
+        _compile(records), source, build, dependency_source_roots={"fmt": dependency})
+
+    item = next(item for item in result["records"] if item["target"] == "fmt")
+    assert item["source"] == "dependency:fmt/src/format.cc"
+    assert item["command_sha256"] == hashlib.sha256("\0".join([
+        "c++", "-Idependency:fmt/include", "-c", "dependency:fmt/src/format.cc",
+        "-o", "build/_deps/fmt-build/CMakeFiles/fmt.dir/src/format.cc.o",
+    ]).encode()).hexdigest()
+    rollback._path_free(result)
+    assert str(tmp_path) not in json.dumps(result)
 
 
 def test_compile_inventory_rejects_required_output_outside_build(tmp_path):
@@ -424,6 +981,182 @@ def test_link_closure_accepts_realistic_generated_plans_and_response_files(tmp_p
     assert all(item["responses"] for item in closure["plans"])
     assert all(item["output"]["sha256"] == images[item["image"]]["sha256"]
                for item in closure["plans"])
+    assert all(item["plan"]["identity"].startswith("fresh:") for item in closure["plans"])
+    assert str(tmp_path) not in json.dumps(closure)
+
+
+def _ninja_link_fixture(tmp_path, *, response=False):
+    build, anchor, images, providers = _link_plan_fixture(tmp_path)
+    commands = {}
+    for target, image_name in rollback._LINK_TARGET_IMAGES.items():
+        plan = next(build.rglob(f"CMakeFiles/{target}.dir/link.txt"))
+        tokens = plan.read_text().split()
+        command_dir = plan.parent.parent.parent
+        for index, token in enumerate(tokens):
+            if index == 0 or token == "-o" or token.startswith("-"):
+                continue
+            if ((index > 0 and tokens[index - 1] == "-o")
+                    or rollback._LINK_FILE_RE.search(token)):
+                candidate = Path(token)
+                tokens[index] = str(candidate if candidate.is_absolute() else
+                                    (command_dir / candidate).resolve())
+        command = " ".join(tokens)
+        if response:
+            output_index = tokens.index("-o")
+            response_path = build / f"{target}.rsp"
+            response_path.write_text(" ".join(tokens[1:output_index]))
+            command = f"/bin/true @{response_path.name} " + " ".join(tokens[output_index:])
+        commands[target] = command
+        plan.unlink()
+    tool = (tmp_path / "ninja-exporter").resolve()
+    tool.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        f"commands = json.loads({json.dumps(json.dumps(commands))})\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('test-ninja 1')\n"
+        "else:\n"
+        "    print(commands[sys.argv[-1]])\n")
+    tool.chmod(0o755)
+    (build / "build.ninja").write_text("# immutable Ninja authority\n")
+    (build / "CMakeCache.txt").write_text(
+        f"CMAKE_GENERATOR:INTERNAL=Ninja\nCMAKE_MAKE_PROGRAM:FILEPATH={tool}\n")
+    return build, anchor, images, providers, tool
+
+
+def test_ninja_link_closure_captures_path_free_authority_and_response_file(tmp_path):
+    build, anchor, images, providers, tool = _ninja_link_fixture(tmp_path, response=True)
+    closure = rollback.capture_link_closure(build, anchor, images, providers)
+    assert all(plan["plan"]["identity"] == "ninja:build.ninja" for plan in closure["plans"])
+    assert all(plan["responses"][0]["identity"] == "ninja-tool" for plan in closure["plans"])
+    assert all(plan["responses"][1]["identity"] ==
+               f"ninja-commands:{plan['target']}" for plan in closure["plans"])
+    assert all(any(item["identity"].startswith("response-")
+                   for item in plan["responses"][2:]) for plan in closure["plans"])
+    assert closure["plans"][0]["responses"][0]["sha256"] == rollback._sha256(tool)
+    assert str(tmp_path) not in json.dumps(closure)
+
+
+@pytest.mark.parametrize("commands", [
+    ["/usr/bin/c++ -c input.cc -o CMakeFiles/example.dir/input.o"],
+    ["/usr/bin/c++ input.o -o audited", "/usr/bin/c++ input.o -o audited"],
+    ["/usr/bin/c++ input.o -o different"],
+], ids=["zero", "multiple", "mismatched"])
+def test_ninja_final_link_command_rejects_zero_multiple_and_mismatched_outputs(
+        tmp_path, commands):
+    build = tmp_path.resolve()
+    expected = build / "audited"
+    with pytest.raises(RuntimeError, match="exactly one Ninja final link command"):
+        rollback._ninja_link_command(("\n".join(commands) + "\n").encode(),
+                                     build, expected, "example")
+
+
+def test_ninja_final_link_command_skips_external_dependency_working_directory(tmp_path):
+    build = (tmp_path / "fresh" / "build").resolve(); build.mkdir(parents=True)
+    dependency = (tmp_path / "anchor" / "_deps" / "backward-build").resolve()
+    dependency.mkdir(parents=True)
+    expected = build / "audited"
+    commands = (
+        f"cd {dependency} && /usr/bin/c++ -c input.cc -o CMakeFiles/dependency.dir/input.o\n"
+        f"cd {build} && /usr/bin/c++ input.o -o {expected}\n"
+    )
+    tokens, directory = rollback._ninja_link_command(
+        commands.encode(), build, expected, "example")
+    assert tokens[-2:] == ["-o", str(expected)]
+    assert directory == build
+
+
+@pytest.mark.parametrize("cwd_kind", ["external", "alias"])
+def test_ninja_final_link_command_rejects_matching_output_from_unauthorized_cwd(
+        tmp_path, cwd_kind):
+    build = (tmp_path / "fresh" / "build").resolve(); build.mkdir(parents=True)
+    expected = build / "audited"
+    if cwd_kind == "external":
+        command_dir = (tmp_path / "anchor" / "_deps" / "backward-build").resolve()
+        command_dir.mkdir(parents=True)
+        error = "outside fresh build root"
+    else:
+        real_dir = build / "link"; real_dir.mkdir()
+        command_dir = tmp_path / "link-alias"
+        command_dir.symlink_to(real_dir, target_is_directory=True)
+        error = "aliased working directory"
+    command = f"cd {command_dir} && /usr/bin/c++ input.o -o {expected}\n"
+    with pytest.raises(RuntimeError, match=error):
+        rollback._ninja_link_command(command.encode(), build, expected, "example")
+
+
+def test_ninja_final_link_command_rejects_multiple_matches_with_dependency_commands(tmp_path):
+    build = (tmp_path / "fresh" / "build").resolve(); build.mkdir(parents=True)
+    dependency = (tmp_path / "anchor" / "_deps" / "backward-build").resolve()
+    dependency.mkdir(parents=True)
+    expected = build / "audited"
+    commands = (
+        f"cd {dependency} && /usr/bin/c++ -c input.cc -o dependency.o\n"
+        f"/usr/bin/c++ one.o -o {expected}\n"
+        f"/usr/bin/c++ two.o -o {expected}\n"
+    )
+    with pytest.raises(RuntimeError, match="exactly one Ninja final link command.*found 2"):
+        rollback._ninja_link_command(commands.encode(), build, expected, "example")
+
+
+def test_ninja_link_closure_detects_authority_and_exporter_mutation(tmp_path):
+    build, anchor, images, providers, tool = _ninja_link_fixture(tmp_path)
+    before = rollback.capture_link_closure(build, anchor, images, providers)
+    (build / "build.ninja").write_text("# mutated Ninja authority\n")
+    assert rollback.capture_link_closure(build, anchor, images, providers) != before
+    (build / "build.ninja").write_text("# immutable Ninja authority\n")
+    tool.write_text(tool.read_text() + "# mutated exporter\n")
+    assert rollback.capture_link_closure(build, anchor, images, providers) != before
+
+
+def test_ninja_link_closure_rejects_authority_mutation_during_export(tmp_path, monkeypatch):
+    build, anchor, images, providers, _tool = _ninja_link_fixture(tmp_path)
+    run = rollback._run_bounded_command
+    mutated = False
+
+    def mutate_authority(argv, *, timeout, max_output):
+        nonlocal mutated
+        output = run(argv, timeout=timeout, max_output=max_output)
+        if not mutated:
+            (build / "build.ninja").write_text("# changed during export\n")
+            mutated = True
+        return output
+
+    monkeypatch.setattr(rollback, "_run_bounded_command", mutate_authority)
+    with pytest.raises(RuntimeError, match="build.ninja changed during Ninja command export"):
+        rollback.capture_link_closure(build, anchor, images, providers)
+
+
+@pytest.mark.skipif(not all(shutil.which(tool) for tool in ("cmake", "ninja", "c++")),
+                    reason="CMake, Ninja, and a C++ compiler are required")
+def test_link_closure_accepts_real_cmake_ninja_fixture(tmp_path):
+    source = tmp_path / "source"; source.mkdir()
+    build = tmp_path / "build"
+    (source / "extension.cc").write_text("extern \"C\" int extension() { return 1; }\n")
+    (source / "main.cc").write_text("int main() { return 0; }\n")
+    (source / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.16)\n"
+        "project(rollback_ninja LANGUAGES CXX)\n"
+        "add_library(ibmw_dds_extension SHARED extension.cc)\n"
+        "set_target_properties(ibmw_dds_extension PROPERTIES OUTPUT_NAME ibmw_dds_transport)\n"
+        "add_executable(ibmw_dds_trace_off_business_roundtrip main.cc)\n")
+    subprocess.run(["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja"],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    subprocess.run(["cmake", "--build", str(build)], check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    extension = build / "libibmw_dds_transport.so"
+    executable = build / "ibmw_dds_trace_off_business_roundtrip"
+    images = {name: {"path": str(path), "sha256": rollback._sha256(path)}
+              for name, path in (("extension", extension), ("executable", executable))}
+    provider_root = tmp_path / "provider"; provider_root.mkdir()
+    providers: dict[str, Any] = {
+        name: {"path": str(provider_root / f"lib{name}.so")} for name in ("dds", "cdr")}
+    for item in providers.values():
+        Path(item["path"]).write_bytes(b"provider")
+    providers["library_paths"] = [str(provider_root)]
+    anchor = tmp_path / "anchor"; anchor.mkdir()
+    closure = rollback.capture_link_closure(build, anchor, images, providers)
+    assert all(plan["plan"]["identity"] == "ninja:build.ninja" for plan in closure["plans"])
     assert str(tmp_path) not in json.dumps(closure)
 
 
@@ -670,15 +1403,7 @@ def _packaging_result(tmp_path):
         return {"source": source_kind, "resolved_path": str(paths[name]), **identity}
     runtime_observations = [observation("executable", "exe"), observation("extension", "maps"),
                             observation("dds", "maps"), observation("cdr", "maps")]
-    googletest_anchor, googletest_source = _googletest_fixture(tmp_path / "dependency")
-    googletest_identity = rollback._googletest_source_identity(googletest_anchor)
-    dependency_source_control = {
-        "name": "googletest_LOCAL_SOURCE", "provider": "anchor_external_dependency_source",
-        "reuse_scope": "source_only", "canonical_source": str(googletest_source),
-        "cache_verified": True, "identity": {
-            "before_configure": googletest_identity,
-            "after_configure": dict(googletest_identity),
-            "after_build": dict(googletest_identity)}}
+    dependency_source_control = _staged_dependency_control(tmp_path / "dependency")
     link_plans = []
     for target, image_name in (("ibmw_dds_extension", "extension"),
                                ("ibmw_dds_trace_off_business_roundtrip", "executable")):
@@ -767,10 +1492,12 @@ def test_path_free_rejects_nested_unknown_path_authority(value):
 def test_build_rollback_companion_success_closed_schema_path_free_and_valid_object(tmp_path, monkeypatch):
     _, packaged = _package(tmp_path, monkeypatch)
     report, descriptor = packaged["report"], packaged["descriptor"]
-    schema = json.loads((Path(rollback.__file__).parent / "schemas/rollback-trace-off-result.schema.v1.json").read_text())
+    schema = json.loads((Path(rollback.__file__).parent / "schemas/rollback-trace-off-result.schema.v2.json").read_text())
     assert not core._schema_errors(report, schema)
+    assert report["schema"] == "mw_perf.rollback_trace_off.v2"
     assert report["dependency_source_control"]["reuse_scope"] == "source_only"
-    assert report["dependency_source_control"]["cache_variable"] == "googletest_LOCAL_SOURCE"
+    assert [item["name"] for item in report["dependency_source_control"]["dependencies"]] == [
+        "backward", "googletest"]
     _assert_no_paths(report)
     payload = tmp_path / "payload"
     expected = {"rollback_trace_off.json", "build_plan.json", "compile_source_inventory.json",
@@ -786,6 +1513,80 @@ def test_build_rollback_companion_success_closed_schema_path_free_and_valid_obje
     assert descriptor["evidence_manifest_sha256"] == hashlib.sha256(evidence_raw).hexdigest()
     object_path = tmp_path / "objects/sha256" / descriptor["object_sha256"][:2] / (descriptor["object_sha256"] + ".tar")
     assert validate_companion_object(object_path, descriptor)["valid"]
+    assert rollback.validate_trace_off_rollback_companion(object_path, descriptor)["valid"]
+
+
+def test_build_rollback_companion_accepts_captured_ninja_closure(tmp_path, monkeypatch):
+    result = _packaging_result(tmp_path)
+    build, ninja_anchor, ninja_images, ninja_providers, ninja_tool = _ninja_link_fixture(
+        tmp_path / "ninja", response=True)
+    closure = rollback.capture_link_closure(
+        build, ninja_anchor, ninja_images, ninja_providers)
+
+    for name in rollback._IMAGE_NAMES:
+        path = Path(ninja_images[name]["path"])
+        result["images"][name].update(
+            {"path": str(path), "sha256": rollback._sha256(path), "size": path.stat().st_size})
+    for family in ("dds", "cdr"):
+        path = Path(ninja_providers[family]["path"])
+        result["provider_identity"][family].update(
+            {"path": str(path), "sha256": rollback._sha256(path), "size": path.stat().st_size})
+    result["provider_identity"]["library_paths"] = ninja_providers["library_paths"]
+
+    def observation(path, source):
+        return {"source": source, "resolved_path": str(path), **rollback._file_identity(path)}
+
+    runtime = result["runtime"]
+    runtime["executable_matches"] = [observation(
+        Path(ninja_images["executable"]["path"]), "exe")]
+    runtime["extension_matches"] = [observation(
+        Path(ninja_images["extension"]["path"]), "maps")]
+    runtime["provider_matches"] = {
+        family: [observation(Path(ninja_providers[family]["path"]), "maps")]
+        for family in ("dds", "cdr")}
+    runtime["observations"] = [runtime["executable_matches"][0],
+                               runtime["extension_matches"][0],
+                               *runtime["provider_matches"]["dds"],
+                               *runtime["provider_matches"]["cdr"]]
+
+    true_tool = rollback._file_identity(Path("/bin/true").resolve())
+    true_tool["version"] = "true-test"
+    ninja_identity = rollback._file_identity(ninja_tool)
+    ninja_identity["version"] = "test-ninja 1"
+    result["tools"]["active_toolchain"] = {
+        "CMAKE_CXX_COMPILER": true_tool, "CMAKE_MAKE_PROGRAM": ninja_identity}
+    result["link_closure"] = closure
+
+    inventory = result["compile_inventory"]
+    outputs = {plan["target"]: next(
+        item["identity"].removeprefix("fresh:") for item in plan["inputs"]
+        if item["class"] == "fresh_object") for plan in closure["plans"]}
+    for record in inventory["records"]:
+        if record["target"] in outputs:
+            record["output"] = outputs[record["target"]]
+    inventory["records"].sort(key=lambda item: (
+        item["source"], item["output"], item["target"] or ""))
+    inventory["sources"] = sorted({item["source"] for item in inventory["records"]})
+    inventory["content_sha256"] = hashlib.sha256(
+        core._canonical_json_bytes(inventory["records"])).hexdigest()
+    for key, selected in (("registered_records", True), ("other_records", False)):
+        records = [item for item in inventory["records"]
+                   if (item["target"] in rollback._REGISTERED_TARGETS) is selected]
+        inventory[key] = {"record_count": len(records), "content_sha256": hashlib.sha256(
+            core._canonical_json_bytes(records)).hexdigest()}
+
+    monkeypatch.setattr(rollback, "_anchor_binding", lambda _path: _anchor_metadata())
+    monkeypatch.setattr(rollback, "_revalidate_packaging", lambda claimed, _anchor, _logs: (
+        claimed, {name: Path(claimed["images"][name]["path"]).read_bytes()
+                  for name in rollback._IMAGE_NAMES}))
+    rollback._path_free(result["link_closure"])
+    packaged = rollback.build_trace_off_rollback_companion(
+        result, tmp_path, tmp_path / "payload", tmp_path / "objects", "campaign", "ninja")
+
+    _assert_no_paths(json.loads((tmp_path / "payload/build_identity.json").read_text()))
+    descriptor = packaged["descriptor"]
+    object_path = (tmp_path / "objects/sha256" / descriptor["object_sha256"][:2]
+                   / (descriptor["object_sha256"] + ".tar"))
     assert rollback.validate_trace_off_rollback_companion(object_path, descriptor)["valid"]
 
 
@@ -922,6 +1723,50 @@ def test_anchor_binding_rejects_root_evidence_contract_version_mismatch(tmp_path
     manifest["dds_comm_trace"]["registration_contract_version"] = "wrong"
     path.write_bytes(core._canonical_json_bytes(manifest, newline=True))
     with pytest.raises(ValueError):
+        rollback._anchor_binding(anchor)
+
+
+def test_regular_unique_rejects_symlinked_parent_escape(tmp_path):
+    root = tmp_path / "build"
+    outside = tmp_path / "outside"
+    root.mkdir(); outside.mkdir()
+    (outside / "ibmw_dds_trace_off_business_roundtrip").write_bytes(b"outside")
+    (root / "escaped").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="symlink|escapes"):
+        rollback._regular_unique(root, "ibmw_dds_trace_off_business_roundtrip")
+
+
+def test_anchor_binding_uses_immutable_reads_for_racing_input(tmp_path, monkeypatch):
+    anchor = _anchor_fixture(tmp_path, monkeypatch)
+    manifest = anchor / "manifest.json"
+    original_read = rollback.os.read
+    replaced = False
+    original_inode = manifest.stat().st_ino
+
+    def racing_read(fd, count):
+        nonlocal replaced
+        if not replaced and rollback.os.fstat(fd).st_ino == original_inode:
+            replaced = True
+            replacement = manifest.with_name("manifest.replacement")
+            manifest.rename(replacement)
+            manifest.write_bytes(replacement.read_bytes())
+        return original_read(fd, count)
+
+    monkeypatch.setattr(rollback.os, "read", racing_read)
+    with pytest.raises(ValueError, match="anchor v8 evidence is unavailable"):
+        rollback._anchor_binding(anchor)
+
+
+def test_anchor_binding_rejects_symlinked_input_parent(tmp_path, monkeypatch):
+    anchor = _anchor_fixture(tmp_path, monkeypatch)
+    capability = anchor / "capability"
+    outside = tmp_path / "outside-capability"
+    outside.mkdir()
+    for item in capability.iterdir():
+        item.rename(outside / item.name)
+    capability.rmdir()
+    capability.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="anchor v8 evidence is unavailable"):
         rollback._anchor_binding(anchor)
 
 
@@ -1170,3 +2015,161 @@ def test_tar_rejects_coherently_rehashed_invented_link_object(tmp_path, monkeypa
     assert validate_companion_object(object_path, new_descriptor)["valid"]
     result = rollback.validate_trace_off_rollback_companion(object_path, new_descriptor)
     assert result["failure_codes"] == ["ROLLBACK_OBJECT_SEMANTICS"]
+
+
+def _rehash_dependency_summary(summary):
+    records = [{key: dependency[key] for key in (
+        "name", "override_variable", "cache_bindings", "file_count",
+        "directory_count", "byte_count", "tree_sha256")}
+        for dependency in summary["dependencies"]]
+    aggregate = hashlib.sha256(core._canonical_json_bytes(records)).hexdigest()
+    summary.update({
+        "dependency_count": len(records),
+        "file_count": sum(item["file_count"] for item in records),
+        "directory_count": sum(item["directory_count"] for item in records),
+        "byte_count": sum(item["byte_count"] for item in records),
+        "aggregate_sha256": aggregate,
+        "checkpoint_digests": {name: aggregate for name in rollback._DEPENDENCY_CHECKPOINTS},
+    })
+
+
+@pytest.mark.parametrize("mutation", ["files", "directories", "bytes", "escape"])
+def test_v2_dependency_summary_rejects_coherent_resource_or_path_tamper(tmp_path, mutation):
+    summary = rollback._portable_dependency_source(_staged_dependency_control(tmp_path))
+    if mutation == "files":
+        for dependency in summary["dependencies"]:
+            dependency["file_count"] = rollback._MAX_DEPENDENCY_FILES // 2 + 1
+    elif mutation == "directories":
+        for dependency in summary["dependencies"]:
+            dependency["directory_count"] = rollback._MAX_DEPENDENCY_DIRECTORIES // 2 + 1
+    elif mutation == "bytes":
+        for dependency in summary["dependencies"]:
+            dependency["byte_count"] = rollback._MAX_DEPENDENCY_TOTAL_BYTES // 2 + 1
+    else:
+        summary["dependencies"][0]["cache_bindings"] = [
+            {"variable": "forged_SOURCE_DIR", "relative": "../escape"}]
+    _rehash_dependency_summary(summary)
+    with pytest.raises(ValueError, match="resource limits|bindings"):
+        rollback._validate_v2_dependency_summary(summary)
+
+
+@pytest.mark.parametrize("mutation", ["files", "bytes", "escape"])
+def test_v2_tar_rejects_coherently_rehashed_dependency_limit_or_escape(
+        tmp_path, monkeypatch, mutation):
+    _, packaged = _package(tmp_path, monkeypatch)
+    descriptor = dict(packaged["descriptor"])
+
+    def mutate(payload):
+        report_path = payload / "rollback_trace_off.json"
+        report = json.loads(report_path.read_bytes())
+        summary = report["dependency_source_control"]
+        if mutation == "files":
+            for dependency in summary["dependencies"]:
+                dependency["file_count"] = rollback._MAX_DEPENDENCY_FILES // 2 + 1
+        elif mutation == "bytes":
+            for dependency in summary["dependencies"]:
+                dependency["byte_count"] = rollback._MAX_DEPENDENCY_TOTAL_BYTES // 2 + 1
+        else:
+            summary["dependencies"][0]["cache_bindings"] = [
+                {"variable": "forged_SOURCE_DIR", "relative": "../escape"}]
+        _rehash_dependency_summary(summary)
+
+        identity_path = payload / "build_identity.json"
+        identity = json.loads(identity_path.read_bytes())
+        identity["dependency_source_control"] = summary
+        identity_path.write_bytes(core._canonical_json_bytes(identity, newline=True))
+        build_hash = hashlib.sha256(core._canonical_json_bytes(identity)).hexdigest()
+        descriptor["build_identity_sha256"] = build_hash
+        report["rollback_build_identity_sha256"] = build_hash
+        report_path.write_bytes(core._canonical_json_bytes(report, newline=True))
+        plan_path = payload / "build_plan.json"
+        plan = json.loads(plan_path.read_bytes())
+        plan["build_identity_sha256"] = build_hash
+        plan_path.write_bytes(core._canonical_json_bytes(plan, newline=True))
+
+    object_path, new_descriptor = _rebuild_mutated_package(
+        tmp_path, descriptor, mutate)
+    assert validate_companion_object(object_path, new_descriptor)["valid"]
+    assert not rollback.validate_trace_off_rollback_companion(
+        object_path, new_descriptor)["valid"]
+
+
+@pytest.mark.parametrize("field", ["dependency_count", "file_count", "directory_count",
+                                    "byte_count", "aggregate_sha256", "checkpoint"])
+def test_v2_tar_rejects_coherently_rehashed_dependency_summary_forgery(
+        tmp_path, monkeypatch, field):
+    _, packaged = _package(tmp_path, monkeypatch)
+    descriptor = dict(packaged["descriptor"])
+
+    def mutate(payload):
+        report_path = payload / "rollback_trace_off.json"
+        report = json.loads(report_path.read_bytes())
+        dependency = report["dependency_source_control"]
+        if field == "checkpoint":
+            dependency["checkpoint_digests"]["staged_after_build"] = "0" * 64
+        elif field.endswith("sha256"):
+            dependency[field] = "0" * 64
+        else:
+            dependency[field] += 1
+
+        identity_path = payload / "build_identity.json"
+        identity = json.loads(identity_path.read_bytes())
+        identity["dependency_source_control"] = dependency
+        identity_path.write_bytes(core._canonical_json_bytes(identity, newline=True))
+        build_hash = hashlib.sha256(core._canonical_json_bytes(identity)).hexdigest()
+        descriptor["build_identity_sha256"] = build_hash
+
+        report["rollback_build_identity_sha256"] = build_hash
+        report_path.write_bytes(core._canonical_json_bytes(report, newline=True))
+        plan_path = payload / "build_plan.json"
+        plan = json.loads(plan_path.read_bytes())
+        plan["build_identity_sha256"] = build_hash
+        plan_path.write_bytes(core._canonical_json_bytes(plan, newline=True))
+
+    object_path, new_descriptor = _rebuild_mutated_package(
+        tmp_path, descriptor, mutate)
+    assert validate_companion_object(object_path, new_descriptor)["valid"]
+    assert rollback.validate_trace_off_rollback_companion(
+        object_path, new_descriptor)["failure_codes"] == ["ROLLBACK_OBJECT_SEMANTICS"]
+
+
+def test_validator_preserves_v1_archive_semantics(tmp_path, monkeypatch):
+    _, packaged = _package(tmp_path, monkeypatch)
+    descriptor = dict(packaged["descriptor"])
+
+    def mutate(payload):
+        report_path = payload / "rollback_trace_off.json"
+        report = json.loads(report_path.read_bytes())
+        current = report["dependency_source_control"]
+        legacy = {
+            "cache_variable": "googletest_LOCAL_SOURCE",
+            "provider": "anchor_external_dependency_source",
+            "reuse_scope": "source_only",
+            "cache_verified": True,
+            "mutation_checkpoints": ["before_configure", "after_configure", "after_build"],
+            "source_inventory": {name: current[name] for name in (
+                "file_count", "directory_count", "aggregate_sha256")},
+        }
+        legacy["source_inventory"]["tree_sha256"] = legacy["source_inventory"].pop(
+            "aggregate_sha256")
+        report["schema"] = "mw_perf.rollback_trace_off.v1"
+        report["dependency_source_control"] = legacy
+
+        identity_path = payload / "build_identity.json"
+        identity = json.loads(identity_path.read_bytes())
+        identity["dependency_source_control"] = legacy
+        identity_path.write_bytes(core._canonical_json_bytes(identity, newline=True))
+        build_hash = hashlib.sha256(core._canonical_json_bytes(identity)).hexdigest()
+        descriptor["build_identity_sha256"] = build_hash
+        report["rollback_build_identity_sha256"] = build_hash
+        report_path.write_bytes(core._canonical_json_bytes(report, newline=True))
+
+        plan_path = payload / "build_plan.json"
+        plan = json.loads(plan_path.read_bytes())
+        plan["build_identity_sha256"] = build_hash
+        plan_path.write_bytes(core._canonical_json_bytes(plan, newline=True))
+
+    object_path, new_descriptor = _rebuild_mutated_package(
+        tmp_path, descriptor, mutate)
+    assert validate_companion_object(object_path, new_descriptor)["valid"]
+    assert rollback.validate_trace_off_rollback_companion(object_path, new_descriptor)["valid"]

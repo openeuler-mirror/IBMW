@@ -5,6 +5,9 @@
 #include "dds_ext/detail/dds_qos_descriptor.h"
 #include "dds_ext/global.h"
 #include "dds_ext/ros2_type_helper.h"
+#ifdef IBMW_ENABLE_COMM_TRACE
+#include "dds_ext/internal/dds_comm_trace.h"
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -369,6 +372,42 @@ class SerializedDataReaderListener final
 };
 
 }  // namespace
+
+#ifdef IBMW_ENABLE_COMM_TRACE
+struct ExactCallbackInvocationContext final {
+  comm_trace::DeliveryKey delivery_key;
+  uint64_t start_ns = 0;
+  uint64_t expected_registration_id = 0;
+  bool admitted = false;
+  bool entered = false;
+  bool exited = false;
+  bool registration_valid = false;
+};
+
+void ExactCallbackEnter(void* opaque_context,
+                        uint64_t callback_registration_id) noexcept {
+  auto& context = *static_cast<ExactCallbackInvocationContext*>(opaque_context);
+  if (context.entered) return;
+  context.entered = true;
+  if (!context.admitted || callback_registration_id == 0 ||
+      callback_registration_id != context.expected_registration_id) {
+    if (context.admitted) comm_trace::ExactMissingRegistration();
+    return;
+  }
+  context.registration_valid = true;
+  context.start_ns = comm_trace::NowNs();
+}
+
+void ExactCallbackExit(void* opaque_context, uint32_t status) noexcept {
+  auto& context = *static_cast<ExactCallbackInvocationContext*>(opaque_context);
+  if (context.exited) return;
+  context.exited = true;
+  if (!context.entered || !context.registration_valid) return;
+  comm_trace::ExactSubmitCallback(
+      context.start_ns, comm_trace::NowNs(), context.delivery_key,
+      context.expected_registration_id, status == 0 ? 0 : 1);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -1254,6 +1293,7 @@ bool DdsTransportDriver::OnMessage(
     auto listener = std::make_unique<DdsDataReaderListener>(
         message_handler_tool,
         message_handler,
+        dds_topic_name,
         use_plain_loan_receive,
         executor,
         loan_mode);
@@ -1544,6 +1584,33 @@ void DdsTransportDriver::LogPublishProfileSnapshot(
 }
 
 void DdsTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapper) noexcept {
+#ifdef IBMW_ENABLE_COMM_TRACE
+  SendImpl(msg_wrapper, nullptr);
+}
+
+const runtime::core::transport::internal::OverlayDescriptorV1&
+DdsTransportDriver::Descriptor() const noexcept {
+  static constexpr runtime::core::transport::internal::OverlayDescriptorV1
+      descriptor{runtime::core::transport::internal::kPublishEnvelopeAbiV1,
+                 sizeof(runtime::core::transport::internal::OverlayDescriptorV1),
+                 sizeof(runtime::core::transport::internal::PublishEnvelopeV1),
+                 0,
+                 runtime::core::transport::internal::kCommTraceSendOverlayIdV1};
+  return descriptor;
+}
+
+void DdsTransportDriver::SendObserved(
+    runtime::core::transport::MessageFrame& msg_wrapper,
+    const runtime::core::transport::internal::PublishEnvelopeV1& envelope)
+    noexcept {
+  SendImpl(msg_wrapper, envelope.valid() ? &envelope : nullptr);
+}
+
+void DdsTransportDriver::SendImpl(
+    runtime::core::transport::MessageFrame& msg_wrapper,
+    const runtime::core::transport::internal::PublishEnvelopeV1* envelope)
+    noexcept {
+#endif
   try {
     if (state_ != State::kStart) {
       MW_WARN("Publish called when state is not 'Start'.");
@@ -1565,7 +1632,11 @@ void DdsTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
     if (pub_info.is_plain) {
       SendPlainType(msg_wrapper, pub_info, dds_topic_name);
     } else {
-      SendNonPlainType(msg_wrapper, pub_info, dds_topic_name);
+      SendNonPlainType(msg_wrapper, pub_info, dds_topic_name
+#ifdef IBMW_ENABLE_COMM_TRACE
+                       , envelope
+#endif
+                       );
     }
 
   } catch (const std::exception& e) {
@@ -1638,7 +1709,11 @@ void DdsTransportDriver::SendPlainType(
 void DdsTransportDriver::SendNonPlainType(
     runtime::core::transport::MessageFrame& msg_wrapper,
     PublisherInfo& pub_info,
-    const std::string& dds_topic_name) {
+    const std::string& dds_topic_name
+#ifdef IBMW_ENABLE_COMM_TRACE
+    , const runtime::core::transport::internal::PublishEnvelopeV1* envelope
+#endif
+    ) {
 
   MW_TRACE("Publishing non-plain type to topic: {}.", dds_topic_name);
 
@@ -1653,26 +1728,60 @@ void DdsTransportDriver::SendNonPlainType(
   const auto& profile_stats = pub_info.publish_profile_stats;
   const uint64_t write_start_ns =
       profile_stats ? DdsLoanedAsyncProfileStats::NowNs() : 0;
+  const auto complete_write = [&](const auto& write_ret) {
+    if (profile_stats) {
+      const uint64_t write_ns = DdsLoanedAsyncProfileStats::NowNs() - write_start_ns;
+      profile_stats->nonplain_write_count.fetch_add(1, std::memory_order_relaxed);
+      profile_stats->nonplain_write_total_ns.fetch_add(write_ns, std::memory_order_relaxed);
+      DdsLoanedAsyncProfileStats::UpdateMax(profile_stats->nonplain_write_max_ns, write_ns);
+    }
+    if (COMPAT_WRITE_SUCCESS(write_ret)) {
+      pub_info.stats.fallback_publish++;
+      MW_TRACE("Published non-plain type via regular write to topic: {}.",
+               dds_topic_name);
+    } else {
+      if (profile_stats) {
+        profile_stats->nonplain_write_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+      pub_info.stats.fallback_publish++;
+      MW_WARN("Failed to write non-plain type to topic: {}, ret={}",
+              dds_topic_name, CompatWriteResultString(write_ret));
+    }
+  };
+
+#ifdef IBMW_ENABLE_COMM_TRACE
+  if (comm_trace::active()) {
+    const bool valid_publish_envelope = envelope != nullptr && envelope->valid();
+    const bool emit_publish_write =
+        comm_trace::ShouldEmitPublishWrite(valid_publish_envelope);
+    const uint64_t trace_start_ns =
+        emit_publish_write
+            ? (valid_publish_envelope ? envelope->publish_enter_ns
+                                      : comm_trace::NowNs())
+            : 0;
+    comm_trace::WriteParams trace_params;
+    auto write_ret = pub_info.writer->write(const_cast<void*>(msg_ptr), trace_params);
+    if (COMPAT_WRITE_SUCCESS(write_ret) && emit_publish_write) {
+      const uint64_t trace_end_ns = comm_trace::NowNs();
+      comm_trace::SampleKey sample_key;
+      if (comm_trace::MakeSampleKey(trace_params.sample_identity(), &sample_key) &&
+          comm_trace::WriterMatches(sample_key, pub_info.writer->guid())) {
+        comm_trace::Submit(comm_trace::MakeEvent(
+            trace_start_ns, trace_end_ns, sample_key,
+            comm_trace::TopicHash(dds_topic_name.data(), dds_topic_name.size()),
+            comm_trace::EventKind::publish_write));
+      } else {
+        comm_trace::InvalidIdentity();
+      }
+    }
+    complete_write(write_ret);
+    return;
+  }
+#endif
+
   auto write_ret = pub_info.writer->write(
       const_cast<void*>(msg_ptr), eprosima::fastdds::dds::HANDLE_NIL);
-  if (profile_stats) {
-    const uint64_t write_ns = DdsLoanedAsyncProfileStats::NowNs() - write_start_ns;
-    profile_stats->nonplain_write_count.fetch_add(1, std::memory_order_relaxed);
-    profile_stats->nonplain_write_total_ns.fetch_add(write_ns, std::memory_order_relaxed);
-    DdsLoanedAsyncProfileStats::UpdateMax(profile_stats->nonplain_write_max_ns, write_ns);
-  }
-  if (COMPAT_WRITE_SUCCESS(write_ret)) {
-    pub_info.stats.fallback_publish++;
-    MW_TRACE("Published non-plain type via regular write to topic: {}.",
-             dds_topic_name);
-  } else {
-    if (profile_stats) {
-      profile_stats->nonplain_write_failures.fetch_add(1, std::memory_order_relaxed);
-    }
-    pub_info.stats.fallback_publish++;
-    MW_WARN("Failed to write non-plain type to topic: {}, ret={}",
-            dds_topic_name, CompatWriteResultString(write_ret));
-  }
+  complete_write(write_ret);
 }
 
 // ---------------------------------------------------------------------------
@@ -2127,7 +2236,14 @@ void DdsTransportDriver::DdsDataReaderListener::HandleNonPlainType(
 
     const uint64_t take_start_ns =
         profile_stats ? DdsLoanedAsyncProfileStats::NowNs() : 0;
+#ifdef IBMW_ENABLE_COMM_TRACE
+    const bool trace_active = comm_trace::active();
+    const uint64_t trace_take_start_ns = trace_active ? comm_trace::NowNs() : 0;
+#endif
     auto ret = reader->take_next_sample(dds_msg, &sample_info);
+#ifdef IBMW_ENABLE_COMM_TRACE
+    const uint64_t trace_take_end_ns = trace_active ? comm_trace::NowNs() : 0;
+#endif
     if (profile_stats) {
       const uint64_t take_ns = DdsLoanedAsyncProfileStats::NowNs() - take_start_ns;
       profile_stats->take_count.fetch_add(1, std::memory_order_relaxed);
@@ -2141,6 +2257,23 @@ void DdsTransportDriver::DdsDataReaderListener::HandleNonPlainType(
     }
 
     if (sample_info.valid_data) {
+#ifdef IBMW_ENABLE_COMM_TRACE
+      comm_trace::DeliveryKey trace_delivery_key;
+      const bool trace_identity_valid = trace_active &&
+          comm_trace::MakeDeliveryKey(sample_info.sample_identity, reader->guid(),
+                                      &trace_delivery_key);
+      if (trace_active) {
+        if (trace_identity_valid) {
+          comm_trace::Submit(comm_trace::MakeEvent(
+              trace_take_start_ns, trace_take_end_ns, trace_delivery_key,
+              comm_trace::TopicHash(dds_topic_name_.data(), dds_topic_name_.size()),
+              comm_trace::EventKind::take_receive));
+        } else {
+          comm_trace::InvalidIdentity();
+          if (comm_trace::ExactActive()) comm_trace::ExactInvalidIdentity();
+        }
+      }
+#endif
       if (profile_stats) {
         profile_stats->valid_samples.fetch_add(1, std::memory_order_relaxed);
       }
@@ -2155,6 +2288,10 @@ void DdsTransportDriver::DdsDataReaderListener::HandleNonPlainType(
           });
 
       if (loan_mode_ == LoanMode::ASYNC && executor_) {
+#ifdef IBMW_ENABLE_COMM_TRACE
+        if (trace_active && trace_identity_valid) comm_trace::UnsupportedAsync();
+        if (comm_trace::ExactActive()) comm_trace::ExactUnsupportedAsync();
+#endif
         IncrementAsyncPending(async_state_, async_profile_stats_);
         const uint64_t dispatch_submit_ns =
             profile_stats ? DdsLoanedAsyncProfileStats::NowNs() : 0;
@@ -2243,7 +2380,89 @@ void DdsTransportDriver::DdsDataReaderListener::HandleNonPlainType(
           throw;
         }
       } else {
-        message_handler_tool_->DoMessageCallback(ctx_ptr, message_handler_, msg_shared_ptr);
+#ifdef IBMW_ENABLE_COMM_TRACE
+        const uint64_t trace_dispatch_start_ns =
+            trace_active && trace_identity_valid ? comm_trace::NowNs() : 0;
+        const bool exact_callback_admitted =
+            trace_active && trace_identity_valid && comm_trace::ExactCallbackBegin();
+#endif
+        try {
+#ifdef IBMW_ENABLE_COMM_TRACE
+          if (comm_trace::ExactActive() && trace_identity_valid) {
+            const size_t handler_count =
+                message_handler_tool_->MessageHandlerCount();
+            message_handler_tool_->DoMessageCallbackWithInvoker(
+                ctx_ptr, message_handler_, msg_shared_ptr,
+                [trace_delivery_key, handler_count, exact_callback_admitted,
+                 multi_reported = false](const auto& handler,
+                                         auto&& invoke) mutable {
+                  if (handler_count != 1) {
+                    if (!multi_reported) {
+                      comm_trace::ExactUnsupportedMultiHandler();
+                      multi_reported = true;
+                    }
+                    invoke(handler, nullptr);
+                    return;
+                  }
+                  if (handler.callback_registration_id == 0) {
+                    comm_trace::ExactMissingRegistration();
+                    invoke(handler, nullptr);
+                    return;
+                  }
+                  if (!exact_callback_admitted) {
+                    invoke(handler, nullptr);
+                    return;
+                  }
+                  ExactCallbackInvocationContext context{
+                      .delivery_key = trace_delivery_key,
+                      .expected_registration_id =
+                          handler.callback_registration_id,
+                      .admitted = true};
+                  const runtime::core::transport::internal::
+                      CallbackInvocationEnvelopeV1 envelope{
+                          .abi_version = runtime::core::transport::internal::
+                              kCallbackInvocationEnvelopeAbiV1,
+                          .struct_size = sizeof(envelope),
+                          .flags = runtime::core::transport::internal::
+                              kCallbackInvocationEnvelopeValid,
+                          .reserved = 0,
+                          .context = &context,
+                          .enter = &ExactCallbackEnter,
+                          .exit = &ExactCallbackExit};
+                  invoke(handler, &envelope);
+                });
+          } else {
+            message_handler_tool_->DoMessageCallback(
+                ctx_ptr, message_handler_, msg_shared_ptr);
+          }
+#else
+          message_handler_tool_->DoMessageCallback(ctx_ptr, message_handler_, msg_shared_ptr);
+#endif
+        } catch (...) {
+#ifdef IBMW_ENABLE_COMM_TRACE
+          if (exact_callback_admitted) comm_trace::ExactCallbackEnd();
+#endif
+#ifdef IBMW_ENABLE_COMM_TRACE
+          if (trace_active && trace_identity_valid) {
+            comm_trace::Submit(comm_trace::MakeEvent(
+                trace_dispatch_start_ns, comm_trace::NowNs(), trace_delivery_key,
+                comm_trace::TopicHash(dds_topic_name_.data(), dds_topic_name_.size()),
+                comm_trace::EventKind::dispatch, 1));
+          }
+#endif
+          throw;
+        }
+#ifdef IBMW_ENABLE_COMM_TRACE
+        if (exact_callback_admitted) comm_trace::ExactCallbackEnd();
+#endif
+#ifdef IBMW_ENABLE_COMM_TRACE
+        if (trace_active && trace_identity_valid) {
+          comm_trace::Submit(comm_trace::MakeEvent(
+              trace_dispatch_start_ns, comm_trace::NowNs(), trace_delivery_key,
+              comm_trace::TopicHash(dds_topic_name_.data(), dds_topic_name_.size()),
+              comm_trace::EventKind::dispatch));
+        }
+#endif
       }
     } else {
       native_ts.delete_data(dds_msg);

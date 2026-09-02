@@ -196,7 +196,8 @@ void ProxyExtension::RegisterSubTransport() {
       }
 
       message_handler.callback = [this, action_raw_ptr = proxy_action.get()](
-                                       MessageFrame& msg_wrapper, std::function<void()>&& release_callback) {
+                                       MessageFrame& msg_wrapper, std::function<void()>&& release_callback,
+                                       const internal::CallbackInvocationEnvelopeV1*) {
         if (msg_wrapper.msg_ptr == nullptr && msg_wrapper.serialization_cache.size() == 0) [[unlikely]] {
           MW_WARN("Receive empty msg, ignore it.");
           release_callback();

@@ -209,8 +209,13 @@ class TransportDriverDispatcher {
 
  private:
   std::atomic<State> state_ = State::kPreInit;
+#ifdef IBMW_ENABLE_CORE_METRICS
+  std::shared_ptr<ibmw::runtime::core::observability::CachedMetricsGate>
+      cached_metrics_gate_;
+#endif
   uint64_t sub_topic_index_ = 0;
   uint64_t pub_topic_index_ = 0;
+  uint64_t callback_registration_id_ = 0;
 
   std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_;
 

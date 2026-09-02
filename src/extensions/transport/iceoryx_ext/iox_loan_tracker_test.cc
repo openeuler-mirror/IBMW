@@ -92,6 +92,114 @@ TEST(IoxLoanTracker, SuccessfulReplacementKeepsOneOutstandingLoan) {
   EXPECT_EQ(tracker.Outstanding(), 0U);
 }
 
+TEST(IoxLoanTracker, PublisherStopAndTimeoutRemainBoundedDuringBlockedPublish) {
+  IoxLoanTracker tracker;
+  ASSERT_TRUE(tracker.TryTrackLoan([] { return true; }));
+  std::promise<void> publish_entered_promise;
+  auto publish_entered = publish_entered_promise.get_future();
+  std::promise<void> consumer_unblocks_promise;
+  auto consumer_unblocks = consumer_unblocks_promise.get_future().share();
+  auto publish = std::async(std::launch::async, [&] {
+    tracker.CompleteTrackedLoan([&] {
+      publish_entered_promise.set_value();
+      consumer_unblocks.wait();
+    });
+  });
+  ASSERT_EQ(publish_entered.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+
+  const auto begin = std::chrono::steady_clock::now();
+  tracker.BeginShutdown();
+  EXPECT_FALSE(tracker.WaitForLoans(std::chrono::milliseconds(10)));
+  EXPECT_LT(std::chrono::steady_clock::now() - begin,
+            std::chrono::milliseconds(200));
+  EXPECT_TRUE(tracker.IsClosing());
+
+  consumer_unblocks_promise.set_value();
+  EXPECT_EQ(publish.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  EXPECT_TRUE(tracker.WaitForLoans(std::chrono::milliseconds(10)));
+}
+
+TEST(IoxOperationGate, CloseIsIrreversibleAndDrainsEstablishedLease) {
+  IoxOperationGate gate;
+  auto lease = gate.TryAcquire();
+  ASSERT_TRUE(lease);
+  EXPECT_EQ(gate.Active(), 1U);
+
+  gate.Close();
+  EXPECT_FALSE(gate.Accepting());
+  EXPECT_FALSE(gate.TryAcquire());
+  EXPECT_FALSE(gate.WaitForQuiescence(std::chrono::milliseconds(0)));
+
+  lease = {};
+  EXPECT_TRUE(gate.WaitForQuiescence(std::chrono::milliseconds(0)));
+  gate.Close();
+  EXPECT_FALSE(gate.TryAcquire());
+}
+
+TEST(IoxOperationGate, PostCloseAdmissionIsRejectedWithoutSleep) {
+  IoxOperationGate gate;
+  std::promise<void> closed_promise;
+  auto closed = closed_promise.get_future().share();
+  auto admission = std::async(std::launch::async, [&] {
+    closed.wait();
+    return gate.TryAcquire();
+  });
+
+  gate.Close();
+  closed_promise.set_value();
+  EXPECT_FALSE(admission.get());
+  EXPECT_TRUE(gate.WaitForQuiescence(std::chrono::milliseconds(0)));
+}
+
+TEST(IoxOperationGate, EstablishedLoanCompletesAfterAdmissionCloses) {
+  IoxOperationGate gate;
+  IoxLoanTracker tracker;
+  {
+    auto operation = gate.TryAcquire();
+    ASSERT_TRUE(operation);
+    ASSERT_TRUE(tracker.TryTrackLoan([] { return true; }));
+  }
+
+  gate.Close();
+  EXPECT_TRUE(gate.WaitForQuiescence(std::chrono::milliseconds(0)));
+  EXPECT_FALSE(gate.TryAcquire());
+  EXPECT_EQ(tracker.Outstanding(), 1U);
+
+  int completions = 0;
+  tracker.CompleteTrackedLoan([&] { ++completions; });
+  EXPECT_EQ(completions, 1);
+  EXPECT_TRUE(tracker.WaitForLoans(std::chrono::milliseconds(0)));
+}
+
+TEST(IoxOperationGate, LookupBeforeCloseCannotLoanAfterPublisherShutdownBegins) {
+  IoxOperationGate gate;
+  IoxLoanTracker tracker;
+  std::promise<void> lookup_complete_promise;
+  auto lookup_complete = lookup_complete_promise.get_future();
+  std::promise<void> publisher_closing_promise;
+  auto publisher_closing = publisher_closing_promise.get_future().share();
+
+  auto operation = std::async(std::launch::async, [&] {
+    auto lease = gate.TryAcquire();
+    if (!lease) return true;
+    lookup_complete_promise.set_value();
+    publisher_closing.wait();
+    return !tracker.TryTrackLoan([] { return true; });
+  });
+
+  ASSERT_EQ(lookup_complete.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  gate.Close();
+  tracker.BeginShutdown();
+  publisher_closing_promise.set_value();
+
+  EXPECT_TRUE(operation.get());
+  EXPECT_TRUE(gate.WaitForQuiescence(std::chrono::milliseconds(0)));
+  EXPECT_EQ(tracker.Outstanding(), 0U);
+}
+
 TEST(IoxCallbackContextRegistry, FailedRetriesDoNotAccumulateContexts) {
   IoxBusControl control;
   constexpr size_t kRetries = 8;
