@@ -5,6 +5,7 @@ from .core import VERSION, EXIT_FAILED, EXIT_INVALID, run, report, validate_dir,
 from .json_strict import loads as strict_json_loads
 from .metric_qualification import build_metric_qualification, validate_metric_qualification
 from .ohos_capture import CaptureSemanticError, validate_capture_semantics
+from .ohos_remote_p0a import OhosP0aMaterializationError, materialize_ohos_p0a_candidate
 
 _METRIC_QUALIFICATION_FILES = frozenset({
     "declaration.json", "latency_samples.jsonl", "metric_qualification.json",
@@ -171,6 +172,31 @@ def _run_ohos_import(args):
         return EXIT_INVALID
 
 
+def _run_ohos_p0a_materialize(args):
+    try:
+        result, result_sha256 = _read_strict_regular_json(args.result, "result")
+        request, request_sha256 = _read_strict_regular_json(args.request, "request")
+        validation = materialize_ohos_p0a_candidate(
+            args.archive, result, request, args.destination,
+            result_sha256=result_sha256, request_sha256=request_sha256)
+        print(_canonical_json_line({
+            "schema": "mw_perf.ohos_remote_p0a_materialization.v1",
+            "materialized": True, "formal_p0a": False,
+            "destination": args.destination, "validation": validation,
+        }).decode("ascii"), end="")
+        return 0
+    except (CaptureSemanticError, OhosP0aMaterializationError, OSError, TypeError,
+            KeyError, ValueError) as error:
+        print(_canonical_json_line({
+            "schema": "mw_perf.ohos_remote_p0a_materialization.v1",
+            "materialized": False, "formal_p0a": False,
+            "error_code": ("OHOS_P0A_OUTPUT_EXISTS" if isinstance(error, FileExistsError)
+                           else "OHOS_P0A_MATERIALIZATION_INVALID"),
+            "error": str(error)[:256] or "candidate materialization failed",
+        }).decode("ascii"), end="")
+        return EXIT_INVALID
+
+
 def _is_metric_qualification(path: Path) -> bool:
     """Detect qualification artifacts before treating a path as a comparison run."""
     try:
@@ -202,6 +228,11 @@ def main(argv=None):
     oi.add_argument("--result", required=True)
     oi.add_argument("--request", required=True)
     oi.add_argument("--output")
+    op=s.add_parser("materialize-ohos-p0a-candidate")
+    op.add_argument("--archive", required=True)
+    op.add_argument("--result", required=True)
+    op.add_argument("--request", required=True)
+    op.add_argument("--destination", required=True)
     for parser in (qb, qv):
         parser.add_argument("--campaign", required=True)
         parser.add_argument("--object-store", required=True)
@@ -214,6 +245,8 @@ def main(argv=None):
     a=p.parse_args(argv)
     if a.action == "import-ohos-capture":
         return _run_ohos_import(a)
+    if a.action == "materialize-ohos-p0a-candidate":
+        return _run_ohos_p0a_materialize(a)
     if a.action=="doctor":
         try:
             result=adapter_doctor(a.adapter,load_config(a.config)); result["tool_version"]=VERSION

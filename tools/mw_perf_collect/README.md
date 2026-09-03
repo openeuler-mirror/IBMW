@@ -45,6 +45,7 @@ cmake --install build --prefix "$PWD/install"
 ./install/bin/mw-perf-collect --help
 ./install/bin/mw-perf-collect doctor --adapter generic
 ./install/bin/mw-perf-collect import-ohos-capture --archive /absolute/host/capture-<challenge>.tar --result /absolute/host/agent-result.json --request /absolute/host/request.json --output /absolute/host/import-summary.json
+./install/bin/mw-perf-collect materialize-ohos-p0a-candidate --archive /absolute/host/capture-<challenge>.tar --result /absolute/host/agent-result.json --request /absolute/host/request.json --destination /absolute/host/new-candidate
 ```
 
 `import-ohos-capture` 只导入已复制到本机的 OHOS capture，不接受远端 shell、设备路径
@@ -53,6 +54,12 @@ cmake --install build --prefix "$PWD/install"
 canonical JSON 且不覆盖已有文件。该摘要只含语义状态、stage/exact 数量、hash 和来源，
 始终声明 `formal_p0a=false`，不会写 `directory_finalization.json`，也不声明 metric 或
 comparison 有效。
+
+`materialize-ohos-p0a-candidate` 是独立的 v2 exact-anchor 路径。它只接受全新的绝对
+destination，以 0700 staging 目录重新验证并导入 raw trace，生成 collector-owned v8
+candidate artifacts，通过 `validate --profile p0a` 后以 no-replace rename 原子发布。失败
+或目标冲突不会留下 completed tree；该输出仍明确为 candidate-only、metric unsupported
+和 `formal_p0a=false`。
 
 安装后双适配器 smoke（不需要 ROS 2 或 IBMW daemon；缺失外部环境应按合同降级）：
 

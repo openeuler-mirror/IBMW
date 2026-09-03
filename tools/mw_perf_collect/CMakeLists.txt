@@ -58,6 +58,7 @@ install(
     formal_anchor.py
     metric_qualification.py
     ohos_capture.py
+    ohos_remote_p0a.py
   DESTINATION "${_mw_perf_package_parent}/mw_perf_collect"
   COMPONENT mw_perf_collect)
 
