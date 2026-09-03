@@ -103,3 +103,51 @@ if(ABC_SMOKE_DEPENDENCIES)
     DEPENDS ${ABC_SMOKE_DEPENDENCIES}
     VERBATIM)
 endif()
+
+set(ABC_MATRIX_TARGET_DEPENDENCIES
+  ibmw_abc_ros2_endpoint
+  ibmw_abc_dds_endpoint
+  ibmw_abc_iox_endpoint)
+set(ABC_MATRIX_MISSING_TARGETS)
+foreach(ABC_MATRIX_DEPENDENCY IN LISTS ABC_MATRIX_TARGET_DEPENDENCIES)
+  if(NOT TARGET ${ABC_MATRIX_DEPENDENCY})
+    list(APPEND ABC_MATRIX_MISSING_TARGETS ${ABC_MATRIX_DEPENDENCY})
+  endif()
+endforeach()
+
+include(IbmwIceoryxRouDi)
+ibmw_resolve_iceoryx_roudi_target(ABC_MATRIX_ROUDI_TARGET)
+if(NOT ABC_MATRIX_ROUDI_TARGET)
+  list(APPEND ABC_MATRIX_MISSING_TARGETS
+    "iox-roudi or iceoryx_posh::iox-roudi")
+else()
+  get_target_property(ABC_MATRIX_ROUDI_IMPORTED
+    ${ABC_MATRIX_ROUDI_TARGET} IMPORTED)
+  if(NOT ABC_MATRIX_ROUDI_IMPORTED)
+    list(APPEND ABC_MATRIX_TARGET_DEPENDENCIES ${ABC_MATRIX_ROUDI_TARGET})
+  endif()
+  ibmw_generate_iceoryx_roudi_path(
+    "${CMAKE_BINARY_DIR}/ibmw_abc_roudi_path.txt")
+endif()
+
+if(NOT ABC_MATRIX_MISSING_TARGETS)
+  add_custom_target(ibmw_abc_matrix
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "ABC matrix is runnable with src/samples/cpp/transport_benchmark/abc_interop/run_block.py"
+    COMMAND ${CMAKE_COMMAND} -E echo
+      "RouDi executable: $<TARGET_FILE:${ABC_MATRIX_ROUDI_TARGET}>"
+    DEPENDS
+      ${ABC_MATRIX_TARGET_DEPENDENCIES}
+      ${ABC_DIR}/run_block.py
+      ${ABC_DIR}/config/publisher.yaml
+      ${ABC_DIR}/config/subscriber.yaml
+      ${ABC_DIR}/../iox_send/config/linux/bin/cfg/iox_send/publisher.yaml
+      ${ABC_DIR}/../iox_send/config/linux/bin/cfg/iox_send/subscriber.yaml
+    VERBATIM)
+  message(STATUS "A/B/C benchmark matrix target available: ibmw_abc_matrix")
+else()
+  string(JOIN ", " ABC_MATRIX_MISSING_OUTPUT ${ABC_MATRIX_MISSING_TARGETS})
+  message(STATUS
+    "A/B/C benchmark matrix target unavailable; missing targets: ${ABC_MATRIX_MISSING_OUTPUT}. "
+    "ibmw_abc_smoke remains available for configured lanes.")
+endif()

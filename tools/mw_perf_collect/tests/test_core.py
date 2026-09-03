@@ -324,8 +324,10 @@ def test_ros2_adapter_only_uses_whitelisted_sut_environment(tmp_path, monkeypatc
         SUT_ENV_ALLOWLIST = adapters.Ros2Adapter.SUT_ENV_ALLOWLIST
         UNSAFE_ENV_KEYS = adapters.Ros2Adapter.UNSAFE_ENV_KEYS
 
-        def __init__(self, *, environ, ros2_executable=None):
+        def __init__(self, *, environ, ros2_executable=None, ros2_prefix=None):
             captured.update(environ)
+            captured["ros2_executable"] = ros2_executable
+            captured["ros2_prefix"] = ros2_prefix
 
         def run(self, options):
             return {"status": "ok", "readiness": {"ok": True}, "observations": []}
@@ -346,6 +348,42 @@ def test_ros2_adapter_only_uses_whitelisted_sut_environment(tmp_path, monkeypatc
     assert "PYTHONPATH" not in captured
     assert "LD_PRELOAD" not in captured
     assert captured["PATH"] != "/sut/bin"
+
+
+def test_core_forwards_ros2_prefix_for_doctor_and_run(tmp_path, monkeypatch):
+    captured = []
+
+    class FakeRos2Adapter:
+        SUT_ENV_ALLOWLIST = adapters.Ros2Adapter.SUT_ENV_ALLOWLIST
+
+        @classmethod
+        def sanitized_environment(cls, source, *, include_ros=True):
+            return adapters.Ros2Adapter.sanitized_environment(source, include_ros=include_ros)
+
+        @classmethod
+        def valid_environment_value(cls, key, value):
+            return adapters.Ros2Adapter.valid_environment_value(key, value)
+
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        def doctor(self):
+            return {"adapter": "ros2", "status": "ready"}
+
+        def run(self, options):
+            return {"status": "ok", "readiness": {"ok": True}, "observations": []}
+
+    monkeypatch.setattr(adapters, "Ros2Adapter", FakeRos2Adapter)
+    config = {"sut": {"env": {}}, "adapters": {"ros2": {
+        "ros2_prefix": "/opt/ros/humble", "ros2_executable": "/opt/ros/humble/bin/ros2"}}}
+    assert core.adapter_doctor("ros2", config)["status"] == "ready"
+    for directory in ("environment", "topology", "capability"):
+        (tmp_path / directory).mkdir()
+    assert core._collect_adapter("ros2", config, tmp_path, 123)["status"] == "ok"
+    assert [item["ros2_prefix"] for item in captured] == [
+        "/opt/ros/humble", "/opt/ros/humble"]
+    assert all(item["ros2_executable"] == "/opt/ros/humble/bin/ros2"
+               for item in captured)
 
 
 def test_proc_stat_reads_pss_from_smaps_rollup_not_status(monkeypatch):
@@ -735,6 +773,29 @@ def test_optional_archived_unknown_ros2_clock_domain_is_not_metric_eligible(tmp_
 
     result = validate_dir(tmp_path)
     assert result["valid_for_collection"] is True
+    assert result["valid_for_metric"] is False
+    assert result["valid_for_comparison"] is False
+
+
+def test_completion_only_latency_cannot_support_manifest_metric(tmp_path):
+    _write_valid_artifacts(tmp_path)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    manifest.update(adapter="ros2", measurement_kind="producer_latency",
+                    metric_availability="supported",
+                    latency_artifact={"required": False, "status": "supported",
+                                      "record_count": 0, "topic": "/chatter",
+                                      "type": "std_msgs/msg/String"})
+    completion_only = {
+        "schema": "mw_perf.latency.v1", "kind": "completion", "run_id": "test-run",
+        "producer_pid": 1, "producer_start_time_ticks": 2, "record_count": 0,
+        "topic": "/chatter", "type": "std_msgs/msg/String", "complete": True,
+        "clock_domain": "producer_monotonic",
+    }
+    (tmp_path / "raw/latency.jsonl").write_text(json.dumps(completion_only) + "\n")
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+
+    result = validate_dir(tmp_path)
+    assert result["latency_artifact"]["valid"] is False
     assert result["valid_for_metric"] is False
     assert result["valid_for_comparison"] is False
 
@@ -1304,7 +1365,12 @@ def _ros2_preflight_value(*, identity_valid=True, libraries_verified=True,
     return {
         "schema": "mw_perf.ros2.preflight.v1", "pid": 123,
         "ros2_command": {"path": "/trusted/ros2", "trusted": True},
-        "environment": {"prefixes": []}, "ros2_pkg_prefix": [],
+        "environment": {"prefixes": []},
+        "trusted_runtime": {"status": "unconfigured", "prefix": None,
+            "executable": None, "interpreter": None, "shebang_interpreter": None,
+            "python_version": None, "python_paths": [], "library_paths": [],
+            "identity": None, "reason": "ros2_prefix is not configured"},
+        "ros2_pkg_prefix": [],
         "process_identity": {"start_ticks_before": 1, "start_ticks_after": 1,
                              "valid": identity_valid, "reason": None},
         "process": {"maps": [], "dynamic_library_resolution": {
@@ -1345,6 +1411,7 @@ def test_ros2_preflight_schema_rejects_false_available_claim():
 def test_ros2_config_schema_has_p0a_and_tracing_conditions():
     schema = json.loads((Path(core.__file__).parent / "schemas/config.schema.v1.json").read_text())
     ros2 = schema["properties"]["adapters"]["properties"]["ros2"]
+    assert ros2["properties"]["ros2_prefix"] == {"type": "string", "pattern": "^/"}
     assert ros2["allOf"][1]["then"]["required"] == ["required_tracepoints"]
     required = schema["allOf"][0]["then"]["properties"]["adapters"]["properties"]["ros2"]["required"]
     assert required == ["required_runtime_libraries"]
@@ -1357,6 +1424,72 @@ def test_ros2_config_schema_has_p0a_and_tracing_conditions():
     assert expectations["additionalProperties"] is False
     assert expectations["required"] == [
         "publish_count", "readers_per_sample", "ordering_policy"]
+    p0a = schema["properties"]["p0a_evidence"]
+    assert p0a["properties"]["observer"] == {"type": "boolean"}
+    assert "observer_latency" in p0a["properties"]["measurement_kind"]["enum"]
+    assert len(p0a["allOf"]) == 3
+
+
+def test_observer_latency_is_in_result_and_core_manifest_vocabularies():
+    schema = json.loads((Path(core.__file__).parent / "schemas/result.schema.v1.json").read_text())
+    assert "observer_latency" in schema["properties"]["measurement_kind"]["enum"]
+    manifest = {"measurement_kind": "observer_latency"}
+    assert "measurement_kind" not in core._manifest_schema_errors(manifest)
+
+
+@pytest.mark.parametrize("adapter,p0a", [
+    ("ibmw", {"run_type": "observer_diagnostic", "observer": True,
+              "measurement_kind": "observer_latency"}),
+    ("ros2", {"run_type": "observer_diagnostic", "observer": False,
+              "measurement_kind": "observer_latency"}),
+    ("ros2", {"run_type": "observer_diagnostic", "observer": True,
+              "measurement_kind": "exact_correlated"}),
+    ("ros2", {"run_type": "observer_diagnostic", "observer": True}),
+    ("ibmw", {"run_type": "exact_run", "observer": True,
+              "measurement_kind": "exact_correlated"}),
+    ("ibmw", {"run_type": "exact_run", "observer": False,
+              "measurement_kind": "stage_only"}),
+    ("ibmw", {"run_type": "stage_run", "observer": True,
+              "measurement_kind": "stage_only"}),
+    ("ibmw", {"run_type": "stage_run", "observer": False,
+              "measurement_kind": "observer_latency"}),
+])
+def test_p0a_control_plane_admission_rejects_invalid_combinations(adapter, p0a):
+    with pytest.raises(ValueError):
+        core._run_admission(adapter, p0a)
+
+
+def test_stage_and_exact_control_plane_admission_remain_enabled():
+    assert core._run_admission("ibmw", {"run_type": "stage_run", "observer": False,
+        "measurement_kind": "stage_only"}) is None
+    assert core._run_admission("ibmw", {"run_type": "exact_run", "observer": False,
+        "measurement_kind": "exact_correlated"}) is None
+
+
+def test_ros2_observer_diagnostic_refuses_before_launch_or_output(
+        tmp_path, monkeypatch, capsys):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({
+        "sut": {"mode": "managed", "command": ["/bin/true"], "env": {
+            "MW_PERF_COMM_TRACE_DIR_FD": "forged", "IBMW_COMM_TRACE": "full"}},
+        "p0a_evidence": {"run_type": "observer_diagnostic", "observer": True,
+                         "measurement_kind": "observer_latency"},
+    }))
+    output = tmp_path / "runs"
+    monkeypatch.setattr(core.subprocess, "Popen",
+                        lambda *_args, **_kwargs: pytest.fail("SUT was launched"))
+    args = core.argparse.Namespace(config=str(config), adapter="ros2", command=[],
+                                   override_command=False, output=str(output))
+    assert core.run(args) == core.EXIT_INVALID
+    refusal = json.loads(capsys.readouterr().out)
+    assert refusal == {
+        "failure_code": "ROS2_OBSERVER_NOT_IMPLEMENTED",
+        "failure_codes": ["ROS2_OBSERVER_NOT_IMPLEMENTED"],
+        "metric_availability": "unsupported", "required_stop": True,
+        "status": "refused", "valid_for_comparison": False,
+        "valid_for_metric": False,
+    }
+    assert not output.exists()
 
 
 def test_validation_instrumented_deployment_mode_stops_before_sample_on_preflight_failure(
@@ -1753,7 +1886,9 @@ def test_p0a_trace_quality_publication_conflict_adds_no_metadata(tmp_path):
 def test_p0a_contract_v4_rejects_ineligible_run_before_output(
         tmp_path, capsys, mode, run_type, include_resolution):
     p0a = {"registration_contract_version": "mw_perf.p0a_contract.v4",
-           "run_type": run_type}
+           "run_type": run_type, "observer": False,
+           "measurement_kind": "stage_only" if run_type == "stage_run"
+               else "exact_correlated"}
     if include_resolution:
         p0a["resolution"] = {"runtime_images": []}
     config = tmp_path / "config.json"
@@ -1782,7 +1917,7 @@ def test_p0a_contract_v5_rejects_ineligible_run_before_output(
         tmp_path, changes, version):
     image = tmp_path / "image"; image.write_bytes(b"image")
     p0a = {"registration_contract_version": version,
-           "run_type": "exact_run", "trace_mode": "full",
+           "run_type": "exact_run", "observer": False, "trace_mode": "full",
            "capability_id": "dds.ordinary.nonplain.single_driver.sync_callback",
            "measurement_kind": "exact_correlated",
            "resolution": {"runtime_images": [{"role": "sut", "name": "image",

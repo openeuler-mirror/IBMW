@@ -3,6 +3,7 @@ import hashlib
 import json
 import struct
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 from pathlib import Path
@@ -11,6 +12,24 @@ from mw_perf_collect.adapters.ros2 import Ros2Adapter
 from mw_perf_collect import core
 
 ROS2 = "/trusted/ros2"
+
+
+def _trusted_prefix(tmp_path, monkeypatch, version=None):
+    version = version or f"{sys.version_info.major}.{sys.version_info.minor}"
+    interpreter_root = tmp_path / "system-bin"
+    interpreter_root.mkdir()
+    interpreter = interpreter_root / f"python{version}"
+    interpreter.write_bytes(b"\x7fELF" + b"\x02\x01" + b"\x00" * 12 + (62).to_bytes(2, "little") + b"\x00" * 44)
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(Ros2Adapter, "TRUSTED_INTERPRETER_ROOTS", (interpreter_root,))
+    prefix = tmp_path / "ros"
+    executable = prefix / "bin" / "ros2"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(f"#!{interpreter}\n")
+    executable.chmod(0o755)
+    python_path = prefix / "lib" / f"python{version}" / "site-packages"
+    (python_path / "ros2cli").mkdir(parents=True)
+    return prefix, executable, python_path
 
 
 def _synthetic_elf(*, elf_class=2, endian="<", build_ids=("001122aabbcc",), soname="libfixture.so",
@@ -99,16 +118,20 @@ def test_run_collects_environment_cli_and_graph_without_observer():
         calls.append(args)
         output = {
             (ROS2, "-h"): "usage: ros2 [-h]\n",
-            (ROS2, "node", "list"): "/talker\n",
-            (ROS2, "topic", "list"): "/chatter\n",
-            (ROS2, "topic", "info", "-v", "/chatter"): "Type: std_msgs/msg/String\n",
+            (ROS2, "node", "list", "--no-daemon"): "/talker\n",
+            (ROS2, "topic", "list", "--no-daemon"): "/chatter\n",
+            (ROS2, "topic", "info", "-v", "--no-daemon", "/chatter"): "Type: std_msgs/msg/String\n",
         }[tuple(args)]
         return subprocess.CompletedProcess(args, 0, output, "")
 
     result = Ros2Adapter(runner=runner, environ={"ROS_DISTRO": "humble", "RMW_IMPLEMENTATION": "rmw_fastrtps_cpp", "ROS_DOMAIN_ID": "7"}).run({"topics": [{"name": "/chatter", "count": 1}]})
     assert result["status"] == "ok"
     assert result["readiness"]["ok"] is True
-    assert {ROS2, "node", "list"} == set(calls[0])
+    assert [tuple(call) for call in calls] == [
+        (ROS2, "node", "list", "--no-daemon"),
+        (ROS2, "topic", "list", "--no-daemon"),
+        (ROS2, "-h"),
+    ]
     assert all(item["measurement_lane"] == "passive_business_observation" for item in result["observations"])
     assert result["readiness"]["evidence"]["attempts"] == 1
     assert result["readiness"]["evidence"]["first_seen"]["/chatter"] is not None
@@ -138,11 +161,11 @@ def test_readiness_polls_until_topic_appears():
 
     def runner(args, **kwargs):
         command = tuple(args)
-        if command == (ROS2, "node", "list"):
+        if command == (ROS2, "node", "list", "--no-daemon"):
             output = ""
-        elif command == (ROS2, "topic", "list"):
+        elif command == (ROS2, "topic", "list", "--no-daemon"):
             output = next(topic_lists)
-        elif command == (ROS2, "topic", "info", "-v", "/chatter"):
+        elif command == (ROS2, "topic", "info", "-v", "--no-daemon", "/chatter"):
             output = "Type: std_msgs/msg/String\n"
         else:
             raise AssertionError(command)
@@ -172,6 +195,72 @@ def test_readiness_topic_timeout_has_structured_evidence():
         "elapsed": result["evidence"]["elapsed"],
         "failure_reason": "timeout",
     }
+
+
+def test_graph_snapshot_fails_closed_and_retains_bounded_command_evidence():
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(tuple(args))
+        if tuple(args) == (ROS2, "node", "list", "--no-daemon"):
+            return subprocess.CompletedProcess(args, 0, "/talker\n", "")
+        return subprocess.CompletedProcess(args, 2, "", "x" * 2000)
+
+    result = Ros2Adapter(runner=runner, environ={}).graph_snapshot()
+
+    assert calls == [
+        (ROS2, "node", "list", "--no-daemon"),
+        (ROS2, "topic", "list", "--no-daemon"),
+    ]
+    assert result["metric_availability"] == "unsupported"
+    assert result["detail"] == "CLI graph query failed (1 of 2 commands)"
+    assert result["value"]["query_evidence"] == [
+        {"command": [ROS2, "node", "list", "--no-daemon"], "name": "ros2_node_list",
+         "metric_availability": "supported"},
+        {"command": [ROS2, "topic", "list", "--no-daemon"], "name": "ros2_topic_list",
+         "metric_availability": "unsupported", "detail": "x" * 1024},
+    ]
+    assert result["value"]["query_evidence_omitted"] == 0
+
+
+def test_topic_info_uses_direct_discovery_and_failure_fails_snapshot_closed():
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(tuple(args))
+        outputs = {
+            (ROS2, "node", "list", "--no-daemon"): "",
+            (ROS2, "topic", "list", "--no-daemon"): "/chatter\n",
+        }
+        command = tuple(args)
+        if command in outputs:
+            return subprocess.CompletedProcess(args, 0, outputs[command], "")
+        return subprocess.CompletedProcess(args, 1, "", "topic info failed")
+
+    result = Ros2Adapter(runner=runner, environ={}).graph_snapshot()
+
+    assert calls[-1] == (ROS2, "topic", "info", "-v", "--no-daemon", "/chatter")
+    assert result["metric_availability"] == "unsupported"
+    assert result["value"]["topic_info"]["/chatter"]["metric_availability"] == "unsupported"
+
+
+def test_readiness_fails_closed_when_graph_query_fails():
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(tuple(args))
+        return subprocess.CompletedProcess(args, 1, "", "discovery unavailable")
+
+    result = Ros2Adapter(runner=runner, environ={}).readiness(
+        {"topics": ["/chatter"], "readiness_timeout_seconds": 1})
+
+    assert calls == [
+        (ROS2, "node", "list", "--no-daemon"),
+        (ROS2, "topic", "list", "--no-daemon"),
+    ]
+    assert result["ok"] is False
+    assert result["evidence"]["failure_reason"] == "graph_query_failed"
+    assert result["checks"][0]["name"] == "graph_query"
 
 
 def test_readiness_fails_when_process_exits(monkeypatch):
@@ -367,7 +456,7 @@ def test_readiness_rechecks_pid_after_snapshot_before_success(monkeypatch):
     monkeypatch.setattr(Ros2Adapter, "_process_ready", staticmethod(lambda pid: {"name": "process_alive", "ok": True, "metric_availability": "supported"}))
 
     def runner(args, **kwargs):
-        output = "/chatter\n" if tuple(args) == (ROS2, "topic", "list") else ""
+        output = "/chatter\n" if tuple(args) == (ROS2, "topic", "list", "--no-daemon") else ""
         return subprocess.CompletedProcess(args, 0, output, "")
 
     result = Ros2Adapter(runner=runner, environ={}).readiness(
@@ -397,6 +486,163 @@ def test_ros2_subprocess_uses_absolute_command_and_sanitized_environment():
     assert captured["ROS_DOMAIN_ID"] == "41"
     assert not Ros2Adapter.UNSAFE_ENV_KEYS.intersection(captured)
     assert not {"LD_AUDIT", "DYLD_INSERT_LIBRARIES", "BASH_ENV", "ENV"}.intersection(captured)
+
+
+def test_trusted_prefix_derives_environment_without_inherited_contamination(tmp_path, monkeypatch):
+    prefix, executable, python_path = _trusted_prefix(tmp_path, monkeypatch, "3.10")
+    captured = {}
+
+    def runner(args, **kwargs):
+        captured.update(kwargs["env"])
+        assert args == [str(executable), "-h"]
+        return subprocess.CompletedProcess(args, 0, "usage", "")
+
+    result = Ros2Adapter(runner=runner, environ={
+        "PATH": "/usr/bin", "PYTHONPATH": "/untrusted/python",
+        "LD_LIBRARY_PATH": "/untrusted/lib", "PYTHONHOME": "/untrusted/home",
+    }, ros2_prefix=str(prefix)).doctor()
+    runtime = result["observations"][-1]["value"]
+    assert result["status"] == "ready"
+    assert runtime["status"] == "ready"
+    assert runtime["prefix"] == str(prefix)
+    assert runtime["executable"] == str(executable)
+    assert runtime["python_paths"] == [str(python_path)]
+    assert runtime["python_version"] == "3.10"
+    assert runtime["interpreter"].endswith("/python3.10")
+    assert len(runtime["identity"]) == 64
+    assert captured["PYTHONPATH"] == str(python_path)
+    assert "/untrusted" not in captured.get("LD_LIBRARY_PATH", "")
+    assert "/untrusted" not in captured["PYTHONPATH"]
+    assert "PYTHONHOME" not in captured
+
+
+def test_trusted_prefix_rejects_symlink_and_noncanonical_paths(tmp_path, monkeypatch):
+    prefix, _, _ = _trusted_prefix(tmp_path, monkeypatch)
+    link = tmp_path / "ros-link"
+    link.symlink_to(prefix, target_is_directory=True)
+    for configured in (str(link), str(prefix / ".." / prefix.name)):
+        adapter = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                              ros2_prefix=configured)
+        assert adapter.trusted_runtime()["status"] == "invalid"
+        assert adapter.doctor()["status"] == "degraded"
+
+
+def test_trusted_prefix_rejects_outside_or_symlinked_executable(tmp_path, monkeypatch):
+    prefix, executable, _ = _trusted_prefix(tmp_path, monkeypatch)
+    outside = tmp_path / "outside-ros2"
+    outside.write_text("#!/bin/sh\n")
+    outside.chmod(0o755)
+    linked = prefix / "bin" / "linked-ros2"
+    linked.symlink_to(executable)
+    for configured in (str(outside), str(linked)):
+        adapter = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                              ros2_prefix=str(prefix), ros2_executable=configured)
+        assert adapter.trusted_runtime()["status"] == "unavailable"
+        assert adapter.doctor()["status"] == "degraded"
+
+
+@__import__("pytest").mark.parametrize("shebang", [
+    "", "not-a-shebang", "#!/relative/python3.10", "#!/usr/bin/env python3",
+    "#!/usr/bin/python3 -I", "#! /usr/bin/python3", "#!/usr/bin/python",
+])
+def test_trusted_prefix_rejects_missing_or_malformed_python_shebang(
+        tmp_path, monkeypatch, shebang):
+    prefix, executable, _ = _trusted_prefix(tmp_path, monkeypatch)
+    executable.write_text(shebang + "\n")
+    runtime = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                          ros2_prefix=str(prefix)).trusted_runtime()
+    assert runtime["status"] == "unavailable"
+    assert "shebang" in runtime["reason"]
+
+
+def test_trusted_prefix_rejects_shebang_interpreter_outside_trusted_roots(tmp_path, monkeypatch):
+    prefix, executable, _ = _trusted_prefix(tmp_path, monkeypatch)
+    outside = tmp_path / "outside" / "python3.10"
+    outside.parent.mkdir()
+    outside.write_bytes(b"\x7fELF" + b"\x02\x01" + b"\x00" * 58)
+    outside.chmod(0o755)
+    executable.write_text(f"#!{outside}\n")
+    runtime = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                          ros2_prefix=str(prefix)).trusted_runtime()
+    assert runtime["status"] == "unavailable"
+
+
+def test_trusted_prefix_resolves_trusted_python_symlink_and_records_both_paths(
+        tmp_path, monkeypatch):
+    prefix, executable, _ = _trusted_prefix(tmp_path, monkeypatch, "3.10")
+    interpreter = tmp_path / "system-bin" / "python3.10"
+    alias = interpreter.parent / "python3"
+    alias.symlink_to(interpreter.name)
+    executable.write_text(f"#!{alias}\n")
+    runtime = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                          ros2_prefix=str(prefix)).trusted_runtime()
+    assert runtime["status"] == "ready"
+    assert runtime["shebang_interpreter"] == str(alias)
+    assert runtime["interpreter"] == str(interpreter)
+    assert runtime["python_version"] == "3.10"
+
+
+def test_trusted_prefix_fails_closed_without_ros2cli_package(tmp_path, monkeypatch):
+    prefix, _, python_path = _trusted_prefix(tmp_path, monkeypatch)
+    (python_path / "ros2cli").rmdir()
+    adapter = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                          ros2_prefix=str(prefix))
+    assert adapter.trusted_runtime()["status"] == "unavailable"
+    assert "ros2cli package" in adapter.trusted_runtime()["reason"]
+    assert adapter.doctor()["status"] == "degraded"
+
+
+def test_trusted_prefix_rejects_symlinked_python_directory(tmp_path, monkeypatch):
+    prefix, _, python_path = _trusted_prefix(tmp_path, monkeypatch)
+    package = python_path / "ros2cli"
+    package.rmdir()
+    python_path.rmdir()
+    outside = tmp_path / "outside-site-packages"
+    (outside / "ros2cli").mkdir(parents=True)
+    python_path.symlink_to(outside, target_is_directory=True)
+    adapter = Ros2Adapter(runner=lambda *args, **kwargs: None, environ={},
+                          ros2_prefix=str(prefix))
+    assert adapter.trusted_runtime()["status"] == "unavailable"
+
+
+def test_preflight_records_trusted_runtime_identity(tmp_path, monkeypatch):
+    prefix, executable, python_path = _trusted_prefix(tmp_path, monkeypatch)
+    adapter = Ros2Adapter(
+        runner=lambda args, **kwargs: subprocess.CompletedProcess(args, 1, "", "unavailable"),
+        environ={"PYTHONPATH": "/untrusted", "LD_LIBRARY_PATH": "/untrusted"},
+        proc_root=tmp_path, ros2_prefix=str(prefix))
+    value = adapter.preflight()["value"]
+    assert value["trusted_runtime"]["status"] == "ready"
+    assert value["trusted_runtime"]["prefix"] == str(prefix)
+    assert value["trusted_runtime"]["executable"] == str(executable)
+    assert value["trusted_runtime"]["python_paths"] == [str(python_path)]
+    schema = json.loads((Path(__file__).parents[1] / "schemas/ros2-preflight.schema.v1.json").read_bytes())
+    assert core._schema_errors(value, schema) == []
+
+
+def test_no_prefix_behavior_does_not_add_runtime_environment():
+    captured = {}
+
+    def runner(args, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(args, 0, "usage", "")
+
+    result = Ros2Adapter(runner=runner, environ={
+        "PYTHONPATH": "/untrusted/python", "LD_LIBRARY_PATH": "/untrusted/lib"}).doctor()
+    assert result["status"] == "ready"
+    assert result["observations"][-1]["value"]["status"] == "unconfigured"
+    assert "PYTHONPATH" not in captured and "LD_LIBRARY_PATH" not in captured
+
+
+@__import__("pytest").mark.skipif(
+    os.environ.get("MW_PERF_TEST_ROS2_HUMBLE") != "1",
+    reason="set MW_PERF_TEST_ROS2_HUMBLE=1 to test /opt/ros/humble")
+def test_opt_in_installed_ros_humble_trusted_prefix():
+    result = Ros2Adapter(environ={"PATH": os.defpath, "PYTHONPATH": "/untrusted",
+                                  "LD_LIBRARY_PATH": "/untrusted"},
+                         ros2_prefix="/opt/ros/humble").doctor()
+    assert result["status"] == "ready"
+    assert result["observations"][-1]["value"]["status"] == "ready"
 
 
 def test_relative_ros2_executable_is_not_trusted():

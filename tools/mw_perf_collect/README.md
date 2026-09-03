@@ -44,7 +44,15 @@ cmake --build build
 cmake --install build --prefix "$PWD/install"
 ./install/bin/mw-perf-collect --help
 ./install/bin/mw-perf-collect doctor --adapter generic
+./install/bin/mw-perf-collect import-ohos-capture --archive /absolute/host/capture-<challenge>.tar --result /absolute/host/agent-result.json --request /absolute/host/request.json --output /absolute/host/import-summary.json
 ```
+
+`import-ohos-capture` 只导入已复制到本机的 OHOS capture，不接受远端 shell、设备路径
+或启动命令。`result` 和 `request` 必须是非符号链接的普通 JSON 文件，重复 JSON key
+会被拒绝。省略 `--output` 时 stdout 仅输出一条有界 JSON；指定输出时以 0600 权限发布
+canonical JSON 且不覆盖已有文件。该摘要只含语义状态、stage/exact 数量、hash 和来源，
+始终声明 `formal_p0a=false`，不会写 `directory_finalization.json`，也不声明 metric 或
+comparison 有效。
 
 安装后双适配器 smoke（不需要 ROS 2 或 IBMW daemon；缺失外部环境应按合同降级）：
 

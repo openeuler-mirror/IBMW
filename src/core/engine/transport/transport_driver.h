@@ -6,6 +6,7 @@
 #include "c/driver_slot.h"
 #include "engine/transport/loaned_sample_handle.h"
 #include "engine/transport/transport_catalog.h"
+#include "engine/transport/transport_export.h"
 
 #include "yaml-cpp/yaml.h"
 
@@ -15,7 +16,7 @@ class Context;  // fwd decl: cpp/transport/transport_context.h
 
 namespace ibmw::runtime::core::transport {
 
-class TransportDriver {
+class IBMW_TRANSPORT_EXPORT TransportDriver {
  public:
   TransportDriver() = default;
   virtual ~TransportDriver() = default;

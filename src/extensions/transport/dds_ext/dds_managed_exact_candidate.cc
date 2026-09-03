@@ -152,8 +152,8 @@ bool IsPlain(const fastdds::TypeSupport& type) {
 }
 
 #ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
-std::optional<std::string> ParseFault(int argc, char** argv) {
 #ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
+std::optional<std::string> ParseFault(int argc, char** argv) {
   if (argc != 2) return std::nullopt;
   constexpr char prefix[] = "--fault=";
   const std::string argument(argv[1]);
@@ -163,13 +163,8 @@ std::optional<std::string> ParseFault(int argc, char** argv) {
       fault == "producer_identity_mismatch" || fault == "stage_status" ||
       fault == "callback_status") return fault;
   return std::nullopt;
-#else
-  if (argc == 1) return std::string{};
-  return std::nullopt;
-#endif
 }
 
-#ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
 dds_ext::comm_trace::DeliveryKey FaultDeliveryKey() {
   dds_ext::comm_trace::DeliveryKey key{};
   for (size_t index = 0; index < 16; ++index) {
@@ -186,6 +181,24 @@ dds_ext::comm_trace::DeliveryKey FaultDeliveryKey() {
 }  // namespace
 
 int main(int argc, char** argv) {
+#if !defined(IBMW_TRACE_OFF_BUSINESS_CANDIDATE) && \
+    !defined(IBMW_MANAGED_EXACT_FAULT_CANDIDATE)
+  const bool exit_after_complete =
+      argc == 2 && std::strcmp(argv[1], "--exit-after-complete") == 0;
+  const bool verify_overlay_dso =
+      argc == 2 && std::strcmp(argv[1], "--verify-overlay-dso") == 0;
+  if (argc != 1 && !exit_after_complete && !verify_overlay_dso) {
+    std::cerr << "usage: " << argv[0]
+              << " [--exit-after-complete|--verify-overlay-dso]" << std::endl;
+    return 2;
+  }
+  if (verify_overlay_dso) {
+    setenv("IBMW_COMM_TRACE", "full", 1);
+    setenv("IBMW_COMM_TRACE_SINK", "none", 1);
+    setenv("MW_PERF_CAPABILITY_ID", dds_ext::comm_trace::kExactCapabilityId, 1);
+    setenv("MW_PERF_EXACT_REQUIRED", "1", 1);
+  }
+#endif
 #ifdef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
   if (argc != 1) {
     std::cerr << "usage: " << argv[0] << std::endl;
@@ -198,26 +211,20 @@ int main(int argc, char** argv) {
     std::cerr << "managed exact candidate startup failure: " << error.what() << std::endl;
     return 1;
   }
-#else
+#elif defined(IBMW_MANAGED_EXACT_FAULT_CANDIDATE)
   const auto parsed_fault = ParseFault(argc, argv);
   if (!parsed_fault) {
-#ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
     std::cerr << "usage: " << argv[0]
               << " --fault=stage_loss|callback_loss|producer_identity_mismatch|stage_status|callback_status"
               << std::endl;
-#else
-    std::cerr << "usage: " << argv[0] << std::endl;
-#endif
     return 2;
   }
   const std::string fault = *parsed_fault;
-#ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
   if (fault == "producer_identity_mismatch" &&
       setenv("MW_PERF_RUN_ID", kWrongRunId, 1) != 0) {
     std::cerr << "managed exact candidate startup failure: run identity override failed" << std::endl;
     return 1;
   }
-#endif
 #endif
   std::signal(SIGTERM, RequestStop);
   std::signal(SIGINT, RequestStop);
@@ -235,6 +242,19 @@ int main(int argc, char** argv) {
   const std::string topic = "managed_exact_candidate_" + unique;
   dds_ext::DdsBus bus(domain_id, "ibmw_managed_exact_candidate_" + unique);
   dds_ext::DdsTransportDriver driver(bus);
+#if !defined(IBMW_TRACE_OFF_BUSINESS_CANDIDATE) && \
+    !defined(IBMW_MANAGED_EXACT_FAULT_CANDIDATE)
+  if (verify_overlay_dso) {
+    transport::TransportDriver* discovered_driver = &driver;
+    auto* overlay = dynamic_cast<transport::internal::CommTraceSendOverlayV1*>(
+        discovered_driver);
+    if (overlay == nullptr || !overlay->Descriptor().valid()) {
+      std::cerr << "managed exact candidate startup failure: extension DSO publish overlay unavailable"
+                << std::endl;
+      return 1;
+    }
+  }
+#endif
   transport::TransportCatalog catalog;
   transport::FrameworkAsyncTransportFilterBus publish_filters;
   transport::FrameworkAsyncTransportFilterBus subscribe_filters;
@@ -362,6 +382,28 @@ int main(int argc, char** argv) {
         throw std::runtime_error("DDS callback failed");
       }
     }
+#if !defined(IBMW_TRACE_OFF_BUSINESS_CANDIDATE) && \
+    !defined(IBMW_MANAGED_EXACT_FAULT_CANDIDATE)
+    if (verify_overlay_dso) {
+      const auto* stage_query = ibmw_dds_comm_trace_query_v1();
+      if (stage_query == nullptr) {
+        throw std::runtime_error("extension DSO stage query unavailable");
+      }
+      std::vector<dds_ext::comm_trace::Event> events(3 * kSampleCount);
+      const size_t event_count = stage_query->drain(events.data(), events.size());
+      size_t publish_count = 0;
+      for (size_t index = 0; index < event_count; ++index) {
+        if (events[index].kind == static_cast<uint8_t>(
+                dds_ext::comm_trace::EventKind::publish_write)) {
+          ++publish_count;
+        }
+      }
+      if (event_count != events.size() || publish_count != kSampleCount) {
+        throw std::runtime_error(
+            "SendObserved route did not produce the required publish stage events");
+      }
+    }
+#endif
 #ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
     const auto* fault_hooks = reinterpret_cast<const dds_ext::comm_trace::RuntimeFaultHooksForTest*>(
         ibmw_dds_comm_trace_query_v2()->reserved);
@@ -391,8 +433,14 @@ int main(int argc, char** argv) {
     if (rollback_handshake) CompleteRollbackHandshake(*rollback_handshake);
     run_completed = true;
 #else
-    std::cout << "managed exact candidate ready" << std::endl;
-    while (stop_requested == 0) std::this_thread::sleep_for(20ms);
+#ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
+    constexpr bool exit_after_complete = false;
+    constexpr bool verify_overlay_dso = false;
+#endif
+    if (!exit_after_complete && !verify_overlay_dso) {
+      std::cout << "managed exact candidate ready" << std::endl;
+      while (stop_requested == 0) std::this_thread::sleep_for(20ms);
+    }
     run_completed = true;
 #endif
   } catch (const std::exception& error) {

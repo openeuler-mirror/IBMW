@@ -37,12 +37,14 @@ COLLECTOR=./tools/mw_perf_collect/mw-perf-collect
 
 - Linux，且可读取目标进程的 `/proc`；PSS 需要读取 `/proc/<pid>/smaps_rollup`；
 - Python 3；JSON 配置不依赖第三方包，YAML 配置需要 PyYAML；
-- ROS2 Adapter 需要先 source 对应 ROS 环境，并确保 `ros2` CLI 可用；
+- ROS2 Adapter 可使用已 source 的环境；安装后的 clean collector 建议配置 canonical、非符号链接的 `adapters.ros2.ros2_prefix`，由工具仅从该目录派生 ROS CLI 的 Python 和共享库路径；
 - IBMW Adapter 需要可读的仓库、构建目录和被测二进制；
 - Core Metrics 需要被测 IBMW 构建已包含该能力，且 SUT 能正常走 Engine shutdown；
 - 容器内采集时需确认 `/proc` 和 `/sys/class/net` 是目标 namespace 的视图。当前不存在的网络接口会被静默跳过，不构成自动 gate；运行后必须检查 `raw/network.jsonl` 中目标接口确实存在。
 
 工具不执行交互式 sudo。权限不足的指标会降级或使 required gate 失败。
+
+配置 `ros2_prefix` 时，工具要求 `<prefix>/bin/ros2` 是 prefix 内 canonical executable，并从其无参数 absolute Python shebang 验证 interpreter identity 和 Python 版本；随后仅从该 prefix 派生 `ros2cli` package path 与共享库路径。Graph 子命令使用 `--no-daemon` 直接发现，不依赖或复用后台 ROS 2 daemon。调用方或 SUT 的 `PYTHONPATH`、`PYTHONHOME`、`LD_PRELOAD`、`LD_LIBRARY_PATH` 不会进入该可信 CLI 环境；prefix、shebang 或包闭包不满足条件时 doctor 降级/失败，不应退回污染环境补齐。
 
 ## 4. managed 与 attached
 
@@ -126,6 +128,7 @@ attached 会校验 PID start ticks，目标在采样期退出则运行无效。�
   },
   "adapters": {
     "ros2": {
+      "ros2_prefix": "/opt/ros/humble",
       "readiness_timeout_seconds": 10.0,
       "readiness_poll_interval_seconds": 0.2,
       "topics": [
@@ -271,7 +274,44 @@ SUT 必须正常走 Engine shutdown 才会生成 final `metrics.jsonl`。collect
 }
 ```
 
-当前 counters 性能门尚未通过，不应在生产环境中默认打开，也不能用内部计数替代 A/B/C 公共外部指标。
+Core Metrics 的 formal host 性能门已在既定 host capability/合同上通过，但 counters 仍不应在生产环境中默认打开，也不能用内部计数替代 A/B/C 公共外部指标或外推到 OHOS。
+
+### 7.3 OHOS remote capture candidate
+
+OHOS 上 host collector 的 inherited FD 不能穿过 HDC。需要验证设备端 DDS exact capture 时，可分别启用默认关闭的 native agent 与 production candidate：
+
+```bash
+cmake -S . -B <ohos-build-dir> \
+  -DIBMW_BUILD_OHOS_CAPTURE_AGENT=ON \
+  -DIBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE=ON \
+  -DIBMW_ENABLE_COMM_TRACE=ON \
+  -DIBMW_BUILD_DDS_EXTENSION=ON \
+  -DIBMW_BUILD_PROTOCOLS=ON
+cmake --build <ohos-build-dir> --parallel
+```
+
+完整 agent 参数、安全约束见 [native capture README](../../tools/mw_perf_collect/native/README.md)，production candidate 的构建、安装组件和 `--exit-after-complete` 约束见 [DDS managed exact candidate](../../src/extensions/transport/dds_ext/DDS_MANAGED_EXACT_CANDIDATE.md)。将 agent、candidate、DDS extension 以及目标 ELF `NEEDED` 的 provider/platform shared objects 通过 HDC 部署到设备；candidate 保持 `bin`、extension 保持 `lib` 布局。设备运行目录必须是 agent uid 拥有、非 group/world accessible 的 canonical absolute directory。
+
+设备端 agent 在本地创建 inherited trace FD，并输出一行 result JSON 与 challenge 绑定的规范化 USTAR。运行 production candidate 时使用显式完成模式：
+
+```text
+mw_perf_ohos_capture_agent <agent-options> -- \
+  /absolute/device/path/bin/ibmw_dds_managed_exact_candidate --exit-after-complete
+```
+
+使用 HDC 把 archive 和 result JSON 拉回 host，并保留启动 agent 时使用的完整 canonical request JSON。host archive 必须是当前用户拥有的普通非符号链接文件，link count 为 1，mode 为 0600；建议先放入 mode 0700 的私有 host 目录。然后运行安装后的 importer：
+
+```bash
+./install/bin/mw-perf-collect import-ohos-capture \
+  --archive /absolute/host/capture-<request-challenge>.tar \
+  --result /absolute/host/agent-result.json \
+  --request /absolute/host/request.json \
+  [--output /absolute/host/import-summary.json]
+```
+
+importer 严格验证 canonical USTAR、request challenge、archive/tree hash、agent result/manifest、child PID/start ticks、meta/seal 及 stage/exact semantics。`--output` 省略时 stdout 输出单个 bounded JSON；指定时以 0600 独占创建，拒绝覆盖已有文件。
+
+该流程是 remote candidate，不是正式 OHOS P0a：summary 固定 `formal_p0a=false`，不会生成 `directory_finalization.json`，也不提供 trusted remote contract/campaign、runtime image attestation、fault/rollback、metric 或 comparison 证据。`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`，不得从 capture 数量或 exact correlation 发布性能结论。
 
 ## 8. 输出产物解释
 

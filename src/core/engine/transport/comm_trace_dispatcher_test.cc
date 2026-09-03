@@ -6,6 +6,7 @@
 #ifdef IBMW_ENABLE_COMM_TRACE
 
 #include <atomic>
+#include <cstdlib>
 #include <string>
 
 #include "engine/transport/internal/comm_trace_send_overlay.h"
@@ -60,6 +61,18 @@ class OverlayDriver final : public TransportDriver,
   internal::OverlayDescriptorV1 descriptor_;
 };
 
+class BasicDriver final : public TransportDriver {
+ public:
+  std::string_view Name() const noexcept override { return "basic"; }
+  IBMW_DECLARE_DRIVER_SLOT("comm-trace-basic-test")
+  void Initialize(YAML::Node) override {}
+  void Start() override {}
+  void Shutdown() override {}
+  bool RegisterSendType(const SendTypeWrapper&) noexcept override { return true; }
+  bool OnMessage(const MessageHandlerWrapper&) noexcept override { return false; }
+  void Send(MessageFrame&) noexcept override {}
+};
+
 SendAccessInfoWrapper SendRequest() {
   static const int message = 7;
   return SendAccessInfoWrapper{.pkg_path = "pkg",
@@ -82,11 +95,53 @@ void RegisterFrame(TransportDriverDispatcher& dispatcher) {
 class CommTraceDispatcherTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    unsetenv("MW_PERF_EXACT_REQUIRED");
     observability::comm_trace::reset_for_test();
     overlay_clock_reads.store(0, std::memory_order_relaxed);
     observability::comm_trace::SetClockForTest(&OverlayClock);
   }
+
+  void TearDown() override { unsetenv("MW_PERF_EXACT_REQUIRED"); }
 };
+
+TEST_F(CommTraceDispatcherTest, ExactRequiredRejectsDriverWithoutPublishOverlay) {
+  setenv("MW_PERF_EXACT_REQUIRED", "1", 1);
+  TransportCatalog catalog;
+  FrameworkAsyncTransportFilterBus filters;
+  TransportDriverDispatcher dispatcher;
+  BasicDriver driver;
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"basic"}}});
+  dispatcher.RegisterTransportDriver(&driver);
+  dispatcher.Initialize();
+
+  SendTypeWrapper wrapper;
+  wrapper.info.msg_type = "Frame";
+  wrapper.info.topic_name = "topic";
+  wrapper.info.pkg_path = "pkg";
+  wrapper.info.module_name = "module";
+  EXPECT_FALSE(dispatcher.RegisterSendType(std::move(wrapper)));
+  EXPECT_EQ(catalog.GetSendTypeWrapperPtr("Frame", "topic", "pkg", "module"),
+            nullptr);
+}
+
+TEST_F(CommTraceDispatcherTest, ExactRequiredAcceptsValidPublishOverlay) {
+  setenv("MW_PERF_EXACT_REQUIRED", "1", 1);
+  TransportCatalog catalog;
+  FrameworkAsyncTransportFilterBus filters;
+  TransportDriverDispatcher dispatcher;
+  OverlayDriver driver("overlay");
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"overlay"}}});
+  dispatcher.RegisterTransportDriver(&driver);
+  dispatcher.Initialize();
+
+  RegisterFrame(dispatcher);
+  EXPECT_NE(catalog.GetSendTypeWrapperPtr("Frame", "topic", "pkg", "module"),
+            nullptr);
+}
 
 TEST_F(CommTraceDispatcherTest, FullModeUsesObservedSingleDriverPath) {
   TransportCatalog catalog;

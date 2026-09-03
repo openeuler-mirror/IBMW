@@ -35,6 +35,21 @@ def test_latency_contract_accepts_valid_single_topic_artifact(tmp_path):
     assert result["valid"] and result["record_count"] == 2
 
 
+def test_latency_contract_preserves_valid_3000_record_artifact(tmp_path):
+    path = tmp_path / "latency-3000.jsonl"
+    write(path, [*(record(seq) for seq in range(3000)), completion(count=3000)])
+    result = validate_latency_artifact(path)
+    assert result["valid"] and result["record_count"] == 3000
+
+
+def test_absent_optional_latency_artifact_remains_unsupported(tmp_path):
+    result = archive_latency_artifact(None, {}, tmp_path / "archive.jsonl", managed=True,
+        graceful_finalization=True, run_id="run", mode="managed", sut_pid=1,
+        sut_start_time_ticks=2)
+    assert result["status"] == "unsupported"
+    assert result["reason"] == "latency artifact not configured"
+
+
 def test_latency_contract_rejects_truncated_duplicate_formula_and_multi_topic(tmp_path):
     cases = {
         "truncated": ([record()], False),
@@ -103,3 +118,26 @@ def test_unknown_clock_domain_fails_closed(tmp_path):
     path = tmp_path / "unknown.jsonl"
     write(path, [record(), completion(count=1, clock_domain="wall_clock")])
     assert not validate_latency_artifact(path)["valid"]
+
+
+def test_completion_only_artifact_fails_closed_required_and_optional(tmp_path):
+    for required in (False, True):
+        source = tmp_path / f"completion-only-{required}.jsonl"
+        baseline = latency_artifact_snapshot(source)
+        write(source, [completion(count=0)])
+        config = {"path": str(source), "required": required}
+        result = archive_latency_artifact(config, baseline, tmp_path / f"archive-{required}.jsonl",
+            managed=True, graceful_finalization=True, run_id="run", mode="managed",
+            sut_pid=1, sut_start_time_ticks=2)
+        assert result["status"] == "invalid"
+        assert result["reason"] == "artifact contains no data records"
+        assert "artifact contains no data records" in result["validation_errors"]
+
+
+def test_completion_topic_and_type_must_be_nonempty(tmp_path):
+    path = tmp_path / "completion-only.jsonl"
+    write(path, [completion(count=0, topic="", message_type="")])
+    result = validate_latency_artifact(path)
+    assert not result["valid"]
+    assert "completion topic must be a non-empty string" in result["validation_errors"]
+    assert "completion type must be a non-empty string" in result["validation_errors"]

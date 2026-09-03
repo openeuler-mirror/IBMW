@@ -1,3 +1,11 @@
+option(IBMW_BUILD_OHOS_CAPTURE_AGENT
+  "Build the native OHOS remote-managed capture candidate." OFF)
+
+if(IBMW_BUILD_OHOS_CAPTURE_AGENT AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
+                                      CMAKE_SYSTEM_NAME STREQUAL "OHOS"))
+  add_subdirectory(native)
+endif()
+
 if(NOT IBMW_INSTALL)
   return()
 endif()
@@ -49,6 +57,7 @@ install(
     json_strict.py
     formal_anchor.py
     metric_qualification.py
+    ohos_capture.py
   DESTINATION "${_mw_perf_package_parent}/mw_perf_collect"
   COMPONENT mw_perf_collect)
 

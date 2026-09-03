@@ -134,7 +134,7 @@
       "additionalProperties": true
     },
     "metric_availability": {"enum": ["supported", "unsupported", "estimated", "partial"]},
-    "measurement_kind": {"enum": ["observation", "measurement", "derived", "metadata", "producer_latency", "latency_summary_csv", "stage_only", "exact_correlated"]},
+    "measurement_kind": {"enum": ["observation", "measurement", "derived", "metadata", "producer_latency", "latency_summary_csv", "stage_only", "exact_correlated", "observer_latency"]},
     "runtime_changed": {"type": "boolean"},
     "business_unchanged": {"type": "boolean"},
     "candidate_only": {"type": "boolean"},

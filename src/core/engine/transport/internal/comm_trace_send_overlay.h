@@ -8,6 +8,7 @@
 #include <type_traits>
 
 #include "engine/transport/message_frame.h"
+#include "engine/transport/transport_export.h"
 
 namespace ibmw::runtime::core::transport::internal {
 
@@ -64,7 +65,7 @@ static_assert(alignof(OverlayDescriptorV1) == alignof(uint64_t));
 static_assert(std::is_standard_layout_v<OverlayDescriptorV1>);
 static_assert(std::is_trivial_v<OverlayDescriptorV1>);
 
-class CommTraceSendOverlayV1 {
+class IBMW_TRANSPORT_EXPORT CommTraceSendOverlayV1 {
  public:
   virtual ~CommTraceSendOverlayV1() = default;
   virtual const OverlayDescriptorV1& Descriptor() const noexcept = 0;

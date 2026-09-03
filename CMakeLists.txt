@@ -26,6 +26,8 @@ option(IBMW_BUILD_CLI_TOOLS "IBMW build ibmw command line tools." OFF)
 option(IBMW_BUILD_WITH_ROS2 "IBMW build with ROS2." OFF)
 option(IBMW_BUILD_ROS2_TYPES "IBMW build ROS2 type support (rosidl build-time only, no rcl runtime dependency)." OFF)
 option(IBMW_BUILD_PROTOCOLS "IBMW build protocols." ON)
+option(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
+  "Build the production DDS remote-managed exact-capture candidate." OFF)
 
 # DDS selection is explicit. SYSTEM intentionally uses ordinary CMake package
 # resolution, so a sourced ROS environment may affect package selection; it
@@ -131,6 +133,20 @@ cmake_dependent_option(IBMW_BUILD_DDS_EXTENSION "IBMW build DDS extension (FastD
 cmake_dependent_option(IBMW_BUILD_DDS_XML_VALIDATION
   "Build the standalone DDS XML transport validation pair." OFF
   "IBMW_BUILD_RUNTIME;IBMW_BUILD_DDS_EXTENSION" OFF)
+
+if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE)
+  foreach(_ibmw_candidate_requirement
+      IBMW_BUILD_RUNTIME
+      IBMW_ENABLE_COMM_TRACE
+      IBMW_BUILD_DDS_EXTENSION
+      IBMW_BUILD_PROTOCOLS)
+    if(NOT ${_ibmw_candidate_requirement})
+      message(FATAL_ERROR
+        "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE requires ${_ibmw_candidate_requirement}=ON")
+    endif()
+  endforeach()
+  unset(_ibmw_candidate_requirement)
+endif()
 
 option(IBMW_ZENOH_USE_PACKAGE "IBMW use an existing/prebuilt zenohc CMake package instead of building zenoh-c from source." OFF)
 
@@ -629,9 +645,11 @@ list(
   IBMW_BUILD_GRPC_EXTENSION
   IBMW_BUILD_PROXY_EXTENSION
   IBMW_BUILD_DDS_EXTENSION
+  IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
   IBMW_EXECUTOR_USE_STDEXEC
   IBMW_ENABLE_DLOPEN_DEEPBIND
   IBMW_ENABLE_CORE_METRICS
+  IBMW_ENABLE_COMM_TRACE
   IBMW_ENABLE_REPORTER_V1
   IBMW_BUILD_WITH_WERROR)
 

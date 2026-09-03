@@ -25,9 +25,11 @@ CSV uses `LatencyStats` and monotonic clock timestamps.
 For producer-owned managed collection, use `--jsonl PATH`. The subscriber then
 reads collector-injected run identity, buffers measured unique valid records,
 stays alive after the target count, and writes the strict completion trailer on
-collector SIGTERM. `a_lane_managed.json` and `run_a_managed.sh` provide a real
-managed layout where the shell starts the publisher as a descendant and execs
-the subscriber as collector leader; replace the endpoint build path before use.
+collector SIGTERM. From the repository root, `a_lane_managed.json` and
+`run_a_managed.sh` provide this benchmark's managed layout: the shell starts the
+publisher as a descendant and execs the subscriber as collector leader. The
+JSON is a repository-root example with a sample build path, not a generally
+relocatable collector configuration; replace the endpoint build path before use.
 
 ## B: IBMW DDS ROS 2-compatible
 
@@ -87,7 +89,8 @@ Every artifact used by a gate (CSV and subscriber or publisher status) must have
 exit zero. C processes may exit zero or from the runner's intentional SIGINT;
 any timeout/kill remains invalid. Results record
 `process_exit_codes`, `validation_errors`, and `validation_warnings`. A/B's
-fixed readiness sleep is retained and reported as a warning. C requires a fresh
+fixed readiness sleep is retained; the current runner does not generate a
+dedicated warning for it. C requires a fresh
 structured publisher status with `valid=true`, `completion=true`, and exactly
 3000 attempted measured messages. A missing, stale, malformed, incomplete, or
 wrong-count publisher artifact fails the run; publisher logs are never a
@@ -102,3 +105,19 @@ requires `WITH_ROS2` (`IBMW_BUILD_WITH_ROS2`), B requires `IBMW_BUILD_ROS2_TYPES
 and `IBMW_BUILD_DDS_EXTENSION`, and C requires `IBMW_BUILD_ICEORYX_EXTENSION`.
 `cmake --build <build> --target ibmw_abc_smoke` checks target wiring without
 starting middleware. `extension_v2_fixture.cc` is untouched.
+
+For lane C, CMake writes the resolved source-built or package-provided RouDi
+target location to `<build>/ibmw_abc_roudi_path.txt`. `run_block.py` and
+`run_matrix.py` use it automatically. Use `--roudi /path/to/iox-roudi` (or set
+`IBMW_ROUDI_BIN`) to override that location explicitly.
+
+`run_matrix.py --comparison-plan PLAN.json` also emits a formal
+`mw_perf.comparison-plan.v1` and a bridge `manifest.json`/`validation.json` in
+each lane directory. Supply comparison declarations with `--contract`,
+`--profile`, `--workload`, and `--resource-scope`; JSON values are accepted.
+The fixed lane sequence is accompanied by `--order-policy` and `--order-seed`.
+This bridge does not run a collector lifecycle or claim resource/provenance
+evidence: those capabilities and omitted declarations are marked unsupported,
+and its validation is intentionally invalid for comparison. Formal compare
+therefore accepts the plan shape but fails closed until each lane directory is
+replaced by a genuinely collected and validated run carrying matching metadata.

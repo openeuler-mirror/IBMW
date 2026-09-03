@@ -154,6 +154,12 @@ IBMW_OBSERVABILITY_OUTPUT_DIR=<directory>
 
 histogram、sampled trace、动态控制、OTLP、通用 queue wait 以及 wire bytes/retransmit/remote ack 等 Driver 专有指标后置。能力缺失时必须保持 `unsupported`。
 
+### 4.6 OHOS remote exact candidate 边界
+
+OHOS remote candidate 使用设备本地 native agent 管理 production DDS exact candidate：agent 在设备私有目录内创建 trace FD、执行并约束单个 SUT 生命周期、稳定扫描 producer 文件并发布 canonical USTAR；HDC 只负责把 archive、单行 result JSON 和对应 request JSON 传到 host。host 安装态 `import-ohos-capture` 重新校验 request challenge、archive/tree hash、PID/start ticks、meta/seal 和 stage/exact 语义。该结构解决了 host FD 不能跨 HDC 传递的问题，但不把 HDC 当作可信 FD 或生命周期通道。
+
+该能力当前只登记 remote candidate：成功导入可证明本次设备 capture 的受控生命周期、snapshot 完整性和 `exact_correlated` producer 语义，不生成 collector `directory_finalization.json`，固定 `formal_p0a=false`。它未建立 trusted remote contract/campaign、runtime image attestation、fault/rollback 或 metric/comparison 证据；`metric_availability` 必须保持 `unsupported`，`valid_for_metric` 与 `valid_for_comparison` 必须保持 false，不得形成 OHOS 性能结论。构建、部署和使用入口见[性能采集指南](../guides/performance-collection.zh.md)。
+
 ## 5. 跨主线集成
 
 ### 5.1 最小场景合同

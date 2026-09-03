@@ -40,7 +40,8 @@ bool WriteLatencyArtifact(std::ostream& out, const std::vector<LatencyRecord>& r
   out << "{\"schema\":\"" << kLatencySchema << "\",\"kind\":\"completion\",\"run_id\":" << JsonString(run_id)
     << ",\"producer_pid\":" << pid << ",\"producer_start_time_ticks\":" << ticks
     << ",\"record_count\":" << records.size() << ",\"topic\":" << JsonString(topic)
-    << ",\"type\":\"" << kRos2PayloadType << "\",\"complete\":" << (complete?"true":"false") << "}\n";
+    << ",\"type\":\"" << kRos2PayloadType << "\",\"complete\":" << (complete?"true":"false")
+    << ",\"clock_domain\":\"" << kLatencyClockDomain << "\"}\n";
   out.flush(); return static_cast<bool>(out);
 }
 }  // namespace ibmw::abc

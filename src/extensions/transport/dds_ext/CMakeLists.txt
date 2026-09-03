@@ -156,6 +156,65 @@ if(IBMW_INSTALL)
   )
 endif()
 
+function(ibmw_configure_managed_exact_candidate target extension_target)
+  target_include_directories(${target} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src/core)
+  target_link_libraries(${target} PRIVATE
+    ${extension_target}
+    dds_ext_proto
+    ibmw::extensions::dds_types
+    ibmw::core::engine
+    ibmw::api::cpp
+    ibmw::base
+    yaml-cpp
+    ${IBMW_FASTCDR_PROVIDER_TARGET}
+    ${IBMW_FASTDDS_PROVIDER_TARGET})
+  set_target_properties(${target} PROPERTIES
+    BUILD_RPATH
+      "$ORIGIN;$<TARGET_FILE_DIR:${extension_target}>;$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>"
+    INSTALL_RPATH "$ORIGIN/../lib;$ORIGIN"
+    INSTALL_RPATH_USE_LINK_PATH FALSE)
+  if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+    target_link_options(${target} PRIVATE
+      "LINKER:-rpath,$ORIGIN,-rpath,$ORIGIN/../lib")
+  endif()
+endfunction()
+
+# The production candidate is also used by the managed-exact integration test.
+# Create it once when either production capture or that test lane requests it.
+if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE OR
+   (IBMW_BUILD_TESTS AND IBMW_ENABLE_COMM_TRACE))
+  add_executable(ibmw_dds_managed_exact_candidate
+    dds_managed_exact_candidate.cc dds_bus.cc global.cc)
+  ibmw_configure_managed_exact_candidate(
+    ibmw_dds_managed_exact_candidate ibmw_dds_extension)
+
+  if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE)
+    if(NOT CMAKE_READELF OR NOT EXISTS "${CMAKE_READELF}")
+      message(FATAL_ERROR
+        "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE requires CMAKE_READELF to audit production RTTI dynamic symbols")
+    endif()
+    add_custom_command(TARGET ibmw_dds_managed_exact_candidate POST_BUILD
+      COMMAND ${CMAKE_COMMAND}
+        -DREADELF=${CMAKE_READELF}
+        "-DARTIFACTS=$<TARGET_FILE:ibmw_dds_managed_exact_candidate>;$<TARGET_FILE:ibmw_dds_extension>"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_transport_rtti_symbols.cmake
+      COMMENT "Auditing production DDS cross-DSO RTTI dynamic symbols"
+      VERBATIM)
+  endif()
+
+  if(IBMW_INSTALL AND IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE)
+    install(TARGETS
+        ibmw_dds_managed_exact_candidate
+        ibmw_dds_extension
+      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT dds_managed_exact_candidate
+      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        COMPONENT dds_managed_exact_candidate)
+  endif()
+endif()
+
 # Set test of target
 if(IBMW_BUILD_TESTS AND test_files)
   add_gtest_target(TEST_TARGET ibmw_dds_extension TEST_SRC ${test_files})
@@ -214,29 +273,6 @@ if(IBMW_BUILD_TESTS)
     target_compile_definitions(ibmw_dds_extension_fault_test PRIVATE
       IBMW_COMM_TRACE_TEST_HOOKS=1)
 
-    function(ibmw_configure_managed_exact_candidate target extension_target)
-      target_include_directories(${target} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/..
-        ${CMAKE_SOURCE_DIR}/src/core)
-      target_link_libraries(${target} PRIVATE
-      ${extension_target}
-      dds_ext_proto
-      ibmw::extensions::dds_types
-      ibmw::core::engine
-      ibmw::api::cpp
-      ibmw::base
-      yaml-cpp
-      ${IBMW_FASTCDR_PROVIDER_TARGET}
-      ${IBMW_FASTDDS_PROVIDER_TARGET})
-      set_property(TARGET ${target} PROPERTY BUILD_RPATH
-        "$<TARGET_FILE_DIR:${extension_target}>;$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>")
-    endfunction()
-
-    add_executable(ibmw_dds_managed_exact_candidate
-      dds_managed_exact_candidate.cc dds_bus.cc global.cc)
-    ibmw_configure_managed_exact_candidate(
-      ibmw_dds_managed_exact_candidate ibmw_dds_extension)
-
     add_executable(ibmw_dds_managed_exact_fault_candidate
       dds_managed_exact_candidate.cc dds_bus.cc global.cc)
     ibmw_configure_managed_exact_candidate(
@@ -260,6 +296,27 @@ if(IBMW_BUILD_TESTS)
         "CTEST_BINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
       ENVIRONMENT_MODIFICATION
         "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:ibmw_dds_extension>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>")
+
+    add_test(NAME ibmw_dds_overlay_cross_dso
+      COMMAND $<TARGET_FILE:ibmw_dds_managed_exact_candidate>
+        --verify-overlay-dso)
+    set_tests_properties(ibmw_dds_overlay_cross_dso PROPERTIES
+      TIMEOUT 30
+      ENVIRONMENT_MODIFICATION
+        "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:ibmw_dds_extension>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>")
+
+    if(CMAKE_READELF)
+      add_test(NAME ibmw_dds_transport_rtti_symbols
+        COMMAND ${CMAKE_COMMAND}
+          -DREADELF=${CMAKE_READELF}
+          "-DARTIFACTS=$<TARGET_FILE:ibmw_dds_managed_exact_candidate>;$<TARGET_FILE:ibmw_dds_extension>"
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_transport_rtti_symbols.cmake)
+      add_test(NAME ibmw_dds_transport_rtti_verifier_negative_cases
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_transport_rtti_verifier.py
+          --cmake ${CMAKE_COMMAND}
+          --verifier ${CMAKE_CURRENT_SOURCE_DIR}/verify_transport_rtti_symbols.cmake)
+    endif()
 
     add_executable(ibmw_dds_extension_production_abi_test
       dds_extension_production_abi_test.cc)

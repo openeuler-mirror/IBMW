@@ -1,13 +1,174 @@
 from __future__ import annotations
-import argparse, json
+import argparse, hashlib, json, os, secrets, stat
 from pathlib import Path
 from .core import VERSION, EXIT_FAILED, EXIT_INVALID, run, report, validate_dir, load_config, adapter_doctor, _schema_errors, _schema_audit, _validation_matches_current, _resource_integrity_errors
 from .json_strict import loads as strict_json_loads
 from .metric_qualification import build_metric_qualification, validate_metric_qualification
+from .ohos_capture import CaptureSemanticError, validate_capture_semantics
 
 _METRIC_QUALIFICATION_FILES = frozenset({
     "declaration.json", "latency_samples.jsonl", "metric_qualification.json",
     "qualification_seal.json"})
+_OHOS_IMPORT_ERROR = "OHOS_CAPTURE_IMPORT_INVALID"
+_OHOS_OUTPUT_ERROR = "OHOS_CAPTURE_OUTPUT_EXISTS"
+_OHOS_JSON_LIMIT = 1024 * 1024
+
+
+def _read_strict_regular_json(path_value: str, label: str):
+    path = Path(path_value)
+    try:
+        named = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(named.st_mode) or named.st_nlink != 1:
+            raise CaptureSemanticError(f"{label} JSON must be a bounded regular file")
+        flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, flags)
+    except OSError as error:
+        raise CaptureSemanticError(f"{label} JSON open failed") from error
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or (before.st_dev, before.st_ino) != (named.st_dev, named.st_ino)
+                or before.st_size > _OHOS_JSON_LIMIT):
+            raise CaptureSemanticError(f"{label} JSON must be a bounded regular file")
+        data = bytearray()
+        while len(data) <= _OHOS_JSON_LIMIT:
+            chunk = os.read(fd, min(65536, _OHOS_JSON_LIMIT + 1 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+        after = os.fstat(fd)
+        if (len(data) > _OHOS_JSON_LIMIT
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                    before.st_ctime_ns) !=
+                   (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                    after.st_ctime_ns)):
+            raise CaptureSemanticError(f"{label} JSON changed while reading")
+        value = strict_json_loads(data)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        if isinstance(error, CaptureSemanticError):
+            raise
+        raise CaptureSemanticError(f"{label} JSON is invalid") from error
+    finally:
+        os.close(fd)
+    if not isinstance(value, dict):
+        raise CaptureSemanticError(f"{label} JSON object required")
+    return value, hashlib.sha256(data).hexdigest()
+
+
+def _canonical_json_line(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                      allow_nan=False).encode("ascii") + b"\n"
+
+
+def _publish_no_replace(path_value: str, data: bytes):
+    path = Path(path_value)
+    parent = path.parent
+    parent_stat = os.stat(parent, follow_symlinks=False)
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise OSError("output parent is not a directory")
+    parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    temporary_name = None
+    try:
+        for _ in range(128):
+            temporary_name = ".mw-perf-ohos-import-" + secrets.token_hex(16)
+            try:
+                fd = os.open(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                             | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                             0o600, dir_fd=parent_fd)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise OSError("unable to allocate temporary output")
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("output write failed")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.link(temporary_name, path.name, src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd, follow_symlinks=False)
+        os.fsync(parent_fd)
+    finally:
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        os.close(parent_fd)
+
+
+def _ohos_import_document(archive, result, request, result_sha256, request_sha256):
+    imported = validate_capture_semantics(archive, result, request)
+    semantics = imported["imported_semantics"]
+    stage_count = semantics.get("stage_record_count", semantics.get("record_count"))
+    exact_correlated = semantics.get("measurement_kind") == "exact_correlated"
+    exact_count = semantics.get("record_count") if exact_correlated else 0
+    return {
+        "schema": "mw_perf.ohos_capture_import.v1",
+        "semantic_validation": imported["semantic_validation"],
+        "formal_p0a": False,
+        "status": semantics.get("status"),
+        "stage_status": "supported",
+        "exact_status": semantics.get("status") if exact_correlated else "not_requested",
+        "measurement_kind": semantics.get("measurement_kind", "stage_only"),
+        "counts": {
+            "stage_records": stage_count,
+            "exact_records": exact_count,
+            "streams": semantics.get("stream_count"),
+            "segments": semantics.get("segment_count"),
+        },
+        "hashes": {
+            "archive_sha256": result["archive_sha256"],
+            "result_json_sha256": result_sha256,
+            "request_json_sha256": request_sha256,
+        },
+        "provenance": {
+            "request_challenge": request["request_challenge"],
+            "run_id": request["run_id"],
+            "capability_id": request["capability_id"],
+            "path_id": request["path_id"],
+            "topology_generation": request["topology_generation"],
+            "topology_sha256": request["topology_sha256"],
+            "child_pid": result["child_pid"],
+            "child_start_time_ticks": result["child_start_time_ticks"],
+            "archive_size": result["archive_size"],
+        },
+    }
+
+
+def _run_ohos_import(args):
+    try:
+        result, result_sha256 = _read_strict_regular_json(args.result, "result")
+        request, request_sha256 = _read_strict_regular_json(args.request, "request")
+        document = _ohos_import_document(
+            args.archive, result, request, result_sha256, request_sha256)
+        data = _canonical_json_line(document)
+        if args.output:
+            try:
+                _publish_no_replace(args.output, data)
+            except FileExistsError:
+                failure = {"schema": "mw_perf.ohos_capture_import.v1",
+                           "semantic_validation": False, "formal_p0a": False,
+                           "error_code": _OHOS_OUTPUT_ERROR}
+                print(_canonical_json_line(failure).decode("ascii"), end="")
+                return EXIT_INVALID
+        else:
+            print(data.decode("ascii"), end="")
+        return 0
+    except (CaptureSemanticError, OSError, TypeError, KeyError, ValueError) as error:
+        failure = {"schema": "mw_perf.ohos_capture_import.v1",
+                   "semantic_validation": False, "formal_p0a": False,
+                   "error_code": _OHOS_IMPORT_ERROR,
+                   "error": str(error)[:256] or "capture import validation failed"}
+        print(_canonical_json_line(failure).decode("ascii"), end="")
+        return EXIT_INVALID
 
 
 def _is_metric_qualification(path: Path) -> bool:
@@ -36,6 +197,11 @@ def main(argv=None):
     c=s.add_parser("compare"); c.add_argument("--plan", required=True); c.add_argument("--output", default="comparison"); c.add_argument("--valid-blocks", type=int); c.add_argument("--order")
     qb=s.add_parser("metric-qualification-build")
     qv=s.add_parser("metric-qualification-validate")
+    oi=s.add_parser("import-ohos-capture")
+    oi.add_argument("--archive", required=True)
+    oi.add_argument("--result", required=True)
+    oi.add_argument("--request", required=True)
+    oi.add_argument("--output")
     for parser in (qb, qv):
         parser.add_argument("--campaign", required=True)
         parser.add_argument("--object-store", required=True)
@@ -46,6 +212,8 @@ def main(argv=None):
     qb.add_argument("--destination", required=True)
     qv.add_argument("--qualification", required=True)
     a=p.parse_args(argv)
+    if a.action == "import-ohos-capture":
+        return _run_ohos_import(a)
     if a.action=="doctor":
         try:
             result=adapter_doctor(a.adapter,load_config(a.config)); result["tool_version"]=VERSION

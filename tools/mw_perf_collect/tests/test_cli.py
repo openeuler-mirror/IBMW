@@ -5,6 +5,59 @@ import mw_perf_collect.core as core
 from mw_perf_collect.cli import main
 
 class CliTest(unittest.TestCase):
+    def test_ohos_import_cli_emits_bounded_summary_and_exclusive_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = root / "result.json"
+            request = root / "request.json"
+            archive = root / "capture.tar"
+            archive.write_bytes(b"archive")
+            result_value = {"archive_sha256": "a" * 64, "archive_size": 7,
+                            "child_pid": 12, "child_start_time_ticks": 34}
+            request_value = {"request_challenge": "b" * 64, "run_id": "run",
+                             "capability_id": "cap", "path_id": "path",
+                             "topology_generation": "gen", "topology_sha256": "c" * 64}
+            result.write_text(json.dumps(result_value))
+            request.write_text(json.dumps(request_value))
+            imported = {"semantic_validation": True, "formal_p0a": False,
+                        "imported_semantics": {"status": "supported", "record_count": 3,
+                                               "stream_count": 1, "segment_count": 1,
+                                               "raw_stage_events": [{"large": "payload"}]}}
+            output = root / "summary.json"
+            with patch("mw_perf_collect.cli.validate_capture_semantics",
+                       return_value=imported):
+                self.assertEqual(main(["import-ohos-capture", "--archive", str(archive),
+                                       "--result", str(result), "--request", str(request),
+                                       "--output", str(output)]), 0)
+                self.assertEqual(main(["import-ohos-capture", "--archive", str(archive),
+                                       "--result", str(result), "--request", str(request),
+                                       "--output", str(output)]), core.EXIT_INVALID)
+            document = json.loads(output.read_text())
+            self.assertTrue(document["semantic_validation"])
+            self.assertFalse(document["formal_p0a"])
+            self.assertEqual(document["counts"]["stage_records"], 3)
+            self.assertNotIn("raw_stage_events", output.read_text())
+            self.assertNotIn("directory_finalization", document)
+            self.assertNotIn("valid_for_metric", document)
+            self.assertNotIn("valid_for_comparison", document)
+
+    def test_ohos_import_cli_rejects_duplicate_json_and_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); archive = root / "capture.tar"; archive.write_bytes(b"x")
+            request = root / "request.json"; request.write_text("{}")
+            duplicate = root / "duplicate.json"
+            duplicate.write_text('{"protocol":"one","protocol":"two"}')
+            with patch("mw_perf_collect.cli.validate_capture_semantics") as validator:
+                self.assertEqual(main(["import-ohos-capture", "--archive", str(archive),
+                                       "--result", str(duplicate), "--request", str(request)]),
+                                 core.EXIT_INVALID)
+                validator.assert_not_called()
+            target = root / "result.json"; target.write_text("{}")
+            link = root / "result-link.json"; link.symlink_to(target)
+            self.assertEqual(main(["import-ohos-capture", "--archive", str(archive),
+                                   "--result", str(link), "--request", str(request)]),
+                             core.EXIT_INVALID)
+
     def _formal_run(self, root, lane, block="b1"):
         path = root / lane
         path.mkdir(parents=True)
@@ -529,6 +582,7 @@ class CliTest(unittest.TestCase):
                             "--component", "mw_perf_collect"], check=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             installed = prefix / "libexec/ibmw/mw_perf_collect"
+            self.assertTrue((installed / "ohos_capture.py").is_file())
             for relative in core._RESOURCE_SHA256:
                 self.assertTrue((installed / relative).is_file(), relative)
             run_path = self._real_formal_run(root, "A")

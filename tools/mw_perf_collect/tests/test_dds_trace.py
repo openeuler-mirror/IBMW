@@ -915,7 +915,7 @@ while True: time.sleep(.01)
                         "MW_PERF_TOPOLOGY_GENERATION": "forged",
                         "MW_PERF_TOPOLOGY_SHA256": "0" * 64,
                         "IBMW_COMM_TRACE": "sampled", "IBMW_COMM_TRACE_SINK": "none"}},
-        "p0a_evidence": {"run_type": "stage_run", "trace_mode": "full",
+        "p0a_evidence": {"run_type": "stage_run", "observer": False, "trace_mode": "full",
                          "capability_id": "cap", "path_id": "path",
                          "topology_generation": "generation-1", "measurement_kind": "stage_only"},
         "scenario_contract": {"topology": "frozen"},
@@ -1148,7 +1148,8 @@ def test_attached_p0a_binary_trace_is_required_stop_unsupported(tmp_path):
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"validation_profile": "p0a",
         "sut": {"mode": "attached", "pid": os.getpid()},
-        "p0a_evidence": {"run_type": "stage_run", "trace_mode": "full"}}))
+        "p0a_evidence": {"run_type": "stage_run", "observer": False,
+                         "measurement_kind": "stage_only", "trace_mode": "full"}}))
     args = core.argparse.Namespace(config=str(config), adapter="generic", command=[],
                                    override_command=False, output=str(tmp_path / "runs"))
     assert core.run(args) != core.EXIT_OK
@@ -1165,7 +1166,7 @@ def test_sigkill_does_not_generate_directory_finalization(tmp_path):
         "run": {"sample_seconds": .01, "stop_timeout_seconds": .01},
         "sut": {"mode": "managed", "command": [sys.executable, "-c",
             "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(10)"]},
-        "p0a_evidence": {"run_type": "stage_run", "trace_mode": "full",
+        "p0a_evidence": {"run_type": "stage_run", "observer": False, "trace_mode": "full",
                          "measurement_kind": "stage_only"}}))
     args = core.argparse.Namespace(config=str(config), adapter="generic", command=[],
                                    override_command=False, output=str(tmp_path / "runs"))

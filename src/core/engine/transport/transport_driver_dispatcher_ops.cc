@@ -3,8 +3,11 @@
 
 #include "engine/transport/transport_driver_dispatcher.h"
 
+#include <algorithm>
 #include <charconv>
 #include <condition_variable>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <limits>
 #include <optional>
@@ -35,6 +38,19 @@ std::vector<internal::CommTraceSendOverlayV1*> ResolveCommTraceSendOverlays(
                            : nullptr);
   }
   return overlays;
+}
+
+bool ExactPublishOverlayRequired() noexcept {
+  const char* required = std::getenv("MW_PERF_EXACT_REQUIRED");
+  return required != nullptr && std::strcmp(required, "1") == 0;
+}
+
+bool ValidateExactPublishOverlay(
+    const std::vector<TransportDriver*>& drivers,
+    const std::vector<internal::CommTraceSendOverlayV1*>& overlays) {
+  if (!ExactPublishOverlayRequired()) return true;
+  return drivers.size() == 1 && overlays.size() == 1 &&
+         overlays.front() != nullptr;
 }
 #endif
 
@@ -647,6 +663,17 @@ bool TransportDriverDispatcher::RegisterSendType(RegisterSendTypeAccessInfoWrapp
 #ifdef IBMW_ENABLE_COMM_TRACE
   send_type_wrapper_ptr->cached_send_overlays =
       ResolveCommTraceSendOverlays(driver_itr->second);
+  if (!ValidateExactPublishOverlay(driver_itr->second,
+                                   send_type_wrapper_ptr->cached_send_overlays)) {
+    MW_ERROR(
+        "Exact communication tracing requires one publish driver with a valid "
+        "CommTraceSendOverlayV1 for topic '{}'; selected_driver_count={}, valid_overlay_count={}.",
+        topic_name, driver_itr->second.size(),
+        std::count_if(send_type_wrapper_ptr->cached_send_overlays.begin(),
+                      send_type_wrapper_ptr->cached_send_overlays.end(),
+                      [](const auto* overlay) { return overlay != nullptr; }));
+    return false;
+  }
 #endif
   send_type_wrapper_ptr->cached_seq_counter = seq_counter_ptr;
   send_type_wrapper_ptr->cached_filter_collector = filter_collector_ptr;
@@ -1120,6 +1147,17 @@ bool TransportDriverDispatcher::RegisterSendType(SendTypeWrapper&& wrapper) {
 #ifdef IBMW_ENABLE_COMM_TRACE
   send_type_wrapper_ptr->cached_send_overlays =
       ResolveCommTraceSendOverlays(driver_itr->second);
+  if (!ValidateExactPublishOverlay(driver_itr->second,
+                                   send_type_wrapper_ptr->cached_send_overlays)) {
+    MW_ERROR(
+        "Exact communication tracing requires one publish driver with a valid "
+        "CommTraceSendOverlayV1 for topic '{}'; selected_driver_count={}, valid_overlay_count={}.",
+        topic_name, driver_itr->second.size(),
+        std::count_if(send_type_wrapper_ptr->cached_send_overlays.begin(),
+                      send_type_wrapper_ptr->cached_send_overlays.end(),
+                      [](const auto* overlay) { return overlay != nullptr; }));
+    return false;
+  }
 #endif
   send_type_wrapper_ptr->cached_seq_counter = seq_counter_ptr;
   send_type_wrapper_ptr->cached_filter_collector = filter_collector_ptr;

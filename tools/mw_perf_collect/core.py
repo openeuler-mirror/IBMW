@@ -26,7 +26,7 @@ _RESOURCE_SHA256 = {
     "contracts/p0a-evidence-contract.v8.json": "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575",
     "contracts/p0a-evidence-contract.v9.json": "4ecef870afdc652853f40bc3d2716d66a6a3304849741a7cb03eef7033fbce11",
     "schemas/comparison-plan.schema.v1.json": "b3c3fe804c3c7ef9897837abc4f756d9c79301eaf293ef00598799ffa7ffeb69",
-    "schemas/config.schema.v1.json": "71fbe7868f0ab1b4844970098edcf280752c17c87bb3b1b3e1cfd54152c590f0",
+    "schemas/config.schema.v1.json": "ec6299a21ea2a402d10ae2b2249997a8960d27b1511a07fb5312c1a685ad3bcc",
     "schemas/evidence-campaign-seal.schema.v1.json": "ae0e9c184c79dad0e3d7d931da94f5ef56a131ca1844d45776cbd814040daba4",
     "schemas/evidence-campaign-seal.v2.schema.json": "a3d2b74aa563e9441558f4131fc018e740b5c4774aea7a2812670aadd76dee60",
     "schemas/evidence-campaign-validation.schema.v1.json": "555cdb0213ccf2cf8665ddabc4725479410df447b01d88340282b7d26cbf4d1b",
@@ -41,15 +41,15 @@ _RESOURCE_SHA256 = {
     "schemas/metric-qualification-seal.schema.v1.json": "cf6a9c6cd4b4cf0b693dd19a708c0411a3bbb04d4ec5b22fb807b2d98d924678",
     "schemas/metric-qualification.schema.v1.json": "f0309ec5aa2a5495516459f4aab14de5618573805778eda9523864a40f77480a",
     "schemas/p0a-evidence-manifest.schema.v1.json": "66cd0f6aba140056cad8717c9b02268dddf56f4433c16140dd231cd22b2317d6",
-    "schemas/result.schema.v1.json": "eb7689057ca0d0f7201839e9bee2cb049d43adc4cd320d1976ace84155c8b8af",
+    "schemas/result.schema.v1.json": "15eaf0f30c70f9f9d7704a9a38561639b5d37a6065e57154c91c0ff9906ceedb",
     "schemas/rollback-build-plan.schema.v1.json": "feb47456d8513d385912b077f9285c4582bf7f4d1e2fc1c23883e8b999558e35",
     "schemas/rollback-evidence-manifest.schema.v1.json": "0bc71a2ef9f222f5a224ed3f60d73f64b02f077eb09e996242654d77fd6a4c3d",
     "schemas/rollback-formal.schema.v2.json": "df576ed0d139de424747a9fa6c821d195b6a4d46d83359aeee109eabbd59ef24",
     "schemas/rollback-link-closure.schema.v1.json": "21c262fa24dd368e063c85c923e881c560c474b6ec0c4c4630e417295b23086a",
     "schemas/rollback-runtime-resolution.schema.v1.json": "60eb8404625997c2c83e0f06a10b913b20e1fd17ba050c480c80b42d515b2644",
     "schemas/rollback-trace-off-result.schema.v1.json": "5f2eb0f6e214d54ad64f9ccdef0498fd4c6051f803e73b2bd38e045c42c4ffd0",
-    "schemas/rollback-trace-off-result.schema.v2.json": "f744fbcaa1e7e17b569908385631143dd5715f5d665fe0cf7a9aec134b816aa7",
-    "schemas/ros2-preflight.schema.v1.json": "3379a8e03e8890d155773ddde8704ca3ced87d4552086e77ae652b526049dbcf",
+    "schemas/rollback-trace-off-result.schema.v2.json": "5c067cebb391df7e664c37c7ed745004a57c1242cf752b172e1d4bdaf3bb13c3",
+    "schemas/ros2-preflight.schema.v1.json": "acd086154fa06ffe549245ae1f619eed4f3a9d28a72733534ad396ae60108167",
     "schemas/runtime-matrix-evidence-manifest.schema.v1.json": "fe089ace1f388de75dd891edb3ba8f6004b9e86c2f5bddac6deb5c6c835dead1",
     "schemas/runtime-matrix-manifest.schema.v1.json": "bf9caff1194b2405e5da54a481fa5f57a40188f66b24b80652c2708eeeb8e7b4",
     "schemas/trace-quality-formal.schema.v2.json": "be32ccaf29ee017c2bdb75885ffef936bd0e21d743171c8180c226b07fe50f8a",
@@ -847,7 +847,7 @@ def _manifest_schema_errors(value: dict[str, Any]) -> list[str]:
             and len(value["scenario_contract_hash"]) == 64
             and all(char in "0123456789abcdef" for char in value["scenario_contract_hash"]),
         "metric_availability": value.get("metric_availability") in ("supported", "unsupported", "estimated", "partial"),
-        "measurement_kind": value.get("measurement_kind") in ("observation", "measurement", "derived", "metadata", "producer_latency", "latency_summary_csv", "stage_only", "exact_correlated"),
+        "measurement_kind": value.get("measurement_kind") in ("observation", "measurement", "derived", "metadata", "producer_latency", "latency_summary_csv", "stage_only", "exact_correlated", "observer_latency"),
         "start_time": number("start_time"),
         "end_time": number("end_time"),
         "pid": integer("pid", 1),
@@ -2205,6 +2205,37 @@ def _stop_managed(proc: subprocess.Popen[Any], timeout: float, known: dict[int, 
     if remaining: errors.append("processes remain: " + ",".join(remaining))
     return _StopResult("; ".join(errors) or None, sigkill_escalated)
 
+
+def _run_admission(adapter: str, p0a: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate P0a control-plane semantics before creating run resources."""
+    run_type = p0a.get("run_type")
+    if run_type not in ("observer_diagnostic", "exact_run", "stage_run"):
+        return None
+    observer = p0a.get("observer")
+    measurement_kind = p0a.get("measurement_kind")
+    if not isinstance(observer, bool):
+        raise ValueError(f"{run_type} requires explicit boolean p0a_evidence.observer")
+    if run_type == "observer_diagnostic":
+        if adapter != "ros2" or observer is not True or measurement_kind != "observer_latency":
+            raise ValueError(
+                "observer_diagnostic requires adapter ros2, observer=true, "
+                "and measurement_kind=observer_latency")
+        code = "ROS2_OBSERVER_NOT_IMPLEMENTED"
+        return {
+            "status": "refused", "failure_code": code, "failure_codes": [code],
+            "required_stop": True, "metric_availability": "unsupported",
+            "valid_for_metric": False, "valid_for_comparison": False,
+        }
+    if run_type == "exact_run":
+        if observer is not False or measurement_kind != "exact_correlated":
+            raise ValueError(
+                "exact_run requires observer=false and measurement_kind=exact_correlated")
+    elif observer is not False or measurement_kind != "stage_only":
+        raise ValueError(
+            "stage_run requires observer=false and measurement_kind=stage_only")
+    return None
+
+
 def run(args: argparse.Namespace) -> int:
     run_dir: Path | None = None; manifest: dict[str, Any] | None = None
     proc: subprocess.Popen[Any] | None = None; failure: BaseException | None = None; cleanup_error: str | None = None
@@ -2231,6 +2262,10 @@ def run(args: argparse.Namespace) -> int:
         if ("candidate_only" in p0a_config
                 and not isinstance(p0a_config["candidate_only"], bool)):
             raise ValueError("p0a_evidence.candidate_only must be boolean")
+        refusal = _run_admission(args.adapter, p0a_config)
+        if refusal is not None:
+            print(json.dumps(refusal, sort_keys=True))
+            return EXIT_INVALID
         resolution_config = p0a_config.get("resolution")
         if (p0a_config.get("registration_contract_version") == "mw_perf.p0a_contract.v4"
                 and (mode != "managed" or p0a_config.get("run_type") != "exact_run"
@@ -2797,7 +2832,8 @@ def adapter_doctor(name: str, config: dict[str, Any]) -> dict[str, Any]:
         options = _adapter_config(config, "ros2")
         adapter_env = _ros2_collector_environment(config)
         return Ros2Adapter(environ=adapter_env,
-                           ros2_executable=options.get("ros2_executable")).doctor()
+                           ros2_executable=options.get("ros2_executable"),
+                           ros2_prefix=options.get("ros2_prefix")).doctor()
     if name == "ibmw":
         from .adapters import collect_ibmw
         options = _adapter_config(config, "ibmw")
@@ -2818,7 +2854,8 @@ def _collect_adapter(name: str, config: dict[str, Any], run_dir: Path, pid: int)
         options = _adapter_config(config, "ros2"); options.setdefault("pid", pid)
         adapter_env = _ros2_collector_environment(config)
         result = Ros2Adapter(environ=adapter_env,
-                             ros2_executable=options.get("ros2_executable")).run(options)
+                             ros2_executable=options.get("ros2_executable"),
+                             ros2_prefix=options.get("ros2_prefix")).run(options)
         observations = result.get("observations", [])
         preflight = next((x for x in observations if x.get("name") == "ros2_preflight"), None)
         write_json(run_dir/"environment"/"ros2.json", {"adapter": "ros2", "observations": [x for x in observations if x.get("name") in ("ros_environment", "ros2_cli")], **({"preflight": preflight} if preflight else {})})

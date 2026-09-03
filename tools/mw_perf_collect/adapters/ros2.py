@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 import re
@@ -156,6 +157,8 @@ def validate_latency_artifact(path: Path, *, expected_run_id: str | None = None,
             errors.append(f"line {number}: payload_bytes must be a non-negative integer")
         if record.get("valid") is not True:
             errors.append(f"line {number}: valid must be true")
+    if count == 0:
+        errors.append("artifact contains no data records")
     if completion is None:
         errors.append("completion record is missing")
     else:
@@ -163,6 +166,10 @@ def validate_latency_artifact(path: Path, *, expected_run_id: str | None = None,
             errors.append("completion schema/complete is invalid")
         if completion.get("record_count") != count:
             errors.append("completion record_count does not match data records")
+        if not isinstance(completion.get("topic"), str) or not completion.get("topic"):
+            errors.append("completion topic must be a non-empty string")
+        if not isinstance(completion.get("type"), str) or not completion.get("type"):
+            errors.append("completion type must be a non-empty string")
         if completion.get("topic") != topic or completion.get("type") != message_type:
             errors.append("completion topic/type does not match data records")
         for field in ("producer_pid", "producer_start_time_ticks"):
@@ -222,7 +229,9 @@ def archive_latency_artifact(value: Any, baseline: dict[str, Any], destination: 
     controlled = (managed and mode == "managed" and graceful_finalization and validation["valid"]
                   and not validation.get("legacy")
                   and validation.get("clock_domain") == LATENCY_CLOCK_DOMAIN)
-    if validation["valid"] and controlled:
+    if validation["record_count"] == 0:
+        status, reason = "invalid", "artifact contains no data records"
+    elif validation["valid"] and controlled:
         status, reason = "supported", None
     elif mode == "attached" and not config["required"]:
         status = "partial"
@@ -261,10 +270,14 @@ class Ros2Adapter:
     SUT_ENV_ALLOWLIST = frozenset(ENV_KEYS)
     TRUSTED_BASE_ENV_KEYS = frozenset(("PATH", "HOME", "LANG", "LC_ALL", "TZ"))
     UNSAFE_ENV_KEYS = frozenset(("PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH"))
+    TRUSTED_INTERPRETER_ROOTS = (Path("/usr/bin"), Path("/usr/local/bin"))
+    MAX_LAUNCHER_BYTES = 4096
     TRACEPOINT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)+$")
 
     DEFAULT_READINESS_TIMEOUT_SECONDS = 10.0
     DEFAULT_READINESS_POLL_INTERVAL_SECONDS = 0.2
+    MAX_GRAPH_QUERY_EVIDENCE = 64
+    MAX_GRAPH_QUERY_DETAIL_CHARS = 1024
 
     @classmethod
     def valid_environment_value(cls, key: str, value: str) -> bool:
@@ -298,28 +311,191 @@ class Ros2Adapter:
                 if key in allowed and cls.valid_environment_value(key, value)}
 
     def __init__(self, runner: CommandRunner | None = None, environ: Mapping[str, str] | None = None,
-                 proc_root: str | Path = "/proc", ros2_executable: str | None = None,
-                 trusted_path: str | None = None):
+                  proc_root: str | Path = "/proc", ros2_executable: str | None = None,
+                  trusted_path: str | None = None, ros2_prefix: str | None = None):
         self._run = runner or subprocess.run
         source_env = dict(os.environ if environ is None else environ)
         path = trusted_path if trusted_path is not None else source_env.get("PATH", os.defpath)
-        configured = Path(ros2_executable).expanduser() if ros2_executable else None
-        if configured is not None:
-            self._ros2_executable = str(configured.resolve()) if configured.is_absolute() else None
-        elif runner is not None:
-            # An injected runner is itself a trusted collector boundary used by
-            # tests/embedders; still pass an absolute command identity to it.
-            self._ros2_executable = "/trusted/ros2"
-        else:
-            found = shutil.which("ros2", path=path)
-            self._ros2_executable = str(Path(found).resolve()) if found else None
-        if self._ros2_executable is not None and runner is None:
-            candidate = Path(self._ros2_executable)
-            if not candidate.is_file() or not os.access(candidate, os.X_OK):
-                self._ros2_executable = None
         self._env = self.sanitized_environment(source_env)
         self._env["PATH"] = path if self.valid_environment_value("PATH", path) else os.defpath
+        self._trusted_runtime = self._configure_trusted_runtime(ros2_prefix, ros2_executable)
+        if ros2_prefix is not None:
+            self._ros2_executable = self._trusted_runtime.get("executable") \
+                if self._trusted_runtime["status"] == "ready" else None
+            if self._trusted_runtime["status"] == "ready":
+                self._env["PYTHONPATH"] = os.pathsep.join(self._trusted_runtime["python_paths"])
+                if self._trusted_runtime["library_paths"]:
+                    self._env["LD_LIBRARY_PATH"] = os.pathsep.join(
+                        self._trusted_runtime["library_paths"])
+        else:
+            configured = Path(ros2_executable).expanduser() if ros2_executable else None
+            if configured is not None:
+                self._ros2_executable = str(configured.resolve()) if configured.is_absolute() else None
+            elif runner is not None:
+                # An injected runner is itself a trusted collector boundary used by
+                # tests/embedders; still pass an absolute command identity to it.
+                self._ros2_executable = "/trusted/ros2"
+            else:
+                found = shutil.which("ros2", path=path)
+                self._ros2_executable = str(Path(found).resolve()) if found else None
+            if self._ros2_executable is not None and runner is None:
+                candidate = Path(self._ros2_executable)
+                if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                    self._ros2_executable = None
         self._proc_root = Path(proc_root)
+
+    @staticmethod
+    def _canonical_existing(path: Path, *, directory: bool) -> Path | None:
+        if not path.is_absolute():
+            return None
+        try:
+            canonical = path.resolve(strict=True)
+        except OSError:
+            return None
+        if canonical != path or (directory and not canonical.is_dir()) or (
+                not directory and not canonical.is_file()):
+            return None
+        return canonical
+
+    @staticmethod
+    def _beneath(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return path != root
+
+    @classmethod
+    def _read_regular_file_bounded(cls, path: Path, limit: int) -> bytes | None:
+        """Read a canonical regular file without following a replacement symlink."""
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+            try:
+                metadata = os.fstat(fd)
+                current = path.lstat()
+                if (not stat.S_ISREG(metadata.st_mode)
+                        or (metadata.st_dev, metadata.st_ino) != (current.st_dev, current.st_ino)
+                        or metadata.st_size > limit):
+                    return None
+                data = os.read(fd, limit + 1)
+                return data if len(data) <= limit else None
+            finally:
+                os.close(fd)
+        except OSError:
+            return None
+
+    @classmethod
+    def _trusted_python_interpreter(cls, launcher: Path) -> tuple[Path, str, str | None] | None:
+        data = cls._read_regular_file_bounded(launcher, cls.MAX_LAUNCHER_BYTES)
+        if data is None or not data.startswith(b"#!"):
+            return None
+        first_line = data.split(b"\n", 1)[0]
+        try:
+            shebang = first_line[2:].decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        # Arguments (including /usr/bin/env forms) make interpreter identity ambiguous.
+        if not shebang or shebang != shebang.strip() or any(char.isspace() for char in shebang):
+            return None
+        declared = Path(shebang)
+        if not declared.is_absolute():
+            return None
+        try:
+            interpreter = declared.resolve(strict=True)
+            metadata = interpreter.stat()
+        except OSError:
+            return None
+        roots: list[Path] = []
+        for root in cls.TRUSTED_INTERPRETER_ROOTS:
+            try:
+                roots.append(root.resolve(strict=True))
+            except OSError:
+                continue
+        if (not stat.S_ISREG(metadata.st_mode) or not os.access(interpreter, os.X_OK)
+                or not any(cls._beneath(interpreter, root) for root in roots)):
+            return None
+        match = re.fullmatch(r"python(\d+)\.(\d+)", interpreter.name)
+        if match is None:
+            return None
+        return interpreter, f"{match.group(1)}.{match.group(2)}", shebang
+
+    @classmethod
+    def _interpreter_multiarch(cls, interpreter: Path) -> str | None:
+        data = cls._read_regular_file_bounded(interpreter, 64 * 1024 * 1024)
+        if data is None or len(data) < 20 or data[:4] != b"\x7fELF" or data[5] not in (1, 2):
+            return None
+        byteorder = "little" if data[5] == 1 else "big"
+        machine = int.from_bytes(data[18:20], byteorder)
+        return {3: "i386-linux-gnu", 40: "arm-linux-gnueabihf",
+                62: "x86_64-linux-gnu", 183: "aarch64-linux-gnu"}.get(machine)
+
+    def _configure_trusted_runtime(self, prefix_value: str | None,
+                                   executable_value: str | None) -> dict[str, Any]:
+        result: dict[str, Any] = {"status": "unconfigured", "prefix": None,
+                                  "executable": None, "python_paths": [],
+                                  "library_paths": [], "interpreter": None,
+                                  "shebang_interpreter": None, "python_version": None,
+                                  "identity": None,
+                                  "reason": "ros2_prefix is not configured"}
+        if prefix_value is None:
+            return result
+        if not isinstance(prefix_value, str):
+            return {**result, "status": "invalid",
+                    "reason": "ros2_prefix must be an absolute canonical directory"}
+        prefix = self._canonical_existing(Path(prefix_value).expanduser(), directory=True)
+        if prefix is None:
+            return {**result, "status": "invalid",
+                    "reason": "ros2_prefix must be an absolute canonical non-symlink directory"}
+        result["prefix"] = str(prefix)
+
+        executable_path = (Path(executable_value).expanduser() if executable_value
+                           else prefix / "bin" / "ros2")
+        executable = self._canonical_existing(executable_path, directory=False)
+        if executable is None or not self._beneath(executable, prefix) or not os.access(executable, os.X_OK):
+            return {**result, "status": "unavailable",
+                    "reason": "ros2 executable is unavailable or outside ros2_prefix"}
+
+        interpreter_evidence = self._trusted_python_interpreter(executable)
+        if interpreter_evidence is None:
+            return {**result, "status": "unavailable", "executable": str(executable),
+                    "reason": "ros2 executable has no supported trusted Python shebang"}
+        interpreter, python_version, shebang_interpreter = interpreter_evidence
+        version = f"python{python_version}"
+        python_candidates = (prefix / "lib" / version / "site-packages",
+                             prefix / "local" / "lib" / version / "dist-packages")
+        python_paths = [candidate for candidate in (
+            self._canonical_existing(path, directory=True) for path in python_candidates)
+            if candidate is not None and self._beneath(candidate, prefix)]
+        package_available = False
+        for path in python_paths:
+            for package, directory in ((path / "ros2cli", True), (path / "ros2cli.py", False)):
+                canonical_package = self._canonical_existing(package, directory=directory)
+                if canonical_package is not None and self._beneath(canonical_package, prefix):
+                    package_available = True
+        if not package_available:
+            return {**result, "status": "unavailable", "executable": str(executable),
+                    "reason": f"ros2cli package is unavailable for {version}"}
+
+        library_candidates = [prefix / "lib"]
+        multiarch = self._interpreter_multiarch(interpreter)
+        if multiarch is not None:
+            library_candidates.append(prefix / "lib" / multiarch)
+        library_paths = [candidate for candidate in (
+            self._canonical_existing(path, directory=True) for path in library_candidates)
+            if candidate is not None and self._beneath(candidate, prefix)]
+        identity_value = {"prefix": str(prefix), "executable": str(executable),
+                          "interpreter": str(interpreter),
+                          "shebang_interpreter": shebang_interpreter,
+                          "python_paths": [str(path) for path in python_paths],
+                          "library_paths": [str(path) for path in library_paths],
+                          "python_version": python_version}
+        identity = hashlib.sha256(json.dumps(identity_value, sort_keys=True,
+                                              separators=(",", ":")).encode()).hexdigest()
+        return {"status": "ready", **identity_value, "identity": identity, "reason": None}
+
+    def trusted_runtime(self) -> dict[str, Any]:
+        return dict(self._trusted_runtime)
 
     def _ros2_args(self, *args: str) -> tuple[str, ...] | None:
         return (self._ros2_executable, *args) if self._ros2_executable else None
@@ -854,7 +1030,8 @@ class Ros2Adapter:
                  "ros2_command": {"path": self._ros2_executable,
                                   "trusted": self._ros2_executable is not None
                                   and Path(self._ros2_executable).is_absolute()},
-                 "environment": env, "ros2_pkg_prefix": pkg_records,
+                 "environment": env, "trusted_runtime": self.trusted_runtime(),
+                 "ros2_pkg_prefix": pkg_records,
                  "process_identity": {"start_ticks_before": identity_start,
                                       "start_ticks_after": identity_end,
                                       "valid": identity_valid, "reason": identity_reason},
@@ -888,10 +1065,22 @@ class Ros2Adapter:
         deadline: float | None = None,
         include_topic_info: bool = True,
     ) -> dict[str, Any]:
-        snapshot: dict[str, Any] = {"timestamp": time.time(), "nodes": [], "topics": [], "topic_info": {}}
+        snapshot: dict[str, Any] = {"timestamp": time.time(), "nodes": [], "topics": [],
+                                    "topic_info": {}, "query_evidence": [],
+                                    "query_evidence_omitted": 0}
+        query_records: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+
+        def query(args: tuple[str, ...], name: str) -> dict[str, Any]:
+            record = self._ros2_command(args, name, timeout=timeout, deadline=deadline)
+            if record.get("detail"):
+                record = dict(record)
+                record["detail"] = str(record["detail"])[:self.MAX_GRAPH_QUERY_DETAIL_CHARS]
+            query_records.append((args, record))
+            return record
+
         records = [
-            self._ros2_command(("node", "list"), "ros2_node_list", timeout=timeout, deadline=deadline),
-            self._ros2_command(("topic", "list"), "ros2_topic_list", timeout=timeout, deadline=deadline),
+            query(("node", "list", "--no-daemon"), "ros2_node_list"),
+            query(("topic", "list", "--no-daemon"), "ros2_topic_list"),
         ]
         node_record, topic_record = records
         if node_record["metric_availability"] == "supported":
@@ -899,15 +1088,37 @@ class Ros2Adapter:
         if topic_record["metric_availability"] == "supported":
             snapshot["topics"] = [line.strip() for line in str(topic_record["value"]).splitlines() if line.strip()]
             for topic in snapshot["topics"] if include_topic_info else ():
-                info = self._ros2_command(("topic", "info", "-v", topic), "ros2_topic_info", timeout=timeout, deadline=deadline)
+                info = query(("topic", "info", "-v", "--no-daemon", topic),
+                             "ros2_topic_info")
                 snapshot["topic_info"][topic] = info
-        availability = "supported" if any(r["metric_availability"] == "supported" for r in records) else "unsupported"
-        return self._record("ros_graph_snapshot", snapshot, method="ros2_cli", availability=availability, detail="CLI graph query failed" if availability == "unsupported" else None)
+        evidence = []
+        for args, record in query_records[:self.MAX_GRAPH_QUERY_EVIDENCE]:
+            item = {"command": list(self._ros2_args(*args) or args), "name": record["name"],
+                    "metric_availability": record["metric_availability"]}
+            if record.get("detail"):
+                item["detail"] = str(record["detail"])[:self.MAX_GRAPH_QUERY_DETAIL_CHARS]
+            evidence.append(item)
+        snapshot["query_evidence"] = evidence
+        snapshot["query_evidence_omitted"] = max(
+            0, len(query_records) - self.MAX_GRAPH_QUERY_EVIDENCE)
+        availability = ("supported" if query_records and all(
+            record["metric_availability"] == "supported" for _, record in query_records)
+            else "unsupported")
+        failures = sum(record["metric_availability"] != "supported"
+                       for _, record in query_records)
+        detail = (f"CLI graph query failed ({failures} of {len(query_records)} commands)"
+                  if availability == "unsupported" else None)
+        return self._record("ros_graph_snapshot", snapshot, method="ros2_cli",
+                            availability=availability, detail=detail)
 
     def doctor(self) -> dict[str, Any]:
         cli = self._ros2_command(("-h",), "ros2_cli")
         rmw = self._env.get("RMW_IMPLEMENTATION")
-        return {"adapter": "ros2", "status": "ready" if cli["metric_availability"] == "supported" else "degraded", "observations": self.environment() + [cli, self._record("rmw_implementation", rmw, method="process_environment", availability="supported" if rmw else "unsupported", detail=None if rmw else "RMW_IMPLEMENTATION is unset")]}
+        runtime = self._record("ros2_trusted_runtime", self.trusted_runtime(),
+                               method="trusted_prefix",
+                               availability="supported" if self._trusted_runtime["status"] == "ready"
+                               else "unsupported")
+        return {"adapter": "ros2", "status": "ready" if cli["metric_availability"] == "supported" else "degraded", "observations": self.environment() + [cli, self._record("rmw_implementation", rmw, method="process_environment", availability="supported" if rmw else "unsupported", detail=None if rmw else "RMW_IMPLEMENTATION is unset"), runtime]}
 
     @staticmethod
     def _process_ready(pid: int) -> dict[str, Any]:
@@ -975,6 +1186,13 @@ class Ros2Adapter:
             if failure_reason is None and current_snapshot is None:
                 current_snapshot = self.graph_snapshot(deadline=deadline, include_topic_info=False)
 
+            if (failure_reason is None and requirements and current_snapshot is not None
+                    and current_snapshot.get("metric_availability") == "unsupported"):
+                failure_reason = "graph_query_failed"
+                checks.append({"name": "graph_query", "ok": False,
+                               "metric_availability": "unsupported",
+                               "detail": current_snapshot.get("detail", "ROS graph query failed")})
+
             # Re-check after graph collection and before consuming its data.
             if pid is not None and failure_reason is None:
                 process_check = self._process_ready(int(pid))
@@ -1034,7 +1252,10 @@ class Ros2Adapter:
         readiness = self.readiness(config)
         snapshot = readiness.pop("snapshot")
         if snapshot is None:
-            snapshot = self._record("ros_graph_snapshot", {"timestamp": time.time(), "nodes": [], "topics": [], "topic_info": {}}, method="ros2_cli", availability="unsupported", detail="readiness deadline expired before graph query")
+            snapshot = self._record("ros_graph_snapshot", {"timestamp": time.time(), "nodes": [],
+                "topics": [], "topic_info": {}, "query_evidence": [],
+                "query_evidence_omitted": 0}, method="ros2_cli", availability="unsupported",
+                detail="readiness deadline expired before graph query")
         observations = self.environment() + [self._ros2_command(("-h",), "ros2_cli"), snapshot]
         if config.get("preflight") is True:
             observations.append(self.preflight(config))
