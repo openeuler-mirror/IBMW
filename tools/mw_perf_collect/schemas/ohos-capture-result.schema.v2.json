@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://ibmw.example/schemas/ohos-capture-result.schema.v2.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "snapshot_valid", "semantic_validation", "archive_path", "request_challenge", "archive_sha256", "archive_size", "child_pid", "child_start_time_ticks", "reasons"],
+  "properties": {
+    "protocol": {"const": "mw_perf.ohos_remote_capture.result.v2"}, "snapshot_valid": {"const": true}, "semantic_validation": {"const": false},
+    "archive_path": {"type": "string", "pattern": "^/"}, "request_challenge": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "archive_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "archive_size": {"type": "integer", "minimum": 1, "maximum": 67108864},
+    "child_pid": {"type": "integer", "minimum": 2}, "child_start_time_ticks": {"type": "integer", "minimum": 1},
+    "reasons": {"type": "array", "maxItems": 0}
+  }
+}

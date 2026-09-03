@@ -16,9 +16,15 @@
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#if !__has_include(<sys/sysmacros.h>)
+#error "runtime map identity requires sys/sysmacros.h"
+#endif
+#include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <poll.h>
 #if !__has_include(<sys/prctl.h>)
 #error "descendant_policy=forbid requires sys/prctl.h"
 #endif
@@ -37,7 +43,19 @@ constexpr size_t kMaxResult = 32768;
 constexpr uint64_t kMaxMember = 32ULL * 1024 * 1024;
 constexpr uint64_t kMaxArchive = 64ULL * 1024 * 1024;
 constexpr size_t kMaxEntries = 4096;
+constexpr std::string_view kV2Role = "exact_anchor";
+constexpr std::string_view kV2Capability = "dds.ordinary.nonplain.single_driver.sync_callback";
+constexpr std::string_view kV2Workload = "dds.ordinary.nonplain.single_driver.sync_callback";
+constexpr std::string_view kV2Contract = "mw_perf.p0a_contract.v8";
+constexpr std::string_view kV2ContractSha = "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575";
+using Deadline = std::chrono::steady_clock::time_point;
 volatile sig_atomic_t g_forwarded_signal = 0;
+bool g_protocol_v2 = false;
+
+bool Expired(Deadline deadline)
+{
+  return std::chrono::steady_clock::now() >= deadline;
+}
 
 void ForwardSignal(int signal_number)
 {
@@ -160,11 +178,16 @@ std::string Hash(const std::string& s)
   h.Add(s.data(), s.size());
   return h.Final();
 }
-bool WriteAll(int fd, const void* data, size_t n)
+bool WriteAll(int fd, const void* data, size_t n, Deadline deadline = Deadline::max())
 {
   auto*p = static_cast<const char*>(data);
   while (n)
   {
+    if (Expired(deadline))
+    {
+      errno = ETIMEDOUT;
+      return false;
+    }
     ssize_t z = write(fd, p, n);
     if (z < 0 && errno == EINTR)
     {
@@ -179,7 +202,8 @@ bool WriteAll(int fd, const void* data, size_t n)
   }
   return true;
 }
-std::string HashFd(int fd, bool* ok, std::string* bytes = nullptr)
+std::string HashFd(int fd, bool* ok, std::string* bytes = nullptr,
+                   Deadline deadline = Deadline::max())
 {
   Sha256 h;
   char b[65536];
@@ -190,6 +214,12 @@ std::string HashFd(int fd, bool* ok, std::string* bytes = nullptr)
   }
   for (;;)
   {
+    if (Expired(deadline))
+    {
+      errno = ETIMEDOUT;
+      *ok = false;
+      return{};
+    }
     ssize_t n = read(fd, b, sizeof b);
     if (n < 0 && errno == EINTR)
     {
@@ -310,15 +340,41 @@ void Reason(std::vector<std::string>*r, const std::string&s)
   }
 }
 
+struct RuntimeImage {std::string role, name, source, path, sha; int fd = -1; struct stat identity {};};
 struct Request {std::string root, run, cap, path, gen, topo, mode, challenge;
+                std::string protocol, role, campaign, fault, contract, contract_sha, workload;
                 bool exact = false;
-                uint64_t timeout = 0;
+                uint64_t timeout = 0, ready_timeout = 30000, completion_timeout = 30000;
                 std::vector<std::string> env, argv;
+                std::vector<RuntimeImage> images;
 };
+std::string RuntimeImagesJson(const std::vector<RuntimeImage>&images)
+{
+  std::ostringstream o;
+  o << '[';
+  for (size_t i = 0; i < images.size(); ++i) {
+    if (i) o << ',';
+    o << "{\"name\":" << J(images[i].name) << ",\"path\":" << J(images[i].path)
+      << ",\"role\":" << J(images[i].role) << ",\"sha256\":" << J(images[i].sha)
+      << ",\"source\":" << J(images[i].source) << '}';
+  }
+  o << ']';
+  return o.str();
+}
 bool Parse(int argc, char**argv, Request*r, std::string*why)
 {
   std::set<std::string> seen;
   bool command = false;
+  std::string declared_protocol;
+  for (int i = 1; i < argc; ++i) {
+    const std::string option = argv[i];
+    if (option == "--") break;
+    if (option == "--protocol" && i + 1 < argc) declared_protocol = argv[i + 1];
+    if (option == "--env" || option.rfind("--", 0) == 0) ++i;
+  }
+  const std::set<std::string> v2_only_options = {
+    "--role", "--campaign-id", "--fault", "--contract-id", "--contract-sha256",
+    "--workload-id", "--ready-timeout-ms", "--completion-timeout-ms", "--runtime-image"};
   size_t bytes = 0;
   for (int i = 1; i < argc; ++i)
   {
@@ -346,7 +402,7 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
     }
     if (a == "--env")
     {
-      if (++i == argc || !Ascii(argv[i], 128))
+      if (++i == argc || !Ascii(argv[i], 4096))
       {
         *why = "missing_env_name";
         return false;
@@ -359,12 +415,16 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
       *why = "invalid_arguments";
       return false;
     }
-    if (!seen.insert(a).second)
+    if (a != "--runtime-image" && !seen.insert(a).second)
     {
       *why = "duplicate_option";
       return false;
     }
     std::string v = argv[i];
+    if (v2_only_options.count(a) != 0 && declared_protocol != "v2") {
+      *why = "unknown_option";
+      return false;
+    }
     if (!Ascii(v, 4096))
     {
       *why = "invalid_contract_string";
@@ -426,6 +486,33 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
         return false;
       }
     }
+    else if (a == "--protocol") r->protocol = v;
+    else if (a == "--role") r->role = v;
+    else if (a == "--campaign-id") r->campaign = v;
+    else if (a == "--fault") r->fault = v;
+    else if (a == "--contract-id") r->contract = v;
+    else if (a == "--contract-sha256") r->contract_sha = v;
+    else if (a == "--workload-id") r->workload = v;
+    else if (a == "--ready-timeout-ms") {
+      if (!ParseU64(v, &r->ready_timeout) || r->ready_timeout < 1 || r->ready_timeout > 300000) { *why = "invalid_ready_timeout"; return false; }
+    }
+    else if (a == "--completion-timeout-ms") {
+      if (!ParseU64(v, &r->completion_timeout) || r->completion_timeout < 1 || r->completion_timeout > 300000) { *why = "invalid_completion_timeout"; return false; }
+    }
+    else if (a == "--runtime-image") {
+      std::array<std::string, 5> parts{};
+      size_t begin = 0;
+      for (size_t n = 0; n < parts.size(); ++n) {
+        size_t end = v.find('|', begin);
+        if (n + 1 == parts.size()) end = std::string::npos;
+        if (end == std::string::npos && n + 1 != parts.size()) { *why = "invalid_runtime_image"; return false; }
+        parts[n] = v.substr(begin, end == std::string::npos ? end : end - begin);
+        begin = end == std::string::npos ? v.size() : end + 1;
+      }
+      if (!SafeId(parts[0]) || !SafeId(parts[1]) || (parts[2] != "exe" && parts[2] != "maps") ||
+          parts[3].empty() || !Hex64(parts[4])) { *why = "invalid_runtime_image"; return false; }
+      r->images.push_back({parts[0], parts[1], parts[2], parts[3], parts[4], -1, {}});
+    }
     else
     {
       *why = "unknown_option";
@@ -467,6 +554,31 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
     *why = "exact_requires_full_trace";
     return false;
   }
+  if (!r->protocol.empty() && r->protocol != "v1" && r->protocol != "v2") { *why = "invalid_protocol"; return false; }
+  g_protocol_v2 = r->protocol == "v2";
+  if (g_protocol_v2) {
+    if (r->role != kV2Role || !SafeId(r->campaign) || r->fault != "none" ||
+        r->cap != kV2Capability || r->contract != kV2Contract ||
+        r->contract_sha != kV2ContractSha || r->workload != kV2Workload ||
+        r->images.size() != 2 || !r->exact || r->mode != "full") {
+      *why = r->role != kV2Role ? "unsupported_role" :
+        (r->fault != "none" ? "unsupported_fault_role" : "v2_contract_binding_mismatch");
+      return false;
+    }
+    std::set<std::string> image_keys;
+    for (const auto& image : r->images) {
+      if (!image_keys.insert(image.role + "|" + image.name).second) { *why = "runtime_image_collision"; return false; }
+    }
+    if (r->images[0].role != "sut" || r->images[0].source != "exe" ||
+        r->images[1].role != "extension" || r->images[1].source != "maps") {
+      *why = "runtime_image_order_mismatch";
+      return false;
+    }
+    if (r->images[0].path != r->argv[0]) {
+      *why = "runtime_executable_path_mismatch";
+      return false;
+    }
+  }
   if (r->env.size() > 128)
   {
     *why = "invalid_env_allowlist";
@@ -476,13 +588,15 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
   size_t env_bytes = 0;
   for (const auto&n:r->env)
   {
-    const char*v = getenv(n.c_str());
-    if (!EnvName(n) ||
-        n.rfind("MW_PERF_",
+    const size_t equal = n.find('=');
+    const std::string name = g_protocol_v2 && equal != std::string::npos ? n.substr(0, equal) : n;
+    const char*v = g_protocol_v2 ? (equal == std::string::npos ? nullptr : n.c_str() + equal + 1) : getenv(n.c_str());
+    if (!EnvName(name) ||
+        name.rfind("MW_PERF_",
                 0) == 0 ||
-        n.rfind("IBMW_",
-                0) == 0 || !names.insert(n).second || v == nullptr ||
-        !Ascii(v, 4096) || (env_bytes += n.size() + strlen(v) + 1) > 65536)
+        name.rfind("IBMW_",
+                 0) == 0 || !names.insert(name).second || v == nullptr ||
+        !Ascii(v, 4096) || (env_bytes += name.size() + strlen(v) + 1) > 65536)
     {
       *why = "invalid_env_allowlist";
       return false;
@@ -502,20 +616,38 @@ std::string CanonicalRequest(const Request&r)
     }
     o << J(r.argv[i]);
   }
-  o << "],\"capability_id\":" << J(r.cap) << ",\"env\":[";
+  o << ']';
+  if (g_protocol_v2) o << ",\"campaign_id\":" << J(r.campaign);
+  o << ",\"capability_id\":" << J(r.cap);
+  if (g_protocol_v2) o << ",\"capture_role\":" << J(r.role)
+                       << ",\"completion_timeout_ms\":" << r.completion_timeout;
+  o << ",\"env\":[";
   for (size_t i = 0; i < r.env.size(); ++i)
   {
     if (i)
     {
       o << ',';
     }
-    o << J(r.env[i] + "=" + getenv(r.env[i].c_str()));
+    o << J(g_protocol_v2 ? r.env[i] : r.env[i] + "=" + getenv(r.env[i].c_str()));
   }
-  o << "],\"exact_required\":" << (r.exact?"true":"false") << ",\"path_id\":" << J(r.path) <<
-    ",\"request_challenge\":" << J(r.challenge) << ",\"run_id\":" << J(r.run) <<
-    ",\"run_root\":" << J(r.root) << ",\"timeout_ms\":" <<
-    r.timeout << ",\"topology_generation\":" << J(r.gen) << ",\"topology_sha256\":" << J(r.topo) <<
-    ",\"trace_mode\":" << J(r.mode) << '}';
+  o << "],\"exact_required\":" << (r.exact?"true":"false");
+  if (g_protocol_v2) o << ",\"fault\":" << J(r.fault);
+  o << ",\"path_id\":" << J(r.path);
+  if (g_protocol_v2) {
+    o << ",\"protocol\":\"mw_perf.ohos_remote_capture.request.v2\""
+      << ",\"ready_timeout_ms\":" << r.ready_timeout
+      << ",\"registration_contract\":{\"id\":" << J(r.contract)
+      << ",\"sha256\":" << J(r.contract_sha) << '}';
+  }
+  o << ",\"request_challenge\":" << J(r.challenge) << ",\"run_id\":" << J(r.run)
+    << ",\"run_root\":" << J(r.root);
+  if (g_protocol_v2) {
+    o << ",\"runtime_images\":" << RuntimeImagesJson(r.images);
+  }
+  o << ",\"timeout_ms\":" << r.timeout << ",\"topology_generation\":" << J(r.gen)
+    << ",\"topology_sha256\":" << J(r.topo) << ",\"trace_mode\":" << J(r.mode);
+  if (g_protocol_v2) o << ",\"workload_id\":" << J(r.workload);
+  o << '}';
   return o.str();
 }
 bool ProcStart(pid_t pid, uint64_t*out)
@@ -542,6 +674,49 @@ bool ProcStart(pid_t pid, uint64_t*out)
     }
   }
   return false;
+}
+bool ReceiveAuthenticatedMarker(int fd, char expected, pid_t pid, uint64_t ticks,
+                                std::string* failure)
+{
+  char marker = 0;
+  iovec vector{&marker, sizeof marker};
+  std::array<char, CMSG_SPACE(sizeof(ucred))> control{};
+  msghdr message{};
+  message.msg_iov = &vector;
+  message.msg_iovlen = 1;
+  message.msg_control = control.data();
+  message.msg_controllen = control.size();
+  ssize_t count;
+  do { count = recvmsg(fd, &message, 0); } while (count < 0 && errno == EINTR);
+  if (count != 1 || marker != expected || (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0) {
+    *failure = "malformed";
+    return false;
+  }
+  const cmsghdr* credentials = CMSG_FIRSTHDR(&message);
+  if (credentials == nullptr || credentials->cmsg_level != SOL_SOCKET ||
+      credentials->cmsg_type != SCM_CREDENTIALS ||
+      credentials->cmsg_len != CMSG_LEN(sizeof(ucred))) {
+    *failure = "credentials_missing";
+    return false;
+  }
+  ucred sender{};
+  memcpy(&sender, CMSG_DATA(credentials), sizeof sender);
+  uint64_t observed_ticks = 0;
+  if (sender.pid != pid || !ProcStart(pid, &observed_ticks) || observed_ticks != ticks) {
+    *failure = "sender_identity_mismatch";
+    return false;
+  }
+  return true;
+}
+int PollUntil(pollfd* descriptor, std::chrono::steady_clock::time_point deadline)
+{
+  for (;;) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) return 0;
+    const int result = poll(descriptor, 1, static_cast<int>(remaining));
+    if (result >= 0 || errno != EINTR) return result;
+  }
 }
 struct ProcessIdentity
 {
@@ -719,7 +894,7 @@ bool SignalLeaderGroup(pid_t pid, uint64_t start, int signal, std::vector<std::s
   Reason(reasons, "kill_failed");
   return false;
 }
-bool CloseOtherFds(int keep1, int keep2, int keep3)
+bool CloseOtherFds(int keep1, int keep2, int keep3, const std::vector<int>& extras = {})
 {
   long maximum = sysconf(_SC_OPEN_MAX);
   if (maximum < 0)
@@ -729,7 +904,8 @@ bool CloseOtherFds(int keep1, int keep2, int keep3)
   maximum = std::min<long>(maximum, 1048576);
   for (int fd = 3; fd < maximum; ++fd)
   {
-    if (fd == keep1 || fd == keep2 || fd == keep3)
+    if (fd == keep1 || fd == keep2 || fd == keep3 ||
+        std::find(extras.begin(), extras.end(), fd) != extras.end())
     {
       continue;
     }
@@ -746,6 +922,134 @@ std::string BootId()
   std::string s;
   getline(f, s);
   return s;
+}
+int OpenAbsolute(const std::string&p, int final_flags,
+                 Deadline deadline = Deadline::max());
+bool SameStat(const struct stat&a, const struct stat&b);
+std::string ProcLink(pid_t pid, const std::string&name)
+{
+  char buffer[PATH_MAX + 1]{};
+  const ssize_t n = readlink(("/proc/" + std::to_string(pid) + "/" + name).c_str(), buffer, PATH_MAX);
+  return n > 0 ? std::string(buffer, static_cast<size_t>(n)) : std::string();
+}
+bool ProcMapsMatch(pid_t pid, const RuntimeImage&image)
+{
+  std::ifstream file("/proc/" + std::to_string(pid) + "/maps");
+  std::string line;
+  bool matched = false;
+  while (getline(file, line)) {
+    std::istringstream fields(line);
+    std::string addresses, permissions, offset, device, inode, path;
+    if (!(fields >> addresses >> permissions >> offset >> device >> inode) || permissions.size() < 3 || permissions[2] != 'x') continue;
+    getline(fields, path);
+    if (!path.empty() && path.front() == ' ') path.erase(0, 1);
+    char* end = nullptr;
+    errno = 0;
+    const uint64_t observed_inode = strtoull(inode.c_str(), &end, 10);
+    unsigned observed_major = 0, observed_minor = 0;
+    const bool parsed_device = sscanf(device.c_str(), "%x:%x", &observed_major, &observed_minor) == 2;
+    if (!path.empty() && !errno && end != inode.c_str() && *end == '\0' && parsed_device &&
+        observed_inode == static_cast<uint64_t>(image.identity.st_ino) &&
+        observed_major == major(image.identity.st_dev) && observed_minor == minor(image.identity.st_dev)) {
+      matched = true;
+    }
+  }
+  return matched;
+}
+bool ProcExeMatch(pid_t pid, const RuntimeImage&image)
+{
+  struct stat observed {};
+  return ProcLink(pid, "exe") == image.path &&
+         stat(("/proc/" + std::to_string(pid) + "/exe").c_str(), &observed) == 0 &&
+         SameStat(observed, image.identity);
+}
+bool HashDeclaredImage(const RuntimeImage&image, std::string*actual,
+                       Deadline deadline = Deadline::max())
+{
+  const int fd = image.fd >= 0 ? image.fd : OpenAbsolute(image.path, O_RDONLY | O_CLOEXEC, deadline);
+  if (fd < 0 || lseek(fd, 0, SEEK_SET) < 0) return false;
+  bool ok = false;
+  *actual = HashFd(fd, &ok, nullptr, deadline);
+  return (image.fd >= 0 || close(fd) == 0) && ok;
+}
+bool ValidateRuntimeImages(pid_t pid, const Request&r, const std::string*prior, Deadline deadline,
+                           std::string*attestation, std::vector<std::string>*reasons)
+{
+  std::ostringstream json;
+  json << '[';
+  bool all = true;
+  for (size_t i = 0; i < r.images.size(); ++i) {
+    const auto& image = r.images[i];
+    std::string observed;
+#if defined(IBMW_CAPTURE_TEST_HOOKS)
+    if (const char* delay = getenv("IBMW_CAPTURE_INJECT_RUNTIME_HASH_DELAY_MS")) {
+      uint64_t delay_ms = 0;
+      if (!Expired(deadline) && ParseU64(delay, &delay_ms) && delay_ms <= 10000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+      }
+    }
+#endif
+    const bool visible = image.source == "exe" ? ProcExeMatch(pid, image) : ProcMapsMatch(pid, image);
+    struct stat retained {};
+    const bool identity_retained = image.fd >= 0 && fstat(image.fd, &retained) == 0 &&
+                                   SameStat(retained, image.identity);
+    const bool hashed = identity_retained && HashDeclaredImage(image, &observed, deadline) &&
+                        fstat(image.fd, &retained) == 0 && SameStat(retained, image.identity);
+    const bool match = visible && hashed && observed == image.sha;
+    all = all && match;
+    if (!match) Reason(reasons, image.source == "exe" ? "runtime_executable_mismatch" : "runtime_maps_mismatch");
+    if (i) json << ',';
+    json << "{\"role\":" << J(image.role) << ",\"name\":" << J(image.name)
+         << ",\"source\":" << J(image.source) << ",\"expected_path\":" << J(image.path)
+         << ",\"expected_sha256\":" << J(image.sha) << ",\"observed_sha256\":" << J(observed)
+         << ",\"observed_device_major\":" << major(image.identity.st_dev)
+         << ",\"observed_device_minor\":" << minor(image.identity.st_dev)
+         << ",\"observed_inode\":" << static_cast<uint64_t>(image.identity.st_ino)
+         << ",\"visible\":" << (visible ? "true" : "false") << ",\"matched\":" << (match ? "true" : "false") << '}';
+  }
+  json << ']';
+  *attestation = json.str();
+  if (prior != nullptr && *prior != *attestation) {
+    all = false;
+    Reason(reasons, "runtime_images_changed_after_release");
+  }
+  return all;
+}
+short PeerShutdownEvents()
+{
+  short events = POLLHUP;
+#if defined(POLLRDHUP)
+  events = static_cast<short>(events | POLLRDHUP);
+#endif
+  return events;
+}
+bool ReceiveDrainedSeqpacketClosure(int fd, short revents)
+{
+  if ((revents & PeerShutdownEvents()) == 0) return false;
+  auto receive_eof = [fd]() {
+    char extra = 0;
+    iovec vector{&extra, sizeof extra};
+    std::array<char, CMSG_SPACE(sizeof(ucred))> control{};
+    msghdr message{};
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    message.msg_control = control.data();
+    message.msg_controllen = control.size();
+    ssize_t count;
+    do { count = recvmsg(fd, &message, MSG_DONTWAIT); } while (count < 0 && errno == EINTR);
+    if (count != 0 || message.msg_flags != 0) return false;
+    const cmsghdr* ancillary = CMSG_FIRSTHDR(&message);
+    if (ancillary != nullptr && ancillary->cmsg_level == SOL_SOCKET &&
+        ancillary->cmsg_type == SCM_CREDENTIALS) return false;
+    return ancillary == nullptr;
+  };
+  if (!receive_eof()) return false;
+
+  pollfd drained{fd, static_cast<short>(POLLIN | PeerShutdownEvents()), 0};
+  int polled;
+  do { polled = poll(&drained, 1, 0); } while (polled < 0 && errno == EINTR);
+  if (polled != 1 || (drained.revents & PeerShutdownEvents()) == 0) return false;
+  return receive_eof();
 }
 std::string Nonce()
 {
@@ -781,8 +1085,13 @@ std::string Nonce()
   }
   return std::string(x, 32);
 }
-int OpenAbsolute(const std::string&p, int final_flags)
+int OpenAbsolute(const std::string&p, int final_flags, Deadline deadline)
 {
+  if (Expired(deadline))
+  {
+    errno = ETIMEDOUT;
+    return -1;
+  }
   if (p.size() < 2 || p[0] != '/' || p.back() == '/')
   {
     return -1;
@@ -795,6 +1104,12 @@ int OpenAbsolute(const std::string&p, int final_flags)
   size_t begin = 1;
   while (begin < p.size())
   {
+    if (Expired(deadline))
+    {
+      close(fd);
+      errno = ETIMEDOUT;
+      return -1;
+    }
     size_t end = p.find('/', begin);
     bool final = end == std::string::npos;
     std::string component = p.substr(begin, final?end:end - begin);
@@ -849,6 +1164,10 @@ bool Token(std::string_view s)
 }
 bool AllowedName(const std::string&n)
 {
+  if (g_protocol_v2 && (n == "device_completion.json" || n == "device_runtime_attestation.json"))
+  {
+    return true;
+  }
   constexpr std::string_view stage_prefix = "ibmw_dds_trace.";
   constexpr std::string_view exact_prefix = "ibmw_dds_exact.";
   const bool stage = n.rfind(stage_prefix, 0) == 0;
@@ -880,12 +1199,23 @@ bool AllowedName(const std::string&n)
                               dot)) &&
          suffix.substr(dot + 1) == "ibct";
 }
+bool WriteCaptureFile(int dirfd, const std::string&name, const std::string&data,
+                      Deadline deadline = Deadline::max())
+{
+  const int fd = openat(dirfd, name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) return false;
+  const bool ok = WriteAll(fd, data.data(), data.size(), deadline) && !Expired(deadline) &&
+                  fdatasync(fd) == 0 && !Expired(deadline) && close(fd) == 0;
+  if (!ok) unlinkat(dirfd, name.c_str(), 0);
+  return ok;
+}
 bool SameStat(const struct stat&a, const struct stat&b)
 {
   return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
          a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
 }
-std::vector<File> Scan(int dfd, std::vector<std::string>*reasons)
+std::vector<File> Scan(int dfd, std::vector<std::string>*reasons,
+                       Deadline deadline = Deadline::max())
 {
   std::vector<File>out;
   uint64_t total = 0;
@@ -903,6 +1233,11 @@ std::vector<File> Scan(int dfd, std::vector<std::string>*reasons)
   }
   while (auto*e = readdir(d))
   {
+    if (Expired(deadline))
+    {
+      Reason(reasons, "timeout");
+      break;
+    }
     std::string n = e->d_name;
     if (n == "." || n == "..")
     {
@@ -957,7 +1292,8 @@ std::vector<File> Scan(int dfd, std::vector<std::string>*reasons)
       continue;
     }
     bool ok = false;
-    std::string sha = HashFd(fd, &ok);
+    std::string sha = HashFd(fd, &ok, nullptr, deadline);
+    if (!ok && errno == ETIMEDOUT) Reason(reasons, "timeout");
     bool stable = fstat(fd, &b) == 0 && SameStat(a, b) && ok &&
                   fstat(fd, &c) == 0 && SameStat(b, c);
     if (close(fd) != 0)
@@ -1019,7 +1355,7 @@ void Octal(char*p, size_t n, uint64_t v)
 {
   snprintf(p, n, "%0*llo", int(n - 1), (unsigned long long)v);
 }
-bool TarHeader(int fd, const std::string&name, uint64_t size)
+bool TarHeader(int fd, const std::string&name, uint64_t size, Deadline deadline)
 {
   std::array<char, 512>h{};
   memcpy(h.data(), name.data(), name.size());
@@ -1041,19 +1377,20 @@ bool TarHeader(int fd, const std::string&name, uint64_t size)
   snprintf(h.data() + 148, 8, "%06o", sum);
   h[154] = 0;
   h[155] = ' ';
-  return WriteAll(fd, h.data(), h.size());
+  return WriteAll(fd, h.data(), h.size(), deadline);
 }
-bool TarEntry(int fd, const std::string&name, const std::string&data)
+bool TarEntry(int fd, const std::string&name, const std::string&data, Deadline deadline)
 {
-  if (!TarHeader(fd, name, data.size()) || !WriteAll(fd, data.data(), data.size()))
+  if (!TarHeader(fd, name, data.size(), deadline) ||
+      !WriteAll(fd, data.data(), data.size(), deadline))
   {
     return false;
   }
   std::array<char, 512>z{};
   size_t pad = (512 - data.size() % 512) % 512;
-  return !pad || WriteAll(fd, z.data(), pad);
+  return !pad || WriteAll(fd, z.data(), pad, deadline);
 }
-bool TarFile(int out, int dfd, const File&file)
+bool TarFile(int out, int dfd, const File&file, Deadline deadline)
 {
   int in = openat(dfd, file.name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
   if (in < 0)
@@ -1066,12 +1403,18 @@ bool TarFile(int out, int dfd, const File&file)
           &before) == 0 && before.st_nlink == 1 && before.st_uid == getuid() &&
     !(before.st_mode & 022) &&
     before.st_dev == file.dev && before.st_ino == file.ino && before.st_size == file.size &&
-    TarHeader(out, file.name, file.size);
+    TarHeader(out, file.name, file.size, deadline);
   Sha256 hash;
   std::array<char, 65536>buffer{};
   uint64_t copied = 0;
   while (ok && copied < uint64_t(file.size))
   {
+    if (Expired(deadline))
+    {
+      errno = ETIMEDOUT;
+      ok = false;
+      break;
+    }
     size_t want = std::min<uint64_t>(buffer.size(), uint64_t(file.size) - copied);
     ssize_t n = read(in, buffer.data(), want);
     if (n < 0 && errno == EINTR)
@@ -1084,7 +1427,7 @@ bool TarFile(int out, int dfd, const File&file)
       break;
     }
     hash.Add(buffer.data(), size_t(n));
-    ok = WriteAll(out, buffer.data(), size_t(n));
+    ok = WriteAll(out, buffer.data(), size_t(n), deadline);
     copied += size_t(n);
   }
   char extra;
@@ -1102,7 +1445,7 @@ bool TarFile(int out, int dfd, const File&file)
   }
   std::array<char, 512>zero{};
   size_t pad = (512 - uint64_t(file.size) % 512) % 512;
-  return ok && (!pad || WriteAll(out, zero.data(), pad));
+  return ok && (!pad || WriteAll(out, zero.data(), pad, deadline));
 }
 bool RenameNoReplace(int rootfd, const std::string&tmp, const std::string&final)
 {
@@ -1123,20 +1466,22 @@ bool RenameNoReplace(int rootfd, const std::string&tmp, const std::string&final)
 }
 bool PublishTar(int rootfd, int dirfd, const std::string&tmp, const std::string&final,
                 const std::string&manifest, const std::vector<File>&files, std::string*sha,
-                uint64_t*size)
+                uint64_t*size, Deadline deadline)
 {
   int fd = openat(rootfd, tmp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0)
   {
     return false;
   }
-  bool ok = fchmod(fd, 0600) == 0 && TarEntry(fd, "device_capture_manifest.json", manifest);
+  bool ok = !Expired(deadline) && fchmod(fd, 0600) == 0 &&
+            TarEntry(fd, "device_capture_manifest.json", manifest, deadline);
   for (const auto&f:files)
   {
-    ok = ok && TarFile(fd, dirfd, f);
+    ok = ok && TarFile(fd, dirfd, f, deadline);
   }
   std::array<char, 1024>z{};
-  ok = ok && WriteAll(fd, z.data(), z.size()) && fdatasync(fd) == 0;
+  ok = ok && WriteAll(fd, z.data(), z.size(), deadline) && !Expired(deadline) &&
+       fdatasync(fd) == 0 && !Expired(deadline);
   struct stat retained {}, published{};
   ok = ok && fstat(fd, &retained) == 0 && uint64_t(retained.st_size) <= kMaxArchive;
   if (!ok)
@@ -1160,7 +1505,7 @@ bool PublishTar(int rootfd, int dirfd, const std::string&tmp, const std::string&
     close(fd);
     return false;
   }
-  *sha = HashFd(fd, &ok);
+  *sha = HashFd(fd, &ok, nullptr, deadline);
   *size = uint64_t(retained.st_size);
   if (close(fd) != 0)
   {
@@ -1192,16 +1537,17 @@ void Result(bool valid, const std::string&challenge, const std::string&archive,
             const std::vector<std::string>&reasons)
 {
   std::ostringstream o;
-  o << "{\"protocol\":\"mw_perf.ohos_remote_capture.result.v1\",\"snapshot_valid\":" <<
+  o << "{\"protocol\":\"" << (g_protocol_v2 ? "mw_perf.ohos_remote_capture.result.v2" : "mw_perf.ohos_remote_capture.result.v1") << "\",\"snapshot_valid\":" <<
     (valid?"true":"false") << ",\"semantic_validation\":false,\"archive_path\":" << J(archive) <<
     ",\"archive_sha256\":" << J(sha) << ",\"archive_size\":" << size << ",\"child_pid\":" << pid <<
-    ",\"child_start_time_ticks\":" << ticks << ",\"request_challenge\":" << J(challenge) <<
-    ",\"reasons\":" << ReasonsJson(reasons) << '}';
+    ",\"child_start_time_ticks\":" << ticks << ",\"request_challenge\":" << J(challenge);
+  o << ",\"reasons\":" << ReasonsJson(reasons) << '}';
   std::string s = o.str();
   if (s.size() > kMaxResult)
   {
     s =
-      "{\"protocol\":\"mw_perf.ohos_remote_capture.result.v1\",\"snapshot_valid\":false,\"semantic_validation\":false,\"reasons\":[\"result_too_large\"]}";
+      std::string("{\"protocol\":\"") + (g_protocol_v2 ? "mw_perf.ohos_remote_capture.result.v2" : "mw_perf.ohos_remote_capture.result.v1") +
+      "\",\"snapshot_valid\":false,\"semantic_validation\":false,\"reasons\":[\"result_too_large\"]}";
   }
   std::cout << s << '\n';
 }
@@ -1216,8 +1562,9 @@ int main(int argc, char**argv)
     Result(false, r.challenge, "", "", 0, 0, 0, {why});
     return 2;
   }
-  int rootfd = OpenAbsolute(r.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC), exefd = OpenAbsolute(
-    r.argv[0], O_RDONLY | O_CLOEXEC);
+  const Deadline deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(r.timeout);
+  int rootfd = OpenAbsolute(r.root, O_RDONLY | O_DIRECTORY | O_CLOEXEC, deadline), exefd = OpenAbsolute(
+    r.argv[0], O_RDONLY | O_CLOEXEC, deadline);
   struct stat rootst {}, exest{};
   if (rootfd < 0 ||
       fstat(rootfd,
@@ -1272,6 +1619,28 @@ int main(int argc, char**argv)
     Result(false, r.challenge, "", "", 0, 0, 0, {"capture_directory_open_failed"});
     return 2;
   }
+  if (g_protocol_v2) {
+    bool declarations_ok = true, executable_declared = false;
+    for (auto& image : r.images) {
+      image.fd = OpenAbsolute(image.path, O_RDONLY | O_CLOEXEC, deadline);
+      std::string actual;
+      const bool retained = image.fd >= 0 && fstat(image.fd, &image.identity) == 0 &&
+                            S_ISREG(image.identity.st_mode);
+      const bool hashed = retained && HashDeclaredImage(image, &actual, deadline);
+      declarations_ok = declarations_ok && hashed && actual == image.sha;
+      executable_declared = executable_declared ||
+        (image.source == "exe" && image.path == r.argv[0] && SameStat(image.identity, exest));
+    }
+    if (Expired(deadline) || !declarations_ok || !executable_declared) {
+      close(dirfd);
+      close(exefd);
+      close(rootfd);
+      Result(false, r.challenge, "", "", 0, 0, 0,
+             {Expired(deadline) ? "timeout" :
+              (declarations_ok ? "runtime_executable_declaration_missing" : "prelaunch_image_hash_mismatch")});
+      return 2;
+    }
+  }
   int flags = fcntl(dirfd, F_GETFD);
   struct sigaction action {};
   action.sa_handler = ForwardSignal;
@@ -1295,7 +1664,7 @@ int main(int argc, char**argv)
   std::vector<std::string>envs;
   for (const auto&n:r.env)
   {
-    envs.push_back(n + "=" + getenv(n.c_str()));
+    envs.push_back(g_protocol_v2 ? n : n + "=" + getenv(n.c_str()));
   }
   auto add = [&](const std::string&n, const std::string&v){
                envs.push_back(n + "=" + v);
@@ -1309,24 +1678,25 @@ int main(int argc, char**argv)
   add("MW_PERF_TOPOLOGY_SHA256", r.topo);
   add("IBMW_COMM_TRACE", r.mode);
   add("IBMW_COMM_TRACE_SINK", "managed");
+  if (g_protocol_v2)
+  {
+    add("MW_PERF_CAPTURE_PROTOCOL", "v2");
+    add("MW_PERF_CAPTURE_ROLE", r.role);
+    add("MW_PERF_CAPTURE_CAMPAIGN_ID", r.campaign);
+    add("MW_PERF_CAPTURE_FAULT", r.fault);
+    add("MW_PERF_CAPTURE_CONTRACT_ID", r.contract);
+    add("MW_PERF_CAPTURE_CONTRACT_SHA256", r.contract_sha);
+    add("MW_PERF_CAPTURE_WORKLOAD_ID", r.workload);
+  }
   if (r.exact)
   {
     add("MW_PERF_EXACT_REQUIRED", "1");
   }
-  std::vector<char*>av, ev;
-  for (auto&s:r.argv)
-  {
-    av.push_back(s.data());
-  }
-  av.push_back(nullptr);
-  for (auto&s:envs)
-  {
-    ev.push_back(s.data());
-  }
-  ev.push_back(nullptr);
   int pipefd[2];
+  int controlfd[2] = {-1, -1};
   int nullfd = open("/dev/null", O_RDWR | O_CLOEXEC);
-  if (nullfd < 0 || pipe2(pipefd, O_CLOEXEC) != 0)
+  if (nullfd < 0 || pipe2(pipefd, O_CLOEXEC) != 0 ||
+      (g_protocol_v2 && socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, controlfd) != 0))
   {
     if (nullfd >= 0)
     {
@@ -1338,8 +1708,31 @@ int main(int argc, char**argv)
     Result(false, r.challenge, "", "", 0, 0, 0, {"status_pipe_failed"});
     return 2;
   }
+  if (g_protocol_v2) {
+    const int enabled = 1;
+    if (setsockopt(controlfd[0], SOL_SOCKET, SO_PASSCRED, &enabled, sizeof enabled) != 0) {
+      close(controlfd[0]); close(controlfd[1]);
+      close(pipefd[0]); close(pipefd[1]); close(nullfd);
+      close(dirfd); close(exefd); close(rootfd);
+      Result(false, r.challenge, "", "", 0, 0, 0, {"control_socket_credentials_failed"});
+      return 2;
+    }
+    add("MW_PERF_CAPTURE_CONTROL_FD", std::to_string(controlfd[1]));
+  }
+  std::vector<char*>av, ev;
+  for (auto&s:r.argv) av.push_back(s.data());
+  av.push_back(nullptr);
+  for (auto&s:envs) ev.push_back(s.data());
+  ev.push_back(nullptr);
   const pid_t expected_parent = getpid();
   pid_t pid = -1;
+  if (Expired(deadline))
+  {
+    if (g_protocol_v2) { close(controlfd[0]); close(controlfd[1]); }
+    close(pipefd[0]); close(pipefd[1]); close(nullfd); close(dirfd); close(exefd); close(rootfd);
+    Result(false, r.challenge, "", "", 0, 0, 0, {"timeout"});
+    return 2;
+  }
 #if defined(IBMW_CAPTURE_TEST_HOOKS)
   if (getenv("IBMW_CAPTURE_INJECT_FORK_FAILURE") == nullptr)
   {
@@ -1354,6 +1747,10 @@ int main(int argc, char**argv)
 #endif
   if (pid < 0)
   {
+    if (g_protocol_v2) {
+      close(controlfd[0]);
+      close(controlfd[1]);
+    }
     close(pipefd[0]);
     close(pipefd[1]);
     close(nullfd);
@@ -1366,6 +1763,16 @@ int main(int argc, char**argv)
   if (pid == 0)
   {
     int e = 0;
+    if (g_protocol_v2) {
+      for (int fd : {controlfd[1]}) {
+        const int inherited_flags = fcntl(fd, F_GETFD);
+        if (inherited_flags < 0 || fcntl(fd, F_SETFD, inherited_flags & ~FD_CLOEXEC) != 0) {
+          e = errno ? errno : EIO;
+          WriteAll(pipefd[1], &e, sizeof e);
+          _exit(126);
+        }
+      }
+    }
     if (close(pipefd[0]) != 0 ||
         setpgid(0,
                 0) != 0 ||
@@ -1374,7 +1781,7 @@ int main(int argc, char**argv)
         dup2(nullfd, STDIN_FILENO) < 0 ||
         dup2(nullfd, STDOUT_FILENO) < 0 ||
         dup2(nullfd, STDERR_FILENO) < 0 ||
-        !CloseOtherFds(dirfd, pipefd[1], exefd))
+        !CloseOtherFds(dirfd, pipefd[1], exefd, {controlfd[1]}))
     {
       e = errno?errno:EIO;
       WriteAll(pipefd[1], &e, sizeof e);
@@ -1394,6 +1801,9 @@ int main(int argc, char**argv)
   {
     Reason(&reasons, "close_failed");
   }
+  if (g_protocol_v2) {
+    close(controlfd[1]);
+  }
   if (setpgid(pid, pid) != 0 && errno != EACCES)
   {
     Reason(&reasons, "setpgid_failed");
@@ -1403,7 +1813,7 @@ int main(int argc, char**argv)
     Reason(&reasons, "close_failed");
   }
   uint64_t ticks = 0;
-  for (int i = 0; i < 100 && ticks == 0; ++i)
+  for (int i = 0; i < 100 && ticks == 0 && !Expired(deadline); ++i)
   {
     ProcStart(pid, &ticks);
     if (!ticks)
@@ -1416,25 +1826,130 @@ int main(int argc, char**argv)
     Reason(&reasons, "child_start_ticks_unavailable");
   }
   int execerr = 0;
-  ssize_t en;
-  do en = read(pipefd[0], &execerr, sizeof execerr);
-  while(en < 0 && errno == EINTR);
+  ssize_t en = -1;
+  pollfd exec_descriptor{pipefd[0], POLLIN | POLLHUP, 0};
+  const int exec_polled = PollUntil(&exec_descriptor, deadline);
+  bool timedout = exec_polled == 0;
+  if (exec_polled > 0)
+  {
+    do en = read(pipefd[0], &execerr, sizeof execerr);
+    while(en < 0 && errno == EINTR);
+  }
+  else if (exec_polled < 0)
+  {
+    Reason(&reasons, "exec_status_failed");
+  }
   if (close(pipefd[0]) != 0)
   {
     Reason(&reasons, "close_failed");
   }
-  if (en != 0)
+  if (timedout)
+  {
+    Reason(&reasons, "timeout");
+  }
+  else if (en != 0)
   {
     Reason(&reasons, en == sizeof execerr?"exec_failed":"exec_status_failed");
   }
+  std::string ready_attestation = "[]", completion_attestation = "[]";
+  bool ready_observed = false, completion_observed = false;
+  bool completion_attested = false, evidence_released = false, completion_eof = false;
+  bool gate_released = !g_protocol_v2;
+  if (g_protocol_v2 && !timedout) {
+    pollfd descriptor{controlfd[0], POLLIN | POLLHUP, 0};
+    const auto ready_deadline = std::min(
+      deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(r.ready_timeout));
+    const int polled = PollUntil(&descriptor, ready_deadline);
+    std::string marker_failure;
+    if (polled != 1 || !ReceiveAuthenticatedMarker(controlfd[0], 'R', pid, ticks, &marker_failure)) {
+      Reason(&reasons, "handshake_missing");
+      if (polled == 0) { timedout = true; Reason(&reasons, "timeout"); }
+      if (!marker_failure.empty()) Reason(&reasons, "handshake_" + marker_failure);
+    } else {
+      ready_observed = true;
+    }
+    if (ready_observed && ValidateRuntimeImages(
+          pid, r, nullptr, deadline, &ready_attestation, &reasons)) {
+      const char grant = 'G';
+      gate_released = send(controlfd[0], &grant, 1, MSG_NOSIGNAL) == 1;
+      if (!gate_released) Reason(&reasons, "release_write_failed");
+    }
+
+    if (gate_released) {
+      pollfd completion_descriptor{controlfd[0], POLLIN | POLLHUP, 0};
+      const auto completion_deadline = std::min(
+        deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(r.completion_timeout));
+      while (std::chrono::steady_clock::now() < completion_deadline && !completion_observed) {
+        int completion_polled;
+        completion_polled = PollUntil(&completion_descriptor, completion_deadline);
+        if (completion_polled < 0) {
+          Reason(&reasons, "completion_poll_failed");
+          break;
+        }
+        if (completion_polled == 1) {
+          marker_failure.clear();
+          if (ReceiveAuthenticatedMarker(controlfd[0], 'C', pid, ticks, &marker_failure)) {
+            completion_observed = true;
+          }
+          else {
+            Reason(&reasons, "completion_missing_or_malformed");
+            if (!marker_failure.empty()) Reason(&reasons, "completion_" + marker_failure);
+            break;
+          }
+        }
+      }
+      if (!completion_observed) {
+        Reason(&reasons, "completion_missing_or_malformed");
+        if (Expired(completion_deadline)) { timedout = true; Reason(&reasons, "timeout"); }
+      }
+      if (completion_observed && IdentityAlive(pid, ticks)) {
+        completion_attested = ValidateRuntimeImages(
+          pid, r, &ready_attestation, deadline, &completion_attestation, &reasons);
+      } else if (completion_observed) {
+        Reason(&reasons, "completion_not_live");
+      }
+      if (completion_attested) {
+        const char evidence = 'E';
+        evidence_released = send(controlfd[0], &evidence, 1, MSG_NOSIGNAL) == 1;
+        if (!evidence_released) Reason(&reasons, "evidence_release_write_failed");
+      }
+    }
+
+    if (evidence_released) {
+      pollfd eof_descriptor{
+        controlfd[0], static_cast<short>(POLLIN | PeerShutdownEvents()), 0};
+      const auto eof_deadline = std::min(
+        deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(r.completion_timeout));
+      while (std::chrono::steady_clock::now() < eof_deadline && !completion_eof) {
+        int eof_polled;
+        eof_polled = PollUntil(&eof_descriptor, eof_deadline);
+        if (eof_polled < 0) {
+          Reason(&reasons, "completion_poll_failed");
+          break;
+        }
+        if (eof_polled == 1) {
+          if (ReceiveDrainedSeqpacketClosure(controlfd[0], eof_descriptor.revents)) {
+            completion_eof = true;
+          } else {
+            Reason(&reasons, "completion_missing_or_malformed");
+            break;
+          }
+        }
+      }
+      if (!completion_eof) {
+        Reason(&reasons, "completion_missing_or_malformed");
+        if (Expired(eof_deadline)) { timedout = true; Reason(&reasons, "timeout"); }
+      }
+    }
+    if (close(controlfd[0]) != 0) Reason(&reasons, "close_failed");
+  }
   int status = 0;
-  bool reaped = false, timedout = false, desc = false, adopted_reaped = false;
+  bool reaped = false, desc = false, adopted_reaped = false;
   std::map<pid_t, uint64_t> known;
   if (ticks)
   {
     known[pid] = ticks;
   }
-  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(r.timeout);
   while (!reaped)
   {
     if (DiscoverDescendants(pid, &known))
@@ -1456,9 +1971,10 @@ int main(int argc, char**argv)
       SignalLeaderGroup(pid, ticks, forwarded, &reasons);
       IBMW_SIGNAL_IDENTITIES(known, forwarded, pid, &reasons);
     }
-    if (std::chrono::steady_clock::now() >= deadline)
+    if (timedout || Expired(deadline))
     {
       timedout = true;
+      Reason(&reasons, "timeout");
       SignalLeaderGroup(pid, ticks, SIGTERM, &reasons);
       IBMW_SIGNAL_IDENTITIES(known, SIGTERM, pid, &reasons);
       auto grace = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
@@ -1543,47 +2059,83 @@ int main(int argc, char**argv)
   {
     Reason(&reasons, "descendant_detected");
   }
-  if (timedout)
-  {
-    Reason(&reasons, "timeout");
-  }
   if (!reaped || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
   {
     Reason(&reasons, "child_not_zero_exit");
   }
-  auto first = Scan(dirfd, &reasons);
-  std::this_thread::sleep_for(std::chrono::milliseconds(20));
-  auto second = Scan(dirfd, &reasons);
-  if (!SameScans(first, second))
-  {
-    Reason(&reasons, "entries_changed_between_scans");
+  const bool completion_ok = !g_protocol_v2 ||
+    (completion_observed && completion_attested && evidence_released && completion_eof);
+  std::string boot = BootId();
+  if (boot.empty()) Reason(&reasons, "boot_id_unavailable");
+  std::string completion_document, attestation_document;
+  if (g_protocol_v2) {
+    std::ostringstream completion_json, attestation_json;
+    completion_json << "{\"boot_id\":" << J(boot) << ",\"campaign_id\":" << J(r.campaign)
+      << ",\"capture_role\":" << J(r.role) << ",\"child_pid\":" << pid
+      << ",\"child_start_time_ticks\":" << ticks << ",\"complete\":true,\"completion_attested\":true"
+      << ",\"completion_images_sha256\":" << J(Hash(completion_attestation))
+      << ",\"completion_images\":" << completion_attestation
+      << ",\"completion_eof_observed\":true,\"evidence_released\":true"
+      << ",\"protocol\":\"mw_perf.ohos_device_completion.v2\""
+      << ",\"ready\":true,\"ready_attested\":true,\"ready_images_sha256\":" << J(Hash(ready_attestation))
+      << ",\"released\":true,\"request_challenge\":" << J(r.challenge)
+      << ",\"run_id\":" << J(r.run) << '}';
+    attestation_json << "{\"boot_id\":" << J(boot) << ",\"campaign_id\":" << J(r.campaign)
+      << ",\"capture_role\":" << J(r.role) << ",\"child_pid\":" << pid
+      << ",\"child_start_time_ticks\":" << ticks << ",\"completion_attested\":true"
+      << ",\"completion_images\":" << completion_attestation
+      << ",\"completion_images_sha256\":" << J(Hash(completion_attestation))
+      << ",\"completion_eof_observed\":true,\"evidence_released\":true,\"live_images\":" << ready_attestation
+      << ",\"prelaunch_images\":" << RuntimeImagesJson(r.images)
+      << ",\"protocol\":\"mw_perf.ohos_runtime_attestation.v2\",\"ready_attested\":true"
+      << ",\"ready_images_sha256\":" << J(Hash(ready_attestation))
+      << ",\"request_challenge\":" << J(r.challenge)
+      << ",\"run_id\":" << J(r.run) << '}';
+    completion_document = completion_json.str();
+    attestation_document = attestation_json.str();
+    if (!completion_ok || !gate_released ||
+        !WriteCaptureFile(dirfd, "device_completion.json", completion_document, deadline) ||
+        !WriteCaptureFile(dirfd, "device_runtime_attestation.json", attestation_document, deadline)) {
+      if (Expired(deadline)) Reason(&reasons, "timeout");
+      Reason(&reasons, "device_attestation_write_failed");
+    }
+    for (auto& image : r.images) {
+      if (image.fd >= 0 && close(image.fd) != 0) Reason(&reasons, "close_failed");
+      image.fd = -1;
+    }
   }
+  auto first = Scan(dirfd, &reasons, deadline);
+  if (!Expired(deadline))
+  {
+    std::this_thread::sleep_for(std::min(
+      std::chrono::milliseconds(20),
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())));
+  }
+  auto second = Scan(dirfd, &reasons, deadline);
+  if (!SameScans(first, second)) Reason(&reasons, "entries_changed_between_scans");
   std::string tree = TreeHash(second), selfsha;
   int self = open("/proc/self/exe", O_RDONLY | O_CLOEXEC);
   bool hashok = false;
   if (self >= 0)
   {
-    selfsha = HashFd(self, &hashok);
+    selfsha = HashFd(self, &hashok, nullptr, deadline);
   }
   if (self < 0 || !hashok || close(self) != 0)
   {
     Reason(&reasons, "agent_hash_failed");
   }
-  std::string boot = BootId();
-  if (boot.empty())
-  {
-    Reason(&reasons, "boot_id_unavailable");
-  }
   bool valid = reasons.empty();
   std::ostringstream m;
-  m << "{\"protocol\":\"mw_perf.ohos_remote_capture.v1\",\"nonce\":" << J(nonce) <<
+  const std::string request_sha = Hash(CanonicalRequest(r));
+  m << "{\"protocol\":\"" << (g_protocol_v2 ? "mw_perf.ohos_remote_capture.v2" : "mw_perf.ohos_remote_capture.v1")
+    << "\",\"nonce\":" << J(nonce) <<
     ",\"request_challenge\":" << J(r.challenge) << ",\"run_id\":" << J(r.run) <<
     ",\"capability_id\":" << J(r.cap) << ",\"path_id\":" <<
   J(r.path) <<
     ",\"topology_generation\":" << J(r.gen) << ",\"topology_sha256\":" << J(r.topo) <<
     ",\"trace_mode\":" << J(r.mode) << ",\"exact_required\":" << (r.exact?"true":"false") <<
     ",\"boot_id\":" << J(boot) << ",\"agent_executable_sha256\":" << J(selfsha) <<
-    ",\"request_sha256\":" << J(Hash(CanonicalRequest(r))) << ",\"child_pid\":" << pid <<
+    ",\"request_sha256\":" << J(request_sha) << ",\"child_pid\":" << pid <<
     ",\"child_start_time_ticks\":" << ticks << ",\"wait_status\":" << status << ",\"graceful\":" <<
     ((reaped && WIFEXITED(status) &&
       !timedout)?"true":"false") << ",\"no_escalation\":" <<
@@ -1591,7 +2143,26 @@ int main(int argc, char**argv)
                "sigkill_escalation") ==
      reasons.end()?"true":"false") <<
   ",\"descendant_policy\":\"forbid\",\"descendant_detected\":" <<
-    (desc?"true":"false") << ",\"semantic_validation\":false,\"source_files\":[";
+    (desc?"true":"false") << ",\"semantic_validation\":false";
+  if (g_protocol_v2) {
+    m << ",\"campaign_id\":" << J(r.campaign) << ",\"capture_role\":" << J(r.role)
+      << ",\"fault\":" << J(r.fault) << ",\"workload_id\":" << J(r.workload)
+      << ",\"registration_contract\":{\"id\":" << J(r.contract) << ",\"sha256\":" << J(r.contract_sha)
+      << "},\"runtime_images\":" << RuntimeImagesJson(r.images)
+      << ",\"completion_attested\":" << (completion_attested ? "true" : "false")
+      << ",\"completion_eof_observed\":" << (completion_eof ? "true" : "false")
+      << ",\"completion_images\":" << completion_attestation
+      << ",\"completion_images_sha256\":" << J(Hash(completion_attestation))
+      << ",\"evidence_released\":" << (evidence_released ? "true" : "false")
+      << ",\"ready_images_sha256\":" << J(Hash(ready_attestation))
+      << ",\"ready_attested\":" << (ready_observed && gate_released ? "true" : "false")
+      << ",\"ready_observed\":" << (ready_observed ? "true" : "false")
+      << ",\"release_granted\":" << (gate_released ? "true" : "false")
+      << ",\"completion_observed\":" << (completion_ok ? "true" : "false")
+      << ",\"device_completion_sha256\":" << J(Hash(completion_document))
+      << ",\"device_runtime_attestation_sha256\":" << J(Hash(attestation_document));
+  }
+  m << ",\"source_files\":[";
   for (size_t i = 0; i < second.size(); ++i)
   {
     if (i)
@@ -1606,8 +2177,10 @@ int main(int argc, char**argv)
   std::string final = "capture-" + r.challenge + ".tar";
   std::string tmp = "." + final + ".tmp-" + nonce, archive_sha;
   uint64_t archive_size = 0;
-  if (!PublishTar(rootfd, dirfd, tmp, final, m.str(), second, &archive_sha, &archive_size))
+  if (valid && !PublishTar(rootfd, dirfd, tmp, final, m.str(), second,
+                           &archive_sha, &archive_size, deadline))
   {
+    if (Expired(deadline)) Reason(&reasons, "timeout");
     Reason(&reasons, "archive_publish_failed");
     valid = false;
   }

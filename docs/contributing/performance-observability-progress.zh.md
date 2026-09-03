@@ -47,7 +47,7 @@ A/B/C 已完成一轮 collector-managed 的 P0 comparison gate；各运行目录
 
 ### 2. IBMW 采集工具
 
-**状态：验证中**
+**状态：功能闭环**
 
 **已完成**
 
@@ -62,24 +62,23 @@ A/B/C 已完成一轮 collector-managed 的 P0 comparison gate；各运行目录
 - 当前工具测试通过，验证覆盖 Python collector、DDS trace parser/validator 和相关 artifact 合同。
 - 已在真实安装布局完成 B-lane managed E2E：3000/3000，丢失、重复、顺序、payload 和 timestamp error 均为 0；进程/网络 artifact、最终 validation 以及 comparison gate 均通过。该 endpoint 在进程内嵌入 IBMW Engine，不应把此结果描述为独立 IBMW daemon E2E。
 - 已安装并验证 `mw-perf-collect import-ohos-capture`；host importer 对 canonical USTAR、request challenge、archive/tree hash、child PID/start ticks 绑定及 producer trace semantic import 严格 fail-closed。
+- 安装态真实 native managed P0a qualification 已通过：在隔离源码树 Python import 的环境中由安装后的 `mw-perf-collect` CLI 运行 production `ibmw_dds_managed_exact_candidate`，并确认已加载的 collector 模块及 schema/contract 资源均位于安装 prefix；同一既有 campaign 流程完成 P0a validation、fault/rollback companion、v9 formal anchor 和 formal campaign replay。该结论仅覆盖 host 选定 capability `dds.ordinary.nonplain.single_driver.sync_callback`，保持 `metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`。
 
-**进行中**
+**持续验证**
 
-- managed DDS binary trace 在受控构建、运行库和正式证据合同上的持续验证。
-- 安装后 CLI 矩阵及双适配器 smoke 仍只验证隔离安装布局、模块加载、JSON/Markdown 产物合同、schema audit、业务失败语义以及 endpoint 不可用时的正常降级；另行完成的真实 A/B managed E2E 才验证安装态运行路径。A/B endpoint 可在各自进程内嵌入 Engine，不能以“是否存在独立 daemon”概括其 E2E 状态；这些结果仍不替代当前树的 managed P0a 证据。
-- schema audit 仍属于产物 provenance 与合同审计增量，不替代真实 endpoint E2E；旧产物兼容策略保持不变，对缺失 audit 的旧 validation 仅按兼容规则处理，不放宽语义校验。
+- managed DDS binary trace 继续在受控构建、运行库和正式证据合同上执行回归；该持续验证不表示功能闭环仍有缺口。
+- 完整安装遵循 build→codegen→install；裸 `cmake --install` 不支持替代所需的 codegen build。
 
-**阻塞/未完成**
+**能力边界**
 
-- 完整安装按 build→codegen→install 流程已成功安装 `DdsGenericMsg.hpp`、collector 包并通过安装后 CLI smoke；裸 `cmake --install` 在未构建 codegen 的 build tree 中仍会失败，使用者必须先完成构建；
-- callback registration ID、Dispatcher publish-enter 和最终同步业务 callback-enter 已通过 fixed-width internal envelope 闭环；DDS exact 72-byte `.ibce` exporter、stage/exact stream binding 和真实 managed candidate 已在 system DDS、Fast DDS 2.6.12 与 3.2.2 通过。正式 P0a completion axis 对选定 capability `dds.ordinary.nonplain.single_driver.sync_callback` 已通过，状态为 `valid_for_p0a_completion=true`；该状态不代表 metric 或性能通过。
-- A/B/C comparison-plan、block/lane 合同和 fail-closed gate 已实现；bridge evidence 因缺少 collector lifecycle/resource provenance 被正确拒绝。随后完整重跑的 collector-managed evidence 通过消息完整性、identity、顺序和状态门禁，formal compare 返回有效 block 且无 failure codes；该结果只关闭 P0 可比性门，不包含聚合统计或胜负结论。
-- 安装后 CLI 矩阵已覆盖 `validate`/`report`/`compare` 的正常和业务失败路径，检查 JSON/Markdown 产物、`schema_audit` 与 `failure_codes`；该 fixture smoke 与另行完成的真实 A/B managed E2E 是不同证据类别，均不构成当前树 managed P0a 证据。
-- 安装资源 registry 的缺失/篡改 fail-closed 及有效 run 安装后篡改/删除路径已纳入测试；历史 validation 兼容范围仅限缺失的 `schema_audit`/`resource_integrity` 元数据。
+- 安装后 CLI fixture、真实 A/B managed E2E 与安装态真实 native managed P0a qualification 是不同证据类别，不能互相替代；A/B endpoint 可在各自进程内嵌入 Engine，不能描述为独立 daemon E2E。
+- 选定 host capability `dds.ordinary.nonplain.single_driver.sync_callback` 的 completion axis 为 `valid_for_p0a_completion=true`；metric/comparison 轴保持 unsupported/false，不代表性能通过或胜负结论。
+- schema audit 只提供 provenance 与合同审计；历史 validation 仅兼容缺失的 `schema_audit`/`resource_integrity` 元数据，不放宽当前资源完整性或语义校验。
+- OHOS formal P0a、通用 exact、其它 transport/type、异步、多 handler 和多 driver 按独立 capability 验收，不属于本主线已闭环的 host collector capability。
 
 **完成判据**
 
-安装后 CLI 能完整加载所有包内运行时模块；managed P0a stage/exact artifact 的身份、拓扑、seal、loss、目录 finalization 和 manifest 合同验证通过；只有受控 capability 的真实 native round-trip、完整 E2E 因果链和正式 P0a 验收通过时，才可登记 `exact_correlated`。
+安装后 CLI 已从安装 prefix 加载所需包内运行时模块与资源；managed P0a stage/exact artifact 的身份、拓扑、seal、loss、目录 finalization 和 manifest 合同验证通过；受控 host capability 的真实 native round-trip、完整 E2E 因果链和正式 P0a 验收已通过并登记 `exact_correlated`。该完成判据不扩展到通用 exact、OHOS formal P0a 或 metric/comparison 轴。
 
 ### 3. IBMW 本体适配
 
@@ -148,10 +147,10 @@ Core Metrics 已通过正式性能门，但仍需完整 artifact/finalization，
 本轮三主线推进如下：
 
 - **ROS2**：第一主线状态不变，仍为功能闭环；安装态 collector 已从 canonical ROS 2 shebang 建立可信 interpreter/prefix 派生，隔离调用方 Python/LD 污染，并以 `--no-daemon` 直接查询 Graph。真实 Humble doctor 为 ready，真实 managed A-lane 完成 3000 条 `producer_monotonic` latency，readiness、资源、finalization 和 validation 均通过。该结果仍是受控 producer-owned E2E，不证明 generic observer 或通用 ROS2 exact。
-- **IBMW 采集工具**：第二主线仍为验证中；安装态 B-lane managed E2E 完成 3000/3000，丢失、重复、顺序、payload、timestamp error 均为 0，进程/网络 artifact、validation 和 comparison gate 均通过。安装后的 `import-ohos-capture` 已完成 canonical USTAR、challenge/hash、PID/ticks 和 semantic import 严格校验。A/B endpoint 可进程内嵌 Engine，不能再写成真实 daemon/E2E 全部缺失；fixture smoke、真实 E2E 与 managed P0a 仍是不同证据层级。
+- **IBMW 采集工具**：第二主线升级为功能闭环；安装态 B-lane managed E2E 完成 3000/3000，且安装态真实 native managed P0a qualification 已在源码树 Python import 隔离环境中通过 production candidate、安装 CLI、P0a validation、v9 formal anchor/campaign replay及安装 prefix 模块/资源校验。该闭环仅覆盖选定 host capability，metric/comparison 保持 unsupported/false；A/B endpoint 可进程内嵌 Engine，不能据此扩展为独立 daemon、通用 exact、OHOS formal P0a 或性能结论。
 - **IBMW 本体适配**：第三主线仍为验证中；HDC 不能跨主机传递 inherited FD，但 device-local native agent 已在物理 OHOS 上关闭 lifecycle/FD export/snapshot 可行性，production exact candidate 完成 3000 条 stage、1000 条 exact、19 个 segment 的零丢失 `exact_correlated` 语义导入，并修复跨 DSO RTTI visibility、增加 audit。该候选明确 `formal_p0a=false`，没有 `directory_finalization`、trusted remote contract/campaign、runtime image attestation、fault/rollback 或性能结论；metric/comparison 继续 unsupported/false。
 
-第一主线仍缺 generic observer、通用 exact E2E 和通用最终 callback identity；第二主线已具备安装态真实 A/B managed E2E，但安装态 CLI fixture、E2E 与当前树 managed P0a 不能互相替代；第三主线 remote OHOS candidate 仍保持 `formal_p0a=false`、`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`。总目标与 A/B/C 集成场景边界不变。
+第一主线仍缺 generic observer、通用 exact E2E 和通用最终 callback identity；第二主线已具备安装态真实 A/B managed E2E，并以独立安装态真实 native qualification 关闭选定 host capability 的 managed P0a 发布证据缺口；第三主线 remote OHOS candidate 仍保持 `formal_p0a=false`、`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`。总目标与 A/B/C 集成场景边界不变。
 
 ## 最近验证类别与证据路径
 

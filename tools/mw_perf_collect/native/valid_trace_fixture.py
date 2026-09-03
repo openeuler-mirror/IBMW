@@ -4,6 +4,7 @@
 import hashlib
 import json
 import os
+import socket
 import struct
 
 
@@ -30,6 +31,13 @@ def canonical(value: dict) -> bytes:
 
 
 def main() -> None:
+    control = None
+    if (os.environ.get("MW_PERF_CAPTURE_PROTOCOL") == "v2"
+            and os.environ.get("MW_PERF_CAPTURE_GATE_COMPLETE") != "1"):
+        control = socket.socket(fileno=int(os.environ["MW_PERF_CAPTURE_CONTROL_FD"]))
+        control.sendall(b"R")
+        if control.recv(1) != b"G":
+            raise RuntimeError("capture release was not granted")
     directory_fd = int(os.environ["MW_PERF_COMM_TRACE_DIR_FD"])
     pid, ticks = os.getpid(), start_ticks()
     stream = "11" * 16
@@ -118,6 +126,13 @@ def main() -> None:
         put(directory_fd, "ibmw_dds_exact.1.a.exact.meta.json", exact_meta_raw)
         put(directory_fd, "ibmw_dds_exact.1.a.ibce", bytes(exact_header) + exact_event)
         put(directory_fd, "ibmw_dds_exact.1.a.exact.seal.json", canonical(exact_seal))
+    if os.environ.get("MW_PERF_CAPTURE_PROTOCOL") == "v2":
+        if control is None:
+            control = socket.socket(fileno=int(os.environ["MW_PERF_CAPTURE_CONTROL_FD"]))
+        control.sendall(b"C")
+        if control.recv(1) != b"E":
+            raise RuntimeError("v2 evidence release denied")
+        control.close()
 
 
 if __name__ == "__main__":

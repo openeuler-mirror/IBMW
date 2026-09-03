@@ -62,13 +62,34 @@ def build_identity(candidate: Path, extension: Path) -> str:
         formula, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def run_config(core, output: Path, name: str, config_value: dict):
+def isolated_collector_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.pop("PYTHONHOME", None)
+    environment.pop("PYTHONPATH", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
+
+
+def loaded_module_path(module) -> Path:
+    value = getattr(module, "__file__", None)
+    assert isinstance(value, str)
+    return Path(value).resolve(strict=True)
+
+
+def run_config(core, output: Path, name: str, config_value: dict,
+               collector_cli: Path | None = None):
     config = output / f"{name}.config.json"
     config.write_text(json.dumps(config_value), encoding="utf-8")
     run_root = output / name
-    result = core.run(core.argparse.Namespace(
-        config=str(config), adapter="generic", command=[],
-        override_command=False, output=str(run_root)))
+    if collector_cli is None:
+        result = core.run(core.argparse.Namespace(
+            config=str(config), adapter="generic", command=[],
+            override_command=False, output=str(run_root)))
+    else:
+        result = subprocess.run(
+            [str(collector_cli), "run", "--config", str(config),
+             "--adapter", "generic", "--output", str(run_root)],
+            cwd=output, env=isolated_collector_environment(), check=False).returncode
     run_dirs = list(run_root.iterdir())
     assert len(run_dirs) == 1
     return result, run_dirs[0]
@@ -82,9 +103,25 @@ def main() -> int:
     parser.add_argument("--fault-extension", required=True)
     parser.add_argument("--production-query-test", required=True)
     parser.add_argument("--source-root", required=True)
+    parser.add_argument("--collector-prefix")
     args = parser.parse_args()
 
-    sys.path.insert(0, str(Path(args.source_root) / "tools"))
+    source_root = Path(args.source_root).resolve(strict=True)
+    collector_prefix_value = args.collector_prefix
+    collector_prefix = (Path(collector_prefix_value).resolve(strict=True)
+                        if collector_prefix_value is not None else None)
+    collector_cli = None
+    if collector_prefix is None:
+        sys.path.insert(0, str(source_root / "tools"))
+    else:
+        package_files = list(collector_prefix.glob("**/mw_perf_collect/core.py"))
+        assert len(package_files) == 1, package_files
+        package_parent = package_files[0].parent.parent
+        sys.path[:] = [entry for entry in sys.path
+                       if not Path(entry or ".").resolve().is_relative_to(source_root)]
+        sys.path.insert(0, str(package_parent))
+        collector_cli = (collector_prefix / "bin/mw-perf-collect").resolve(strict=True)
+
     from mw_perf_collect import core
     from mw_perf_collect.campaign import (
         build_companion_object_from_snapshot,
@@ -112,7 +149,25 @@ def main() -> int:
         validate_trace_off_rollback_companion,
     )
 
-    output = Path(os.environ.get("CTEST_BINARY_DIRECTORY", Path.cwd())) / "managed_exact_candidate_runs"
+    if collector_prefix is not None:
+        loaded_collector_files = {
+            name: loaded_module_path(module)
+            for name, module in sys.modules.items()
+            if name == "mw_perf_collect" or name.startswith("mw_perf_collect.")
+            if getattr(module, "__file__", None)
+        }
+        assert loaded_collector_files
+        assert all(path.is_relative_to(collector_prefix)
+                   for path in loaded_collector_files.values()), loaded_collector_files
+        package_root = Path(core.__file__).resolve(strict=True).parent
+        resource_files = [package_root / relative for relative in core._RESOURCE_SHA256]
+        assert resource_files
+        assert all(path.resolve(strict=True).is_relative_to(collector_prefix)
+                   for path in resource_files), resource_files
+
+    output_name = ("managed_exact_candidate_installed_runs"
+                   if collector_prefix is not None else "managed_exact_candidate_runs")
+    output = Path(os.environ.get("CTEST_BINARY_DIRECTORY", Path.cwd())) / output_name
     shutil.rmtree(output, ignore_errors=True)
     output.mkdir(parents=True, exist_ok=True)
     candidate = Path(args.candidate).resolve(strict=True)
@@ -128,8 +183,15 @@ def main() -> int:
     assert subprocess.run([str(candidate), "--fault=stage_loss"], check=False).returncode == 2
     assert subprocess.run([str(fault_candidate)], check=False).returncode == 2
     result, run_dir = run_config(
-        core, output, "runs", make_config(candidate, extension, [str(candidate)], 5))
+        core, output, "runs", make_config(candidate, extension, [str(candidate)], 5),
+        collector_cli)
     assert result == core.EXIT_INVALID
+    if collector_cli is not None:
+        cli_validation = subprocess.run(
+            [str(collector_cli), "validate", str(run_dir), "--profile", "p0a"],
+            cwd=output, env=isolated_collector_environment(), check=False,
+            stdout=subprocess.PIPE, text=True)
+        assert cli_validation.returncode == core.EXIT_INVALID, cli_validation.stdout
     manifest = json.loads((run_dir / "manifest.json").read_text())
     validation = json.loads((run_dir / "validation.json").read_text())
     evidence = json.loads((run_dir / "capability/p0a_evidence_manifest.json").read_text())
@@ -458,7 +520,8 @@ def main() -> int:
         fault_result, subject = run_config(
             core, output, f"fault_{case_id}",
             make_config(fault_candidate, fault_extension,
-                        [str(fault_candidate), f"--fault={case_id}"], 1.5))
+                        [str(fault_candidate), f"--fault={case_id}"], 1.5),
+            collector_cli)
         assert fault_result == core.EXIT_INVALID
         fault_manifest = json.loads((subject / "manifest.json").read_text())
         fault_validation = json.loads((subject / "validation.json").read_text())
@@ -506,7 +569,7 @@ def main() -> int:
     assert (run_dir / "manifest.json").read_bytes() == anchor_manifest_bytes
 
     rollback_result = execute_trace_off_build(
-        Path(args.source_root), Path(os.environ["CTEST_BINARY_DIRECTORY"]),
+        source_root, Path(os.environ["CTEST_BINARY_DIRECTORY"]),
         output / "rollback_work")
     rollback = build_trace_off_rollback_companion(
         rollback_result, run_dir, output / "rollback_payload",

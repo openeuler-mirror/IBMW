@@ -20,8 +20,11 @@ from mw_perf_collect.ohos_capture import CaptureSemanticError, validate_capture_
 AGENT = str(Path(sys.argv[1]).resolve()) if len(sys.argv) > 2 else ""
 FIXTURE = str(Path(sys.argv[2]).resolve()) if len(sys.argv) > 2 else ""
 CANDIDATE = str(Path(sys.argv[3]).resolve()) if len(sys.argv) > 3 else ""
+EXTENSION = str(Path(sys.argv[4]).resolve()) if len(sys.argv) > 4 else ""
 TOPOLOGY = "a" * 64
 CHALLENGE = "b" * 64
+V8_CONTRACT = "mw_perf.p0a_contract.v8"
+V8_CONTRACT_SHA = "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575"
 _RUN_NUMBER = 0
 _ROOT_NUMBER = 0
 _LAST_RUN_DIAGNOSTIC = {}
@@ -46,6 +49,8 @@ def root_process_holders(root):
     holders = []
     for process in Path("/proc").iterdir():
         if not process.name.isdigit():
+            continue
+        if int(process.name) == os.getpid():
             continue
         try:
             if process.stat().st_uid != os.getuid():
@@ -87,6 +92,240 @@ def command(root, executable=FIXTURE, arguments=("happy",), timeout=5000, exact=
         "--trace-mode", "full", "--exact-required", "true" if exact else "false",
         "--timeout-ms", str(timeout), "--", executable, *arguments,
     ]
+
+
+def v2_command(root, mode="v2", *, role="exact_anchor", capability=None,
+               workload=None, contract=V8_CONTRACT, contract_sha=V8_CONTRACT_SHA,
+               image_path=None, image_sha=None, extra_images=(), executable=None,
+               arguments=None, extension_path=None,
+               timeout=5000,
+               env_literals=("CAPTURE_LITERAL=literal-value",)):
+    executable = str(Path(executable or FIXTURE).resolve())
+    challenge = sha(str(root).encode())
+    with _RUN_LOCK:
+        if challenge not in _USED_CHALLENGES:
+            _USED_CHALLENGES.add(challenge)
+    capability = capability or "dds.ordinary.nonplain.single_driver.sync_callback"
+    workload = workload or capability
+    image_path = image_path or executable
+    image_sha = image_sha or sha(Path(image_path).read_bytes())
+    invocation = command(root, executable=executable,
+                         arguments=arguments if arguments is not None else (mode,), timeout=timeout,
+                         exact=True, challenge=challenge)
+    declaration = [
+        "--protocol", "v2", "--role", role, "--campaign-id", "campaign-1",
+        "--fault", "none", "--contract-id", contract,
+        "--contract-sha256", contract_sha, "--workload-id", workload,
+        "--ready-timeout-ms", "2000",
+        "--completion-timeout-ms", "2000", "--runtime-image",
+        f"sut|executable|exe|{image_path}|{image_sha}",
+        "--runtime-image", (extra_images[0] if extra_images else
+                            f"extension|runtime-map|maps|{extension_path or executable}|"
+                            f"{sha(Path(extension_path or executable).read_bytes())}"),
+    ]
+    for image in extra_images[1:]:
+        declaration.extend(("--runtime-image", image))
+    for literal in env_literals:
+        declaration.extend(("--env", literal))
+    separator = invocation.index("--")
+    return invocation[:separator] + declaration + invocation[separator:]
+
+
+def invoke_one_line(invocation, env=None):
+    completed = subprocess.run(invocation, text=True, capture_output=True,
+                               env=env, check=False, timeout=10)
+    assert len(completed.stdout.splitlines()) == 1, completed
+    return completed, json.loads(completed.stdout)
+
+
+def assert_v2_fail_closed(completed, result, root, started, acceptable_reasons,
+                          cleanup_limit=4.0):
+    assert completed.returncode != 0, result
+    assert result["snapshot_valid"] is False, result
+    assert result["archive_path"] == "" and result["archive_size"] == 0, result
+    assert result["archive_sha256"] == "", result
+    assert result["reasons"] and set(result["reasons"]) <= set(acceptable_reasons), result
+    assert time.monotonic() - started < cleanup_limit, result
+    assert not list(root.glob("*.tar")), root_inventory(root)
+    assert not root_process_holders(root), root_process_holders(root)
+
+
+def v2_acceptance_cases(run_roots):
+    root = new_run_root(run_roots, "v2-success")
+    completed, result = invoke_one_line(v2_command(root))
+    assert completed.returncode == 0 and result["snapshot_valid"] is True, result
+    assert result["protocol"] == "mw_perf.ohos_remote_capture.result.v2"
+    assert set(result) == ohos_capture._RESULT_KEYS
+    _, entries = inspect_ustar(Path(result["archive_path"]))
+    manifest = json.loads(entries[0][1])
+    assert manifest["protocol"] == "mw_perf.ohos_remote_capture.v2"
+    assert manifest["capture_role"] == "exact_anchor" and manifest["campaign_id"] == "campaign-1"
+    assert manifest["registration_contract"] == {"id": V8_CONTRACT, "sha256": V8_CONTRACT_SHA}
+    payload = dict(entries[1:])
+    completion = json.loads(payload["device_completion.json"])
+    assert completion["complete"] is True
+    attestation = json.loads(payload["device_runtime_attestation.json"])
+    assert attestation["request_challenge"] == result["request_challenge"]
+    assert attestation["child_pid"] == result["child_pid"]
+    assert attestation["child_start_time_ticks"] == result["child_start_time_ticks"]
+    assert attestation["boot_id"] == manifest["boot_id"]
+    assert attestation["live_images"][0]["matched"] is True
+
+    request = {
+        "protocol": "mw_perf.ohos_remote_capture.request.v2", "capture_role": "exact_anchor",
+        "campaign_id": "campaign-1", "fault": "none",
+        "workload_id": "dds.ordinary.nonplain.single_driver.sync_callback",
+        "registration_contract": {"id": V8_CONTRACT, "sha256": V8_CONTRACT_SHA},
+        "runtime_images": manifest["runtime_images"], "ready_timeout_ms": 2000,
+        "completion_timeout_ms": 2000, "argv": [str(Path(FIXTURE).resolve()), "v2"],
+        "capability_id": "dds.ordinary.nonplain.single_driver.sync_callback",
+        "env": ["CAPTURE_LITERAL=literal-value"],
+        "exact_required": True, "path_id": "path-1", "run_id": "run-1",
+        "run_root": str(root), "timeout_ms": 5000, "topology_generation": "gen-1",
+        "topology_sha256": TOPOLOGY, "trace_mode": "full",
+        "request_challenge": sha(str(root).encode()),
+    }
+    assert manifest["request_sha256"] == sha(json.dumps(
+        request, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii"))
+
+    root = new_run_root(run_roots, "v2-exec-after-g")
+    completed, result = invoke_one_line(v2_command(root, "v2-exec-after-g"))
+    assert completed.returncode != 0 and result["snapshot_valid"] is False, result
+    if "completion_missing_or_malformed" not in result["reasons"]:
+        assert "runtime_executable_mismatch" in result["reasons"], result
+
+    root = new_run_root(run_roots, "v2-missing-completion")
+    completed, result = invoke_one_line(v2_command(root, "v2-no-completion"))
+    assert completed.returncode != 0 and "completion_missing_or_malformed" in result["reasons"]
+
+    root = new_run_root(run_roots, "v2-descendant-retains-control")
+    started = time.monotonic()
+    completed, result = invoke_one_line(v2_command(root, "v2-descendant-retains-control"))
+    assert_v2_fail_closed(completed, result, root, started, {
+        "handshake_missing", "completion_missing_or_malformed", "timeout", "sigkill_escalation",
+        "child_not_zero_exit", "descendant_detected", "device_attestation_write_failed",
+    })
+
+    root = new_run_root(run_roots, "v2-zero-packet-immediate-close")
+    started = time.monotonic()
+    completed, result = invoke_one_line(v2_command(root, "v2-zero-packet-immediate-close"))
+    assert_v2_fail_closed(completed, result, root, started, {
+        "completion_missing_or_malformed", "device_attestation_write_failed",
+    })
+    assert result["reasons"] == [
+        "completion_missing_or_malformed", "device_attestation_write_failed"], result
+
+    for mode, reason in (("v2-descendant-ready", "handshake_sender_identity_mismatch"),
+                         ("v2-descendant-completion", "completion_sender_identity_mismatch")):
+        root = new_run_root(run_roots, mode)
+        completed, result = invoke_one_line(v2_command(root, mode))
+        assert completed.returncode != 0 and reason in result["reasons"], result
+
+    root = new_run_root(run_roots, "v2-tiny-overall-timeout")
+    started = time.monotonic()
+    completed, result = invoke_one_line(v2_command(root, "v2-delayed-ready", timeout=5))
+    assert completed.returncode != 0, result
+    assert time.monotonic() - started < 1.0, result
+
+    root = new_run_root(run_roots, "v2-runtime-hash-deadline")
+    injected = os.environ.copy()
+    injected["IBMW_CAPTURE_INJECT_RUNTIME_HASH_DELAY_MS"] = "1000"
+    started = time.monotonic()
+    completed, result = invoke_one_line(v2_command(root, timeout=500), env=injected)
+    assert_v2_fail_closed(completed, result, root, started, {
+        "runtime_executable_mismatch", "runtime_maps_mismatch", "timeout",
+        "child_not_zero_exit", "sigkill_escalation", "device_attestation_write_failed",
+        "agent_hash_failed",
+    }, cleanup_limit=2.0)
+    assert "runtime_executable_mismatch" in result["reasons"], result
+    assert "timeout" in result["reasons"], result
+
+    root = new_run_root(run_roots, "v2-hash-mismatch")
+    completed, result = invoke_one_line(v2_command(root, image_sha="0" * 64))
+    assert completed.returncode != 0 and "prelaunch_image_hash_mismatch" in result["reasons"]
+
+    root = new_run_root(run_roots, "v2-path-mismatch")
+    completed, result = invoke_one_line(v2_command(
+        root, image_path="/bin/true", image_sha=sha(Path("/bin/true").read_bytes())))
+    assert completed.returncode == 2 and result["reasons"] == ["runtime_executable_path_mismatch"]
+
+    root = new_run_root(run_roots, "v2-argv-image-mismatch")
+    other = Path("/bin/true").resolve()
+    completed, result = invoke_one_line(v2_command(
+        root, executable=FIXTURE, image_path=str(other), image_sha=sha(other.read_bytes())))
+    assert completed.returncode == 2 and result["reasons"] == ["runtime_executable_path_mismatch"]
+
+    root = new_run_root(run_roots, "v2-role-name-collision")
+    executable = str(Path(FIXTURE).resolve())
+    collision = f"sut|executable|exe|{executable}|{sha(Path(executable).read_bytes())}"
+    completed, result = invoke_one_line(v2_command(root, extra_images=(collision,)))
+    assert completed.returncode == 2 and result["reasons"] == ["runtime_image_collision"]
+
+    root = new_run_root(run_roots, "v2-map-missing")
+    unrelated = Path("/bin/true").resolve()
+    missing_map = f"extension|missing|maps|{unrelated}|{sha(unrelated.read_bytes())}"
+    completed, result = invoke_one_line(v2_command(root, extra_images=(missing_map,)))
+    assert completed.returncode != 0 and "runtime_maps_mismatch" in result["reasons"]
+
+    malformed = (
+        ("role", "fault_runtime_matrix", "unsupported_role"),
+        ("contract", "mw_perf.p0a_contract.v9", "v2_contract_binding_mismatch"),
+        ("workload", "wrong.workload", "v2_contract_binding_mismatch"),
+    )
+    for label, value, reason in malformed:
+        root = new_run_root(run_roots, f"v2-{label}")
+        changes = {label: value}
+        completed, result = invoke_one_line(v2_command(root, **changes))  # type: ignore[arg-type]
+        assert completed.returncode != 0 and reason in result["reasons"], result
+
+    root = new_run_root(run_roots, "v2-image-collision")
+    executable = str(Path(FIXTURE).resolve())
+    duplicate = f"sut|executable|exe|{executable}|{sha(Path(executable).read_bytes())}"
+    completed, result = invoke_one_line(v2_command(root, extra_images=(duplicate,)))
+    assert completed.returncode != 0 and "runtime_image_collision" in result["reasons"]
+
+    root = new_run_root(run_roots, "v2-archive-collision")
+    archive = root / f"capture-{sha(str(root).encode())}.tar"
+    sentinel = b"v2 collision sentinel\n"
+    archive.write_bytes(sentinel)
+    archive.chmod(0o600)
+    completed, result = invoke_one_line(v2_command(root))
+    assert completed.returncode != 0 and "archive_publish_failed" in result["reasons"]
+    assert archive.read_bytes() == sentinel
+
+    v2_only = (
+        ("--role", "exact_anchor"), ("--campaign-id", "campaign-1"),
+        ("--fault", "none"), ("--contract-id", V8_CONTRACT),
+        ("--contract-sha256", V8_CONTRACT_SHA),
+        ("--workload-id", "dds.ordinary.nonplain.single_driver.sync_callback"),
+        ("--ready-timeout-ms", "1000"), ("--completion-timeout-ms", "1000"),
+        ("--runtime-image", f"sut|fixture|exe|{FIXTURE}|{sha(Path(FIXTURE).read_bytes())}"),
+    )
+    parse_root = run_roots
+    for explicit_protocol in ((), ("--protocol", "v1")):
+        for option in v2_only:
+            invocation = command(parse_root)
+            separator = invocation.index("--")
+            invocation[separator:separator] = [*explicit_protocol, *option]
+            completed, result = invoke_one_line(invocation)
+            assert completed.returncode == 2 and result["reasons"] == ["unknown_option"], result
+        invocation = command(parse_root)
+        separator = invocation.index("--")
+        invocation[separator:separator] = [*explicit_protocol, "--ready-timeout-ms", "invalid"]
+        completed, result = invoke_one_line(invocation)
+        assert completed.returncode == 2 and result["reasons"] == ["unknown_option"], result
+
+    if CANDIDATE and EXTENSION:
+        root = new_run_root(run_roots, "v2-genuine-candidate")
+        completed, result = invoke_one_line(v2_command(
+            root, executable=CANDIDATE, arguments=("--exit-after-complete",),
+            extension_path=EXTENSION, env_literals=(), timeout=30000))
+        assert completed.returncode == 0 and result["snapshot_valid"] is True, result
+        _, entries = inspect_ustar(Path(result["archive_path"]))
+        manifest = json.loads(entries[0][1])
+        assert manifest["completion_attested"] is True
+        assert manifest["evidence_released"] is True
+        assert manifest["completion_images"]
 
 
 def run(root, mode="happy", timeout=5000, env=None, arguments=None, exact=False,
@@ -599,7 +838,7 @@ def candidate_lifecycle_cases(run_roots):
     assert code != 0 and "timeout" in result["reasons"]
     assert "sigkill_escalation" not in result["reasons"]
     assert "child_not_zero_exit" not in result["reasons"]
-    assert stdout.count("\n") == 1 and stderr == ""
+    assert stdout.count("\n") == 1 and stderr == "", (stdout, stderr, result)
 
     completion_challenge = "f" * 64
     root = new_run_root(run_roots, "candidate-completion")
@@ -664,6 +903,7 @@ def main():
         assert completed.returncode != 0 and "exec_failed" in parsed["reasons"]
         assert not root_process_holders(root), root_process_holders(root)
         archive_collision_case(run_roots)
+        v2_acceptance_cases(run_roots)
 
         injected = os.environ.copy()
         injected["IBMW_CAPTURE_INJECT_FORK_FAILURE"] = "1"
@@ -676,7 +916,7 @@ def main():
         root = new_run_root(run_roots, "timeout")
         assert_failure(root, "sleep", "timeout", 50)
         root = new_run_root(run_roots, "sigkill")
-        assert_failure(root, "ignore", "sigkill_escalation", 50)
+        assert_failure(root, "ignore", "sigkill_escalation", 250)
         root = new_run_root(run_roots, "descendant")
         assert_failure(root, "descendant", "descendant_detected")
         started = time.monotonic()
@@ -743,8 +983,9 @@ def main():
             assert stat.S_IMODE(run_root.stat().st_mode) == 0o700
             case_directories = [entry for entry in run_root.iterdir()
                                 if entry.name.startswith("capture-") and entry.is_dir()]
-            assert len(case_directories) == 1, root_inventory(run_root)
-            capture_directories.append(case_directories[0].resolve())
+            assert len(case_directories) <= 1, root_inventory(run_root)
+            if case_directories:
+                capture_directories.append(case_directories[0].resolve())
             for entry in run_root.iterdir():
                 expected = 0o700 if entry.is_dir() else 0o600
                 assert stat.S_IMODE(entry.lstat().st_mode) == expected

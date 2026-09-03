@@ -34,10 +34,9 @@
 #include <optional>
 #include <string>
 #include <thread>
-#ifdef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
 #include <fcntl.h>
 #include <poll.h>
-#endif
+#include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 
@@ -53,6 +52,9 @@ namespace transport = ibmw::runtime::core::transport;
 
 constexpr uint64_t kSampleCount = 1000;
 constexpr size_t kPayloadSize = 2 * sizeof(uint64_t);
+constexpr char kCaptureCapability[] = "dds.ordinary.nonplain.single_driver.sync_callback";
+constexpr char kCaptureContract[] = "mw_perf.p0a_contract.v8";
+constexpr char kCaptureContractSha[] = "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575";
 #ifdef IBMW_MANAGED_EXACT_FAULT_CANDIDATE
 constexpr const char kWrongRunId[] = "runtime-fault-wrong-run-id";
 #endif
@@ -176,6 +178,77 @@ dds_ext::comm_trace::DeliveryKey FaultDeliveryKey() {
   return key;
 }
 #endif
+
+struct CaptureV2Handshake {
+  int control_fd = -1;
+};
+constexpr int kCaptureReleaseWaitMs = 30000;
+
+int ParseCaptureFd(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') throw std::runtime_error(std::string(name) + " is required");
+  int fd = -1;
+  const auto parsed = std::from_chars(value, value + std::strlen(value), fd);
+  if (parsed.ec != std::errc{} || *parsed.ptr != '\0' || fd < 0 || fcntl(fd, F_GETFD) < 0) {
+    throw std::runtime_error(std::string(name) + " is not a valid inherited FD");
+  }
+  return fd;
+}
+
+std::optional<CaptureV2Handshake> ParseCaptureV2Handshake() {
+  const char* protocol = std::getenv("MW_PERF_CAPTURE_PROTOCOL");
+  const char* control = std::getenv("MW_PERF_CAPTURE_CONTROL_FD");
+  if (protocol == nullptr && control == nullptr) return std::nullopt;
+  if (protocol == nullptr || std::strcmp(protocol, "v2") != 0 || control == nullptr) {
+    throw std::runtime_error("v2 capture handshake requires protocol and control FD");
+  }
+  CaptureV2Handshake handshake{ParseCaptureFd("MW_PERF_CAPTURE_CONTROL_FD")};
+  const char* required[] = {"MW_PERF_CAPTURE_ROLE", "MW_PERF_CAPTURE_CAMPAIGN_ID",
+                            "MW_PERF_CAPTURE_FAULT", "MW_PERF_CAPTURE_CONTRACT_ID",
+                            "MW_PERF_CAPTURE_CONTRACT_SHA256", "MW_PERF_CAPTURE_WORKLOAD_ID",
+                            "MW_PERF_CAPABILITY_ID"};
+  for (const char* name : required) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0' || std::strlen(value) > 256) {
+      throw std::runtime_error(std::string("missing v2 declaration: ") + name);
+    }
+  }
+  if (std::strcmp(std::getenv("MW_PERF_CAPTURE_ROLE"), "exact_anchor") != 0 ||
+      std::strcmp(std::getenv("MW_PERF_CAPTURE_FAULT"), "none") != 0 ||
+      std::strcmp(std::getenv("MW_PERF_CAPABILITY_ID"), kCaptureCapability) != 0 ||
+      std::strcmp(std::getenv("MW_PERF_CAPTURE_WORKLOAD_ID"), kCaptureCapability) != 0 ||
+      std::strcmp(std::getenv("MW_PERF_CAPTURE_CONTRACT_ID"), kCaptureContract) != 0 ||
+      std::strcmp(std::getenv("MW_PERF_CAPTURE_CONTRACT_SHA256"), kCaptureContractSha) != 0) {
+    throw std::runtime_error("unsupported v2 role or constant contract binding mismatch");
+  }
+  return handshake;
+}
+
+void CaptureV2ReadyRelease(const CaptureV2Handshake& handshake) {
+  const char ready = 'R';
+  if (send(handshake.control_fd, &ready, 1, 0) != 1) throw std::runtime_error("v2 ready write failed");
+  pollfd descriptor{handshake.control_fd, POLLIN, 0};
+  int result;
+  do { result = poll(&descriptor, 1, kCaptureReleaseWaitMs); } while (result < 0 && errno == EINTR);
+  if (result != 1 || (descriptor.revents & POLLIN) == 0) throw std::runtime_error("v2 release timeout");
+  char release = 0;
+  if (recv(handshake.control_fd, &release, 1, 0) != 1 || release != 'G') throw std::runtime_error("v2 release expected G");
+}
+
+bool CaptureV2Complete(const CaptureV2Handshake& handshake) {
+  const char complete = 'C';
+  if (send(handshake.control_fd, &complete, 1, 0) != 1) return false;
+  pollfd descriptor{handshake.control_fd, POLLIN | POLLHUP, 0};
+  int result;
+  do { result = poll(&descriptor, 1, kCaptureReleaseWaitMs); } while (result < 0 && errno == EINTR);
+  char evidence = 0;
+  ssize_t received = -1;
+  if (result == 1 && (descriptor.revents & POLLIN) != 0) {
+    do { received = recv(handshake.control_fd, &evidence, 1, 0); } while (received < 0 && errno == EINTR);
+  }
+  const bool granted = received == 1 && evidence == 'E';
+  return close(handshake.control_fd) == 0 && granted;
+}
 #endif
 
 }  // namespace
@@ -223,6 +296,15 @@ int main(int argc, char** argv) {
   if (fault == "producer_identity_mismatch" &&
       setenv("MW_PERF_RUN_ID", kWrongRunId, 1) != 0) {
     std::cerr << "managed exact candidate startup failure: run identity override failed" << std::endl;
+    return 1;
+  }
+#endif
+  std::optional<CaptureV2Handshake> capture_v2_handshake;
+#ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
+  try {
+    capture_v2_handshake = ParseCaptureV2Handshake();
+  } catch (const std::exception& error) {
+    std::cerr << "managed exact candidate startup failure: " << error.what() << std::endl;
     return 1;
   }
 #endif
@@ -352,6 +434,7 @@ int main(int argc, char** argv) {
     if (driver.GetPublicationMatchedCount(dds_topic) != 1) {
       throw std::runtime_error("DDS writer must have exactly one matched reader before publish");
     }
+    if (capture_v2_handshake) CaptureV2ReadyRelease(*capture_v2_handshake);
 
     ibmw::dds::GenericMsg sent;
     sent.serialization_type("id");
@@ -452,6 +535,10 @@ int main(int argc, char** argv) {
 #ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
   if (trace_initialized) dds_ext::comm_trace::Shutdown();
 #endif
+  if (capture_v2_handshake && run_completed && !CaptureV2Complete(*capture_v2_handshake)) {
+    std::cerr << "managed exact candidate completion attestation failed" << std::endl;
+    run_completed = false;
+  }
   if (run_completed) {
     std::lock_guard<std::mutex> lock(callback_mutex);
     if (callback_count.load(std::memory_order_relaxed) == kSampleCount && callbacks_valid) {

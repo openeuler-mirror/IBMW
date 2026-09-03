@@ -56,6 +56,11 @@ _RESOURCE_SHA256 = {
     "schemas/trace-quality.schema.v1.json": "741835b8644e715eabb187ddfcaf4517f2e13df9468daa4d008da1fb493641ed",
     "schemas/trusted-external-roots.schema.v1.json": "ebd7711c0c8fcb537a62e90e1d53bd84db10b0cfc3faeeb7bac7dfc1017067a1",
     "schemas/validation.schema.v1.json": "2a859e48c5a6e89b26d62b9ff2019fcab6ec120450cdb0801b8380823099e95d",
+    "schemas/ohos-capture-request.schema.v2.json": "6c02af4e2e564362666769cf27ad0a15aab82cc2279f7b0f3d11812070e81dff",
+    "schemas/ohos-device-completion.schema.v2.json": "27ad13390bd03e1c6f44cd2503a1be1dac05a8eeeb3aaf8405b3c924f3f89094",
+    "schemas/ohos-runtime-attestation.schema.v2.json": "a7587699b2d33fce37a25ecebae3fee2e7273ed86176286f9a9fde7b81293641",
+    "schemas/ohos-capture-result.schema.v2.json": "52ed9e989490745bd382dfd2ab8bd837c18081ba9112c82ce482ea4855bd4d7a",
+    "schemas/ohos-capture-manifest.schema.v2.json": "17dd36451bbc683b25320e0a4ccc35a97c1202ac96674f0012145d123fad563c",
 }
 
 def _resource_integrity_errors() -> list[str]:

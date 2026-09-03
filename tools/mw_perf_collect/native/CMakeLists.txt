@@ -46,7 +46,8 @@ if(IBMW_BUILD_TESTS AND NOT CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL 
     $<TARGET_FILE:mw_perf_capture_fixture>)
   if(TARGET ibmw_dds_managed_exact_candidate)
     list(APPEND _capture_acceptance_command
-      $<TARGET_FILE:ibmw_dds_managed_exact_candidate>)
+      $<TARGET_FILE:ibmw_dds_managed_exact_candidate>
+      $<TARGET_FILE:ibmw_dds_extension>)
   endif()
   add_test(NAME mw_perf_capture_acceptance COMMAND ${_capture_acceptance_command})
   set_tests_properties(mw_perf_capture_acceptance PROPERTIES TIMEOUT 30)

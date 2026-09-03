@@ -338,7 +338,7 @@ importer 严格验证 canonical USTAR、request challenge、archive/tree hash、
 
 ### 9.1 通用 collector 边界
 
-`compare` 只消费已经具备比较元数据的运行目录。除有效的单轮 validation 外，每个 manifest 还必须由上游集成流程在生成时写入一致的 `scenario_contract_hash`、resource profile、comparison block、sequence index 和 order policy。当前通用 `run` 不会自动生成这些 block/order 元数据；`compare` MVP也不检查每个block是否包含完整A/B/C lane集合。因此不能把任意三个普通run直接交给`compare`，也不要通过手工修改manifest绕过provenance。
+`compare` 只消费已经具备比较元数据的运行目录。除有效的单轮 validation 外，每个 manifest 还必须由上游集成流程在生成时写入一致的 `scenario_contract_hash`、resource profile、comparison block、sequence index 和 order policy。当前通用 `run` 不会自动生成这些 block/order 元数据；版本化 `mw_perf.comparison-plan.v1` 会 fail-closed 检查每个 block 恰好包含 A、B、C 各一个 lane，并校验 block/lane identity、合同与 scope/order 元数据、run/path 唯一性及 validation 新鲜度。未声明该 schema 的旧 `runs` plan 仅保留 MVP 兼容。因此不能把任意三个普通 run 直接交给 `compare`，也不要通过手工修改 manifest 绕过 provenance。
 
 对于已经由集成流程生成的目录，将路径写入 plan：
 

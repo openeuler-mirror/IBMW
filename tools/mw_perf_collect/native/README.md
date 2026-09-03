@@ -1,4 +1,4 @@
-# OHOS remote-managed capture candidate v1
+# OHOS remote-managed capture v1 and exact-anchor v2
 
 This candidate is built only when `IBMW_BUILD_OHOS_CAPTURE_AGENT=ON`; the
 option defaults to OFF on every platform, including OHOS. The native agent does
@@ -46,6 +46,16 @@ JSON or trace events are semantically valid. The manifest always records
 file and check producer pid/start ticks, run id, and meta/seal coherence before
 using the trace as evidence. Invalid fixture JSON can still be a valid
 transport snapshot.
+
+Protocol v2 is fail closed and supports only the `exact_anchor` role; fault and
+rollback roles are intentionally unsupported. It additionally freezes the
+selected DDS capability/workload and `mw_perf.p0a_contract.v8` identity, and
+requires declared executable or mapped runtime-image paths and SHA-256 values.
+The agent hashes declarations before launch, waits for `R`, attests the live
+`/proc/<pid>/exe` and executable maps while the child is gated, then writes
+`G`. Successful completion is exactly `C` followed by EOF. The v2 result and
+manifest bind the request hash/challenge, campaign/role, contract/workload,
+PID/start ticks, boot id, runtime attestation, completion, and archive tree.
 
 After copying the archive and the agent's single-line result JSON to a trusted
 host, save the exact request object used to launch the agent and run the

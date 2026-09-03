@@ -7,8 +7,11 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <poll.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #ifndef IBMW_VALID_TRACE_FIXTURE
@@ -82,6 +85,82 @@ int Happy()
        : 10;
 }
 
+int CaptureFd(const char* name)
+{
+  const char* value = getenv(name);
+  return value == nullptr ? -1 : atoi(value);
+}
+
+bool V2Gate()
+{
+  const int control = CaptureFd("MW_PERF_CAPTURE_CONTROL_FD");
+  const char marker = 'R';
+  if (control < 0 || send(control, &marker, 1, 0) != 1) return false;
+  pollfd descriptor{control, POLLIN, 0};
+  if (poll(&descriptor, 1, 5000) != 1) return false;
+  char grant = 0;
+  return recv(control, &grant, 1, 0) == 1 && grant == 'G';
+}
+
+bool V2Complete()
+{
+  const int control = CaptureFd("MW_PERF_CAPTURE_CONTROL_FD");
+  const char marker = 'C';
+  if (control < 0 || send(control, &marker, 1, 0) != 1) return false;
+  pollfd descriptor{control, POLLIN | POLLHUP, 0};
+  if (poll(&descriptor, 1, 5000) != 1) return false;
+  char evidence = 0;
+  const bool granted = recv(control, &evidence, 1, 0) == 1 && evidence == 'E';
+  return close(control) == 0 && granted;
+}
+
+bool V2CompleteWithImmediateZeroPacket()
+{
+  const int control = CaptureFd("MW_PERF_CAPTURE_CONTROL_FD");
+  const char marker = 'C';
+  if (control < 0 || send(control, &marker, 1, 0) != 1) return false;
+  pollfd descriptor{control, POLLIN | POLLHUP, 0};
+  if (poll(&descriptor, 1, 5000) != 1) return false;
+  char evidence = 0;
+  if (recv(control, &evidence, 1, 0) != 1 || evidence != 'E') return false;
+  if (send(control, nullptr, 0, 0) != 0) return false;
+  return close(control) == 0;
+}
+
+bool V2CompleteWithRetainedDescendant()
+{
+  const int control = CaptureFd("MW_PERF_CAPTURE_CONTROL_FD");
+  const char marker = 'C';
+  if (control < 0 || send(control, &marker, 1, 0) != 1) return false;
+  pollfd descriptor{control, POLLIN | POLLHUP, 0};
+  if (poll(&descriptor, 1, 5000) != 1) return false;
+  char evidence = 0;
+  if (recv(control, &evidence, 1, 0) != 1 || evidence != 'E') return false;
+  const pid_t child = fork();
+  if (child < 0) return false;
+  if (child == 0)
+  {
+    sleep(30);
+    close(control);
+    _exit(0);
+  }
+  return close(control) == 0;
+}
+
+bool DescendantMarker(char marker)
+{
+  const int control = CaptureFd("MW_PERF_CAPTURE_CONTROL_FD");
+  const pid_t child = fork();
+  if (control < 0 || child < 0) return false;
+  if (child == 0) {
+    const bool sent = send(control, &marker, 1, 0) == 1;
+    close(control);
+    _exit(sent ? 0 : 17);
+  }
+  int status = 0;
+  return waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 bool OnlyIntendedFds()
 {
   DIR* directory = opendir("/proc/self/fd");
@@ -116,6 +195,42 @@ int main(int argc, char** argv)
   if (mode == "happy")
   {
     return Happy();
+  }
+  if (mode == "v2" || mode == "v2-no-completion")
+  {
+    if (!V2Gate() || Happy() != 0) return 14;
+    return mode == "v2-no-completion" || V2Complete() ? 0 : 15;
+  }
+  if (mode == "v2-descendant-retains-control")
+  {
+    if (!V2Gate() || Happy() != 0) return 22;
+    return V2CompleteWithRetainedDescendant() ? 0 : 23;
+  }
+  if (mode == "v2-zero-packet-immediate-close")
+  {
+    if (!V2Gate() || Happy() != 0) return 24;
+    return V2CompleteWithImmediateZeroPacket() ? 0 : 25;
+  }
+  if (mode == "v2-descendant-ready")
+  {
+    return DescendantMarker('R') ? 0 : 18;
+  }
+  if (mode == "v2-descendant-completion")
+  {
+    if (!V2Gate() || Happy() != 0) return 19;
+    return DescendantMarker('C') ? 0 : 20;
+  }
+  if (mode == "v2-delayed-ready")
+  {
+    usleep(100000);
+    return V2Gate() ? 0 : 21;
+  }
+  if (mode == "v2-valid-trace" || mode == "v2-exec-after-g")
+  {
+    if (!V2Gate() || setenv("MW_PERF_CAPTURE_GATE_COMPLETE", "1", 1) != 0) return 16;
+    execl("/usr/bin/python3", "python3", IBMW_VALID_TRACE_FIXTURE,
+          static_cast<char*>(nullptr));
+    return 12;
   }
   if (mode == "valid-trace")
   {

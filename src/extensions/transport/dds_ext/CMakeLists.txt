@@ -297,6 +297,39 @@ if(IBMW_BUILD_TESTS)
       ENVIRONMENT_MODIFICATION
         "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:ibmw_dds_extension>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>")
 
+    if(IBMW_INSTALL)
+      set(_ibmw_managed_exact_collector_prefix
+          "${CMAKE_BINARY_DIR}/managed_exact_candidate_collector_install")
+      add_test(NAME ibmw_dds_managed_exact_candidate_install_collector
+        COMMAND ${CMAKE_COMMAND}
+          -DBUILD_DIR=${CMAKE_BINARY_DIR}
+          -DINSTALL_PREFIX=${_ibmw_managed_exact_collector_prefix}
+          -DCOMPONENT=mw_perf_collect
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/install_clean_component.cmake)
+      set_tests_properties(ibmw_dds_managed_exact_candidate_install_collector PROPERTIES
+        FIXTURES_SETUP ibmw_dds_managed_exact_candidate_installed_collector
+        TIMEOUT 60)
+
+      add_test(NAME ibmw_dds_managed_exact_candidate_installed_collector
+        COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/test_managed_exact_candidate.py
+          --candidate $<TARGET_FILE:ibmw_dds_managed_exact_candidate>
+          --extension $<TARGET_FILE:ibmw_dds_extension>
+          --fault-candidate $<TARGET_FILE:ibmw_dds_managed_exact_fault_candidate>
+          --fault-extension $<TARGET_FILE:ibmw_dds_extension_fault_test>
+          --production-query-test $<TARGET_FILE:ibmw_dds_extension_production_abi_test>
+          --source-root ${CMAKE_SOURCE_DIR}
+          --collector-prefix ${_ibmw_managed_exact_collector_prefix})
+      set_tests_properties(ibmw_dds_managed_exact_candidate_installed_collector PROPERTIES
+        FIXTURES_REQUIRED ibmw_dds_managed_exact_candidate_installed_collector
+        TIMEOUT 600
+        ENVIRONMENT
+          "CTEST_BINARY_DIRECTORY=${CMAKE_BINARY_DIR}"
+        ENVIRONMENT_MODIFICATION
+          "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:ibmw_dds_extension>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>")
+      unset(_ibmw_managed_exact_collector_prefix)
+    endif()
+
     add_test(NAME ibmw_dds_overlay_cross_dso
       COMMAND $<TARGET_FILE:ibmw_dds_managed_exact_candidate>
         --verify-overlay-dso)

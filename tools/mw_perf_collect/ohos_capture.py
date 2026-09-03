@@ -35,6 +35,28 @@ _REQUEST_KEYS = {
     "timeout_ms", "topology_generation", "topology_sha256", "trace_mode",
     "request_challenge",
 }
+_V2_PROTOCOL = "mw_perf.ohos_remote_capture.v2"
+_V2_RESULT_PROTOCOL = "mw_perf.ohos_remote_capture.result.v2"
+_V2_REQUEST_PROTOCOL = "mw_perf.ohos_remote_capture.request.v2"
+_V2_CAPABILITY = "dds.ordinary.nonplain.single_driver.sync_callback"
+_V2_WORKLOAD = "dds.ordinary.nonplain.single_driver.sync_callback"
+_V2_CONTRACT = "mw_perf.p0a_contract.v8"
+_V2_CONTRACT_SHA256 = "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575"
+_V2_ATTESTATION = "device_runtime_attestation.json"
+_V2_COMPLETION = "device_completion.json"
+_V2_REQUEST_KEYS = _REQUEST_KEYS | {
+    "protocol", "capture_role", "campaign_id", "fault", "workload_id",
+    "registration_contract", "runtime_images", "ready_timeout_ms",
+    "completion_timeout_ms",
+}
+_V2_MANIFEST_KEYS = _MANIFEST_KEYS | {
+    "capture_role", "campaign_id", "fault", "workload_id", "registration_contract",
+    "runtime_images", "ready_observed", "release_granted", "completion_observed",
+    "completion_images", "completion_attested", "evidence_released",
+    "ready_attested", "completion_eof_observed",
+    "ready_images_sha256", "completion_images_sha256",
+    "device_completion_sha256", "device_runtime_attestation_sha256",
+}
 
 
 class CaptureSemanticError(ValueError):
@@ -91,7 +113,8 @@ def _canonical_local_path(value: str | Path) -> Path:
 
 
 def _canonical_request(expected: dict[str, Any]) -> bytes:
-    if set(expected) != _REQUEST_KEYS:
+    keys = _V2_REQUEST_KEYS if expected.get("protocol") == _V2_REQUEST_PROTOCOL else _REQUEST_KEYS
+    if set(expected) != keys:
         _fail("expected request protocol fields mismatch")
     if (not isinstance(expected["argv"], list) or not expected["argv"]
             or not all(isinstance(item, str) for item in expected["argv"])
@@ -109,11 +132,70 @@ def _canonical_request(expected: dict[str, Any]) -> bytes:
             or re.fullmatch(r"[0-9a-f]{64}", expected["request_challenge"]) is None):
         _fail("expected request is malformed")
     _canonical_device_path(expected["run_root"], "expected run_root")
+    if keys == _V2_REQUEST_KEYS:
+        _validate_v2_request(expected)
     try:
         return json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
                           allow_nan=False).encode("ascii")
     except (UnicodeEncodeError, ValueError) as error:
         raise CaptureSemanticError("expected request is not canonical-agent compatible") from error
+
+
+def _schema_validate(value: Any, filename: str, label: str) -> None:
+    try:
+        from . import core
+    except ImportError:
+        import core  # type: ignore[no-redef]
+    if core._resource_integrity_errors():
+        _fail("trusted collector resources failed integrity verification")
+    try:
+        raw = (Path(__file__).parent / "schemas" / filename).read_bytes()
+        schema = _strict_json(raw, filename)
+    except OSError as error:
+        raise CaptureSemanticError(f"trusted {label} schema unavailable") from error
+    errors = core._schema_errors(value, schema)
+    if errors:
+        _fail(f"{label} schema mismatch: {errors[0]}")
+
+
+def _validate_v2_request(request: dict[str, Any]) -> None:
+    _schema_validate(request, "ohos-capture-request.schema.v2.json", "v2 request")
+    contract = request["registration_contract"]
+    images = request["runtime_images"]
+    image_keys = [(item["role"], item["name"]) for item in images]
+    if len(image_keys) != len(set(image_keys)):
+        _fail("runtime image role/name pairs must be unique")
+    if (request["capture_role"] != "exact_anchor" or request["fault"] != "none"
+            or request["capability_id"] != _V2_CAPABILITY
+            or request["workload_id"] != _V2_WORKLOAD
+            or request["trace_mode"] != "full" or request["exact_required"] is not True
+            or contract != {"id": _V2_CONTRACT, "sha256": _V2_CONTRACT_SHA256}
+            or [(item["role"], item["source"]) for item in images]
+               != [("sut", "exe"), ("extension", "maps")]):
+        _fail("unsupported v2 capture contract")
+    if images[0]["path"] != request["argv"][0]:
+        _fail("sut executable path must equal argv[0]")
+    if sum(len(item) + 1 for item in request["argv"]) > 1024 * 1024:
+        _fail("v2 argv byte limit exceeded")
+    env_names: set[str] = set()
+    env_bytes = 0
+    for literal in request["env"]:
+        name, value = literal.split("=", 1)
+        if (len(name) > 128 or name.startswith(("MW_PERF_", "IBMW_"))
+                or name in env_names or not value):
+            _fail("v2 environment allowlist is malformed")
+        env_names.add(name)
+        env_bytes += len(name) + len(value) + 1
+    if env_bytes > 65536:
+        _fail("v2 environment byte limit exceeded")
+    for item in images:
+        if "|" in item["path"]:
+            _fail("runtime image path contains the native declaration delimiter")
+        _canonical_device_path(item["path"], "runtime image path")
+        encoded = "|".join((item["role"], item["name"], item["source"],
+                            item["path"], item["sha256"]))
+        if len(encoded) > 4096:
+            _fail("runtime image declaration byte limit exceeded")
 
 
 def _octal(field: bytes, width: int, label: str) -> int:
@@ -232,10 +314,12 @@ def _read_bound_archive(path: Path, result: dict[str, Any]) -> bytes:
         os.close(fd)
 
 
-def _validate_result(result: dict[str, Any]) -> None:
+def _validate_result(result: dict[str, Any], *, v2: bool = False) -> None:
     if set(result) != _RESULT_KEYS:
         _fail("result protocol fields mismatch")
-    if (result["protocol"] != "mw_perf.ohos_remote_capture.result.v1"
+    if v2:
+        _schema_validate(result, "ohos-capture-result.schema.v2.json", "v2 result")
+    if (result["protocol"] != (_V2_RESULT_PROTOCOL if v2 else "mw_perf.ohos_remote_capture.result.v1")
             or result["snapshot_valid"] is not True
             or result["semantic_validation"] is not False
             or result["reasons"] != []
@@ -249,7 +333,8 @@ def _validate_result(result: dict[str, Any]) -> None:
         _fail("invalid successful result protocol")
 
 
-def _materialize_and_validate(files: dict[str, bytes], manifest: dict[str, Any]) -> dict[str, Any]:
+def _materialize_and_validate(files: dict[str, bytes], manifest: dict[str, Any],
+                              *, contract_version: str = "mw_perf.p0a_contract.v4") -> dict[str, Any]:
     try:
         from . import core, dds_trace
     except ImportError:
@@ -277,7 +362,12 @@ def _materialize_and_validate(files: dict[str, bytes], manifest: dict[str, Any])
             stable_files = dds_trace.scan_directory_fd(dirfd)
             if stable_files != files:
                 _fail("materialized source set mismatch")
-            contract, _ = core._trusted_p0a_contract("mw_perf.p0a_contract.v4")
+            if core._resource_integrity_errors():
+                _fail("trusted collector resources failed integrity verification")
+            contract, contract_raw = core._trusted_p0a_contract(contract_version)
+            if (contract_version == _V2_CONTRACT
+                    and hashlib.sha256(contract_raw).hexdigest() != _V2_CONTRACT_SHA256):
+                _fail("trusted v8 contract digest mismatch")
             expected_identity = {
                 "run_id": manifest["run_id"], "capability_id": manifest["capability_id"],
                 "path_id": manifest["path_id"], "deployment_mode": "managed",
@@ -291,7 +381,7 @@ def _materialize_and_validate(files: dict[str, bytes], manifest: dict[str, Any])
                 producer_start_time_ticks=manifest["child_start_time_ticks"],
                 topology_generation=manifest["topology_generation"],
                 topology_sha256=manifest["topology_sha256"],
-                registration_contract_version="mw_perf.p0a_contract.v4")
+                registration_contract_version=contract_version)
             dds_trace.confirm_directory_unchanged(dirfd, stable_files)
             return trace_result
         except (OSError, ValueError, UnicodeError, json.JSONDecodeError, KeyError) as error:
@@ -302,13 +392,88 @@ def _materialize_and_validate(files: dict[str, bytes], manifest: dict[str, Any])
             os.close(dirfd)
 
 
+def _validate_v2_bindings(files: dict[str, bytes], manifest: dict[str, Any],
+                          request: dict[str, Any], result: dict[str, Any]) -> None:
+    expected = {
+        "capture_role": request["capture_role"], "campaign_id": request["campaign_id"],
+        "fault": request["fault"], "workload_id": request["workload_id"],
+        "registration_contract": request["registration_contract"],
+        "runtime_images": request["runtime_images"],
+    }
+    if (any(manifest.get(key) != value for key, value in expected.items())
+            or manifest["ready_observed"] is not True
+            or manifest["release_granted"] is not True
+            or manifest["completion_observed"] is not True
+            or manifest["completion_attested"] is not True
+            or manifest["evidence_released"] is not True
+            or manifest["ready_attested"] is not True
+            or manifest["completion_eof_observed"] is not True):
+        _fail("v2 role, contract, image, or lifecycle binding mismatch")
+    if not {_V2_COMPLETION, _V2_ATTESTATION}.issubset(files):
+        _fail("v2 attestation members missing")
+    completion_raw, attestation_raw = files[_V2_COMPLETION], files[_V2_ATTESTATION]
+    if (manifest["device_completion_sha256"] != hashlib.sha256(completion_raw).hexdigest()
+            or manifest["device_runtime_attestation_sha256"] != hashlib.sha256(attestation_raw).hexdigest()):
+        _fail("v2 attestation hash mismatch")
+    completion = _strict_json(completion_raw, _V2_COMPLETION)
+    attestation = _strict_json(attestation_raw, _V2_ATTESTATION)
+    _schema_validate(completion, "ohos-device-completion.schema.v2.json", "device completion")
+    _schema_validate(attestation, "ohos-runtime-attestation.schema.v2.json", "runtime attestation")
+    identity = {
+        "request_challenge": request["request_challenge"], "campaign_id": request["campaign_id"],
+        "run_id": request["run_id"], "capture_role": "exact_anchor",
+        "boot_id": manifest["boot_id"], "child_pid": result["child_pid"],
+        "child_start_time_ticks": result["child_start_time_ticks"],
+    }
+    ready_images = attestation["live_images"]
+    completion_images = attestation["completion_images"]
+    ready_hash = hashlib.sha256(json.dumps(
+        ready_images, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+    completion_hash = hashlib.sha256(json.dumps(
+        completion_images, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+    if (any(completion.get(key) != value for key, value in identity.items())
+            or completion["ready"] is not True or completion["released"] is not True
+            or completion["complete"] is not True
+            or completion["completion_attested"] is not True
+            or completion["evidence_released"] is not True
+            or completion["ready_attested"] is not True
+            or completion["completion_eof_observed"] is not True
+            or completion["completion_images"] != completion_images
+            or any(attestation.get(key) != value for key, value in identity.items())
+            or attestation["prelaunch_images"] != request["runtime_images"]
+            or attestation["ready_attested"] is not True
+            or attestation["completion_attested"] is not True
+            or attestation["evidence_released"] is not True
+            or attestation["completion_eof_observed"] is not True
+            or len(ready_images) != 2 or completion_images != ready_images
+            or manifest["completion_images"] != completion_images
+            or any(value != ready_hash for value in (
+                completion["ready_images_sha256"], attestation["ready_images_sha256"],
+                manifest["ready_images_sha256"]))
+            or any(value != completion_hash for value in (
+                completion["completion_images_sha256"], attestation["completion_images_sha256"],
+                manifest["completion_images_sha256"]))):
+        _fail("v2 completion or runtime identity replay mismatch")
+    for declared, observed in zip(request["runtime_images"], ready_images):
+        if (any(observed.get(key) != declared[key] for key in ("role", "name", "source"))
+                or observed.get("expected_path") != declared["path"]
+                or observed.get("expected_sha256") != declared["sha256"]
+                or observed.get("observed_sha256") != declared["sha256"]
+                or not _integer(observed.get("observed_device_major"))
+                or not _integer(observed.get("observed_device_minor"))
+                or not _integer(observed.get("observed_inode"), minimum=1)
+                or observed["visible"] is not True or observed["matched"] is not True):
+            _fail("v2 live runtime image mismatch")
+
+
 def _validate_capture_semantics(
     archive_path: str | Path, result: dict[str, Any], expected_request: dict[str, Any]
 ) -> dict[str, Any]:
     path = _canonical_local_path(archive_path)
     if not isinstance(result, dict):
         _fail("result object required")
-    _validate_result(result)
+    v2 = expected_request.get("protocol") == _V2_REQUEST_PROTOCOL
+    _validate_result(result, v2=v2)
     request_bytes = _canonical_request(expected_request)
     challenge = expected_request["request_challenge"]
     basename = f"capture-{challenge}.tar"
@@ -322,8 +487,10 @@ def _validate_capture_semantics(
         _fail("archive path is outside the expected run root")
     entries = _parse_ustar(_read_bound_archive(path, result))
     manifest = _strict_json(entries[0][1], _MANIFEST)
-    if set(manifest) != _MANIFEST_KEYS:
+    if set(manifest) != (_V2_MANIFEST_KEYS if v2 else _MANIFEST_KEYS):
         _fail("manifest protocol fields mismatch")
+    if v2:
+        _schema_validate(manifest, "ohos-capture-manifest.schema.v2.json", "v2 manifest")
     expected_fields = {
         "run_id": expected_request["run_id"],
         "capability_id": expected_request["capability_id"],
@@ -335,7 +502,7 @@ def _validate_capture_semantics(
         "child_pid": result["child_pid"],
         "child_start_time_ticks": result["child_start_time_ticks"],
     }
-    if (manifest["protocol"] != "mw_perf.ohos_remote_capture.v1"
+    if (manifest["protocol"] != (_V2_PROTOCOL if v2 else "mw_perf.ohos_remote_capture.v1")
             or any(manifest.get(key) != value for key, value in expected_fields.items())
             or manifest["request_sha256"] != hashlib.sha256(request_bytes).hexdigest()
             or not isinstance(manifest["agent_executable_sha256"], str)
@@ -352,6 +519,8 @@ def _validate_capture_semantics(
             or manifest["snapshot_valid"] is not True or manifest["reasons"] != []):
         _fail("manifest request, lifecycle, or protocol mismatch")
     files = dict(entries[1:])
+    if v2:
+        _validate_v2_bindings(files, manifest, expected_request, result)
     declared = manifest["source_files"]
     if not isinstance(declared, list) or len(declared) != len(files):
         _fail("source file inventory mismatch")
@@ -377,7 +546,10 @@ def _validate_capture_semantics(
     if (not isinstance(manifest["archive_tree_sha256"], str)
             or manifest["archive_tree_sha256"] != tree.hexdigest()):
         _fail("archive tree hash mismatch")
-    trace_result = _materialize_and_validate(files, manifest)
+    trace_files = files if not v2 else {name: content for name, content in files.items()
+                                        if name not in {_V2_COMPLETION, _V2_ATTESTATION}}
+    trace_result = _materialize_and_validate(
+        trace_files, manifest, contract_version=_V2_CONTRACT if v2 else "mw_perf.p0a_contract.v4")
     return {
         "semantic_validation": True,
         "imported_semantics": trace_result,
