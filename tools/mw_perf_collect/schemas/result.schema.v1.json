@@ -138,6 +138,18 @@
     "runtime_changed": {"type": "boolean"},
     "business_unchanged": {"type": "boolean"},
     "candidate_only": {"type": "boolean"},
+    "formal_p0a": {"type": "boolean"},
+    "artifact_kind": {"type": "string"},
+    "remote_timing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "start_time", "end_time", "reason"],
+      "properties": {
+        "schema": {"const": "mw_perf.ohos_remote_timing.v1"},
+        "start_time": {"const": "unavailable"},
+        "end_time": {"const": "unavailable"},
+        "reason": {"const": "ohos_remote_capture_v2_did_not_export_wall_clock_boundaries"}
+      }
+    },
     "dds_comm_trace": {"type": "object"},
     "start_time": {"type": "number"},
     "end_time": {"type": "number"},
@@ -181,8 +193,13 @@
         "required": ["provenance"]
       },
       "then": {"required": ["runtime_images"]}
+    },
+    {
+      "if": {"properties": {"artifact_kind": {"const": "ohos_remote_p0a_candidate"}}, "required": ["artifact_kind"]},
+      "then": {"required": ["remote_timing", "formal_p0a"], "properties": {"formal_p0a": {"const": false}}},
+      "else": {"required": ["start_time", "end_time"]}
     }
   ],
-  "required": ["schema_version", "tool_version", "run_id", "adapter", "mode", "run_status", "scenario_contract_hash", "metric_availability", "measurement_kind", "start_time", "end_time", "pid", "pid_start_time_ticks", "states", "sample_count", "sample_artifacts", "metrics_valid", "adapter_readiness"],
+  "required": ["schema_version", "tool_version", "run_id", "adapter", "mode", "run_status", "scenario_contract_hash", "metric_availability", "measurement_kind", "pid", "pid_start_time_ticks", "states", "sample_count", "sample_artifacts", "metrics_valid", "adapter_readiness"],
   "additionalProperties": true
 }

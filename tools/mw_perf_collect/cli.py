@@ -6,6 +6,10 @@ from .json_strict import loads as strict_json_loads
 from .metric_qualification import build_metric_qualification, validate_metric_qualification
 from .ohos_capture import CaptureSemanticError, validate_capture_semantics
 from .ohos_remote_p0a import OhosP0aMaterializationError, materialize_ohos_p0a_candidate
+from .ohos_registration import (BUILD_FORMULA, OhosRegistrationError,
+                                build_identity_sha256, canonical_bytes,
+                                read_operator_approval, read_registration,
+                                validate_registration)
 
 _METRIC_QUALIFICATION_FILES = frozenset({
     "declaration.json", "latency_samples.jsonl", "metric_qualification.json",
@@ -54,7 +58,8 @@ def _read_strict_regular_json(path_value: str, label: str):
         os.close(fd)
     if not isinstance(value, dict):
         raise CaptureSemanticError(f"{label} JSON object required")
-    return value, hashlib.sha256(data).hexdigest()
+    raw = bytes(data)
+    return value, hashlib.sha256(raw).hexdigest(), raw
 
 
 def _canonical_json_line(value):
@@ -146,8 +151,8 @@ def _ohos_import_document(archive, result, request, result_sha256, request_sha25
 
 def _run_ohos_import(args):
     try:
-        result, result_sha256 = _read_strict_regular_json(args.result, "result")
-        request, request_sha256 = _read_strict_regular_json(args.request, "request")
+        result, result_sha256, _result_raw = _read_strict_regular_json(args.result, "result")
+        request, request_sha256, _request_raw = _read_strict_regular_json(args.request, "request")
         document = _ohos_import_document(
             args.archive, result, request, result_sha256, request_sha256)
         data = _canonical_json_line(document)
@@ -174,11 +179,14 @@ def _run_ohos_import(args):
 
 def _run_ohos_p0a_materialize(args):
     try:
-        result, result_sha256 = _read_strict_regular_json(args.result, "result")
-        request, request_sha256 = _read_strict_regular_json(args.request, "request")
+        result, _result_sha256, result_raw = _read_strict_regular_json(args.result, "result")
+        request, _request_sha256, request_raw = _read_strict_regular_json(args.request, "request")
         validation = materialize_ohos_p0a_candidate(
             args.archive, result, request, args.destination,
-            result_sha256=result_sha256, request_sha256=request_sha256)
+            result_raw=result_raw, request_raw=request_raw,
+            registration_path=args.registration,
+            registration_sha256=args.registration_sha256,
+            approval_path=args.approval, approval_sha256=args.approval_sha256)
         print(_canonical_json_line({
             "schema": "mw_perf.ohos_remote_p0a_materialization.v1",
             "materialized": True, "formal_p0a": False,
@@ -194,6 +202,45 @@ def _run_ohos_p0a_materialize(args):
                            else "OHOS_P0A_MATERIALIZATION_INVALID"),
             "error": str(error)[:256] or "candidate materialization failed",
         }).decode("ascii"), end="")
+        return EXIT_INVALID
+
+
+def _run_ohos_registration_create(args):
+    try:
+        value, _digest, _raw = _read_strict_regular_json(args.input, "registration input")
+        value = dict(value)
+        approval, approval_raw = read_operator_approval(args.approval, args.approval_sha256)
+        value["approval_artifact"] = {"schema": approval["schema"],
+                                      "sha256": hashlib.sha256(approval_raw).hexdigest()}
+        value["build_identity"] = {"formula": BUILD_FORMULA, "sha256": "0" * 64}
+        value["build_identity"]["sha256"] = build_identity_sha256(value)
+        validate_registration(value, approval=approval, approval_raw=approval_raw,
+                              expected_approval_sha256=args.approval_sha256)
+        raw = canonical_bytes(value)
+        _publish_no_replace(args.output, raw)
+        print(_canonical_json_line({"schema": "mw_perf.ohos_p0a_registration_result.v1",
+            "valid": True, "registration_id": value["registration_id"],
+            "sha256": hashlib.sha256(raw).hexdigest(), "output": args.output}).decode("ascii"), end="")
+        return 0
+    except (OhosRegistrationError, CaptureSemanticError, OSError, TypeError, KeyError,
+            ValueError) as error:
+        print(_canonical_json_line({"schema": "mw_perf.ohos_p0a_registration_result.v1",
+            "valid": False, "error": str(error)[:256]}).decode("ascii"), end="")
+        return EXIT_INVALID
+
+
+def _run_ohos_registration_validate(args):
+    try:
+        value, raw, _approval, _approval_raw = read_registration(
+            args.registration, args.sha256, approval_path=args.approval,
+            expected_approval_sha256=args.approval_sha256)
+        print(_canonical_json_line({"schema": "mw_perf.ohos_p0a_registration_result.v1",
+            "valid": True, "registration_id": value["registration_id"],
+            "sha256": hashlib.sha256(raw).hexdigest()}).decode("ascii"), end="")
+        return 0
+    except (OhosRegistrationError, OSError, TypeError, ValueError) as error:
+        print(_canonical_json_line({"schema": "mw_perf.ohos_p0a_registration_result.v1",
+            "valid": False, "error": str(error)[:256]}).decode("ascii"), end="")
         return EXIT_INVALID
 
 
@@ -232,7 +279,17 @@ def main(argv=None):
     op.add_argument("--archive", required=True)
     op.add_argument("--result", required=True)
     op.add_argument("--request", required=True)
+    op.add_argument("--registration", required=True)
+    op.add_argument("--registration-sha256", required=True)
+    op.add_argument("--approval", required=True)
+    op.add_argument("--approval-sha256", required=True)
     op.add_argument("--destination", required=True)
+    orc=s.add_parser("create-ohos-p0a-registration")
+    orc.add_argument("--input", required=True); orc.add_argument("--output", required=True)
+    orc.add_argument("--approval", required=True); orc.add_argument("--approval-sha256", required=True)
+    orv=s.add_parser("validate-ohos-p0a-registration")
+    orv.add_argument("--registration", required=True); orv.add_argument("--sha256", required=True)
+    orv.add_argument("--approval", required=True); orv.add_argument("--approval-sha256", required=True)
     for parser in (qb, qv):
         parser.add_argument("--campaign", required=True)
         parser.add_argument("--object-store", required=True)
@@ -247,6 +304,10 @@ def main(argv=None):
         return _run_ohos_import(a)
     if a.action == "materialize-ohos-p0a-candidate":
         return _run_ohos_p0a_materialize(a)
+    if a.action == "create-ohos-p0a-registration":
+        return _run_ohos_registration_create(a)
+    if a.action == "validate-ohos-p0a-registration":
+        return _run_ohos_registration_validate(a)
     if a.action=="doctor":
         try:
             result=adapter_doctor(a.adapter,load_config(a.config)); result["tool_version"]=VERSION

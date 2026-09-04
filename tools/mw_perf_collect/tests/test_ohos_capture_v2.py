@@ -26,9 +26,13 @@ def _request():
         "workload_id": "dds.ordinary.nonplain.single_driver.sync_callback",
         "registration_contract": {"id": "mw_perf.p0a_contract.v8",
                                   "sha256": core._RESOURCE_SHA256["contracts/p0a-evidence-contract.v8.json"]},
+        "trust_registration": {"id": "registration-1", "sha256": "9" * 64},
         "runtime_images": [
             {"role": "sut", "name": "candidate", "source": "exe", "path": "/system/bin/candidate", "sha256": H},
             {"role": "extension", "name": "dds-ext", "source": "maps", "path": "/system/lib64/libdds_ext.so", "sha256": "b" * 64},
+            {"role": "fastdds", "name": "fastdds", "source": "maps", "path": "/system/lib64/libfastdds.so", "sha256": "3" * 64},
+            {"role": "fastcdr", "name": "fastcdr", "source": "maps", "path": "/system/lib64/libfastcdr.so", "sha256": "4" * 64},
+            {"role": "cpp_runtime", "name": "libcxx", "source": "maps", "path": "/system/lib64/libc++.so", "sha256": "5" * 64},
         ],
         "ready_timeout_ms": 1000, "completion_timeout_ms": 1000,
         "argv": ["/system/bin/candidate"], "capability_id": "dds.ordinary.nonplain.single_driver.sync_callback",
@@ -87,6 +91,7 @@ def _fixture(tmp_path, mutate=None):
         "snapshot_valid": True, "reasons": [], "capture_role": "exact_anchor",
         "campaign_id": "campaign-1", "fault": "none", "workload_id": request["workload_id"],
         "registration_contract": request["registration_contract"], "runtime_images": request["runtime_images"],
+        "trust_registration": request["trust_registration"],
         "completion_images": live, "completion_attested": True, "evidence_released": True,
         "ready_attested": True, "completion_eof_observed": True,
         "ready_images_sha256": phase_hash, "completion_images_sha256": phase_hash,
@@ -110,7 +115,8 @@ def _fixture(tmp_path, mutate=None):
     result = {"protocol": "mw_perf.ohos_remote_capture.result.v2", "snapshot_valid": True,
               "semantic_validation": False, "archive_path": f"/data/capture/{archive.name}",
               "request_challenge": request["request_challenge"], "archive_sha256": hashlib.sha256(raw).hexdigest(),
-              "archive_size": len(raw), "child_pid": 42, "child_start_time_ticks": 99, "reasons": []}
+              "archive_size": len(raw), "child_pid": 42, "child_start_time_ticks": 99,
+              "reasons": [], "trust_registration": request["trust_registration"]}
     return archive, result, request
 
 
@@ -173,7 +179,9 @@ def test_v2_closed_schemas_and_registry():
     root = Path(ohos_capture.__file__).parent
     for name in ("ohos-capture-request.schema.v2.json", "ohos-capture-result.schema.v2.json",
                  "ohos-capture-manifest.schema.v2.json", "ohos-device-completion.schema.v2.json",
-                 "ohos-runtime-attestation.schema.v2.json"):
+                 "ohos-runtime-attestation.schema.v2.json",
+                 "ohos-p0a-operator-approval.schema.v1.json",
+                 "ohos-p0a-registration.schema.v1.json"):
         schema = json.loads((root / "schemas" / name).read_bytes())
         assert schema["additionalProperties"] is False
         assert f"schemas/{name}" in core._RESOURCE_SHA256

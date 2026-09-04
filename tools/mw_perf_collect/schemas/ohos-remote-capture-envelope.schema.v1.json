@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.p0a.ohos_remote_capture_envelope.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "registration_contract", "trust_classification", "trust_registration", "operator_approval", "request", "result", "archive", "device_capture_manifest", "runtime_attestation", "device_completion", "finalized"],
+  "properties": {
+    "schema": {"const": "mw_perf.p0a.ohos_remote_capture_envelope.v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+    "path_id": {"type": "string", "minLength": 1},
+    "deployment_mode": {"const": "managed"},
+    "registration_contract": {"type": "object", "additionalProperties": false, "required": ["version", "sha256"], "properties": {"version": {"const": "mw_perf.p0a_ohos_remote_contract.v1"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "trust_classification": {"$ref": "#/$defs/trustClassification"},
+    "trust_registration": {"type": "object", "additionalProperties": false, "required": ["relative_path", "id", "size", "sha256"], "properties": {"relative_path": {"const": "registration/ohos_capture_registration.json"}, "id": {"type": "string", "minLength": 1}, "size": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "operator_approval": {"type": "object", "additionalProperties": false, "required": ["relative_path", "schema", "size", "sha256"], "properties": {"relative_path": {"const": "registration/operator_approval.json"}, "schema": {"const": "mw_perf.ohos_p0a_operator_approval.v1"}, "size": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "request": {"$ref": "#/$defs/raw"},
+    "result": {"$ref": "#/$defs/raw"},
+    "archive": {"$ref": "#/$defs/raw"},
+    "device_capture_manifest": {"$ref": "#/$defs/member"},
+    "runtime_attestation": {"$ref": "#/$defs/member"},
+    "device_completion": {"$ref": "#/$defs/member"},
+    "finalized": {"const": true}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "raw": {"type": "object", "additionalProperties": false, "required": ["relative_path", "size", "sha256"], "properties": {"relative_path": {"type": "string", "pattern": "^raw/remote_capture/[^/]+$"}, "size": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "member": {"type": "object", "additionalProperties": false, "required": ["archive_member", "size", "sha256"], "properties": {"archive_member": {"type": "string", "minLength": 1}, "size": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "trustClassification": {"type": "object", "additionalProperties": false, "required": ["preregistered_declarations", "runtime_attested_facts", "self_contained_authority", "external_authority"], "properties": {"preregistered_declarations": {"const": ["device.serial", "device.os_name", "device.os_version", "device.build_id", "device.abi", "device.os_image_sha256", "toolchain", "source", "approval_artifact"]}, "runtime_attested_facts": {"const": ["boot_id", "agent_executable_sha256", "five_live_image_identities"]}, "self_contained_authority": {"const": "retained_consistency_only"}, "external_authority": {"const": "requires_separately_supplied_expected_roots"}}}
+  }
+}

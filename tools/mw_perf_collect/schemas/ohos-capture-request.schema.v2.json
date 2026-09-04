@@ -1,35 +1,16 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ibmw.example/schemas/ohos-capture-request.schema.v2.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["protocol", "capture_role", "campaign_id", "fault", "workload_id", "registration_contract", "runtime_images", "ready_timeout_ms", "completion_timeout_ms", "argv", "capability_id", "env", "exact_required", "path_id", "run_id", "run_root", "timeout_ms", "topology_generation", "topology_sha256", "trace_mode", "request_challenge"],
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://ibmw.example/schemas/ohos-capture-request.schema.v2.json", "type": "object", "additionalProperties": false,
+  "required": ["protocol", "capture_role", "campaign_id", "fault", "workload_id", "registration_contract", "trust_registration", "runtime_images", "ready_timeout_ms", "completion_timeout_ms", "argv", "capability_id", "env", "exact_required", "path_id", "run_id", "run_root", "timeout_ms", "topology_generation", "topology_sha256", "trace_mode", "request_challenge"],
   "properties": {
-    "protocol": {"const": "mw_perf.ohos_remote_capture.request.v2"},
-    "capture_role": {"const": "exact_anchor"},
-    "campaign_id": {"$ref": "#/$defs/identifier"},
-    "fault": {"const": "none"},
-    "workload_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
-    "registration_contract": {"$ref": "#/$defs/contract"},
-    "runtime_images": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/image"}},
-    "ready_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 300000},
-    "completion_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 300000},
-    "argv": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"$ref": "#/$defs/asciiArgument"}},
-    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
-    "env": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 3, "maxLength": 4096, "pattern": "^[A-Za-z_][A-Za-z0-9_]*=[ -~]+$"}},
-    "exact_required": {"const": true},
-    "path_id": {"$ref": "#/$defs/identifier"}, "run_id": {"$ref": "#/$defs/identifier"},
-    "run_root": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/[ -~]*$"}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 86400000},
-    "topology_generation": {"$ref": "#/$defs/identifier"}, "topology_sha256": {"$ref": "#/$defs/hash"},
-    "trace_mode": {"const": "full"}, "request_challenge": {"$ref": "#/$defs/hash"}
+    "protocol": {"const": "mw_perf.ohos_remote_capture.request.v2"}, "capture_role": {"const": "exact_anchor"}, "campaign_id": {"$ref": "#/$defs/id"}, "fault": {"const": "none"}, "workload_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+    "registration_contract": {"$ref": "#/$defs/contract"}, "trust_registration": {"$ref": "#/$defs/trust"}, "runtime_images": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/image"}},
+    "ready_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 300000}, "completion_timeout_ms": {"type": "integer", "minimum": 1, "maximum": 300000}, "argv": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[ -~]+$"}},
+    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"}, "env": {"type": "array", "maxItems": 128, "items": {"type": "string", "minLength": 3, "maxLength": 4096, "pattern": "^[A-Za-z_][A-Za-z0-9_]*=[ -~]+$"}}, "exact_required": {"const": true},
+    "path_id": {"$ref": "#/$defs/id"}, "run_id": {"$ref": "#/$defs/id"}, "run_root": {"$ref": "#/$defs/path"}, "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 86400000}, "topology_generation": {"$ref": "#/$defs/id"}, "topology_sha256": {"$ref": "#/$defs/hash"}, "trace_mode": {"const": "full"}, "request_challenge": {"$ref": "#/$defs/hash"}
   },
   "$defs": {
-    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-    "identifier": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"},
-    "asciiArgument": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[ -~]+$"},
-    "contract": {"type": "object", "additionalProperties": false, "required": ["id", "sha256"], "properties": {"id": {"const": "mw_perf.p0a_contract.v8"}, "sha256": {"const": "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575"}}},
-    "image": {"oneOf": [{"$ref": "#/$defs/sutImage"}, {"$ref": "#/$defs/extensionImage"}]},
-    "sutImage": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "path", "sha256"], "properties": {"role": {"const": "sut"}, "name": {"$ref": "#/$defs/identifier"}, "source": {"const": "exe"}, "path": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^(?!.*\\|)/[ -~]*$"}, "sha256": {"$ref": "#/$defs/hash"}}},
-    "extensionImage": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "path", "sha256"], "properties": {"role": {"const": "extension"}, "name": {"$ref": "#/$defs/identifier"}, "source": {"const": "maps"}, "path": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^(?!.*\\|)/[ -~]*$"}, "sha256": {"$ref": "#/$defs/hash"}}}
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"}, "path": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/[ -~]*$"},
+    "contract": {"type": "object", "additionalProperties": false, "required": ["id", "sha256"], "properties": {"id": {"const": "mw_perf.p0a_contract.v8"}, "sha256": {"const": "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575"}}}, "trust": {"type": "object", "additionalProperties": false, "required": ["id", "sha256"], "properties": {"id": {"$ref": "#/$defs/id"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "image": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "path", "sha256"], "properties": {"role": {"enum": ["sut", "extension", "fastdds", "fastcdr", "cpp_runtime"]}, "name": {"$ref": "#/$defs/id"}, "source": {"enum": ["exe", "maps"]}, "path": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^(?!.*\\|)/[ -~]*$"}, "sha256": {"$ref": "#/$defs/hash"}}}
   }
 }

@@ -51,6 +51,8 @@ constexpr std::string_view kV2ContractSha = "c8f76997156ecd6e608f0d5d4a0d756d3e5
 using Deadline = std::chrono::steady_clock::time_point;
 volatile sig_atomic_t g_forwarded_signal = 0;
 bool g_protocol_v2 = false;
+std::string g_trust_registration_id;
+std::string g_trust_registration_sha;
 
 bool Expired(Deadline deadline)
 {
@@ -343,6 +345,7 @@ void Reason(std::vector<std::string>*r, const std::string&s)
 struct RuntimeImage {std::string role, name, source, path, sha; int fd = -1; struct stat identity {};};
 struct Request {std::string root, run, cap, path, gen, topo, mode, challenge;
                 std::string protocol, role, campaign, fault, contract, contract_sha, workload;
+                std::string trust_registration, trust_registration_sha;
                 bool exact = false;
                 uint64_t timeout = 0, ready_timeout = 30000, completion_timeout = 30000;
                 std::vector<std::string> env, argv;
@@ -374,7 +377,8 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
   }
   const std::set<std::string> v2_only_options = {
     "--role", "--campaign-id", "--fault", "--contract-id", "--contract-sha256",
-    "--workload-id", "--ready-timeout-ms", "--completion-timeout-ms", "--runtime-image"};
+    "--workload-id", "--ready-timeout-ms", "--completion-timeout-ms", "--runtime-image",
+    "--trust-registration-id", "--trust-registration-sha256"};
   size_t bytes = 0;
   for (int i = 1; i < argc; ++i)
   {
@@ -492,6 +496,8 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
     else if (a == "--fault") r->fault = v;
     else if (a == "--contract-id") r->contract = v;
     else if (a == "--contract-sha256") r->contract_sha = v;
+    else if (a == "--trust-registration-id") r->trust_registration = v;
+    else if (a == "--trust-registration-sha256") r->trust_registration_sha = v;
     else if (a == "--workload-id") r->workload = v;
     else if (a == "--ready-timeout-ms") {
       if (!ParseU64(v, &r->ready_timeout) || r->ready_timeout < 1 || r->ready_timeout > 300000) { *why = "invalid_ready_timeout"; return false; }
@@ -560,7 +566,8 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
     if (r->role != kV2Role || !SafeId(r->campaign) || r->fault != "none" ||
         r->cap != kV2Capability || r->contract != kV2Contract ||
         r->contract_sha != kV2ContractSha || r->workload != kV2Workload ||
-        r->images.size() != 2 || !r->exact || r->mode != "full") {
+        !SafeId(r->trust_registration) || !Hex64(r->trust_registration_sha) ||
+        r->images.size() != 5 || !r->exact || r->mode != "full") {
       *why = r->role != kV2Role ? "unsupported_role" :
         (r->fault != "none" ? "unsupported_fault_role" : "v2_contract_binding_mismatch");
       return false;
@@ -569,11 +576,18 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
     for (const auto& image : r->images) {
       if (!image_keys.insert(image.role + "|" + image.name).second) { *why = "runtime_image_collision"; return false; }
     }
-    if (r->images[0].role != "sut" || r->images[0].source != "exe" ||
-        r->images[1].role != "extension" || r->images[1].source != "maps") {
+    const std::array<std::pair<std::string_view, std::string_view>, 5> layout{{
+      {"sut", "exe"}, {"extension", "maps"}, {"fastdds", "maps"},
+      {"fastcdr", "maps"}, {"cpp_runtime", "maps"}}};
+    if (!std::equal(r->images.begin(), r->images.end(), layout.begin(),
+                    [](const RuntimeImage& image, const auto& expected) {
+                      return image.role == expected.first && image.source == expected.second;
+                    })) {
       *why = "runtime_image_order_mismatch";
       return false;
     }
+    g_trust_registration_id = r->trust_registration;
+    g_trust_registration_sha = r->trust_registration_sha;
     if (r->images[0].path != r->argv[0]) {
       *why = "runtime_executable_path_mismatch";
       return false;
@@ -646,6 +660,8 @@ std::string CanonicalRequest(const Request&r)
   }
   o << ",\"timeout_ms\":" << r.timeout << ",\"topology_generation\":" << J(r.gen)
     << ",\"topology_sha256\":" << J(r.topo) << ",\"trace_mode\":" << J(r.mode);
+  if (g_protocol_v2) o << ",\"trust_registration\":{\"id\":" << J(r.trust_registration)
+                        << ",\"sha256\":" << J(r.trust_registration_sha) << '}';
   if (g_protocol_v2) o << ",\"workload_id\":" << J(r.workload);
   o << '}';
   return o.str();
@@ -1541,7 +1557,10 @@ void Result(bool valid, const std::string&challenge, const std::string&archive,
     (valid?"true":"false") << ",\"semantic_validation\":false,\"archive_path\":" << J(archive) <<
     ",\"archive_sha256\":" << J(sha) << ",\"archive_size\":" << size << ",\"child_pid\":" << pid <<
     ",\"child_start_time_ticks\":" << ticks << ",\"request_challenge\":" << J(challenge);
-  o << ",\"reasons\":" << ReasonsJson(reasons) << '}';
+  o << ",\"reasons\":" << ReasonsJson(reasons);
+  if (g_protocol_v2) o << ",\"trust_registration\":{\"id\":" << J(g_trust_registration_id)
+                        << ",\"sha256\":" << J(g_trust_registration_sha) << '}';
+  o << '}';
   std::string s = o.str();
   if (s.size() > kMaxResult)
   {
@@ -2148,6 +2167,8 @@ int main(int argc, char**argv)
     m << ",\"campaign_id\":" << J(r.campaign) << ",\"capture_role\":" << J(r.role)
       << ",\"fault\":" << J(r.fault) << ",\"workload_id\":" << J(r.workload)
       << ",\"registration_contract\":{\"id\":" << J(r.contract) << ",\"sha256\":" << J(r.contract_sha)
+      << "},\"trust_registration\":{\"id\":" << J(r.trust_registration)
+      << ",\"sha256\":" << J(r.trust_registration_sha)
       << "},\"runtime_images\":" << RuntimeImagesJson(r.images)
       << ",\"completion_attested\":" << (completion_attested ? "true" : "false")
       << ",\"completion_eof_observed\":" << (completion_eof ? "true" : "false")

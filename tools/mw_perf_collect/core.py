@@ -25,6 +25,7 @@ _RESOURCE_SHA256 = {
     "contracts/p0a-evidence-contract.v7.json": "eb3bc93735bfe6adb6bfbffa67bfd4b6d3cf51658c7bc76a1d0b64fc41e9cc29",
     "contracts/p0a-evidence-contract.v8.json": "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575",
     "contracts/p0a-evidence-contract.v9.json": "4ecef870afdc652853f40bc3d2716d66a6a3304849741a7cb03eef7033fbce11",
+    "contracts/p0a-ohos-remote-contract.v1.json": "618c7e8e17473f19c41871a7e45d58894ab76d9ff28c1df0a7543d1cb78eb427",
     "schemas/comparison-plan.schema.v1.json": "b3c3fe804c3c7ef9897837abc4f756d9c79301eaf293ef00598799ffa7ffeb69",
     "schemas/config.schema.v1.json": "ec6299a21ea2a402d10ae2b2249997a8960d27b1511a07fb5312c1a685ad3bcc",
     "schemas/evidence-campaign-seal.schema.v1.json": "ae0e9c184c79dad0e3d7d931da94f5ef56a131ca1844d45776cbd814040daba4",
@@ -41,7 +42,7 @@ _RESOURCE_SHA256 = {
     "schemas/metric-qualification-seal.schema.v1.json": "cf6a9c6cd4b4cf0b693dd19a708c0411a3bbb04d4ec5b22fb807b2d98d924678",
     "schemas/metric-qualification.schema.v1.json": "f0309ec5aa2a5495516459f4aab14de5618573805778eda9523864a40f77480a",
     "schemas/p0a-evidence-manifest.schema.v1.json": "66cd0f6aba140056cad8717c9b02268dddf56f4433c16140dd231cd22b2317d6",
-    "schemas/result.schema.v1.json": "15eaf0f30c70f9f9d7704a9a38561639b5d37a6065e57154c91c0ff9906ceedb",
+    "schemas/result.schema.v1.json": "4895699463484942340973dc6bf370b9c6a1c03dda3848b72fdfb4cc0156d16f",
     "schemas/rollback-build-plan.schema.v1.json": "feb47456d8513d385912b077f9285c4582bf7f4d1e2fc1c23883e8b999558e35",
     "schemas/rollback-evidence-manifest.schema.v1.json": "0bc71a2ef9f222f5a224ed3f60d73f64b02f077eb09e996242654d77fd6a4c3d",
     "schemas/rollback-formal.schema.v2.json": "df576ed0d139de424747a9fa6c821d195b6a4d46d83359aeee109eabbd59ef24",
@@ -56,11 +57,17 @@ _RESOURCE_SHA256 = {
     "schemas/trace-quality.schema.v1.json": "741835b8644e715eabb187ddfcaf4517f2e13df9468daa4d008da1fb493641ed",
     "schemas/trusted-external-roots.schema.v1.json": "ebd7711c0c8fcb537a62e90e1d53bd84db10b0cfc3faeeb7bac7dfc1017067a1",
     "schemas/validation.schema.v1.json": "2a859e48c5a6e89b26d62b9ff2019fcab6ec120450cdb0801b8380823099e95d",
-    "schemas/ohos-capture-request.schema.v2.json": "6c02af4e2e564362666769cf27ad0a15aab82cc2279f7b0f3d11812070e81dff",
-    "schemas/ohos-device-completion.schema.v2.json": "27ad13390bd03e1c6f44cd2503a1be1dac05a8eeeb3aaf8405b3c924f3f89094",
-    "schemas/ohos-runtime-attestation.schema.v2.json": "a7587699b2d33fce37a25ecebae3fee2e7273ed86176286f9a9fde7b81293641",
-    "schemas/ohos-capture-result.schema.v2.json": "52ed9e989490745bd382dfd2ab8bd837c18081ba9112c82ce482ea4855bd4d7a",
-    "schemas/ohos-capture-manifest.schema.v2.json": "17dd36451bbc683b25320e0a4ccc35a97c1202ac96674f0012145d123fad563c",
+    "schemas/ohos-capture-request.schema.v2.json": "42ea56e132e0e1027d7d6c6bb8cc4fe9b9c3cfad3843b53e0999cc15d9875850",
+    "schemas/ohos-device-completion.schema.v2.json": "38ad4f8eb4e60bfdab9364f1ef9f2e1aaa7ca428ad3a5eba870e7b17edb79dfc",
+    "schemas/ohos-runtime-attestation.schema.v2.json": "9a325494bb823a557afb48a89571913613e8b61d26c65b2f2b58fad379dadfc6",
+    "schemas/ohos-capture-result.schema.v2.json": "763cc10fb8155732caa8c1f0fc75e281dc327d83a3163450562f5c119ae4143a",
+    "schemas/ohos-capture-manifest.schema.v2.json": "568bc6f3fcc163cfc730b8fd3f5175ca2743ac46d0117e39bd9e7cb9cd08b91d",
+    "schemas/ohos-remote-capture-envelope.schema.v1.json": "7acb2c26dda75e254f5cb7c12f5b4e6e6e3488e1ad678a8b8c585c896c5911f8",
+    "schemas/ohos-p0a-operator-approval.schema.v1.json": "553390734c6b3a6748f620e018ab79c7c8c0fc3cb47e5df3dce16034d6a9751d",
+    "schemas/ohos-p0a-registration.schema.v1.json": "e5ab174c16075a1346e29197bd3d5a5cc910fc4e9ce2edb1ba4ce45e6c7d8c0e",
+    "schemas/p0a-ohos-remote-resolution.schema.v1.json": "5ee8f187e0dcc4ad56dc1cdb22fa5ae90b0f14890fc588056ff04f53b7e5bb60",
+    "schemas/p0a-ohos-remote-resolution-declarations.schema.v1.json": "a4d4040bc7c04b01bda14945e8fea5f09b7499c0e4e647063bfb0cc986513f75",
+    "schemas/trace-quality-ohos-remote.schema.v1.json": "f0f06bb2d53da119113a1a52ee91d724899151641393ad82f7f7ecf33c231c1a",
 }
 
 def _resource_integrity_errors() -> list[str]:
@@ -767,7 +774,7 @@ def _valid_runtime_images(value: Any, manifest: dict[str, Any], run_dir: Path) -
             if item.get("sha256") != effective_sha: return False
     return True
 
-_REQUIRED_MANIFEST_FIELDS = ("schema_version", "tool_version", "run_id", "adapter", "mode", "run_status", "scenario_contract_hash", "metric_availability", "measurement_kind", "start_time", "end_time", "pid", "pid_start_time_ticks", "states", "sample_count", "sample_artifacts", "metrics_valid", "adapter_readiness")
+_REQUIRED_MANIFEST_FIELDS = ("schema_version", "tool_version", "run_id", "adapter", "mode", "run_status", "scenario_contract_hash", "metric_availability", "measurement_kind", "pid", "pid_start_time_ticks", "states", "sample_count", "sample_artifacts", "metrics_valid", "adapter_readiness")
 _SAMPLE_ARTIFACT_PATHS = {
     "process": "raw/process.jsonl",
     "network": "raw/network.jsonl",
@@ -832,6 +839,35 @@ def _valid_sample_artifact_evidence(value: Any, run_dir: Path,
             return False
     return True
 
+
+def _valid_remote_not_collected(value: Any, manifest: dict[str, Any]) -> bool:
+    expected = {
+        "collection": "not_collected",
+        "process": {"status": "not_collected"},
+        "network": {"status": "not_collected"},
+        "reason": "ohos_remote_capture_v2_did_not_collect_resource_samples",
+    }
+    return (manifest.get("artifact_kind") == "ohos_remote_p0a_candidate"
+            and manifest.get("dds_comm_trace", {}).get("registration_contract_version") ==
+                _P0A_REMOTE_CONTRACT
+            and manifest.get("sample_count") == 0 and value == expected)
+
+
+def _remote_manifest_declaration(manifest: dict[str, Any], run_dir: Path) -> bool:
+    trace = manifest.get("dds_comm_trace")
+    declared = (manifest.get("artifact_kind") == "ohos_remote_p0a_candidate"
+                or isinstance(trace, dict)
+                and trace.get("registration_contract_version") == _P0A_REMOTE_CONTRACT)
+    try:
+        evidence = _strict_json(_secure_read(
+            run_dir, "capability/p0a_evidence_manifest.json")[0])
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        return declared
+    return declared or (isinstance(evidence, dict)
+                        and evidence.get("registration_contract_version") ==
+                        _P0A_REMOTE_CONTRACT)
+
+
 def _manifest_schema_errors(value: dict[str, Any]) -> list[str]:
     def integer(name: str, minimum: int) -> bool:
         item = value.get(name)
@@ -841,6 +877,13 @@ def _manifest_schema_errors(value: dict[str, Any]) -> list[str]:
         item = value.get(name)
         return isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item)
 
+    remote = value.get("artifact_kind") == "ohos_remote_p0a_candidate"
+    timing_valid = (value.get("remote_timing") == {
+        "schema": "mw_perf.ohos_remote_timing.v1",
+        "start_time": "unavailable", "end_time": "unavailable",
+        "reason": "ohos_remote_capture_v2_did_not_export_wall_clock_boundaries",
+    } and "start_time" not in value and "end_time" not in value) if remote else (
+        number("start_time") and number("end_time") and "remote_timing" not in value)
     checks = {
         "schema_version": value.get("schema_version") == 1 and not isinstance(value.get("schema_version"), bool),
         "tool_version": isinstance(value.get("tool_version"), str),
@@ -853,8 +896,7 @@ def _manifest_schema_errors(value: dict[str, Any]) -> list[str]:
             and all(char in "0123456789abcdef" for char in value["scenario_contract_hash"]),
         "metric_availability": value.get("metric_availability") in ("supported", "unsupported", "estimated", "partial"),
         "measurement_kind": value.get("measurement_kind") in ("observation", "measurement", "derived", "metadata", "producer_latency", "latency_summary_csv", "stage_only", "exact_correlated", "observer_latency"),
-        "start_time": number("start_time"),
-        "end_time": number("end_time"),
+        "timing": timing_valid,
         "pid": integer("pid", 1),
         "pid_start_time_ticks": integer("pid_start_time_ticks", 0),
         "states": isinstance(value.get("states"), list) and all(isinstance(item, str) for item in value.get("states", [])),
@@ -863,7 +905,8 @@ def _manifest_schema_errors(value: dict[str, Any]) -> list[str]:
         "metrics_valid": isinstance(value.get("metrics_valid"), bool),
         "adapter_readiness": isinstance(value.get("adapter_readiness"), bool),
     }
-    return [name for name, valid in checks.items() if name in value and not valid]
+    return [name for name, valid in checks.items()
+            if (name == "timing" or name in value) and not valid]
 
 def _valid_jsonl(path: Path, kind: str) -> bool:
     try:
@@ -925,12 +968,17 @@ def validate_dir(path: Path, profile: str | None = None, config: dict[str, Any] 
         resources = _resource_integrity_errors()
         return {"validation_profile": profile, "valid_for_collection": False, "valid_for_metric": False, "valid_for_comparison": False, "rules": [{"name": "resource_integrity", "passed": not resources}], "failure_codes": resources + ["MANIFEST_INVALID"], "schema_audit": _schema_audit(validation_mode=profile)}
     resource_errors = _resource_integrity_errors()
-    missing = [name for name in _REQUIRED_MANIFEST_FIELDS if name not in m]
+    remote_declared = _remote_manifest_declaration(m, path)
+    required_fields = _REQUIRED_MANIFEST_FIELDS + (() if remote_declared else (
+        "start_time", "end_time"))
+    missing = [name for name in required_fields if name not in m]
     schema_errors = _manifest_schema_errors(m)
-    artifacts_valid = (_valid_jsonl(path/"raw"/"process.jsonl", "process")
-                       and _valid_jsonl(path/"raw"/"network.jsonl", "network")
-                       and _valid_sample_artifact_evidence(
-                           m.get("sample_artifacts"), path, m.get("sample_count")))
+    remote_resource_claim = _valid_remote_not_collected(m.get("sample_artifacts"), m)
+    sampled_artifacts_valid = (
+        _valid_jsonl(path/"raw"/"process.jsonl", "process")
+        and _valid_jsonl(path/"raw"/"network.jsonl", "network")
+        and _valid_sample_artifact_evidence(m.get("sample_artifacts"), path,
+                                            m.get("sample_count")))
     core_metrics = m.get("core_metrics", {})
     core_required = isinstance(core_metrics, dict) and core_metrics.get("required") is True
     provenance = m.get("provenance")
@@ -1031,7 +1079,7 @@ def validate_dir(path: Path, profile: str | None = None, config: dict[str, Any] 
         csv_latency_ok = revalidate(csv_latency, path, m)
     managed_comparison_ok = not formal_comparison or m.get("mode") == "managed"
     p0a_path = path / "capability/p0a_evidence_manifest.json"
-    p0a_required = profile == "p0a"
+    p0a_required = profile == "p0a" or remote_declared
     p0a_marker_ok = not p0a_required or m.get("validation_profile") == "p0a"
     trace_controls = m.get("dds_comm_trace")
     exact_top_level = m.get("run_type") == "exact_run"
@@ -1057,6 +1105,20 @@ def validate_dir(path: Path, profile: str | None = None, config: dict[str, Any] 
         p0a_validation_kwargs["enumerate_after_binding_failure"] = True
     p0a_validation = (validate_p0a_evidence_manifest(path, **p0a_validation_kwargs)
                       if p0a_required else {"valid": True, "failure_codes": []})
+    remote_invariants = (not remote_declared or (
+        m.get("artifact_kind") == "ohos_remote_p0a_candidate"
+        and isinstance(trace_controls, dict)
+        and trace_controls.get("registration_contract_version") == _P0A_REMOTE_CONTRACT
+        and m.get("candidate_only") is True
+        and m.get("formal_p0a") is False
+        and m.get("metric_availability") == "unsupported"
+        and m.get("valid_for_metric") is False
+        and m.get("valid_for_comparison") is False))
+    remote_evidence_valid = (remote_declared and remote_invariants
+                             and p0a_validation.get("valid") is True
+                             and p0a_validation.get("failure_codes") == [])
+    remote_resources = remote_resource_claim and remote_evidence_valid
+    artifacts_valid = sampled_artifacts_valid or remote_resources
     trace_summary_ok = True
     if p0a_required and exact_top_level:
         fresh_trace = p0a_validation.get("dds_comm_trace")
@@ -1080,8 +1142,9 @@ def validate_dir(path: Path, profile: str | None = None, config: dict[str, Any] 
             and all(trace_controls.get(field) == 0 for field in (
                 "dropped", "invalid_identity", "missing_registration", "unsupported_async",
                 "unsupported_multi_handler")))
-    rules = [{"name": "resource_integrity", "passed": not resource_errors}, {"name": "required_fields", "passed": not missing}, {"name": "manifest_schema", "passed": not schema_errors}, {"name": "sample_artifacts", "passed": artifacts_valid}, {"name": "candidate_only", "passed": m.get("candidate_only") is not True}, {"name": "run_completed", "passed": m.get("run_status") == "completed"}, {"name": "samples_present", "passed": isinstance(m.get("sample_count"), int) and not isinstance(m.get("sample_count"), bool) and m.get("sample_count", 0) > 0}, {"name": "metrics_valid", "passed": m.get("metrics_valid") is True}, {"name": "adapter_ready", "passed": m.get("adapter_readiness") is True}, {"name": "metric_available", "passed": m.get("metric_availability") in ("supported", "estimated")}, {"name": "scenario_contract", "passed": scenario_ok}, {"name": "ibmw_provenance", "passed": provenance_ok}, {"name": "runtime_images", "passed": runtime_ok}, {"name": "core_metrics_required", "passed": core_ok}, {"name": "latency_artifact_required", "passed": latency_ok}, {"name": "collector_managed_comparison", "passed": managed_comparison_ok}, {"name": "comparison_metadata", "passed": comparison_metadata_ok}, {"name": "comparison_resources", "passed": comparison_resources_ok}, {"name": "comparison_latency_csv", "passed": csv_latency_ok}, {"name": "p0a_profile_marker", "passed": p0a_marker_ok}, {"name": "p0a_evidence", "passed": p0a_validation["valid"]}, {"name": "dds_comm_trace_summary", "passed": trace_summary_ok}]
-    collection = all(rule["passed"] for rule in rules[:4])
+    rules = [{"name": "resource_integrity", "passed": not resource_errors}, {"name": "required_fields", "passed": not missing}, {"name": "manifest_schema", "passed": not schema_errors}, {"name": "sample_artifacts", "passed": artifacts_valid}, {"name": "remote_invariants", "passed": remote_invariants}, {"name": "candidate_only", "passed": m.get("candidate_only") is not True}, {"name": "run_completed", "passed": m.get("run_status") == "completed"}, {"name": "samples_present", "passed": remote_resources or isinstance(m.get("sample_count"), int) and not isinstance(m.get("sample_count"), bool) and m.get("sample_count", 0) > 0}, {"name": "metrics_valid", "passed": m.get("metrics_valid") is True}, {"name": "adapter_ready", "passed": m.get("adapter_readiness") is True}, {"name": "metric_available", "passed": m.get("metric_availability") in ("supported", "estimated")}, {"name": "scenario_contract", "passed": scenario_ok}, {"name": "ibmw_provenance", "passed": provenance_ok}, {"name": "runtime_images", "passed": runtime_ok}, {"name": "core_metrics_required", "passed": core_ok}, {"name": "latency_artifact_required", "passed": latency_ok}, {"name": "collector_managed_comparison", "passed": managed_comparison_ok}, {"name": "comparison_metadata", "passed": comparison_metadata_ok}, {"name": "comparison_resources", "passed": comparison_resources_ok}, {"name": "comparison_latency_csv", "passed": csv_latency_ok}, {"name": "p0a_profile_marker", "passed": p0a_marker_ok}, {"name": "p0a_evidence", "passed": p0a_validation["valid"]}, {"name": "dds_comm_trace_summary", "passed": trace_summary_ok}]
+    collection = all(rule["passed"] for rule in rules[:4]) and (
+        not remote_declared or remote_invariants and p0a_validation["valid"])
     passed = collection and all(r["passed"] for r in rules[4:]) and not archived_latency_contract_blocked
     failures = (resource_errors
                 + [f"REQUIRED_FIELD_MISSING:{x}" for x in missing]
@@ -1175,6 +1238,12 @@ _P0A_CONTRACT_FILES = {
     "mw_perf.p0a_contract.v7": "p0a-evidence-contract.v7.json",
     "mw_perf.p0a_contract.v8": "p0a-evidence-contract.v8.json",
     "mw_perf.p0a_contract.v9": "p0a-evidence-contract.v9.json",
+    "mw_perf.p0a_ohos_remote_contract.v1": "p0a-ohos-remote-contract.v1.json",
+}
+_P0A_REMOTE_CONTRACT = "mw_perf.p0a_ohos_remote_contract.v1"
+_P0A_EXACT_PIPELINE_CONTRACTS = {
+    "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5", "mw_perf.p0a_contract.v6",
+    "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT,
 }
 
 def _strict_json(data: bytes) -> Any:
@@ -1182,6 +1251,10 @@ def _strict_json(data: bytes) -> Any:
 
 def _schema_errors(value: Any, schema: dict[str, Any], root: dict[str, Any] | None = None,
                    location: str = "$") -> list[str]:
+    if schema is True:
+        return []
+    if schema is False:
+        return [f"{location}:falseSchema"]
     root = root or schema; errors: list[str] = []
     if "$ref" in schema:
         target: Any = root
@@ -1231,8 +1304,14 @@ def _schema_errors(value: Any, schema: dict[str, Any], root: dict[str, Any] | No
             errors.append(f"{location}:maxItems")
         if schema.get("uniqueItems") and len({json.dumps(x, sort_keys=True, allow_nan=False) for x in value}) != len(value):
             errors.append(f"{location}:uniqueItems")
+        prefix = schema.get("prefixItems", [])
+        for index, item_schema in enumerate(prefix):
+            if index < len(value):
+                errors += _schema_errors(value[index], item_schema, root, f"{location}[{index}]")
         if "items" in schema:
-            for index, item in enumerate(value): errors += _schema_errors(item, schema["items"], root, f"{location}[{index}]")
+            start = len(prefix)
+            for index, item in enumerate(value[start:], start=start):
+                errors += _schema_errors(item, schema["items"], root, f"{location}[{index}]")
     return errors
 
 def _trusted_p0a_contract(version: Any) -> tuple[dict[str, Any], bytes]:
@@ -1242,6 +1321,25 @@ def _trusted_p0a_contract(version: Any) -> tuple[dict[str, Any], bytes]:
     if not isinstance(stored, dict) or stored.get("registration_contract_version") != version:
         raise ValueError("invalid trusted P0a contract")
     contract = stored
+    if version == _P0A_REMOTE_CONTRACT:
+        pipeline, pipeline_raw = _trusted_p0a_contract("mw_perf.p0a_contract.v8")
+        if (stored.get("shared_trace_pipeline") != "mw_perf.p0a_contract.v8"
+                or stored.get("shared_trace_pipeline_sha256") !=
+                    hashlib.sha256(pipeline_raw).hexdigest()):
+            raise ValueError("remote P0a shared pipeline binding is invalid")
+        contract = json.loads(json.dumps(pipeline))
+        contract["registration_contract_version"] = version
+        contract["contract_family"] = stored.get("contract_family")
+        contract["shared_trace_pipeline"] = stored.get("shared_trace_pipeline")
+        contract["shared_trace_pipeline_sha256"] = stored.get(
+            "shared_trace_pipeline_sha256")
+        contract["artifact_schemas"].update(stored.get("artifact_schemas", {}))
+        overrides = stored.get("artifact_overrides")
+        if not isinstance(overrides, list): raise ValueError("invalid remote P0a artifact overrides")
+        by_path = {item.get("relative_path"): item for item in overrides if isinstance(item, dict)}
+        contract["artifacts"] = [by_path.pop(item.get("relative_path"), item)
+                                 for item in contract["artifacts"]]
+        contract["artifacts"].extend(by_path.values())
     base_version = stored.get("base_contract_version")
     if base_version is not None:
         base, _ = _trusted_p0a_contract(base_version)
@@ -1273,6 +1371,22 @@ def _trusted_p0a_contract(version: Any) -> tuple[dict[str, Any], bytes]:
             if not isinstance(schema, dict) or schema.get("$id") != schema_id:
                 raise ValueError("invalid trusted formal P0a schema")
             contract["artifact_schemas"][schema_id] = schema
+    if version == _P0A_REMOTE_CONTRACT:
+        schema_dir = Path(__file__).parent / "schemas"
+        for filename, schema_id in (
+            ("ohos-remote-capture-envelope.schema.v1.json",
+             "mw_perf.p0a.ohos_remote_capture_envelope.v1"),
+            ("p0a-ohos-remote-resolution.schema.v1.json",
+             "mw_perf.p0a.remote_resolution.v1"),
+            ("p0a-ohos-remote-resolution-declarations.schema.v1.json",
+             "mw_perf.p0a.remote_resolution_declarations.v1"),
+            ("trace-quality-ohos-remote.schema.v1.json",
+             "mw_perf.trace_quality_ohos_remote.v1"),
+        ):
+            schema = _strict_json((schema_dir / filename).read_bytes())
+            if not isinstance(schema, dict) or schema.get("$id") != schema_id:
+                raise ValueError("invalid trusted remote P0a schema")
+            contract["artifact_schemas"][schema_id] = schema
     schemas, artifacts = contract.get("artifact_schemas"), contract.get("artifacts")
     if not isinstance(schemas, dict) or not schemas or not isinstance(artifacts, list) or not artifacts:
         raise ValueError("incomplete trusted P0a contract")
@@ -1301,7 +1415,10 @@ def _p0a_declarations(contract: dict[str, Any], run_type: str, observer: bool,
     if not isinstance(universes, list): raise ValueError("invalid P0a universe")
     declarations = [dict(item) for item in contract["artifacts"] if item.get("universe") in universes]
     for item in declarations:
-        if item.get("observer_conditional"):
+        if item.get("always_not_applicable"):
+            item["status"] = "not_applicable"
+            item["reason"] = item.get("not_applicable_reason")
+        elif item.get("observer_conditional"):
             item["status"] = "required" if observer else "not_applicable"
             if not observer: item["reason"] = item.get("not_applicable_reason")
         else: item["status"] = "required"
@@ -1504,6 +1621,9 @@ def _p0a_decode(data: bytes, declared: dict[str, Any]) -> tuple[int, list[Any]]:
             if not isinstance(target, list): raise ValueError("record field is not an array")
             return len(target), [value]
     if artifact_format == "binary" and rule == "zero": return 0, []
+    if artifact_format == "binary" and rule == "single_blob":
+        if not data: raise ValueError("empty binary artifact")
+        return 1, []
     if artifact_format == "binary" and isinstance(rule, dict) and rule.get("type") == "fixed_size":
         size = rule.get("record_size")
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or len(data) % size: raise ValueError("invalid binary records")
@@ -1592,7 +1712,7 @@ def build_p0a_evidence_manifest(run_dir: Path, config: dict[str, Any], *, run_id
         "registration_contract_version": contract["registration_contract_version"],
         "registration_contract_ref": _P0A_MANIFEST_REF, "run_type": run_type, "observer": observer,
         "measurement_kind": measurement_kind, "entries": entries}
-    if contract["registration_contract_version"] in ("mw_perf.p0a_contract.v2", "mw_perf.p0a_contract.v3", "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5", "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8", "mw_perf.p0a_contract.v9") and directory_decl is not None:
+    if contract["registration_contract_version"] in ("mw_perf.p0a_contract.v2", "mw_perf.p0a_contract.v3", "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5", "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8", "mw_perf.p0a_contract.v9", _P0A_REMOTE_CONTRACT) and directory_decl is not None:
         result["runtime_changed"] = True
         result["business_unchanged"] = True
     result["required"] = [item for item in entries if item["status"] == "required"]
@@ -1718,6 +1838,162 @@ def _valid_resolution_v2(run_dir: Path, p0a_manifest: dict[str, Any],
         return False
     return {identifier for item in matches for identifier in item["observed"]} == set(by_id)
 
+
+def _remote_entry_digest(entries: list[Any], relative: str, data: bytes) -> bool:
+    entry = next((item for item in entries if isinstance(item, dict)
+                  and item.get("relative_path") == relative), None)
+    return isinstance(entry, dict) and entry.get("sha256") == hashlib.sha256(data).hexdigest()
+
+
+def _valid_remote_capture(run_dir: Path, p0a_manifest: dict[str, Any],
+                          entries: list[Any], trusted_raw: bytes) -> bool:
+    """Revalidate retained v2 wire bytes and their remote-only resolution proof."""
+    try:
+        from . import ohos_capture, ohos_registration
+        root = _strict_json(_secure_read(run_dir, "manifest.json")[0])
+        request_raw = _secure_read(run_dir, "raw/remote_capture/request.json")[0]
+        result_raw = _secure_read(run_dir, "raw/remote_capture/result.json")[0]
+        archive_raw = _secure_read(run_dir, "raw/remote_capture/archive.tar")[0]
+        envelope_raw = _secure_read(run_dir, "validation/remote_capture_envelope.json")[0]
+        declarations_raw = _secure_read(run_dir, "registration/resolution_declarations.json")[0]
+        registration_raw = _secure_read(run_dir, "registration/ohos_capture_registration.json")[0]
+        approval_raw = _secure_read(run_dir, "registration/operator_approval.json")[0]
+        resolution_raw = _secure_read(run_dir, "capability/resolution.json")[0]
+        request, result = _strict_json(request_raw), _strict_json(result_raw)
+        envelope, declarations_doc = _strict_json(envelope_raw), _strict_json(declarations_raw)
+        resolution = _strict_json(resolution_raw)
+        registration = ohos_capture._strict_json(
+            registration_raw, "registration/ohos_capture_registration.json")
+        approval = ohos_capture._strict_json(
+            approval_raw, "registration/operator_approval.json")
+        registration_digest = hashlib.sha256(registration_raw).hexdigest()
+        approval_digest = hashlib.sha256(approval_raw).hexdigest()
+        ohos_registration.validate_registration(
+            registration, raw=registration_raw, expected_sha256=registration_digest,
+            approval=approval, approval_raw=approval_raw,
+            expected_approval_sha256=approval_digest)
+        if not all(isinstance(item, dict) for item in (
+                root, request, result, envelope, declarations_doc, resolution)):
+            return False
+        for relative, data in (
+            ("raw/remote_capture/request.json", request_raw),
+            ("raw/remote_capture/result.json", result_raw),
+            ("raw/remote_capture/archive.tar", archive_raw),
+            ("validation/remote_capture_envelope.json", envelope_raw),
+            ("registration/resolution_declarations.json", declarations_raw),
+            ("registration/ohos_capture_registration.json", registration_raw),
+            ("registration/operator_approval.json", approval_raw),
+            ("capability/resolution.json", resolution_raw),
+        ):
+            if not _remote_entry_digest(entries, relative, data): return False
+        imported = ohos_capture.validate_capture_bytes(
+            archive_raw, f"capture-{request['request_challenge']}.tar", result, request)
+        if imported.get("semantic_validation") is not True: return False
+        archive_entries = ohos_capture._parse_ustar(archive_raw)
+        archive_manifest_raw = archive_entries[0][1]
+        archive_manifest = ohos_capture._strict_json(
+            archive_manifest_raw, "device_capture_manifest.json")
+        members = dict(archive_entries[1:])
+        attestation_raw = members[ohos_capture._V2_ATTESTATION]
+        completion_raw = members[ohos_capture._V2_COMPLETION]
+        attestation = ohos_capture._strict_json(attestation_raw, ohos_capture._V2_ATTESTATION)
+        completion = ohos_capture._strict_json(completion_raw, ohos_capture._V2_COMPLETION)
+        contract_hash = hashlib.sha256(trusted_raw).hexdigest()
+        binding = {"id": registration["registration_id"], "sha256": registration_digest}
+        if (request.get("trust_registration") != binding
+                or result.get("trust_registration") != binding
+                or archive_manifest.get("trust_registration") != binding
+                or request.get("campaign_id") != registration["campaign_id"]
+                or request.get("capability_id") != registration["capability_id"]
+                or request.get("runtime_images") != registration["runtime_images"]
+                or archive_manifest.get("agent_executable_sha256")
+                   != registration["capture_agent"]["sha256"]
+                or archive_manifest.get("boot_id") != registration["exact_boot_id"]
+                or root.get("formal_p0a") is not False):
+            return False
+        expected_raw = {
+            "request": ("raw/remote_capture/request.json", request_raw),
+            "result": ("raw/remote_capture/result.json", result_raw),
+            "archive": ("raw/remote_capture/archive.tar", archive_raw),
+        }
+        if (envelope.get("schema") != "mw_perf.p0a.ohos_remote_capture_envelope.v1"
+                or envelope.get("finalized") is not True
+                or envelope.get("trust_classification")
+                   != ohos_registration.TRUST_CLASSIFICATION
+                or envelope.get("registration_contract") != {
+                    "version": _P0A_REMOTE_CONTRACT, "sha256": contract_hash}
+                or envelope.get("trust_registration") != {
+                    "relative_path": "registration/ohos_capture_registration.json",
+                    "id": registration["registration_id"], "size": len(registration_raw),
+                    "sha256": registration_digest}
+                or envelope.get("operator_approval") != {
+                    "relative_path": "registration/operator_approval.json",
+                    "schema": ohos_registration.APPROVAL_SCHEMA,
+                    "size": len(approval_raw), "sha256": approval_digest}
+                or any(envelope.get(field) != p0a_manifest.get(field)
+                       for field in ("run_id", "capability_id", "path_id", "deployment_mode"))):
+            return False
+        for key, (relative, raw) in expected_raw.items():
+            if envelope.get(key) != {"relative_path": relative, "size": len(raw),
+                                     "sha256": hashlib.sha256(raw).hexdigest()}:
+                return False
+        for key, name, raw in (
+            ("device_capture_manifest", "device_capture_manifest.json", archive_manifest_raw),
+            ("runtime_attestation", ohos_capture._V2_ATTESTATION, attestation_raw),
+            ("device_completion", ohos_capture._V2_COMPLETION, completion_raw),
+        ):
+            if envelope.get(key) != {"archive_member": name, "size": len(raw),
+                                     "sha256": hashlib.sha256(raw).hexdigest()}:
+                return False
+        declarations = [{"role": item["role"], "name": item["name"],
+                         "source": item["source"], "path": item["path"],
+                         "sha256": item["sha256"]} for item in request["runtime_images"]]
+        declaration_hash = hashlib.sha256(_canonical_json_bytes(declarations)).hexdigest()
+        if declarations_doc != {"schema": "mw_perf.p0a.remote_resolution_declarations.v1",
+                "registration_contract_version": _P0A_REMOTE_CONTRACT,
+                "run_id": request["run_id"], "capability_id": request["capability_id"],
+                "path_id": request["path_id"], "deployment_mode": "managed",
+                "declaration_sha256": declaration_hash,
+                "declarations": declarations,
+                "trust_classification": ohos_registration.TRUST_CLASSIFICATION}:
+            return False
+        def observations(images: list[dict[str, Any]], phase: str) -> list[dict[str, Any]]:
+            values = []
+            for item in images:
+                value = {"phase": phase, "role": item["role"], "name": item["name"],
+                    "source": item["source"], "path": item["expected_path"],
+                    "sha256": item["observed_sha256"],
+                    "device_major": item["observed_device_major"],
+                    "device_minor": item["observed_device_minor"],
+                    "inode": item["observed_inode"]}
+                value["observation_id"] = _observation_id(value)
+                values.append(value)
+            return values
+        ready = observations(attestation["live_images"], "ready")
+        completed = observations(completion["completion_images"], "completion")
+        ready_by_key = {(item["role"], item["name"]): item for item in ready}
+        completed_by_key = {(item["role"], item["name"]): item for item in completed}
+        matches = [{**item,
+            "ready_observation": ready_by_key[(item["role"], item["name"])]["observation_id"],
+            "completion_observation": completed_by_key[(item["role"], item["name"])]["observation_id"]}
+            for item in declarations]
+        expected_resolution = {"schema": "mw_perf.p0a.remote_resolution.v1",
+            "run_id": request["run_id"], "capability_id": request["capability_id"],
+            "path_id": request["path_id"], "deployment_mode": "managed",
+            "producer": "ohos_remote_capture_v2", "finalized": True,
+            "declaration_sha256": declaration_hash, "declarations": declarations,
+            "ready_observations": ready, "completion_observations": completed,
+            "matches": matches, "resolved": True, "conclusion": "pass"}
+        publication = root.get("p0a_resolution")
+        return (resolution == expected_resolution
+            and publication == {"collector_written": True,
+                "relative_path": "capability/resolution.json",
+                "content_sha256": hashlib.sha256(resolution_raw).hexdigest(),
+                "declaration_sha256": declaration_hash})
+    except (KeyError, OSError, TypeError, ValueError, UnicodeError,
+            json.JSONDecodeError):
+        return False
+
 def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | None = None,
                                    contract: dict[str, Any] | None = None, *,
                                    producer_pid: int | None = None,
@@ -1741,7 +2017,7 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
                 "mw_perf.p0a_contract.v2", "mw_perf.p0a_contract.v3",
                 "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5",
                 "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7",
-                "mw_perf.p0a_contract.v8")
+                "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT)
             and expected_exact_metadata.get("measurement_kind") == "exact_correlated"
             and all(m.get(field) == expected_exact_metadata.get(field) for field in binding_fields))
         if not binding_valid:
@@ -1844,7 +2120,7 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
                     "mw_perf.p0a_contract.v2", "mw_perf.p0a_contract.v3",
                     "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5",
                     "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7",
-                    "mw_perf.p0a_contract.v8")
+                    "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT)
                     and m.get("run_type") == "exact_run"):
                 valid_exact_controls = (
                     isinstance(producer_pid, int) and not isinstance(producer_pid, bool)
@@ -1887,11 +2163,14 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
             "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8")
             and not _valid_resolution_v2(run_dir, m, entry_list)):
         errors.append("P0A_RESOLUTION")
+    if (trusted.get("registration_contract_version") == _P0A_REMOTE_CONTRACT
+            and not _valid_remote_capture(run_dir, m, entry_list, trusted_raw)):
+        errors.append("P0A_REMOTE_CAPTURE")
     offline_identity_derivation: dict[str, Any] | None = None
     if trusted.get("registration_contract_version") in (
             "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5",
             "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7",
-            "mw_perf.p0a_contract.v8"):
+            "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT):
         try:
             from .dds_trace import derive_identity_trace
             if (not isinstance(producer_pid, int) or isinstance(producer_pid, bool)
@@ -1931,7 +2210,8 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
     offline_hook_derivation: dict[str, Any] | None = None
     if trusted.get("registration_contract_version") in (
             "mw_perf.p0a_contract.v5", "mw_perf.p0a_contract.v6",
-            "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8"):
+            "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8",
+            _P0A_REMOTE_CONTRACT):
         try:
             from .dds_trace import derive_hook_callgraph
             if offline_identity_derivation is None:
@@ -1971,7 +2251,7 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
     offline_normalized: dict[str, Any] | None = None
     if trusted.get("registration_contract_version") in (
             "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7",
-            "mw_perf.p0a_contract.v8"):
+            "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT):
         try:
             from .dds_trace import derive_normalized_results
             if offline_identity_derivation is None or offline_hook_derivation is None:
@@ -2013,7 +2293,8 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
             errors.append("P0A_NORMALIZED_RESULTS")
     offline_communication_latency: dict[str, Any] | None = None
     if trusted.get("registration_contract_version") in (
-            "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8"):
+            "mw_perf.p0a_contract.v7", "mw_perf.p0a_contract.v8",
+            _P0A_REMOTE_CONTRACT):
         try:
             from .dds_trace import derive_communication_latency
             if (offline_identity_derivation is None or offline_hook_derivation is None
@@ -2052,7 +2333,8 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
         except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError, KeyError):
             errors.append("P0A_COMMUNICATION_LATENCY")
     offline_communication_delivery: dict[str, Any] | None = None
-    if trusted.get("registration_contract_version") == "mw_perf.p0a_contract.v8":
+    if trusted.get("registration_contract_version") in (
+            "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT):
         try:
             from .dds_trace import derive_communication_delivery
             if (offline_identity_derivation is None or offline_hook_derivation is None
@@ -2098,7 +2380,8 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
                 raise ValueError("communication delivery derivation mismatch")
         except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError, KeyError):
             errors.append("P0A_COMMUNICATION_DELIVERY")
-    if trusted.get("registration_contract_version") == "mw_perf.p0a_contract.v8":
+    if trusted.get("registration_contract_version") in (
+            "mw_perf.p0a_contract.v8", _P0A_REMOTE_CONTRACT):
         try:
             from .dds_trace import derive_trace_quality
             if (offline_identity_derivation is None
@@ -2109,7 +2392,7 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
                 raise ValueError("trace quality root manifest is malformed")
             derived = derive_trace_quality(
                 offline_identity_derivation, offline_communication_delivery,
-                registration_contract_version="mw_perf.p0a_contract.v8",
+                registration_contract_version=trusted["registration_contract_version"],
                 registration_contract_sha256=hashlib.sha256(trusted_raw).hexdigest())
             relative = "validation/trace_quality.json"
             artifact = _secure_read(run_dir, relative)[0]
@@ -2130,7 +2413,10 @@ def validate_p0a_evidence_manifest(run_dir: Path, manifest: dict[str, Any] | Non
                     or not isinstance(entry, dict)
                     or entry.get("sha256") != derived["content_sha256"]
                     or entry.get("record_count") != 1
-                    or entry.get("schema_version") != "mw_perf.trace_quality.v1"):
+                    or entry.get("schema_version") != (
+                        "mw_perf.trace_quality_ohos_remote.v1"
+                        if trusted.get("registration_contract_version") == _P0A_REMOTE_CONTRACT
+                        else "mw_perf.trace_quality.v1")):
                 raise ValueError("trace quality derivation mismatch")
         except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError, KeyError):
             errors.append("P0A_TRACE_QUALITY")

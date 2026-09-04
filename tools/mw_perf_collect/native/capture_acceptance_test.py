@@ -116,12 +116,17 @@ def v2_command(root, mode="v2", *, role="exact_anchor", capability=None,
         "--protocol", "v2", "--role", role, "--campaign-id", "campaign-1",
         "--fault", "none", "--contract-id", contract,
         "--contract-sha256", contract_sha, "--workload-id", workload,
+        "--trust-registration-id", "registration-1",
+        "--trust-registration-sha256", "9" * 64,
         "--ready-timeout-ms", "2000",
         "--completion-timeout-ms", "2000", "--runtime-image",
         f"sut|executable|exe|{image_path}|{image_sha}",
         "--runtime-image", (extra_images[0] if extra_images else
                             f"extension|runtime-map|maps|{extension_path or executable}|"
                             f"{sha(Path(extension_path or executable).read_bytes())}"),
+        "--runtime-image", f"fastdds|fastdds|maps|{executable}|{sha(Path(executable).read_bytes())}",
+        "--runtime-image", f"fastcdr|fastcdr|maps|{executable}|{sha(Path(executable).read_bytes())}",
+        "--runtime-image", f"cpp_runtime|libcxx|maps|{executable}|{sha(Path(executable).read_bytes())}",
     ]
     for image in extra_images[1:]:
         declaration.extend(("--runtime-image", image))
@@ -155,7 +160,7 @@ def v2_acceptance_cases(run_roots):
     completed, result = invoke_one_line(v2_command(root))
     assert completed.returncode == 0 and result["snapshot_valid"] is True, result
     assert result["protocol"] == "mw_perf.ohos_remote_capture.result.v2"
-    assert set(result) == ohos_capture._RESULT_KEYS
+    assert set(result) == ohos_capture._V2_RESULT_KEYS
     _, entries = inspect_ustar(Path(result["archive_path"]))
     manifest = json.loads(entries[0][1])
     assert manifest["protocol"] == "mw_perf.ohos_remote_capture.v2"
@@ -176,6 +181,7 @@ def v2_acceptance_cases(run_roots):
         "campaign_id": "campaign-1", "fault": "none",
         "workload_id": "dds.ordinary.nonplain.single_driver.sync_callback",
         "registration_contract": {"id": V8_CONTRACT, "sha256": V8_CONTRACT_SHA},
+        "trust_registration": {"id": "registration-1", "sha256": "9" * 64},
         "runtime_images": manifest["runtime_images"], "ready_timeout_ms": 2000,
         "completion_timeout_ms": 2000, "argv": [str(Path(FIXTURE).resolve()), "v2"],
         "capability_id": "dds.ordinary.nonplain.single_driver.sync_callback",

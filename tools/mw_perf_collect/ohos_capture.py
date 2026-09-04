@@ -44,10 +44,11 @@ _V2_CONTRACT = "mw_perf.p0a_contract.v8"
 _V2_CONTRACT_SHA256 = "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575"
 _V2_ATTESTATION = "device_runtime_attestation.json"
 _V2_COMPLETION = "device_completion.json"
+_V2_RESULT_KEYS = _RESULT_KEYS | {"trust_registration"}
 _V2_REQUEST_KEYS = _REQUEST_KEYS | {
     "protocol", "capture_role", "campaign_id", "fault", "workload_id",
     "registration_contract", "runtime_images", "ready_timeout_ms",
-    "completion_timeout_ms",
+    "completion_timeout_ms", "trust_registration",
 }
 _V2_MANIFEST_KEYS = _MANIFEST_KEYS | {
     "capture_role", "campaign_id", "fault", "workload_id", "registration_contract",
@@ -55,7 +56,7 @@ _V2_MANIFEST_KEYS = _MANIFEST_KEYS | {
     "completion_images", "completion_attested", "evidence_released",
     "ready_attested", "completion_eof_observed",
     "ready_images_sha256", "completion_images_sha256",
-    "device_completion_sha256", "device_runtime_attestation_sha256",
+    "device_completion_sha256", "device_runtime_attestation_sha256", "trust_registration",
 }
 
 
@@ -161,6 +162,7 @@ def _schema_validate(value: Any, filename: str, label: str) -> None:
 def _validate_v2_request(request: dict[str, Any]) -> None:
     _schema_validate(request, "ohos-capture-request.schema.v2.json", "v2 request")
     contract = request["registration_contract"]
+    registration = request["trust_registration"]
     images = request["runtime_images"]
     image_keys = [(item["role"], item["name"]) for item in images]
     if len(image_keys) != len(set(image_keys)):
@@ -170,8 +172,12 @@ def _validate_v2_request(request: dict[str, Any]) -> None:
             or request["workload_id"] != _V2_WORKLOAD
             or request["trace_mode"] != "full" or request["exact_required"] is not True
             or contract != {"id": _V2_CONTRACT, "sha256": _V2_CONTRACT_SHA256}
+            or set(registration) != {"id", "sha256"}
+            or not isinstance(registration["id"], str) or not registration["id"]
+            or _HEX64.fullmatch(registration["sha256"]) is None
             or [(item["role"], item["source"]) for item in images]
-               != [("sut", "exe"), ("extension", "maps")]):
+               != [("sut", "exe"), ("extension", "maps"), ("fastdds", "maps"),
+                   ("fastcdr", "maps"), ("cpp_runtime", "maps")]):
         _fail("unsupported v2 capture contract")
     if images[0]["path"] != request["argv"][0]:
         _fail("sut executable path must equal argv[0]")
@@ -315,7 +321,7 @@ def _read_bound_archive(path: Path, result: dict[str, Any]) -> bytes:
 
 
 def _validate_result(result: dict[str, Any], *, v2: bool = False) -> None:
-    if set(result) != _RESULT_KEYS:
+    if set(result) != (_V2_RESULT_KEYS if v2 else _RESULT_KEYS):
         _fail("result protocol fields mismatch")
     if v2:
         _schema_validate(result, "ohos-capture-result.schema.v2.json", "v2 result")
@@ -331,6 +337,12 @@ def _validate_result(result: dict[str, Any], *, v2: bool = False) -> None:
             or not _integer(result["child_pid"], minimum=2)
             or not _integer(result["child_start_time_ticks"], minimum=1)):
         _fail("invalid successful result protocol")
+    if v2 and (not isinstance(result["trust_registration"], dict)
+               or set(result["trust_registration"]) != {"id", "sha256"}
+               or not isinstance(result["trust_registration"]["id"], str)
+               or not result["trust_registration"]["id"]
+               or _HEX64.fullmatch(result["trust_registration"]["sha256"]) is None):
+        _fail("invalid v2 result trust registration")
 
 
 def _materialize_and_validate(files: dict[str, bytes], manifest: dict[str, Any],
@@ -399,6 +411,7 @@ def _validate_v2_bindings(files: dict[str, bytes], manifest: dict[str, Any],
         "fault": request["fault"], "workload_id": request["workload_id"],
         "registration_contract": request["registration_contract"],
         "runtime_images": request["runtime_images"],
+        "trust_registration": request["trust_registration"],
     }
     if (any(manifest.get(key) != value for key, value in expected.items())
             or manifest["ready_observed"] is not True
@@ -407,7 +420,8 @@ def _validate_v2_bindings(files: dict[str, bytes], manifest: dict[str, Any],
             or manifest["completion_attested"] is not True
             or manifest["evidence_released"] is not True
             or manifest["ready_attested"] is not True
-            or manifest["completion_eof_observed"] is not True):
+            or manifest["completion_eof_observed"] is not True
+            or result["trust_registration"] != request["trust_registration"]):
         _fail("v2 role, contract, image, or lifecycle binding mismatch")
     if not {_V2_COMPLETION, _V2_ATTESTATION}.issubset(files):
         _fail("v2 attestation members missing")
@@ -445,7 +459,7 @@ def _validate_v2_bindings(files: dict[str, bytes], manifest: dict[str, Any],
             or attestation["completion_attested"] is not True
             or attestation["evidence_released"] is not True
             or attestation["completion_eof_observed"] is not True
-            or len(ready_images) != 2 or completion_images != ready_images
+            or len(ready_images) != 5 or completion_images != ready_images
             or manifest["completion_images"] != completion_images
             or any(value != ready_hash for value in (
                 completion["ready_images_sha256"], attestation["ready_images_sha256"],
@@ -474,18 +488,32 @@ def _validate_capture_semantics(
         _fail("result object required")
     v2 = expected_request.get("protocol") == _V2_REQUEST_PROTOCOL
     _validate_result(result, v2=v2)
+    archive_data = _read_bound_archive(path, result)
+    return validate_capture_bytes(archive_data, path.name, result, expected_request)
+
+
+def validate_capture_bytes(archive_data: bytes, archive_name: str, result: dict[str, Any],
+                           expected_request: dict[str, Any]) -> dict[str, Any]:
+    """Validate already-retained archive bytes without reopening a mutable path."""
+    if not isinstance(result, dict):
+        _fail("result object required")
+    v2 = expected_request.get("protocol") == _V2_REQUEST_PROTOCOL
+    _validate_result(result, v2=v2)
+    if (not isinstance(archive_data, bytes) or len(archive_data) != result["archive_size"]
+            or hashlib.sha256(archive_data).hexdigest() != result["archive_sha256"]):
+        _fail("retained archive bytes do not match result")
     request_bytes = _canonical_request(expected_request)
     challenge = expected_request["request_challenge"]
     basename = f"capture-{challenge}.tar"
     device_root = _canonical_device_path(expected_request["run_root"], "expected run_root")
     device_archive = _canonical_device_path(result["archive_path"], "result archive_path")
     if (result["request_challenge"] != challenge
-            or path.name != basename
+            or archive_name != basename
             or device_archive.name != basename):
         _fail("request challenge archive binding mismatch")
     if device_archive != device_root / basename:
         _fail("archive path is outside the expected run root")
-    entries = _parse_ustar(_read_bound_archive(path, result))
+    entries = _parse_ustar(archive_data)
     manifest = _strict_json(entries[0][1], _MANIFEST)
     if set(manifest) != (_V2_MANIFEST_KEYS if v2 else _MANIFEST_KEYS):
         _fail("manifest protocol fields mismatch")

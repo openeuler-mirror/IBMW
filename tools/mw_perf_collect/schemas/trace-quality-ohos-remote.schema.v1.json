@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "mw_perf.trace_quality_ohos_remote.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "stream_id", "producer_pid", "producer_start_time_ticks", "producer", "finalized", "registration_contract", "raw_source_set", "topology", "trace_configuration", "upstream_delivery", "reconciliation", "counts", "counters", "key_coverage", "loss_accounting", "support", "conclusion_scope", "conclusion"],
+  "properties": {
+    "schema": {"const": "mw_perf.trace_quality_ohos_remote.v1"}, "run_id": {"type": "string", "minLength": 1}, "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"}, "path_id": {"type": "string", "minLength": 1}, "deployment_mode": {"const": "managed"}, "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "producer_pid": {"type": "integer", "minimum": 1}, "producer_start_time_ticks": {"type": "integer", "minimum": 0}, "producer": {"const": "mw_perf_collect"}, "finalized": {"const": true},
+    "registration_contract": {"type": "object", "additionalProperties": false, "required": ["version", "sha256"], "properties": {"version": {"const": "mw_perf.p0a_ohos_remote_contract.v1"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "raw_source_set": {"type": "object", "additionalProperties": false, "required": ["sha256", "file_count", "record_count"], "properties": {"sha256": {"$ref": "#/$defs/hash"}, "file_count": {"type": "integer", "minimum": 6}, "record_count": {"type": "integer", "minimum": 4004}}},
+    "topology": {"type": "object", "additionalProperties": false, "required": ["generation", "sha256"], "properties": {"generation": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "trace_configuration": {"type": "object", "additionalProperties": false, "required": ["mode", "sampling_algorithm", "sampling_permyriad"], "properties": {"mode": {"const": "full"}, "sampling_algorithm": {"const": 0}, "sampling_permyriad": {"const": 10000}}},
+    "upstream_delivery": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "record_count", "schema_version"], "properties": {"content_sha256": {"$ref": "#/$defs/hash"}, "record_count": {"const": 1}, "schema_version": {"const": "mw_perf.communication_delivery.v2"}}},
+    "reconciliation": {"$ref": "#/$defs/reconciliation"}, "counts": {"$ref": "#/$defs/counts"}, "counters": {"type": "object"}, "key_coverage": {"type": "object"}, "loss_accounting": {"type": "object"},
+    "support": {"type": "object", "additionalProperties": false, "required": ["level", "formal_p0a_completion", "failure_code"], "properties": {"level": {"const": "remote_candidate_run_only"}, "formal_p0a_completion": {"const": false}, "failure_code": {"const": "P0A_ARTIFACT"}}},
+    "conclusion_scope": {"const": "run_scoped_remote_trace_quality_artifact_integrity"}, "conclusion": {"const": "pass"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reconciliation": {"type": "object", "additionalProperties": false, "required": ["stage_accepted", "stage_eligible", "stage_exported", "exact_accepted", "exact_eligible", "exact_exported"], "properties": {"stage_accepted": {"const": 3000}, "stage_eligible": {"const": 3000}, "stage_exported": {"const": 3000}, "exact_accepted": {"const": 1000}, "exact_eligible": {"const": 1000}, "exact_exported": {"const": 1000}}},
+    "counts": {"type": "object", "additionalProperties": false, "required": ["stage_records", "exact_records", "publish", "receive", "dispatch", "callback", "unique_sample_keys", "unique_delivery_keys"], "properties": {"stage_records": {"const": 3000}, "exact_records": {"const": 1000}, "publish": {"const": 1000}, "receive": {"const": 1000}, "dispatch": {"const": 1000}, "callback": {"const": 1000}, "unique_sample_keys": {"const": 1000}, "unique_delivery_keys": {"const": 1000}}}
+  }
+}

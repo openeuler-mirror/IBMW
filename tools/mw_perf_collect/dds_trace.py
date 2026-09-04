@@ -351,7 +351,7 @@ def validate_directory_files(files: dict[str, bytes], schemas: dict[str, dict[st
         if (registration_contract_version in (
                 "mw_perf.p0a_contract.v4", "mw_perf.p0a_contract.v5",
                 "mw_perf.p0a_contract.v6", "mw_perf.p0a_contract.v7",
-                "mw_perf.p0a_contract.v8")
+                "mw_perf.p0a_contract.v8", "mw_perf.p0a_ohos_remote_contract.v1")
                 and (len(segments) != 1 or set(segments) != {exact_stream_id})):
             raise ValueError("contract v4-v8 requires exactly one matching stage stream")
         stage_events = stage_events_by_stream[exact_stream_id]
@@ -448,7 +448,8 @@ def derive_hook_callgraph(identity_derivation: dict[str, Any],
     """Derive the semantic boundary-chain claim from offline-regenerable inputs."""
     records = identity_derivation["records"]
     if (not records or identity_derivation.get("record_count") != len(records)
-            or resolution.get("schema") != "mw_perf.p0a.resolution.v2"):
+            or resolution.get("schema") not in (
+                "mw_perf.p0a.resolution.v2", "mw_perf.p0a.remote_resolution.v1")):
         raise ValueError("hook callgraph requires identity and resolution proofs")
     identity = {field: records[0][field] for field in (
         "run_id", "capability_id", "path_id", "deployment_mode")}
@@ -470,16 +471,22 @@ def derive_hook_callgraph(identity_derivation: dict[str, Any],
             raise ValueError("resolution declaration is malformed")
         match = matches_by_identity.get((declaration.get("role"), declaration.get("name")))
         observed = match.get("observed") if isinstance(match, dict) else None
-        if not isinstance(observed, list) or not observed:
+        if (resolution.get("schema") == "mw_perf.p0a.remote_resolution.v1"
+                and isinstance(match, dict)):
+            observed = [match.get("ready_observation"),
+                        match.get("completion_observation")]
+        if (not isinstance(observed, list) or not observed
+                or any(not isinstance(item, str) for item in observed)):
             raise ValueError("resolution declaration has no matched observation")
+        observation_ids = [str(item) for item in observed]
         resolved_images.append({
             "role": declaration["role"], "name": declaration["name"],
             "source": declaration["source"],
-            "expected_path": declaration["expected_path"],
+            "expected_path": declaration.get("expected_path", declaration.get("path")),
             "sha256": declaration["sha256"],
             "declaration_sha256": hashlib.sha256(
                 _canonical_bytes(declaration)).hexdigest(),
-            "observation_ids": sorted(observed),
+            "observation_ids": sorted(observation_ids),
         })
     resolved_images.sort(key=lambda item: tuple(item[field].encode("utf-8")
                          for field in ("role", "name", "source", "expected_path", "sha256")))
@@ -581,7 +588,8 @@ def derive_normalized_results(identity_derivation: dict[str, Any],
             or not isinstance(identity_derivation.get("source_set_sha256"), str)):
         raise ValueError("normalized results require an exact regenerated identity derivation")
     if (_json_object(resolution_bytes) != resolution
-            or resolution.get("schema") != "mw_perf.p0a.resolution.v2"):
+            or resolution.get("schema") not in (
+                "mw_perf.p0a.resolution.v2", "mw_perf.p0a.remote_resolution.v1")):
         raise ValueError("normalized results require exact resolution bytes")
     hook_value = hook_derivation.get("value")
     if (not isinstance(hook_value, dict) or hook_value.get("schema") != "mw_perf.p0a.hook_callgraph.v2"
@@ -744,7 +752,8 @@ def derive_communication_latency(identity_derivation: dict[str, Any],
                             str(identity_derivation.get("source_set_sha256", ""))) is None):
         raise ValueError("communication latency requires regenerated identity bytes")
     if (_json_object(resolution_bytes) != resolution
-            or resolution.get("schema") != "mw_perf.p0a.resolution.v2"):
+            or resolution.get("schema") not in (
+                "mw_perf.p0a.resolution.v2", "mw_perf.p0a.remote_resolution.v1")):
         raise ValueError("communication latency requires exact resolution bytes")
     hook_value = hook_derivation.get("value")
     if (not isinstance(hook_value, dict)
@@ -1043,7 +1052,8 @@ def derive_trace_quality(identity_derivation: dict[str, Any],
                          registration_contract_version: str,
                          registration_contract_sha256: str) -> dict[str, Any]:
     """Derive the v8 candidate-run trace-quality statement from validated raw facts."""
-    if registration_contract_version != "mw_perf.p0a_contract.v8" or re.fullmatch(
+    if registration_contract_version not in (
+            "mw_perf.p0a_contract.v8", "mw_perf.p0a_ohos_remote_contract.v1") or re.fullmatch(
             r"[0-9a-f]{64}", registration_contract_sha256 or "") is None:
         raise ValueError("trace quality registration contract binding is invalid")
     records = identity_derivation.get("records")
@@ -1156,7 +1166,9 @@ def derive_trace_quality(identity_derivation: dict[str, Any],
     sample_hash = delivery_value["observed"]["sample_set"]["sha256"]
     delivery_hash = delivery_value["observed"]["delivery_set"]["sha256"]
     value = {
-        "schema": "mw_perf.trace_quality.v1", **identity,
+        "schema": ("mw_perf.trace_quality_ohos_remote.v1"
+                   if registration_contract_version == "mw_perf.p0a_ohos_remote_contract.v1"
+                   else "mw_perf.trace_quality.v1"), **identity,
         "producer": "mw_perf_collect", "finalized": True,
         "registration_contract": {"version": registration_contract_version,
             "sha256": registration_contract_sha256},
@@ -1187,9 +1199,13 @@ def derive_trace_quality(identity_derivation: dict[str, Any],
         "loss_accounting": {"sampling_exclusion_count": 0, "trace_loss_count": 0,
             "sampling_exclusion_distinct_from_trace_loss": True,
             "zero_loss_exclusion_status_pending_and_io": True},
-        "support": {"level": "candidate_run_only", "formal_p0a_completion": False,
+        "support": {"level": ("remote_candidate_run_only"
+                                if registration_contract_version == "mw_perf.p0a_ohos_remote_contract.v1"
+                                else "candidate_run_only"), "formal_p0a_completion": False,
             "failure_code": "P0A_ARTIFACT"},
-        "conclusion_scope": "run_scoped_trace_quality_artifact_integrity",
+        "conclusion_scope": ("run_scoped_remote_trace_quality_artifact_integrity"
+                             if registration_contract_version == "mw_perf.p0a_ohos_remote_contract.v1"
+                             else "run_scoped_trace_quality_artifact_integrity"),
         "conclusion": "pass",
     }
     data = _canonical_bytes(value, newline=True)
