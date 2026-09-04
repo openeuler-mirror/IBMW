@@ -120,7 +120,8 @@ def _fixture(tmp_path):
         "trace_mode": "full", "request_challenge": challenge,
     }
     registration = {
-        "schema": ohos_registration.SCHEMA, "registration_id": "registration-1",
+        "schema": ohos_registration.SCHEMA, "registration_role": "production_anchor",
+        "registration_id": "registration-1",
         "capability_id": capability, "campaign_id": "campaign-1",
         "device": {"serial": "device-1", "os_name": "OpenHarmony", "os_version": "5.0",
             "build_id": "build-1", "abi": "arm64-v8a", "os_image_sha256": "6" * 64},

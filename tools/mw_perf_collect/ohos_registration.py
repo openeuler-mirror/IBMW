@@ -52,9 +52,10 @@ def build_identity_sha256(registration: dict[str, Any]) -> str:
 
 
 def preregistration_declaration_sha256(registration: dict[str, Any]) -> str:
-    fields = ("schema", "registration_id", "capability_id", "campaign_id", "device",
-              "exact_boot_id", "toolchain", "source", "capture_agent", "runtime_images",
-              "threat_model")
+    fields = ("schema", "registration_role", "registration_id", "capability_id", "campaign_id", "device",
+               "exact_boot_id", "toolchain", "source", "capture_agent", "runtime_images",
+              "threat_model", "production_anchor")
+    fields = tuple(key for key in fields if key in registration)
     return hashlib.sha256(canonical_bytes({key: registration[key] for key in fields})[:-1]).hexdigest()
 
 
@@ -102,6 +103,9 @@ def validate_registration(value: Any, *, raw: bytes | None = None,
     if expected_sha256 is not None and (not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
                                         or digest != expected_sha256):
         raise OhosRegistrationError("registration SHA256 mismatch")
+    role = value["registration_role"]
+    if ((role == "fault_runtime_subject") != ("production_anchor" in value)):
+        raise OhosRegistrationError("registration role/production anchor relationship is invalid")
     if value["build_identity"] != {"formula": BUILD_FORMULA,
                                      "sha256": build_identity_sha256(value)}:
         raise OhosRegistrationError("registration build identity mismatch")
@@ -110,6 +114,8 @@ def validate_registration(value: Any, *, raw: bytes | None = None,
         raise OhosRegistrationError("registration production runtime layout mismatch")
     if len({(item["role"], item["name"]) for item in images}) != len(images):
         raise OhosRegistrationError("registration runtime image identity collision")
+    if any(item["sha256"] == "0" * 64 for item in images):
+        raise OhosRegistrationError("registration runtime image hashes must be nonzero")
     if value["trust_classification"] != TRUST_CLASSIFICATION:
         raise OhosRegistrationError("registration trust classification mismatch")
     if approval is None or approval_raw is None or expected_approval_sha256 is None:
@@ -132,6 +138,13 @@ def validate_registration(value: Any, *, raw: bytes | None = None,
         if str(path) != item["path"] or ".." in path.parts or "." in path.parts:
             raise OhosRegistrationError("registration contains a noncanonical device path")
     return value
+
+
+def validate_fault_registration(value: Any, **kwargs: Any) -> dict[str, Any]:
+    """Validate a fault registration while retaining the production anchor binding."""
+    if not isinstance(value, dict) or value.get("registration_role") != "fault_runtime_subject":
+        raise OhosRegistrationError("fault runtime registration role is required")
+    return validate_registration(value, **kwargs)
 
 
 def _read_bound_json(path_value: str | Path, label: str) -> tuple[dict[str, Any], bytes]:

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.p0a.ohos_remote_fault_trusted_roots.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "campaign_id", "capability_id", "threat_model", "production", "cases"],
+  "properties": {
+    "schema": {"const": "mw_perf.p0a.ohos_remote_fault_trusted_roots.v1"},
+    "campaign_id": {"$ref": "#/$defs/id"},
+    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+    "threat_model": {"const": "cooperative_contained_sut_no_active_same_uid"},
+    "production": {"$ref": "#/$defs/root"},
+    "cases": {"type": "array", "minItems": 5, "maxItems": 5, "prefixItems": [
+      {"$ref": "#/$defs/callbackLoss"}, {"$ref": "#/$defs/callbackStatus"},
+      {"$ref": "#/$defs/producerIdentity"}, {"$ref": "#/$defs/stageLoss"},
+      {"$ref": "#/$defs/stageStatus"}], "items": false}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"},
+    "nonzeroHash": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "root": {"type": "object", "additionalProperties": false, "required": ["registration_sha256", "approval_sha256"], "properties": {"registration_sha256": {"$ref": "#/$defs/nonzeroHash"}, "approval_sha256": {"$ref": "#/$defs/nonzeroHash"}}},
+    "case": {"type": "object", "additionalProperties": false, "required": ["case_id", "registration_sha256", "approval_sha256"], "properties": {"case_id": {}, "registration_sha256": {"$ref": "#/$defs/nonzeroHash"}, "approval_sha256": {"$ref": "#/$defs/nonzeroHash"}}},
+    "callbackLoss": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "callback_loss"}}}]},
+    "callbackStatus": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "callback_status"}}}]},
+    "producerIdentity": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "producer_identity_mismatch"}}}]},
+    "stageLoss": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "stage_loss"}}}]},
+    "stageStatus": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "stage_status"}}}]}
+  }
+}

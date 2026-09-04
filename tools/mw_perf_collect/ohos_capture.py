@@ -40,6 +40,7 @@ _V2_RESULT_PROTOCOL = "mw_perf.ohos_remote_capture.result.v2"
 _V2_REQUEST_PROTOCOL = "mw_perf.ohos_remote_capture.request.v2"
 _V2_CAPABILITY = "dds.ordinary.nonplain.single_driver.sync_callback"
 _V2_WORKLOAD = "dds.ordinary.nonplain.single_driver.sync_callback"
+_FAULT_IDS = {"callback_loss", "callback_status", "producer_identity_mismatch", "stage_loss", "stage_status"}
 _V2_CONTRACT = "mw_perf.p0a_contract.v8"
 _V2_CONTRACT_SHA256 = "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575"
 _V2_ATTESTATION = "device_runtime_attestation.json"
@@ -167,7 +168,10 @@ def _validate_v2_request(request: dict[str, Any]) -> None:
     image_keys = [(item["role"], item["name"]) for item in images]
     if len(image_keys) != len(set(image_keys)):
         _fail("runtime image role/name pairs must be unique")
-    if (request["capture_role"] != "exact_anchor" or request["fault"] != "none"
+    exact = request["capture_role"] == "exact_anchor"
+    fault = request["fault"] in _FAULT_IDS
+    if ((exact and request["fault"] != "none") or (fault and request["capture_role"] != "fault_runtime_subject")
+            or (not exact and not fault)
             or request["capability_id"] != _V2_CAPABILITY
             or request["workload_id"] != _V2_WORKLOAD
             or request["trace_mode"] != "full" or request["exact_required"] is not True
@@ -435,7 +439,7 @@ def _validate_v2_bindings(files: dict[str, bytes], manifest: dict[str, Any],
     _schema_validate(attestation, "ohos-runtime-attestation.schema.v2.json", "runtime attestation")
     identity = {
         "request_challenge": request["request_challenge"], "campaign_id": request["campaign_id"],
-        "run_id": request["run_id"], "capture_role": "exact_anchor",
+        "run_id": request["run_id"], "capture_role": request["capture_role"],
         "boot_id": manifest["boot_id"], "child_pid": result["child_pid"],
         "child_start_time_ticks": result["child_start_time_ticks"],
     }
@@ -576,6 +580,12 @@ def validate_capture_bytes(archive_data: bytes, archive_name: str, result: dict[
         _fail("archive tree hash mismatch")
     trace_files = files if not v2 else {name: content for name, content in files.items()
                                         if name not in {_V2_COMPLETION, _V2_ATTESTATION}}
+    if v2 and expected_request.get("capture_role") == "fault_runtime_subject":
+        try:
+            _materialize_and_validate(trace_files, manifest, contract_version=_V2_CONTRACT)
+        except CaptureSemanticError as error:
+            return {"semantic_validation": False, "fault_error": str(error), "formal_p0a": False}
+        _fail("fault subject trace is semantically valid")
     trace_result = _materialize_and_validate(
         trace_files, manifest, contract_version=_V2_CONTRACT if v2 else "mw_perf.p0a_contract.v4")
     return {

@@ -28,6 +28,8 @@ option(IBMW_BUILD_ROS2_TYPES "IBMW build ROS2 type support (rosidl build-time on
 option(IBMW_BUILD_PROTOCOLS "IBMW build protocols." ON)
 option(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
   "Build the production DDS remote-managed exact-capture candidate." OFF)
+option(IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE
+  "Build and install the OHOS DDS remote-managed runtime-fault candidate." OFF)
 
 # DDS selection is explicit. SYSTEM intentionally uses ordinary CMake package
 # resolution, so a sourced ROS environment may affect package selection; it
@@ -134,7 +136,7 @@ cmake_dependent_option(IBMW_BUILD_DDS_XML_VALIDATION
   "Build the standalone DDS XML transport validation pair." OFF
   "IBMW_BUILD_RUNTIME;IBMW_BUILD_DDS_EXTENSION" OFF)
 
-if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE)
+if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE OR IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE)
   foreach(_ibmw_candidate_requirement
       IBMW_BUILD_RUNTIME
       IBMW_ENABLE_COMM_TRACE
@@ -646,6 +648,7 @@ list(
   IBMW_BUILD_PROXY_EXTENSION
   IBMW_BUILD_DDS_EXTENSION
   IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
+  IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE
   IBMW_EXECUTOR_USE_STDEXEC
   IBMW_ENABLE_DLOPEN_DEEPBIND
   IBMW_ENABLE_CORE_METRICS

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.p0a.ohos_remote_fault_runtime_matrix.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "matrix_id", "campaign_id", "companion_id", "finalized", "conclusion", "production_anchor", "production_build_identity_sha256", "fault_build_identity_sha256", "cases", "subjects_sha256", "trusted_roots_sha256", "offline_revalidation"],
+  "properties": {
+    "schema": {"const": "mw_perf.p0a.ohos_remote_fault_runtime_matrix.v1"},
+    "matrix_id": {"type": "string", "pattern": "^ohos-runtime-fault-matrix-[0-9a-f]{24}$"},
+    "campaign_id": {"$ref": "#/$defs/id"},
+    "companion_id": {"$ref": "#/$defs/id"},
+    "finalized": {"const": true},
+    "conclusion": {"const": "pass"},
+    "production_anchor": {"$ref": "#/$defs/anchor"},
+    "production_build_identity_sha256": {"$ref": "#/$defs/nonzeroHash"},
+    "fault_build_identity_sha256": {"$ref": "#/$defs/nonzeroHash"},
+    "subjects_sha256": {"$ref": "#/$defs/nonzeroHash"},
+    "trusted_roots_sha256": {"$ref": "#/$defs/nonzeroHash"},
+    "offline_revalidation": {"const": "consistency_only"},
+    "cases": {"type": "array", "minItems": 5, "maxItems": 5, "prefixItems": [
+      {"$ref": "#/$defs/callbackLoss"}, {"$ref": "#/$defs/callbackStatus"},
+      {"$ref": "#/$defs/producerIdentity"}, {"$ref": "#/$defs/stageLoss"},
+      {"$ref": "#/$defs/stageStatus"}], "items": false}
+  },
+  "$defs": {
+    "nonzeroHash": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"},
+    "anchor": {"type": "object", "additionalProperties": false, "required": ["registration_id", "sha256", "build_identity_sha256"], "properties": {"registration_id": {"$ref": "#/$defs/id"}, "sha256": {"$ref": "#/$defs/nonzeroHash"}, "build_identity_sha256": {"$ref": "#/$defs/nonzeroHash"}}},
+    "images": {"type": "object", "additionalProperties": false, "required": ["sut", "extension", "fastdds", "fastcdr", "cpp_runtime"], "properties": {"sut": {"$ref": "#/$defs/nonzeroHash"}, "extension": {"$ref": "#/$defs/nonzeroHash"}, "fastdds": {"$ref": "#/$defs/nonzeroHash"}, "fastcdr": {"$ref": "#/$defs/nonzeroHash"}, "cpp_runtime": {"$ref": "#/$defs/nonzeroHash"}}},
+    "observation": {"type": "object", "additionalProperties": false, "required": ["stage_dropped_before", "stage_dropped_after", "stage_invalid_identity", "stage_unsupported_async", "exact_dropped", "exact_invalid_identity", "exact_missing_registration", "exact_unsupported_async", "exact_unsupported_multi_handler", "stage_nonzero_status_count", "exact_nonzero_status_count", "producer_run_id_matches_subject"], "properties": {"stage_dropped_before": {"type": "integer", "minimum": 0}, "stage_dropped_after": {"type": "integer", "minimum": 0}, "stage_invalid_identity": {"type": "integer", "minimum": 0}, "stage_unsupported_async": {"type": "integer", "minimum": 0}, "exact_dropped": {"type": "integer", "minimum": 0}, "exact_invalid_identity": {"type": "integer", "minimum": 0}, "exact_missing_registration": {"type": "integer", "minimum": 0}, "exact_unsupported_async": {"type": "integer", "minimum": 0}, "exact_unsupported_multi_handler": {"type": "integer", "minimum": 0}, "stage_nonzero_status_count": {"type": "integer", "minimum": 0}, "exact_nonzero_status_count": {"type": "integer", "minimum": 0}, "producer_run_id_matches_subject": {"type": "boolean"}}},
+    "case": {"type": "object", "additionalProperties": false, "required": ["case_id", "subject_run_id", "request_challenge", "capture_nonce", "archive_sha256", "archive_tree_sha256", "observed_failure_kind", "observed_error", "observed_failure_codes", "injected_observation", "runtime_image_hashes"], "properties": {"case_id": {}, "subject_run_id": {"$ref": "#/$defs/id"}, "request_challenge": {"$ref": "#/$defs/nonzeroHash"}, "capture_nonce": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"}, "archive_sha256": {"$ref": "#/$defs/nonzeroHash"}, "archive_tree_sha256": {"$ref": "#/$defs/nonzeroHash"}, "observed_failure_kind": {}, "observed_error": {}, "observed_failure_codes": {"const": ["P0A_ARTIFACT", "P0A_DDS_COMM_TRACE"]}, "injected_observation": {"$ref": "#/$defs/observation"}, "runtime_image_hashes": {"$ref": "#/$defs/images"}}},
+    "callbackLoss": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "callback_loss"}, "observed_failure_kind": {"const": "callback_zero_loss"}, "observed_error": {"const": "imported trace semantic validation failed"}}}]},
+    "callbackStatus": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "callback_status"}, "observed_failure_kind": {"const": "callback_nonzero_status"}, "observed_error": {"const": "imported trace semantic validation failed"}}}]},
+    "producerIdentity": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "producer_identity_mismatch"}, "observed_failure_kind": {"const": "producer_identity"}, "observed_error": {"const": "imported trace semantic validation failed"}}}]},
+    "stageLoss": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "stage_loss"}, "observed_failure_kind": {"const": "stage_zero_loss"}, "observed_error": {"const": "imported trace semantic validation failed"}}}]},
+    "stageStatus": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "stage_status"}, "observed_failure_kind": {"const": "stage_nonzero_status"}, "observed_error": {"const": "imported trace semantic validation failed"}}}]}
+  }
+}

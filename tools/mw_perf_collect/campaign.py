@@ -1070,6 +1070,11 @@ def _specialized_companion(role: str, path: Path, descriptor: dict[str, Any],
         from .fault_evaluation import validate_evidence_tamper_companion
         return validate_evidence_tamper_companion(path, descriptor)
     if role == "fault_runtime_matrix":
+        if descriptor.get("evidence_contract", {}).get("id") == \
+                "mw_perf.p0a.ohos_remote_fault_runtime_matrix.v1":
+            return {"valid": False,
+                    "failure_codes": ["RUNTIME_FAULT_CONTRACT_FAMILY"],
+                    "descriptor": descriptor}
         from .runtime_fault_evaluation import validate_runtime_fault_companion
         return validate_runtime_fault_companion(path, descriptor)
     from .rollback_evaluation import validate_trace_off_rollback_companion

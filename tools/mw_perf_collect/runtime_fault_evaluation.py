@@ -58,6 +58,39 @@ _EXPECTED_ERRORS = {
 }
 
 
+def runtime_fault_observation_matches(case_id: str, observation: Mapping[str, Any],
+                                      *, exact_finalized: bool,
+                                      producer_run_id_matches: bool) -> bool:
+    """Pure shared predicate for native and remote fault receipt validation."""
+    if case_id not in CASE_IDS:
+        return False
+    exclusions_zero = all(observation.get(key) == 0 for key in (
+        "stage_invalid_identity", "stage_unsupported_async", "exact_invalid_identity",
+        "exact_missing_registration", "exact_unsupported_async",
+        "exact_unsupported_multi_handler"))
+    common = observation.get("stage_dropped_before") == 0 and exclusions_zero
+    clean = (observation.get("stage_dropped_after") == 0 and
+             observation.get("exact_dropped") == 0)
+    return {
+        "stage_loss": common and observation.get("stage_dropped_after", 0) > 0 and
+                      observation.get("exact_dropped") == 0 and
+                      observation.get("stage_nonzero_status_count") == 0 and
+                      observation.get("exact_nonzero_status_count") == 0 and producer_run_id_matches and exact_finalized,
+        "callback_loss": common and observation.get("stage_dropped_after") == 0 and
+                         observation.get("exact_dropped", 0) > 0 and
+                         observation.get("stage_nonzero_status_count") == 0 and
+                         observation.get("exact_nonzero_status_count") == 0 and producer_run_id_matches and not exact_finalized,
+        "producer_identity_mismatch": common and clean and
+                                      observation.get("stage_nonzero_status_count") == 0 and
+                                      observation.get("exact_nonzero_status_count") == 0 and
+                                      not producer_run_id_matches and exact_finalized,
+        "stage_status": common and clean and observation.get("stage_nonzero_status_count", 0) > 0 and
+                        observation.get("exact_nonzero_status_count") == 0 and producer_run_id_matches and exact_finalized,
+        "callback_status": common and clean and observation.get("stage_nonzero_status_count") == 0 and
+                           observation.get("exact_nonzero_status_count", 0) > 0 and producer_run_id_matches and exact_finalized,
+    }[case_id]
+
+
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -438,40 +471,9 @@ def _producer_observation(case_id: str, files: Mapping[str, bytes], manifest: di
         "exact_missing_registration", "exact_unsupported_async",
         "exact_unsupported_multi_handler"))
     common = observation["stage_dropped_before"] == 0 and exclusions_zero
-    expected = {
-        "stage_loss": (common and observation["stage_dropped_after"] > 0
-                        and observation["exact_dropped"] == 0
-                       and observation["stage_nonzero_status_count"] == 0
-                       and observation["exact_nonzero_status_count"] == 0
-                       and observation["producer_run_id_matches_subject"]
-                       and exact_finalized is True),
-        "callback_loss": (common and observation["stage_dropped_after"] == 0
-                           and observation["exact_dropped"] > 0
-                          and observation["stage_nonzero_status_count"] == 0
-                          and observation["exact_nonzero_status_count"] == 0
-                          and observation["producer_run_id_matches_subject"]
-                          and exact_finalized is False),
-        "producer_identity_mismatch": (common and observation["stage_dropped_after"] == 0
-                                       and observation["exact_dropped"] == 0
-                                       and observation["stage_nonzero_status_count"] == 0
-                                       and observation["exact_nonzero_status_count"] == 0
-                                       and len(producer_ids) == 1
-                                       and not observation["producer_run_id_matches_subject"]
-                                       and exact_finalized is True),
-        "stage_status": (common and observation["stage_dropped_after"] == 0
-                          and observation["exact_dropped"] == 0
-                         and observation["stage_nonzero_status_count"] > 0
-                         and observation["exact_nonzero_status_count"] == 0
-                         and observation["producer_run_id_matches_subject"]
-                         and exact_finalized is True),
-        "callback_status": (common and observation["stage_dropped_after"] == 0
-                             and observation["exact_dropped"] == 0
-                            and observation["stage_nonzero_status_count"] == 0
-                            and observation["exact_nonzero_status_count"] > 0
-                            and observation["producer_run_id_matches_subject"]
-                            and exact_finalized is True),
-    }
-    if not expected[case_id]:
+    if not runtime_fault_observation_matches(
+            case_id, observation, exact_finalized=exact_finalized is True,
+            producer_run_id_matches=observation["producer_run_id_matches_subject"]):
         raise ValueError("subject producer observation does not match its runtime fault case")
     return observation
 

@@ -6,6 +6,9 @@ from .json_strict import loads as strict_json_loads
 from .metric_qualification import build_metric_qualification, validate_metric_qualification
 from .ohos_capture import CaptureSemanticError, validate_capture_semantics
 from .ohos_remote_p0a import OhosP0aMaterializationError, materialize_ohos_p0a_candidate
+from .ohos_remote_fault import (OhosRemoteFaultError, materialize_ohos_remote_fault_subject,
+                                evaluate_ohos_remote_fault_matrix,
+                                package_ohos_remote_fault_matrix, CASE_IDS)
 from .ohos_registration import (BUILD_FORMULA, OhosRegistrationError,
                                 build_identity_sha256, canonical_bytes,
                                 read_operator_approval, read_registration,
@@ -290,6 +293,20 @@ def main(argv=None):
     orv=s.add_parser("validate-ohos-p0a-registration")
     orv.add_argument("--registration", required=True); orv.add_argument("--sha256", required=True)
     orv.add_argument("--approval", required=True); orv.add_argument("--approval-sha256", required=True)
+    of=s.add_parser("materialize-ohos-remote-fault")
+    for name in ("archive", "result", "request", "registration", "registration-sha256", "approval", "approval-sha256", "destination"):
+        of.add_argument("--" + name, required=True)
+    oe=s.add_parser("evaluate-ohos-remote-fault")
+    oe.add_argument("--subjects", required=True); oe.add_argument("--destination", required=True)
+    oe.add_argument("--production-anchor", required=True)
+    oe.add_argument("--companion-id", required=True)
+    oe.add_argument("--trusted-roots", required=True)
+    oe.add_argument("--trusted-roots-sha256", required=True)
+    ok=s.add_parser("package-ohos-remote-fault")
+    ok.add_argument("--matrix", required=True); ok.add_argument("--object-store", required=True)
+    ok.add_argument("--campaign-id", required=True)
+    ok.add_argument("--trusted-roots", required=True)
+    ok.add_argument("--trusted-roots-sha256", required=True)
     for parser in (qb, qv):
         parser.add_argument("--campaign", required=True)
         parser.add_argument("--object-store", required=True)
@@ -308,6 +325,46 @@ def main(argv=None):
         return _run_ohos_registration_create(a)
     if a.action == "validate-ohos-p0a-registration":
         return _run_ohos_registration_validate(a)
+    if a.action == "materialize-ohos-remote-fault":
+        try:
+            result, _, result_raw = _read_strict_regular_json(a.result, "result")
+            request, _, request_raw = _read_strict_regular_json(a.request, "request")
+            receipt = materialize_ohos_remote_fault_subject(
+                a.archive, result, request, a.destination, result_raw=result_raw,
+                request_raw=request_raw, registration_path=a.registration,
+                registration_sha256=a.registration_sha256, approval_path=a.approval,
+                approval_sha256=a.approval_sha256)
+            print(_canonical_json_line(receipt).decode("ascii"), end="")
+            return 0
+        except (OhosRemoteFaultError, OSError, ValueError, TypeError, KeyError) as error:
+            print(_canonical_json_line({"schema": "mw_perf.p0a.ohos_remote_fault_receipt.v1",
+                "materialized": False, "error": str(error)[:256]}).decode("ascii"), end="")
+            return EXIT_INVALID
+    if a.action == "evaluate-ohos-remote-fault":
+        try:
+            subjects = {case: Path(a.subjects, case) for case in CASE_IDS}
+            result = evaluate_ohos_remote_fault_matrix(
+                subjects, a.destination, a.production_anchor,
+                companion_id=a.companion_id,
+                trusted_roots_path=a.trusted_roots,
+                expected_trusted_roots_sha256=a.trusted_roots_sha256)
+            print(_canonical_json_line(result).decode("ascii"), end="")
+            return 0
+        except (OhosRemoteFaultError, OSError, ValueError, TypeError, KeyError) as error:
+            print(_canonical_json_line({"schema": "mw_perf.p0a.ohos_remote_fault_runtime_matrix.v1",
+                "finalized": False, "error": str(error)[:256]}).decode("ascii"), end="")
+            return EXIT_INVALID
+    if a.action == "package-ohos-remote-fault":
+        try:
+            result = package_ohos_remote_fault_matrix(a.matrix, a.object_store,
+                campaign_id=a.campaign_id,
+                trusted_roots_path=a.trusted_roots,
+                expected_trusted_roots_sha256=a.trusted_roots_sha256)
+            print(_canonical_json_line(result).decode("ascii"), end="")
+            return 0
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            print(_canonical_json_line({"valid": False, "error": str(error)[:256]}).decode("ascii"), end="")
+            return EXIT_INVALID
     if a.action=="doctor":
         try:
             result=adapter_doctor(a.adapter,load_config(a.config)); result["tool_version"]=VERSION

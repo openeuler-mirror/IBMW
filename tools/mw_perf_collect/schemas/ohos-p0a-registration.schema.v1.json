@@ -3,9 +3,10 @@
   "$id": "mw_perf.ohos_p0a_registration.v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "registration_id", "capability_id", "campaign_id", "device", "exact_boot_id", "toolchain", "source", "capture_agent", "runtime_images", "build_identity", "threat_model", "approval_artifact", "trust_classification"],
+  "required": ["schema", "registration_role", "registration_id", "capability_id", "campaign_id", "device", "exact_boot_id", "toolchain", "source", "capture_agent", "runtime_images", "build_identity", "threat_model", "approval_artifact", "trust_classification"],
   "properties": {
     "schema": {"const": "mw_perf.ohos_p0a_registration.v1"},
+    "registration_role": {"enum": ["production_anchor", "fault_runtime_subject"]},
     "registration_id": {"$ref": "#/$defs/id"},
     "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
     "campaign_id": {"$ref": "#/$defs/id"},
@@ -18,13 +19,19 @@
     "build_identity": {"type": "object", "additionalProperties": false, "required": ["formula", "sha256"], "properties": {"formula": {"const": "sha256(canonical_json(source,toolchain,capture_agent,runtime_images))"}, "sha256": {"$ref": "#/$defs/hash"}}},
     "threat_model": {"const": "cooperative_contained_sut_no_active_same_uid"},
     "approval_artifact": {"type": "object", "additionalProperties": false, "required": ["schema", "sha256"], "properties": {"schema": {"const": "mw_perf.ohos_p0a_operator_approval.v1"}, "sha256": {"$ref": "#/$defs/hash"}}},
-    "trust_classification": {"$ref": "#/$defs/trustClassification"}
+    "trust_classification": {"$ref": "#/$defs/trustClassification"},
+    "production_anchor": {"type": "object", "additionalProperties": false, "required": ["registration_id", "sha256", "build_identity_sha256"], "properties": {"registration_id": {"$ref": "#/$defs/id"}, "sha256": {"$ref": "#/$defs/hash"}, "build_identity_sha256": {"$ref": "#/$defs/hash"}}}
   },
+  "allOf": [
+    {"if": {"properties": {"registration_role": {"const": "fault_runtime_subject"}}}, "then": {"required": ["production_anchor"]}},
+    {"if": {"properties": {"registration_role": {"const": "production_anchor"}}}, "then": {"not": {"required": ["production_anchor"]}}}
+  ],
   "$defs": {
     "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"},
     "path": {"type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^/(?!.*(?:^|/)\\.\\.?/)[ -~]+$"},
-    "imageBase": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "path", "sha256"], "properties": {"role": {}, "name": {"$ref": "#/$defs/id"}, "source": {}, "path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "imageBase": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "path", "sha256"], "properties": {"role": {}, "name": {"$ref": "#/$defs/id"}, "source": {}, "path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/nonzeroHash"}}},
+    "nonzeroHash": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
     "sut": {"allOf": [{"$ref": "#/$defs/imageBase"}, {"properties": {"role": {"const": "sut"}, "source": {"const": "exe"}}}]},
     "extension": {"allOf": [{"$ref": "#/$defs/imageBase"}, {"properties": {"role": {"const": "extension"}, "source": {"const": "maps"}}}]},
     "fastdds": {"allOf": [{"$ref": "#/$defs/imageBase"}, {"properties": {"role": {"const": "fastdds"}, "source": {"const": "maps"}}}]},

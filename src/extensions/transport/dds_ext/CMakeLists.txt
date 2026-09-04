@@ -184,6 +184,7 @@ endfunction()
 # The production candidate is also used by the managed-exact integration test.
 # Create it once when either production capture or that test lane requests it.
 if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE OR
+   IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE OR
    (IBMW_BUILD_TESTS AND IBMW_ENABLE_COMM_TRACE))
   add_executable(ibmw_dds_managed_exact_candidate
     dds_managed_exact_candidate.cc dds_bus.cc global.cc)
@@ -212,6 +213,31 @@ if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE OR
         COMPONENT dds_managed_exact_candidate
       LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         COMPONENT dds_managed_exact_candidate)
+  endif()
+endif()
+
+# The fault candidate is a separate test-instrumented image.  It is enabled by
+# an explicit production option so an OHOS image can ship the injection lane
+# without enabling the full test suite.
+if(IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE)
+  add_library(ibmw_dds_extension_fault_candidate SHARED ${DDS_EXTENSION_SOURCES})
+  ibmw_configure_dds_extension(
+    ibmw_dds_extension_fault_candidate ibmw_dds_transport_fault_candidate)
+  target_compile_definitions(ibmw_dds_extension_fault_candidate PRIVATE
+    IBMW_COMM_TRACE_TEST_HOOKS=1)
+  add_executable(ibmw_dds_managed_exact_fault_candidate
+    dds_managed_exact_candidate.cc dds_bus.cc global.cc)
+  ibmw_configure_managed_exact_candidate(
+    ibmw_dds_managed_exact_fault_candidate ibmw_dds_extension_fault_candidate)
+  target_compile_definitions(ibmw_dds_managed_exact_fault_candidate PRIVATE
+    IBMW_MANAGED_EXACT_FAULT_CANDIDATE=1 IBMW_COMM_TRACE_TEST_HOOKS=1)
+  if(IBMW_INSTALL)
+    install(TARGETS ibmw_dds_managed_exact_fault_candidate
+      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+      COMPONENT dds_managed_exact_fault_candidate)
+    install(TARGETS ibmw_dds_extension_fault_candidate
+      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+      COMPONENT dds_managed_exact_fault_candidate)
   endif()
 endif()
 
@@ -266,7 +292,7 @@ if(IBMW_BUILD_TESTS)
     ENVIRONMENT_MODIFICATION
       "LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTCDR_PROVIDER_TARGET}>;LD_LIBRARY_PATH=path_list_prepend:$<TARGET_FILE_DIR:${IBMW_FASTDDS_PROVIDER_TARGET}>")
 
-  if(IBMW_ENABLE_COMM_TRACE)
+  if(IBMW_ENABLE_COMM_TRACE AND NOT IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE)
     add_library(ibmw_dds_extension_fault_test SHARED ${DDS_EXTENSION_SOURCES})
     ibmw_configure_dds_extension(
       ibmw_dds_extension_fault_test ibmw_dds_transport_fault_test)

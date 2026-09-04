@@ -213,8 +213,17 @@ std::optional<CaptureV2Handshake> ParseCaptureV2Handshake() {
       throw std::runtime_error(std::string("missing v2 declaration: ") + name);
     }
   }
-  if (std::strcmp(std::getenv("MW_PERF_CAPTURE_ROLE"), "exact_anchor") != 0 ||
-      std::strcmp(std::getenv("MW_PERF_CAPTURE_FAULT"), "none") != 0 ||
+  const char* capture_role = std::getenv("MW_PERF_CAPTURE_ROLE");
+  const char* capture_fault = std::getenv("MW_PERF_CAPTURE_FAULT");
+  const bool fault_role = std::strcmp(capture_role, "fault_runtime_subject") == 0;
+  const bool valid_fault = capture_fault != nullptr &&
+      (std::strcmp(capture_fault, "callback_loss") == 0 ||
+       std::strcmp(capture_fault, "callback_status") == 0 ||
+       std::strcmp(capture_fault, "producer_identity_mismatch") == 0 ||
+       std::strcmp(capture_fault, "stage_loss") == 0 ||
+       std::strcmp(capture_fault, "stage_status") == 0);
+  if ((!fault_role && std::strcmp(capture_role, "exact_anchor") != 0) ||
+      (fault_role ? !valid_fault : std::strcmp(capture_fault, "none") != 0) ||
       std::strcmp(std::getenv("MW_PERF_CAPABILITY_ID"), kCaptureCapability) != 0 ||
       std::strcmp(std::getenv("MW_PERF_CAPTURE_WORKLOAD_ID"), kCaptureCapability) != 0 ||
       std::strcmp(std::getenv("MW_PERF_CAPTURE_CONTRACT_ID"), kCaptureContract) != 0 ||
@@ -293,6 +302,12 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::string fault = *parsed_fault;
+  const char* declared_fault = std::getenv("MW_PERF_CAPTURE_FAULT");
+  if (declared_fault != nullptr && fault != declared_fault) {
+    std::cerr << "managed exact fault candidate: argv fault does not match authenticated request"
+              << std::endl;
+    return 2;
+  }
   if (fault == "producer_identity_mismatch" &&
       setenv("MW_PERF_RUN_ID", kWrongRunId, 1) != 0) {
     std::cerr << "managed exact candidate startup failure: run identity override failed" << std::endl;
