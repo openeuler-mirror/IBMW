@@ -130,7 +130,7 @@ IBMW_OBSERVABILITY_OUTPUT_DIR=<directory>
 - Reporter V1 host/extension 边界；
 - shutdown final snapshot。
 
-`comm_trace` 属于本主线的独立交付边界：当前提供默认关闭的 core hook、DDS writer/reader identity trace、同步 callback registration identity scope、独立 exact record/query、managed `.ibce` exporter 和 stage sink；旧 V1 DDS dispatch 仍保持 `stage_only`，受控 exact artifact 只有在 capability、managed finalization、native round-trip 和正式 P0a 门禁全部通过后才能登记 `exact_correlated`。comm_trace 与 Core Metrics 解耦，Core Metrics 功能和 artifact 已闭环，最新 sealed formal host E2E 性能门已通过；但该结论仅适用于既定 host capability/合同，不外推到 OHOS managed P0a、metric axis 或其它 capability。仍不能用 Core Metrics 做 ROS2/IBMW 排名。
+`comm_trace` 属于本主线的独立交付边界：当前提供默认关闭的 core hook、DDS writer/reader identity trace、同步 callback registration identity scope、独立 exact record/query、managed `.ibce` exporter 和 stage sink；旧 V1 DDS dispatch 仍保持 `stage_only`，受控 exact artifact 只有在 capability、managed finalization、native round-trip 和正式 P0a 门禁全部通过后才能登记 `exact_correlated`。comm_trace 与 Core Metrics 解耦，Core Metrics 功能和 artifact 已闭环；性能门是独立验收轴，不作为主要功能闭环依据，也不外推到 OHOS managed P0a、metric axis 或其它 capability。仍不能用 Core Metrics 做 ROS2/IBMW 排名。
 
 指标名称与 kind 以实际 `ibmw.core_metrics.v1` artifact 为准。不同路径的 attempted、succeeded、failed、publish、delivery、callback 和 release 语义必须独立，不能为凑守恒关系合并。
 
@@ -144,7 +144,7 @@ IBMW_OBSERVABILITY_OUTPUT_DIR=<directory>
 
 ### 4.4 性能边界
 
-功能、artifact 合同和安装后 ABI 闭环已经建立，formal host 性能门已通过。该结论仅适用于既定 host capability/合同，不得外推为 OHOS managed P0a 或其它未验收 capability；性能门必须保持预注册、质量有效、不可放宽。
+功能、artifact 合同和安装后 ABI 闭环已经建立。性能门继续按既定 host capability/合同独立验收，不作为功能状态依据，也不得外推为 OHOS managed P0a 或其它未验收 capability；任何性能结论必须保持预注册、质量有效、不可放宽。
 
 - 不得宣称 counters 可用于 ROS 2/IBMW 胜负排名；
 - 不得将 host 结果外推为 OHOS managed P0a 或其它未验收 capability；
@@ -158,7 +158,7 @@ histogram、sampled trace、动态控制、OTLP、通用 queue wait 以及 wire 
 
 OHOS remote candidate 使用设备本地 native agent 管理 production DDS exact candidate：agent 在设备私有目录内创建 trace FD、执行并约束单个 SUT 生命周期、稳定扫描 producer 文件并发布 canonical USTAR；HDC 只负责把 archive、单行 result JSON 和对应 request JSON 传到 host。host 安装态 `import-ohos-capture` 重新校验 request challenge、archive/tree hash、PID/start ticks、meta/seal 和 stage/exact 语义。该结构解决了 host FD 不能跨 HDC 传递的问题，但不把 HDC 当作可信 FD 或生命周期通道。
 
-该能力当前只登记 remote candidate：成功导入可证明本次设备 capture 的受控生命周期、snapshot 完整性和 `exact_correlated` producer 语义，不生成 collector `directory_finalization.json`，固定 `formal_p0a=false`。它未建立 trusted remote contract/campaign、runtime image attestation、fault/rollback 或 metric/comparison 证据；`metric_availability` 必须保持 `unsupported`，`valid_for_metric` 与 `valid_for_comparison` 必须保持 false，不得形成 OHOS 性能结论。构建、部署和使用入口见[性能采集指南](../guides/performance-collection.zh.md)。
+该能力当前只登记 remote candidate：已完成物理验证的 legacy import 可证明本次设备 capture 的受控生命周期、snapshot 完整性和 `exact_correlated` producer 语义，但不生成 collector `directory_finalization.json`。仓内另有预注册哈希、双阶段 runtime image 观察、host candidate materialization 和 fault evidence 的后续候选实现；这些能力尚未完成物理 formal campaign/rollback 验收，不能据此升级既有真机证据。所有 remote candidate 固定 `formal_p0a=false`，`metric_availability=unsupported`，`valid_for_metric=false`，`valid_for_comparison=false`，不得形成 OHOS 性能结论。OHOS formal P0a 是独立 capability，不阻塞三条主线的主要功能闭环。构建、部署和使用入口见[性能采集指南](../guides/performance-collection.zh.md)。
 
 ## 5. 跨主线集成
 

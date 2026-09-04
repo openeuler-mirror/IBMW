@@ -16,6 +16,12 @@ A/B/C 已完成一轮 collector-managed 的 P0 comparison gate；各运行目录
 
 ## 主线矩阵
 
+| 主线 | 状态 | 主要闭环范围 | 后续独立 capability |
+|---|---|---|---|
+| ROS2 采集工具 | 功能闭环 | 安装态被动采集与受控 producer-owned latency E2E | generic observer、通用 ROS2/RMW exact callback |
+| IBMW 采集工具 | 功能闭环 | 安装态 CLI、真实 A/B managed E2E、选定 host DDS capability 的 P0a 证据处理 | OHOS formal P0a、通用 exact 与其它平台能力 |
+| IBMW 本体适配 | 功能闭环 | Core Metrics 主要路径与选定 host DDS synchronous callback 的 comm_trace/formal completion | OHOS formal P0a、异步/多 handler/多 driver、其它 transport/type |
+
 ### 1. ROS2 采集工具
 
 **状态：功能闭环**
@@ -82,7 +88,7 @@ A/B/C 已完成一轮 collector-managed 的 P0 comparison gate；各运行目录
 
 ### 3. IBMW 本体适配
 
-**状态：验证中**
+**状态：功能闭环**
 
 **已完成**
 
@@ -104,25 +110,25 @@ A/B/C 已完成一轮 collector-managed 的 P0 comparison gate；各运行目录
 **进行中**
 
 - comm_trace 对选定 capability 的 clock、topology、trace-quality 事实已绑定进 validated source/formal chain；仍需保留 metric 轴状态（`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`）。v8 exact source 仍不可变、candidate-only/P0A_ARTIFACT，v9 formal snapshot 与 campaign v2 不回写它；
-- Core Metrics formal host E2E 性能门已通过 sealed trials、质量和预注册 verdict；因此 host performance gate 已关闭，历史失败轮次不再作为当前门结论。稳定文档不固化临时目录或阶段性数值；
-- 新 round9 micro controls 的守恒与 paired bootstrap projection allowance 均为 `PASS`；该结果只用于解释 hot hook CPU 成本，不替代 E2E 或 latency gate；
+- Core Metrics 的功能路径、归档与 finalization 合同已闭环；性能门属于独立验收轴，不作为本主线主要功能闭环的前提，也不从功能状态推导性能结论；
+- micro controls 仅用于诊断 hot hook CPU 成本，不替代 E2E 或 latency gate，也不作为本主线功能状态依据；
 - OHOS AArch64 真机的 Core Metrics direct-loan counters 路径已验证；独立 device paired runs 只作诊断，不替代 managed P0a，也不形成性能结论；
-- remote OHOS candidate importer 显式输出 `formal_p0a=false`，不创建 `directory_finalization.json`，且没有新增 trusted remote contract、formal campaign、runtime image attestation、fault 或 rollback evidence；其 `metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`。仍需正式 OHOS P0a、通用 exact、异步/multi-handler/multi-driver、其它 transport/type/ROS2 formal exact。
+- remote OHOS candidate importer 显式输出 `formal_p0a=false`，不创建 `directory_finalization.json`。仓内已有预注册哈希、双阶段 runtime image 观察、host candidate materialization 和 fault evidence 的候选实现，但尚未完成物理 formal campaign/rollback 验收，不能升级既有真机证据；其 `metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`。仍需正式 OHOS P0a、通用 exact、异步/multi-handler/multi-driver、其它 transport/type/ROS2 formal exact。
 
 **阻塞/未完成**
 
-- host 选定 capability 的 v9 formal snapshot 与 campaign v2 已完成 formal campaign-to-P0a closure，并在 system DDS、Fast DDS 2.6.12 与 3.2.2 通过，状态为 `valid_for_p0a_completion=true`。OHOS remote candidate 是独立边界，保持 `formal_p0a=false`，没有 directory finalization、formal campaign、runtime image attestation、fault 或 rollback 闭环。这不改变 metric 轴：`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`；不得据此宣称性能接受、排名、latency advantage 或通用能力；
+- host 选定 capability 的 v9 formal snapshot 与 campaign v2 已完成 formal campaign-to-P0a closure，并在 system DDS、Fast DDS 2.6.12 与 3.2.2 通过，状态为 `valid_for_p0a_completion=true`。OHOS remote candidate 是独立边界：仓内已有 runtime attestation 与 fault 候选基础设施，但尚无通过验收的物理 formal campaign/rollback，仍保持 `formal_p0a=false`。这不改变 metric 轴：`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`；不得据此宣称性能接受、排名、latency advantage 或通用能力；
 - 通用 exact callback 和 A/B/C 聚合统计/胜负判定仍未完成；collector-managed P0 comparison gate 通过不代表这些能力已经闭环。
 
 **完成判据**
 
-Core Metrics 已通过正式性能门，但仍需完整 artifact/finalization，并按各独立 capability 完成验收；comm_trace 对选定 capability 已完成 identity、故障/丢失、拓扑、时钟和正式 P0a completion 轴，登记 `valid_for_p0a_completion=true`。metric 轴仍为 unsupported/invalid，不作性能接受、排名或 latency advantage 声明；通用能力继续按独立 capability 验收。
+Core Metrics 主要路径和 artifact/finalization 合同已完成；comm_trace 对选定 host capability 已完成 identity、故障/丢失、拓扑、时钟和正式 P0a completion 轴，登记 `valid_for_p0a_completion=true`。这构成本主线主要功能闭环，但不升级独立 capability：metric 轴仍为 unsupported/invalid，不作性能接受、排名或 latency advantage 声明；OHOS formal、通用 exact、并发模型和其它 transport/type 继续独立验收。
 
 ### 问题反馈与决策
 
 - **问题**：旧文档沿用历史 round8/lossless-v2 `FAIL`。
-- **反馈**：新的 sealed formal evidence 为 `PASS`。
-- **决策**：解除 Core Metrics 性能阻塞，但不扩大 capability，也不宣称 metric、comparison 或 performance ranking。
+- **反馈**：历史性能运行不能替代主要功能、artifact 和 completion 合同的验收。
+- **决策**：三条主线的功能状态不依赖该历史性能门结论；性能继续作为独立验收轴，且不扩大 capability，也不宣称 metric、comparison 或 performance ranking。
 - **问题**：新增 schema provenance 导致旧封存 validation 在 runtime fault/campaign 校验中误判。
 - **反馈**：定位为比较逻辑未兼容缺失的 `schema_audit`，而非外部根校验问题。
 - **决策**：仅忽略缺失的 `schema_audit` provenance，继续严格比较所有语义字段，不放宽外部根校验。
@@ -134,13 +140,13 @@ Core Metrics 已通过正式性能门，但仍需完整 artifact/finalization，
 - **决策**：建立安装资源 SHA-256 registry，并对 registry 缺失或内容不匹配统一 fail-closed；仅兼容历史 validation 中缺失的上述元数据，不以兼容名义放宽当前资源完整性或语义校验。
 - **问题**：Core Metrics archive/finalization 的 manifest、provenance 和目录校验边界此前缺少覆盖实际归档链路的合同测试，容易遗漏空文件、计数/类型或篡改后的 fail-closed 语义。
 - **反馈**：本轮通过实际 `archive_core_metrics→manifest/provenance→validate_dir` happy path 及 source/archive hash、`record_count`/`kinds`、graceful finalization/final snapshot、零字节 JSONL 和篡改场景测试，确认完整 artifact 的 metric 轴仍为 unsupported/invalid，unknown kind 仍 forward-compatible。
-- **决策**：将上述 archive/finalization contract 测试作为第三主线的窄交付记录；它只验证仓内合同，不替代正式 OHOS P0a。后续真机 remote candidate 已关闭设备本地 export/snapshot 可行性，但不改变第三主线“验证中”状态。
+- **决策**：将上述 archive/finalization contract 测试作为第三主线的主要功能交付记录；它只验证仓内合同，不替代正式 OHOS P0a。后续真机 remote candidate 已关闭设备本地 export/snapshot 可行性，作为独立平台 capability 继续验证，不阻塞第三主线主要功能闭环。
 - **问题**：producer-owned ROS2 latency completion 过去未在 artifact 层明确时钟域，归档链可能无法区分受支持时钟、legacy/unknown/invalid 值，也需要防止安装 launcher 从源码树误加载包。
 - **反馈**：本轮为 completion 增加 artifact-level `clock_domain`，仅支持 `producer_monotonic`，并将其绑定到 archive/provenance/manifest；legacy/unknown/invalid 已归档 artifact 仅保留诊断用途，metric/comparison 均为 false，required 情况 invalid，而无 artifact 的 optional run 保持既有行为。安装 component/CLI smoke 同时确认 launcher 隔离源码路径并从安装 prefix 加载包。
 - **决策**：对 completion/archive/provenance/manifest 的 clock-domain 缺失、不一致或非法值统一 fail-closed；不把该窄交付解释为 generic exact callback、SampleKey/DeliveryKey、跨主机同步或 producer 诚实性证明，也不据此升级第一主线状态。真实 A-lane producer-owned E2E 已验证，generic observer 和通用 ROS2/RMW exact 继续列为未完成。
 - **问题**：HDC 不能传递 host collector-owned inherited FD，旧口径据此把 OHOS export/snapshot 整体标为阻塞。
 - **反馈**：设备本地 native agent 已在物理 OHOS 上完成受控子进程生命周期、本地 FD 注入、snapshot/archive 发布；host importer 已完成 canonical USTAR、challenge/hash、PID/ticks 与 trace semantic 严格校验，production exact candidate 得到 3000 条 stage 和 1000 条 exact record，零丢失且为 `exact_correlated`。
-- **决策**：关闭 remote candidate 的 inherited-FD/export/snapshot 可行性问题，但保持 `formal_p0a=false`；不补写 `directory_finalization`，不声称已有 trusted remote contract/campaign、runtime image attestation、fault/rollback、metric、comparison 或性能结论。
+- **决策**：关闭 remote candidate 的 inherited-FD/export/snapshot 可行性问题，但保持 `formal_p0a=false`；不补写 `directory_finalization`，不把仓内 runtime attestation/fault 候选实现描述为已验收的物理 trusted remote contract/campaign 或 fault/rollback 证据，也不声称 metric、comparison 或性能结论。
 
 ### 本轮推进记录
 
@@ -148,9 +154,9 @@ Core Metrics 已通过正式性能门，但仍需完整 artifact/finalization，
 
 - **ROS2**：第一主线状态不变，仍为功能闭环；安装态 collector 已从 canonical ROS 2 shebang 建立可信 interpreter/prefix 派生，隔离调用方 Python/LD 污染，并以 `--no-daemon` 直接查询 Graph。真实 Humble doctor 为 ready，真实 managed A-lane 完成 3000 条 `producer_monotonic` latency，readiness、资源、finalization 和 validation 均通过。该结果仍是受控 producer-owned E2E，不证明 generic observer 或通用 ROS2 exact。
 - **IBMW 采集工具**：第二主线升级为功能闭环；安装态 B-lane managed E2E 完成 3000/3000，且安装态真实 native managed P0a qualification 已在源码树 Python import 隔离环境中通过 production candidate、安装 CLI、P0a validation、v9 formal anchor/campaign replay及安装 prefix 模块/资源校验。该闭环仅覆盖选定 host capability，metric/comparison 保持 unsupported/false；A/B endpoint 可进程内嵌 Engine，不能据此扩展为独立 daemon、通用 exact、OHOS formal P0a 或性能结论。
-- **IBMW 本体适配**：第三主线仍为验证中；HDC 不能跨主机传递 inherited FD，但 device-local native agent 已在物理 OHOS 上关闭 lifecycle/FD export/snapshot 可行性，production exact candidate 完成 3000 条 stage、1000 条 exact、19 个 segment 的零丢失 `exact_correlated` 语义导入，并修复跨 DSO RTTI visibility、增加 audit。该候选明确 `formal_p0a=false`，没有 `directory_finalization`、trusted remote contract/campaign、runtime image attestation、fault/rollback 或性能结论；metric/comparison 继续 unsupported/false。
+- **IBMW 本体适配**：第三主线按主要交付 capability 调整为功能闭环；Core Metrics 主要功能和 artifact/finalization 已完成，comm_trace 对选定 host synchronous single-handler DDS capability 已完成 formal campaign-to-P0a completion。性能门不作为该功能状态依据；OHOS remote capture、通用 exact、异步/多 handler/多 driver 和其它 transport/type 继续作为独立 capability 验证，不扩大主线闭环声明；未验收 capability 的 metric/comparison 继续 unsupported/false。
 
-第一主线仍缺 generic observer、通用 exact E2E 和通用最终 callback identity；第二主线已具备安装态真实 A/B managed E2E，并以独立安装态真实 native qualification 关闭选定 host capability 的 managed P0a 发布证据缺口；第三主线 remote OHOS candidate 仍保持 `formal_p0a=false`、`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`。总目标与 A/B/C 集成场景边界不变。
+三条主线的主要功能现均为功能闭环。第一主线的 generic observer/通用 exact、第二主线闭环范围外的平台 capability、第三主线的 OHOS formal P0a 与通用/并发/其它 transport capability 继续独立推进；这些后续能力在验收前不得借用主线状态升级自身声明。A/B/C 集成场景仍只完成 P0 可比性门，不形成聚合统计、性能排名或显著性结论。
 
 ## 最近验证类别与证据路径
 
