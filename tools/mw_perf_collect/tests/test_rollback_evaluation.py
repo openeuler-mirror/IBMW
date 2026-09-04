@@ -103,6 +103,7 @@ def test_configure_argv_uses_fresh_disconnected_cache_and_all_overrides(tmp_path
     assert sorted(path.name for path in Path(control["staged_source_cache"]).iterdir()) == [
         "backward-src", "googletest-src"]
     assert "-DIBMW_ENABLE_COMM_TRACE=OFF" in argv
+    assert "-DIBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE=OFF" in argv
 
 
 def test_dependency_override_preserves_cmake_fetchcontent_name_spelling():
@@ -1349,7 +1350,8 @@ def test_execute_trace_off_build_integration(tmp_path):
     anchor = source / ".opencode" / "comm-trace-on"
     result = rollback.execute_trace_off_build(source, anchor, tmp_path / "rollback")
     assert result["selected_options"]["IBMW_ENABLE_COMM_TRACE"] == "OFF"
-    assert set(result["delta"]) == {"IBMW_ENABLE_COMM_TRACE"}
+    assert set(result["delta"]) == {
+        "IBMW_ENABLE_COMM_TRACE", "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"}
     assert result["runtime"]["returncode"] == 0
     assert result["runtime"]["executable_matches"]
     assert result["runtime"]["extension_matches"]
@@ -1429,10 +1431,19 @@ def _packaging_result(tmp_path):
         core._canonical_json_bytes(link_closure)).hexdigest()
     return {"work_root": str(tmp_path), "build_dir": str(tmp_path),
             "source_identity": {"before": source, "after": dict(source)},
-            "product_options": {"anchor": {"IBMW_ENABLE_COMM_TRACE": "ON"},
-                                "fresh": {"IBMW_ENABLE_COMM_TRACE": "OFF"},
-                                "delta": {"IBMW_ENABLE_COMM_TRACE": {"anchor": "ON", "fresh": "OFF"}}},
-            "delta": {"IBMW_ENABLE_COMM_TRACE": {"anchor": "ON", "fresh": "OFF"}},
+            "product_options": {
+                "anchor": {"IBMW_ENABLE_COMM_TRACE": "ON",
+                           "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE": "ON"},
+                "fresh": {"IBMW_ENABLE_COMM_TRACE": "OFF",
+                          "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE": "OFF"},
+                "delta": {
+                    "IBMW_ENABLE_COMM_TRACE": {"anchor": "ON", "fresh": "OFF"},
+                    "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE": {
+                        "anchor": "ON", "fresh": "OFF"}}},
+            "delta": {
+                "IBMW_ENABLE_COMM_TRACE": {"anchor": "ON", "fresh": "OFF"},
+                "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE": {
+                    "anchor": "ON", "fresh": "OFF"}},
             "evidence_control": {"name": "CMAKE_EXPORT_COMPILE_COMMANDS", "forced": "ON", "fresh": "ON"},
             "dependency_source_control": dependency_source_control,
             "compile_inventory": inventory, "link_closure": link_closure,
@@ -1495,6 +1506,14 @@ def test_build_rollback_companion_success_closed_schema_path_free_and_valid_obje
     schema = json.loads((Path(rollback.__file__).parent / "schemas/rollback-trace-off-result.schema.v2.json").read_text())
     assert not core._schema_errors(report, schema)
     assert report["schema"] == "mw_perf.rollback_trace_off.v2"
+    expected_delta = {
+        "IBMW_ENABLE_COMM_TRACE": {"anchor": "ON", "fresh": "OFF"},
+        "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE": {"anchor": "ON", "fresh": "OFF"},
+    }
+    assert report["product_delta"] == expected_delta
+    assert "managed-candidate build ON-to-OFF" in report["claim"]
+    assert "separate target" in report["claim"]
+    assert "independent compile and final-link closure" in report["claim"]
     assert report["dependency_source_control"]["reuse_scope"] == "source_only"
     assert [item["name"] for item in report["dependency_source_control"]["dependencies"]] == [
         "backward", "googletest"]
@@ -1514,6 +1533,24 @@ def test_build_rollback_companion_success_closed_schema_path_free_and_valid_obje
     object_path = tmp_path / "objects/sha256" / descriptor["object_sha256"][:2] / (descriptor["object_sha256"] + ".tar")
     assert validate_companion_object(object_path, descriptor)["valid"]
     assert rollback.validate_trace_off_rollback_companion(object_path, descriptor)["valid"]
+
+
+def test_build_rollback_companion_rejects_malformed_managed_candidate_delta(
+        tmp_path, monkeypatch):
+    result = _packaging_result(tmp_path)
+    malformed = {"anchor": "ON", "fresh": "OFF", "unexpected": "value"}
+    result["delta"]["IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"] = malformed
+    result["product_options"]["delta"][
+        "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"] = malformed
+    monkeypatch.setattr(rollback, "_anchor_binding", lambda _path: _anchor_metadata())
+    monkeypatch.setattr(rollback, "_revalidate_packaging", lambda claimed, _anchor, _logs: (
+        claimed, {name: Path(claimed["images"][name]["path"]).read_bytes()
+                  for name in rollback._IMAGE_NAMES}))
+
+    with pytest.raises(ValueError, match="managed exact candidate delta is not ON-to-OFF"):
+        rollback.build_trace_off_rollback_companion(
+            result, tmp_path, tmp_path / "payload", tmp_path / "objects",
+            "campaign", "companion")
 
 
 def test_build_rollback_companion_accepts_captured_ninja_closure(tmp_path, monkeypatch):
@@ -1612,7 +1649,7 @@ def test_build_rollback_companion_rejects_report_rewrite(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("mutation,error", [
-    ("bad_delta", "trace-only"), ("source_drift", "source identity"),
+    ("bad_delta", "not limited"), ("source_drift", "source identity"),
     ("symbol_zero", "symbol audit"), ("runtime_mismatch", "runtime image identity"),
     ("provider_mismatch", "provider runtime identity"),
 ])
@@ -1804,6 +1841,53 @@ def _rebuild_mutated_package(tmp_path, descriptor, mutate):
     object_path = (tmp_path / "mutated-objects/sha256" / new_descriptor["object_sha256"][:2]
                    / (new_descriptor["object_sha256"] + ".tar"))
     return object_path, new_descriptor
+
+
+@pytest.mark.parametrize("document,operation", [
+    ("report", "remove"),
+    ("identity", "remove"),
+    ("report", "add"),
+    ("identity", "add"),
+])
+def test_tar_rejects_coherently_repackaged_product_delta_mismatch(
+        tmp_path, monkeypatch, document, operation):
+    result = _packaging_result(tmp_path)
+    candidate = "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"
+    if operation == "add":
+        result["delta"].pop(candidate)
+        for controls in result["product_options"].values():
+            controls.pop(candidate)
+    _, packaged = _package(tmp_path, monkeypatch, result)
+    descriptor = dict(packaged["descriptor"])
+
+    def mutate(payload):
+        report_path = payload / "rollback_trace_off.json"
+        report = json.loads(report_path.read_bytes())
+        identity_path = payload / "build_identity.json"
+        identity = json.loads(identity_path.read_bytes())
+        delta = (report["product_delta"] if document == "report"
+                 else identity["product"]["delta"])
+        if operation == "remove":
+            delta.pop(candidate)
+        else:
+            delta[candidate] = {"anchor": "ON", "fresh": "OFF"}
+
+        if document == "identity":
+            identity_path.write_bytes(core._canonical_json_bytes(identity, newline=True))
+            build_hash = hashlib.sha256(core._canonical_json_bytes(identity)).hexdigest()
+            descriptor["build_identity_sha256"] = build_hash
+            report["rollback_build_identity_sha256"] = build_hash
+            plan_path = payload / "build_plan.json"
+            plan = json.loads(plan_path.read_bytes())
+            plan["build_identity_sha256"] = build_hash
+            plan_path.write_bytes(core._canonical_json_bytes(plan, newline=True))
+        report_path.write_bytes(core._canonical_json_bytes(report, newline=True))
+
+    object_path, new_descriptor = _rebuild_mutated_package(
+        tmp_path, descriptor, mutate)
+    assert validate_companion_object(object_path, new_descriptor)["valid"]
+    assert rollback.validate_trace_off_rollback_companion(
+        object_path, new_descriptor)["failure_codes"] == ["ROLLBACK_OBJECT_SEMANTICS"]
 
 
 @pytest.mark.parametrize("mutation", ["extra", "absolute", "dotdot"])
@@ -2134,7 +2218,12 @@ def test_v2_tar_rejects_coherently_rehashed_dependency_summary_forgery(
 
 
 def test_validator_preserves_v1_archive_semantics(tmp_path, monkeypatch):
-    _, packaged = _package(tmp_path, monkeypatch)
+    result = _packaging_result(tmp_path)
+    candidate = "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"
+    result["delta"].pop(candidate)
+    for controls in result["product_options"].values():
+        controls.pop(candidate)
+    _, packaged = _package(tmp_path, monkeypatch, result)
     descriptor = dict(packaged["descriptor"])
 
     def mutate(payload):

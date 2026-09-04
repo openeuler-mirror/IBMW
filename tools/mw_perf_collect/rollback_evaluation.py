@@ -1137,7 +1137,9 @@ def _configure_argv(cmake: str, source: Path, build: Path,
                  "-DFETCHCONTENT_FULLY_DISCONNECTED=ON"))
     argv.extend(f"-D{item['override_variable']}={item['staged_source']}"
                 for item in sorted(dependencies, key=lambda value: str(value["name"])))
-    argv.extend(("-DIBMW_ENABLE_COMM_TRACE=OFF", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"))
+    argv.extend(("-DIBMW_ENABLE_COMM_TRACE=OFF",
+                 "-DIBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE=OFF",
+                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"))
     return argv
 
 
@@ -1941,10 +1943,16 @@ def execute_trace_off_build(source_root: str | Path, anchor_build_dir: str | Pat
         if fresh_selected.get("IBMW_ENABLE_COMM_TRACE") != "OFF":
             raise RuntimeError("fresh IBMW_ENABLE_COMM_TRACE is not OFF")
         delta = option_delta(anchor_selected, fresh_selected)
-        if set(delta) != {"IBMW_ENABLE_COMM_TRACE"}:
-            raise RuntimeError(f"fresh selected option delta is not trace-only: {sorted(delta)}")
+        expected_delta = {"IBMW_ENABLE_COMM_TRACE"}
+        if anchor_selected.get("IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE") == "ON":
+            expected_delta.add("IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE")
+        if set(delta) != expected_delta:
+            raise RuntimeError(
+                "fresh selected option delta is not limited to communication trace and the "
+                f"separate managed-candidate build control: {sorted(delta)}")
         expected_product = dict(anchor_selected)
         expected_product["IBMW_ENABLE_COMM_TRACE"] = "OFF"
+        expected_product["IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"] = "OFF"
         _compare_controls(expected_product, fresh_selected, "product")
         _compare_controls(anchor_toolchain, fresh_toolchain, "toolchain", compiler_aliases=True)
         evidence_control = {
@@ -2632,7 +2640,9 @@ def _revalidate_packaging(result: Mapping[str, Any], anchor_run: Path, logs: Pat
         raise ValueError("anchor IBMW_ENABLE_COMM_TRACE must be ON")
     if any(anchor_selected.get(option) != "ON" for option in _REQUIRED_ON):
         raise ValueError("anchor required product controls are not ON")
-    expected_product = dict(anchor_selected); expected_product["IBMW_ENABLE_COMM_TRACE"] = "OFF"
+    expected_product = dict(anchor_selected)
+    expected_product["IBMW_ENABLE_COMM_TRACE"] = "OFF"
+    expected_product["IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE"] = "OFF"
     _compare_controls(expected_product, fresh_selected, "product")
     anchor_toolchain, fresh_toolchain = toolchain_options(anchor_cache), toolchain_options(fresh_cache)
     _compare_controls(anchor_toolchain, fresh_toolchain, "toolchain", compiler_aliases=True)
@@ -2763,15 +2773,25 @@ def build_trace_off_rollback_companion(result: dict, anchor_run: Path, payload_r
     delta = result.get("delta", product.get("delta") if isinstance(product, dict) else None)
     if not isinstance(product, dict) or not isinstance(delta, dict):
         raise ValueError("rollback product evidence is incomplete")
-    if set(delta) != {"IBMW_ENABLE_COMM_TRACE"}:
-        raise ValueError("rollback product delta is not trace-only")
+    allowed_delta = {"IBMW_ENABLE_COMM_TRACE"}
+    candidate_delta = delta.get("IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE")
+    if candidate_delta is not None:
+        if candidate_delta != {"anchor": "ON", "fresh": "OFF"}:
+            raise ValueError("rollback managed exact candidate delta is not ON-to-OFF")
+        allowed_delta.add("IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE")
+    if set(delta) != allowed_delta:
+        raise ValueError(
+            "rollback product delta is not limited to communication trace and the separate "
+            "managed-candidate build control")
     if delta["IBMW_ENABLE_COMM_TRACE"].get("fresh") != "OFF":
         raise ValueError("rollback trace option is not OFF")
     if (set(product) != {"anchor", "fresh", "delta"}
             or not isinstance(product["anchor"], dict) or not isinstance(product["fresh"], dict)
             or product["delta"] != delta or option_delta(product["anchor"], product["fresh"]) != delta
             or delta["IBMW_ENABLE_COMM_TRACE"].get("anchor") != "ON"):
-        raise ValueError("rollback product evidence does not bind the trace-only delta")
+        raise ValueError(
+            "rollback product evidence does not bind the communication-trace delta and optional "
+            "managed-candidate target-build delta")
     runtime = result.get("runtime")
     if (not isinstance(runtime, dict) or runtime.get("returncode") != 0
             or not runtime.get("executable_matches") or not runtime.get("extension_matches")):
@@ -2835,10 +2855,18 @@ def build_trace_off_rollback_companion(result: dict, anchor_run: Path, payload_r
                    "audits": images[name].get("audits")} for name in _IMAGE_NAMES},
         "runtime": normalized_runtime})
     build_hash = hashlib.sha256(core._canonical_json_bytes(build_identity)).hexdigest()
+    selected_delta_claim = "communication trace ON-to-OFF"
+    if candidate_delta is not None:
+        selected_delta_claim += " and managed-candidate build ON-to-OFF"
     report = {"schema": _ROLLBACK_SCHEMA, "classification": {
                   "classification": "candidate", "metric_availability": "unsupported",
                   "valid_for_comparison": False, "failure_code": "P0A_ARTIFACT"},
-              "claim": "trace-off rollback candidate matches selected controls, registered-source inventory, final-link closure, audited images, providers, and one runtime roundtrip except trace delta",
+              "claim": ("trace-off rollback candidate matches selected controls, registered-source "
+                        "inventory, final-link closure, audited images, providers, and one runtime "
+                        f"roundtrip under selected-control deltas ({selected_delta_claim}); the "
+                        "managed-candidate build option controls only construction, audit, and "
+                        "installation of a separate target, while audited rollback product targets "
+                        "retain independent compile and final-link closure"),
               "limitations": ["candidate-only rollback evidence; no whole-product equivalence or performance claim",
                               "FetchContent dependencies were configured from identified, private source-only copies; their compilation is irrelevant to audited output links and is not image-consumption proof"],
               "anchor": anchor, "source": normalized_source, "product_delta": _path_free(delta),
@@ -3011,6 +3039,10 @@ def validate_trace_off_rollback_companion(
         archive_descriptor = generic.get("descriptor")
         if not isinstance(archive_descriptor, dict):
             raise ValueError("rollback archive descriptor is unavailable")
+        identity_product = build_identity.get("product")
+        if (not isinstance(identity_product, dict)
+                or report.get("product_delta") != identity_product.get("delta")):
+            raise ValueError("rollback product delta binding is inconsistent")
         build_hash = hashlib.sha256(core._canonical_json_bytes(build_identity)).hexdigest()
         plan_compile = build_plan.get("compile", {})
         expected_plan_records = inventory["records"]

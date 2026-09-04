@@ -21,7 +21,7 @@ _CONTRACT = "registration/contract.json"
 _FORMAL_AXIS_RULES = {"candidate_only", "metric_available", "p0a_evidence"}
 _KNOWN_VALIDATION_RULES = (
     "resource_integrity", "required_fields", "manifest_schema", "sample_artifacts",
-    "candidate_only", "run_completed", "samples_present", "metrics_valid",
+    "remote_invariants", "candidate_only", "run_completed", "samples_present", "metrics_valid",
     "adapter_ready", "metric_available", "scenario_contract", "ibmw_provenance",
     "runtime_images", "core_metrics_required", "latency_artifact_required",
     "collector_managed_comparison", "comparison_metadata", "comparison_resources",

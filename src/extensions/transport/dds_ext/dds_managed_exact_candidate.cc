@@ -314,8 +314,8 @@ int main(int argc, char** argv) {
     return 1;
   }
 #endif
-  std::optional<CaptureV2Handshake> capture_v2_handshake;
 #ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
+  std::optional<CaptureV2Handshake> capture_v2_handshake;
   try {
     capture_v2_handshake = ParseCaptureV2Handshake();
   } catch (const std::exception& error) {
@@ -449,7 +449,9 @@ int main(int argc, char** argv) {
     if (driver.GetPublicationMatchedCount(dds_topic) != 1) {
       throw std::runtime_error("DDS writer must have exactly one matched reader before publish");
     }
+#ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
     if (capture_v2_handshake) CaptureV2ReadyRelease(*capture_v2_handshake);
+#endif
 
     ibmw::dds::GenericMsg sent;
     sent.serialization_type("id");
@@ -550,10 +552,12 @@ int main(int argc, char** argv) {
 #ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
   if (trace_initialized) dds_ext::comm_trace::Shutdown();
 #endif
+#ifndef IBMW_TRACE_OFF_BUSINESS_CANDIDATE
   if (capture_v2_handshake && run_completed && !CaptureV2Complete(*capture_v2_handshake)) {
     std::cerr << "managed exact candidate completion attestation failed" << std::endl;
     run_completed = false;
   }
+#endif
   if (run_completed) {
     std::lock_guard<std::mutex> lock(callback_mutex);
     if (callback_count.load(std::memory_order_relaxed) == kSampleCount && callbacks_valid) {

@@ -137,6 +137,12 @@ def test_v9_overrides_v8_paths_without_formal_duplicates():
         "proof", "collection", "observer", "formal_anchor"]
 
 
+def test_formal_validation_registry_includes_remote_invariants_in_emitted_order():
+    names = formal_anchor._KNOWN_VALIDATION_RULES
+    assert names[names.index("sample_artifacts") + 1] == "remote_invariants"
+    assert names[names.index("remote_invariants") + 1] == "candidate_only"
+
+
 def test_formal_schema_documents_are_closed():
     schema_dir = Path(formal_anchor.__file__).parent / "schemas"
     for name in ("formal-anchor.schema.v1.json", "fault-injection-formal.schema.v2.json",
