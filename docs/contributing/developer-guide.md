@@ -180,7 +180,8 @@ Every IBMW module is a C++ class that inherits from `ibmw::Module` and
 implements four public lifecycle methods:
 
 ```cpp
-#include "ibmw_sdk.h"  // or "cpp/core.h" + "cpp/module_base.h"
+#include <ibmw/cpp/core.h>
+#include <ibmw/cpp/module_base.h>
 
 class MyModule : public ibmw::Module {
  public:
@@ -231,7 +232,7 @@ a package entry point:
 
 ```cpp
 // pkg_main.cc
-#include "ibmw_pkg_abi.h"
+#include "ibmw/pkg/pkg_macro.h"
 #include "my_module.h"
 
 static const auto kModuleArray = std::array{
@@ -248,15 +249,41 @@ add_library(my_module_pkg SHARED
   my_module.cc
   pkg_main.cc
 )
-target_link_libraries(my_module_pkg PRIVATE ibmw_interface)
+target_link_libraries(my_module_pkg PRIVATE ibmw::api::pkg)
 ```
+
+For an installed SDK, discover the exported targets before linking:
+
+```cmake
+find_package(ibmw CONFIG REQUIRED)
+target_link_libraries(my_module_pkg PRIVATE ibmw::api::pkg)
+```
+
+`ibmw::api::pkg` is the public package ABI target. Ordinary module packages
+must not include private engine headers or link internal implementation
+targets.
 
 ### Module as Standalone App (App Mode)
 
 ```cpp
 // main.cc
-#include "ibmw_sdk.h"
+#include <chrono>
+#include <csignal>
+#include <iostream>
+#include <thread>
+#include <ibmw/cpp/core.h>
+#include <ibmw/engine/engine.h>
 #include "my_module.h"
+
+volatile std::sig_atomic_t g_stop = 0;
+
+void SignalHandler(int sig) {
+  if (sig == SIGINT || sig == SIGTERM) {
+    g_stop = 1;
+    return;
+  }
+  std::raise(sig);
+}
 
 int main(int argc, char** argv) {
   if (argc < 2) {
@@ -264,21 +291,28 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Create engine and module
   ibmw::runtime::core::Engine engine;
-  engine.Initialize(argv[1]);
-
-  // Create and register module
-  auto& module_bus = engine.GetModuleBus();
-  module_bus.CreateModule<MyModule>();
-
-  // Run (blocks until Ctrl+C)
-  engine.AsyncStart();
-  engine.WaitForShutdownSignal();
+  std::signal(SIGINT, SignalHandler);
+  std::signal(SIGTERM, SignalHandler);
+  MyModule module;
+  engine.GetModuleBus().RegisterModule(module.NativeHandle());
+  ibmw::runtime::core::Engine::Options options;
+  options.cfg_file_path = argv[1];
+  engine.Initialize(options);
+  auto running = engine.AsyncStart();
+  while (!g_stop) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
   engine.Shutdown();
+  running.wait();
   return 0;
 }
 ```
+
+The standalone boundary is `ibmw::runtime::core::Engine` plus
+`RegisterModule(module.NativeHandle())`. This example uses `AsyncStart()` and a
+signal-safe stop flag; `Shutdown()` is called from normal thread context. Do
+not call non-signal-safe runtime code directly from a POSIX signal handler.
 
 ### Accessing Per-Module Configuration
 
@@ -305,7 +339,7 @@ bool Setup(ibmw::Runtime runtime) override {
 ```cpp
 bool Setup(ibmw::Runtime runtime) override {
   core_ = runtime;
-  publisher_ = core_.GetTransport().GetSender("my_topic");
+  publisher_ = core_.GetTransport().GetPublisher("my_topic");
   ibmw::transport::RegisterSendType<MyMessageType>(publisher_);
   return true;
 }
@@ -326,7 +360,7 @@ bool Run() override {
 ```cpp
 bool Setup(ibmw::Runtime runtime) override {
   core_ = runtime;
-  auto subscriber = core_.GetTransport().GetReceiver("my_topic");
+  auto subscriber = core_.GetTransport().GetSubscriber("my_topic");
   ibmw::transport::OnMessage<MyMessageType>(subscriber,
     [](const MyMessageType& msg) {
       MW_INFO("Received: {}", msg.data);
@@ -427,30 +461,31 @@ class MyModule : public ibmw::Module {
 
 ## Writing an Extension
 
-Extensions are shared libraries that implement `EngineExtensionBase`. They
+Extensions are shared libraries that implement `ibmw::ExtensionBase`. They
 are loaded at runtime and can register transport drivers, RPC drivers,
-log backends, and more.
+log backends, and more. `ExtensionBase` owns the framework lifecycle hooks;
+extension code implements `OnInit()` and `OnShutdown()`.
 
 ### Extension Structure
 
 ```cpp
 // my_extension.h
-#include "ibmw_extension_api.h"
+#include <ibmw/engine/extension/extension_base.h>
 
-class MyExtension : public ibmw::EngineExtensionBase {
+class MyExtension : public ibmw::ExtensionBase {
  public:
   std::string_view Name() const noexcept override {
     return "my_extension";
   }
 
-  bool Initialize(ibmw::runtime::core::Engine* core_ptr) noexcept override {
+  bool OnInit(ibmw::runtime::core::Engine* core_ptr) override {
     // Access engine subsystems
     // Register transport/RPC drivers
     // Read extension options from YAML
     return true;
   }
 
-  void Shutdown() noexcept override {
+  void OnShutdown() override {
     // Clean up resources
   }
 
@@ -464,19 +499,10 @@ class MyExtension : public ibmw::EngineExtensionBase {
 ### Extension Entry Points
 
 ```cpp
-// my_extension_main.cc
+// my_extension.cc, at global scope
 #include "my_extension.h"
 
-IBMW_CORE_EXTENSION_EXPORT
-ibmw::EngineExtensionBase* IbmwDynlibCreateCoreExtensionHandle() {
-  return new MyExtension();
-}
-
-IBMW_CORE_EXTENSION_EXPORT
-void IbmwDynlibDestroyCoreExtensionHandle(
-    const ibmw::EngineExtensionBase* ptr) {
-  delete ptr;
-}
+IBMW_EXT_ENTRY_V2(MyExtension)
 ```
 
 ### Extension Logging
@@ -497,10 +523,16 @@ IBMW_DEFINE_EXTENSION_LOGGER(my_ext)
 ```cmake
 add_library(my_extension SHARED
   my_extension.cc
-  my_extension_main.cc
 )
-target_link_libraries(my_extension PRIVATE ibmw_extension_api)
+target_link_libraries(my_extension PRIVATE
+  ibmw::core::extension_api
+  ibmw::core::engine
+)
 ```
+
+The extension must be built for the same target architecture and dependency
+provider as the IBMW runtime. Its shared object is loaded by the runtime; it is
+not a substitute for the public managed-application API.
 
 ### Extension YAML Config
 
@@ -561,10 +593,17 @@ This generates:
 
 ### Hand-Written Types (No Code Generation)
 
-You can also define types manually:
+Hand-written DDS typesupport is a `direct_<transport>_*` escape hatch for
+transport-specific integrations, validation, or performance experiments. It
+is not the normal managed-module type boundary. Ordinary managed modules
+must use generated types and the transport-agnostic public API.
+
+Direct DDS code must link `ibmw::extensions::dds_types`; the installed header
+path below is the supported entry for that extension-facing target. Do not add
+a source-tree `src/extensions/...` include directory to an application target.
 
 ```cpp
-#include "ibmw/extensions/transport/dds_types/util/dds_type_support.h"
+#include <ibmw/dds_types/util/dds_type_support.h>
 
 struct HelloMsg {
   uint64_t id;
@@ -852,19 +891,34 @@ The default pattern is: `%l %c.%f [%n] %v (%G:%R)`
 
 ---
 
-## Multi-Driver Modules
+## Red Lines and Multi-Driver Modules
 
 IBMW enforces a set of code-quality red-line invariants around transport
 decoupling. They are checked by `scripts/check_red_lines.sh` and documented
 for contributors in `skills/transport_decoupling.md`.
 
-### `IBMW_USE_DRIVER` vs `IBMW_USE_DRIVERS`
+Run the checker from the repository root. `--report` inventories existing
+findings without failing; `--strict` fails on every finding and is appropriate
+for a clean scope; `--baseline <file>` fails only on newly introduced findings:
 
-The supported way for user-region modules to obtain a `*TransportDriver*`
-pointer is `IBMW_USE_DRIVER` (single driver) or `IBMW_USE_DRIVERS`
-(multiple drivers). Both expand to a `Module::SetDriverSlot(slot_id,
-driver_ptr)` override that the Engine invokes when broadcasting
-driver-slot ids during `Start()`.
+```bash
+bash scripts/check_red_lines.sh --report
+bash scripts/check_red_lines.sh --baseline scripts/baseline_red_lines.txt
+```
+
+This grep-based checker is an aid, not proof of compliance. Its configured scan
+paths may not cover every sample or custom directory, so code review must still
+verify dependency direction and public-header usage.
+
+### Direct-driver escape hatches
+
+`IBMW_USE_DRIVER` and `IBMW_USE_DRIVERS` are direct-driver escape hatches for
+`direct_<transport>_*` code only. They intentionally couple code to concrete
+transport implementations and are forbidden in ordinary managed modules;
+managed modules must use `SenderAccess<T>`, `ReceiverAccess<T>`,
+`LoanedSample<T>`, `LoanedSubscriber<T>`, or the corresponding high-level
+context APIs. The macros expand to a `Module::SetDriverSlot(slot_id,
+driver_ptr)` override that the Engine invokes during `Start()`.
 
 **Single-driver module:**
 ```cpp
@@ -893,9 +947,10 @@ class MyModule : public ibmw::Module {
 a `static_cast<DriverT*>` assignment. Any typo in a driver type name
 fails at compile time.
 
-> Full end-to-end sample: `src/samples/cpp/multi_driver_demo/`. Macro
-> definitions: `src/api/cpp/module_base.h`. Slot-id entry point:
-> `src/api/c/driver_slot.h`.
+> These examples are intentionally transport-coupled escape hatches, not a
+> pattern for ordinary managed modules. Full sample:
+> `src/samples/cpp/multi_driver_demo/`. Macro definitions:
+> `src/api/cpp/module_base.h`. Slot-id entry point: `src/api/c/driver_slot.h`.
 
 ---
 

@@ -22,6 +22,28 @@ configuration, and parameters through public APIs.
    to the public messaging and RPC APIs. Transport-specific typesupport remains
    generated/internal rather than editable application logic.
 
+## Boundary model
+
+- **Public API**: installed `cpp/...` headers, generated application bindings,
+  lifecycle/context/messaging/RPC contracts, and the single package ABI. This
+  is the compatibility surface for managed applications.
+- **Extension SPI**: interfaces used by core to discover, configure, and inject
+  transport and service implementations. It is a plugin implementation
+  contract, not a managed application's transport API.
+- **Internal/direct**: internal typesupport, backend-specific headers, and
+  direct benchmark/interoperability endpoints. These are implementation details
+  or explicitly non-portable escape hatches.
+
+Managed applications own business behavior and use the public API. The runtime
+owns transport selection, endpoint setup, capability injection, and orderly
+shutdown. A direct endpoint owns native backend setup and teardown and accepts
+the resulting portability and ABI risk.
+
+The normal deployment is a dynamically loaded extension selected by
+configuration. A `direct_<transport>_*` endpoint may instead link the backend
+directly when a benchmark or interoperability test needs implementation-level
+access; it is not an example of managed application architecture.
+
 ## Runtime flow
 
 The engine reads deployment YAML, loads extensions and packages, creates module

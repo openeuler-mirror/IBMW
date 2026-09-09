@@ -25,11 +25,20 @@ matches your task.
 - [Transport Benchmark](guides/transport-benchmark.md)
   ([中文](guides/transport-benchmark.zh.md)) — reproduce and interpret the
   transport latency comparison.
+- [Performance Collection Guide (中文)](guides/performance-collection.zh.md) —
+  collect and validate ROS2/IBMW process, topology, latency, and Core Metrics
+  artifacts, with explicit A/B/C prototype boundaries.
 
 ## Reference
 
 - [Architecture Overview](architecture/overview.md) — runtime layers, dependency
   direction, package ABI, and generated-code boundaries.
+- [Performance Observability Design (中文)](architecture/performance-observability-design.zh.md)
+  — measurement contracts, lifecycle, data boundaries, and implemented versus
+  planned capabilities.
+- [Generic Communication Latency Proposal (中文)](architecture/generic-communication-latency-observation-proposal.zh.md)
+  — review proposal for comparable, low-overhead, type-independent ROS2/IBMW
+  publish-to-callback latency collection.
 - [API Reference](reference/api-reference.md)
   ([中文](reference/api-reference.zh.md)) — C++ SDK, C ABI, extension, package,
   and type-support interfaces.
@@ -49,6 +58,12 @@ matches your task.
   dependency, ABI, generation, and zero-copy constraints.
 - [Testing and Verification](contributing/testing.md) — change-specific checks
   and evidence expectations.
+- [Performance Observability Implementation (中文)](contributing/performance-observability-implementation.zh.md)
+  — stable delivery and maintenance rules for the ROS2 collector, IBMW
+  collector, and IBMW runtime adaptation workstreams.
+- [Performance Observability Progress (中文)](contributing/performance-observability-progress.zh.md)
+  — current status matrix for the three workstreams, DDS P0a boundary, and A/B/C
+  integration readiness.
 - [Security Policy](../SECURITY.md), [Support](../SUPPORT.md), and
   [Code of Conduct](../CODE_OF_CONDUCT.md).
 

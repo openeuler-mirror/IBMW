@@ -11,6 +11,29 @@ module templates, and deployment configuration.
 - Extensions implement public extension interfaces and register capabilities at
   runtime; core does not select an implementation by including its headers.
 
+## API, SPI, and internal boundaries
+
+- **Public API** is the installed, application-facing contract: `cpp/...`
+  headers, generated message bindings, lifecycle/context/messaging/RPC APIs,
+  and the package ABI. It must remain transport-neutral and ABI-reviewed.
+- **Extension SPI** is the framework-facing contract implemented by plugins.
+  SPI headers may be used by extension implementations and core wiring, but
+  are not an application programming model.
+- **Internal/direct** code includes internal typesupport, backend headers, and
+  direct native samples. It may change with an implementation and must not be
+  included by managed application code or installed as a public dependency.
+
+Managed code owns business logic and uses the public API; the runtime owns
+transport selection, setup, lifecycle, and shutdown. A direct application owns
+native endpoint setup and cleanup and therefore also owns its portability and
+compatibility risk.
+
+Extensions are loadable plugins by default: core discovers and injects them
+through the SPI at runtime. A deliberately named `direct_<transport>_*`
+benchmark or interoperability endpoint may direct-link a backend to test a
+wire protocol or implementation. That exception is not a managed-application
+pattern and must be labeled accordingly.
+
 ## Application surface
 
 - Managed user code must not include transport-specific headers, construct
@@ -53,3 +76,17 @@ module templates, and deployment configuration.
 
 Run the repository red-line checker for changes to these surfaces and add focused
 tests for every new rule or exception. See [Testing](testing.md).
+
+From the repository root, use report mode to inspect existing findings and the
+checked-in baseline to reject newly introduced findings. Strict mode is suitable
+only when the selected scan scope has no accepted debt:
+
+```bash
+bash scripts/check_red_lines.sh --report
+bash scripts/check_red_lines.sh --baseline scripts/baseline_red_lines.txt
+# Clean scopes may use: bash scripts/check_red_lines.sh --strict
+```
+
+The checker is grep-based and only covers its configured scan paths. A clean
+result does not replace review of dependency direction, exported CMake targets,
+installed headers, or newly added directories.

@@ -23,6 +23,19 @@ class PerfRunnerTest(unittest.TestCase):
    lines=[f"CMAKE_HOME_DIRECTORY:INTERNAL={registration['cmake_source']}"]
    lines.extend(f"{key}:STRING={value}" for key,value in build["configure_options"].items())
    (directory/"CMakeCache.txt").write_text("\n".join(lines)+"\n")
+ def make_dependency_fixture(self,base):
+  root=base/"root";pool=base/"pool";out=base/"out";root.mkdir();(root/"cmake").mkdir();pool.mkdir();out.mkdir()
+  for name,specification in m.DEPENDENCIES.items():
+   declaration,url,marker=specification
+   (root/"cmake"/declaration).write_text(f'set({name}_DOWNLOAD_URL\n    "{url}"\n    CACHE STRING "")\n')
+   component=pool/f"{name}-src";component.mkdir();marker_path,marker_text=marker;path=component/marker_path;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(marker_text+"\n")
+   (component/"payload.txt").write_text(name+"\n")
+  components=[]
+  for name,specification in sorted(m.DEPENDENCIES.items()):
+   entries,_,total=m._dependency_entries(pool/f"{name}-src",name,m.DEPENDENCY_MAX_ENTRIES,m.DEPENDENCY_MAX_BYTES);declaration=f"cmake/{specification[0]}"
+   components.append({"name":name,"declaration":declaration,"declaration_sha256":m.sha(root/declaration),"url":specification[1],"tree_sha256":m._dependency_tree_digest(entries),"entry_count":len(entries),"byte_count":total})
+  contract=base/"dependency-contract.json";m.write_json(contract,{"schema":"ibmw-core-metrics-dependency-contract-v1","components":components});setattr(m,"DEPENDENCY_CONTRACT",contract)
+  return root,pool,out
  def test_bootstrap_is_deterministic_and_paired(self):
   pairs=[{"a":{"x":2.0},"b":{"x":1.0}},{"a":{"x":3.0},"b":{"x":2.0}}]
   x=m.bootstrap_ratio(pairs,"a","b","x",random.Random(7),10000)
@@ -35,13 +48,21 @@ class PerfRunnerTest(unittest.TestCase):
    self.assertIn("warmup_sec: 10",text); self.assertIn("measured_sec: 60",text)
    self.assertIn("measure_begin_monotonic_ns: 1000000000",text)
    self.assertIn("publisher_status_path: /tmp/pub.json",text)
-   self.assertIn('runtime_id: "metrics_r7_pub"',text)
+   self.assertIn('runtime_id: "metrics_v2_pub"',text)
    self.assertIn("batch_size: 128",text)
-   self.assertIn("label: core_metrics_round7_4KiB",text)
+   self.assertIn("label: core_metrics_lossless_v2_4KiB",text)
+   self.assertIn('benchmark_profile: "core_metrics_e2e_lossless_v1"',text)
+   driver=(ROOT/"src/extensions/transport/iceoryx_ext/iceoryx_transport_driver.cc").read_text()
+   self.assertIn(f'"{m.LOSSLESS_PROFILE["name"]}"',driver)
+   self.assertIn('publisher_too_slow_policy: "WAIT_FOR_CONSUMER"',text)
+   self.assertIn('subscriber_queue_full_policy: "BLOCK_PRODUCER"',text)
+   self.assertIn("subscriber_queue_capacity: 256",text)
  def test_thresholds_and_registration(self):
   self.assertEqual(m.THRESHOLDS["off_out"]["p99"],.05)
   self.assertEqual(m.THRESHOLDS["counters_out"]["throughput"],.07)
   self.assertEqual(m.SEED,1229081943); self.assertEqual(m.CPUS,(25,26,27))
+  self.assertEqual(m.FROZEN_LOAD,448000);self.assertEqual(m.LOSSLESS_PROFILE["queue_capacity"],256)
+  contract,digest=m.protocol_contract();plan=m.registered_plan();self.assertEqual(contract["frozen_load"],448000);self.assertEqual(contract["delivery_profile"],m.LOSSLESS_PROFILE);self.assertEqual(plan["protocol_contract_sha256"],digest)
  def test_registered_build_configuration_pins_options_and_runner_python(self):
   with tempfile.TemporaryDirectory() as d:
    registration=m.registered_build_configuration(Path(d))
@@ -51,7 +72,7 @@ class PerfRunnerTest(unittest.TestCase):
     self.assertEqual(options["CMAKE_BUILD_TYPE"],"Release")
     self.assertEqual(options["IBMW_BUILD_TESTS"],"OFF")
     self.assertEqual(options["IBMW_BUILD_DDS_EXTENSION"],"OFF")
-    self.assertEqual(options["IBMW_BUILD_ROS2_TYPES"],"ON")
+    self.assertEqual(options["IBMW_BUILD_ROS2_TYPES"],"OFF")
     self.assertEqual(options["Python3_EXECUTABLE"],registration["runner_python"])
     expected="OFF" if name=="out" else "ON"
     self.assertEqual(options["IBMW_ENABLE_CORE_METRICS"],expected)
@@ -67,6 +88,49 @@ class PerfRunnerTest(unittest.TestCase):
    cache.write_text(original.replace("IBMW_BUILD_TESTS:STRING=OFF","IBMW_BUILD_TESTS:STRING=ON"))
    with self.assertRaisesRegex(ValueError,"required CMake option mismatch: IBMW_BUILD_TESTS"):
     m.verify_registered_builds(out,registration)
+ def test_build_sandbox_is_network_isolated_and_fail_closed(self):
+  with tempfile.TemporaryDirectory(dir=ROOT/".opencode") as d:
+   command=m.sandbox_command(Path(d),["true"])
+   self.assertEqual(command[0],"/usr/bin/bwrap");self.assertIn("--unshare-net",command);self.assertIn("--ro-bind",command);self.assertIn("--tmpfs",command)
+   m.verify_network_sandbox(Path(d))
+   with mock.patch.object(m,"BWRAP",Path(d)/"missing"):
+    with self.assertRaisesRegex(RuntimeError,"sandbox unavailable"):m.sandbox_command(Path(d),["true"])
+ def test_dependency_snapshot_rejects_mutation_addition_and_symlink(self):
+  for attack in ("mutation","addition","symlink"):
+   with self.subTest(attack=attack),tempfile.TemporaryDirectory() as d:
+    root,pool,out=self.make_dependency_fixture(Path(d));binding=m.create_dependency_snapshot(root,pool,out);component=out/m.DEPENDENCY_DIRECTORY/"fmt"
+    if attack=="mutation":(component/"payload.txt").write_text("changed\n")
+    elif attack=="addition":(component/"added.txt").write_text("added\n")
+    else:os.symlink("payload.txt",component/"link")
+    with self.assertRaises((ValueError,FileNotFoundError)):m.verify_dependency_snapshot(out,binding["manifest_sha256"],binding["aggregate_sha256"])
+ def test_dependency_snapshot_rejects_missing_component_and_wrong_lock(self):
+  with tempfile.TemporaryDirectory() as d:
+   root,pool,out=self.make_dependency_fixture(Path(d));m.shutil.rmtree(pool/"tbb-src")
+   with self.assertRaisesRegex(FileNotFoundError,"missing dependency source component: tbb"):m.create_dependency_snapshot(root,pool,out)
+  with tempfile.TemporaryDirectory() as d:
+   root,pool,out=self.make_dependency_fixture(Path(d));declaration=root/"cmake"/m.DEPENDENCIES["fmt"][0];declaration.write_text(declaration.read_text().replace("10.2.1","10.2.0"))
+   with self.assertRaisesRegex(ValueError,"wrong source lock.*fmt"):m.create_dependency_snapshot(root,pool,out)
+ def test_dependency_snapshot_rejects_coherent_source_rewrite_with_marker(self):
+  with tempfile.TemporaryDirectory() as d:
+   root,pool,out=self.make_dependency_fixture(Path(d));component=pool/"fmt-src"
+   (component/"payload.txt").write_text("malicious but marker remains\n")
+   with self.assertRaisesRegex(ValueError,"trusted source tree mismatch.*fmt"):m.create_dependency_snapshot(root,pool,out)
+   self.assertFalse((out/m.DEPENDENCY_DIRECTORY).exists())
+ def test_dependency_registration_is_offline_local_and_two_builds_verify(self):
+  with tempfile.TemporaryDirectory() as d:
+   root,pool,out=self.make_dependency_fixture(Path(d));m.create_dependency_snapshot(root,pool,out);registration=m.registered_build_configuration(out)
+   self.assertEqual(set(registration["builds"]),{"out","instrumented"})
+   for build in registration["builds"].values():
+    options=build["configure_options"];self.assertEqual(options["FETCHCONTENT_FULLY_DISCONNECTED"],"ON")
+    self.assertFalse(any(str(value).startswith(("http://","https://")) for value in options.values()))
+    for name in m.DEPENDENCIES:self.assertEqual(Path(options[f"{name}_LOCAL_SOURCE"]).parent,out/m.DEPENDENCY_DIRECTORY)
+   self.write_registered_caches(out,registration);self.assertEqual(m.verify_registered_builds(out,registration),registration)
+ def test_dependency_registration_rejects_external_source_path(self):
+  with tempfile.TemporaryDirectory() as d:
+   root,pool,out=self.make_dependency_fixture(Path(d));m.create_dependency_snapshot(root,pool,out);registration=m.registered_build_configuration(out)
+   registration["builds"]["out"]["configure_options"]["fmt_LOCAL_SOURCE"]=str(Path(d)/"external")
+   self.write_registered_caches(out,registration)
+   with self.assertRaisesRegex(ValueError,"dependency source path mismatch: fmt_LOCAL_SOURCE"):m.verify_registered_builds(out,registration,require_current=False)
  def test_rehashed_semantically_altered_plan_is_rejected(self):
   with tempfile.TemporaryDirectory() as d:
    out=Path(d);plan=m.registered_plan();m.write_json(out/"plan.json",plan)
@@ -139,8 +203,43 @@ class PerfRunnerTest(unittest.TestCase):
  def test_counter_conservation(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/"metrics.jsonl"
-   p.write_text("\n".join('{"kind":"direct_iceoryx_loan","metric":"%s","value":%d}' % x for x in (("logical_attempt",2),("logical_success",2),("logical_fail",0),("publish",2),("release",0))))
+   rows=[];seq=1
+   for type_name in m.COUNTER_TYPES:
+    common={"pkg":"core","module":"IoxLoanedCtxPublisherModule","topic":"iox_bench_ctx_topic","type":type_name}
+    for kind,cumulative in (("logical_publish",{**common,"attempted":0,"rejected":0}),("logical_loan",{**common,"loan_attempted":0,"loan_succeeded":0,"loan_failed":0}),("driver_send",{**common,"driver":"iceoryx","attempted":0,"returned":0})):
+     rows.append({"schema":"ibmw.core_metrics.v1","snapshot_seq":seq,"kind":kind,"cumulative":cumulative,"complete":True});seq+=1
+   rows.append({"schema":"ibmw.core_metrics.v1","snapshot_seq":seq,"kind":"source_driver_loan","cumulative":{"driver":"iceoryx","loan_publish_called":0,"loan_release_called":0},"complete":True});seq+=1
+   for type_name in m.COUNTER_TYPES:
+    for metric in m.COUNTER_METRICS:
+     value=2 if type_name.endswith("4KB") and metric in ("logical_attempt","logical_success","publish") else 0;cumulative={"metric":metric,"topic":"iox_bench_ctx_topic","type":type_name,"driver":"iceoryx","value":value}
+     rows.append({"schema":"ibmw.core_metrics.v1","snapshot_seq":seq,"kind":"direct_iceoryx_loan",**cumulative,"cumulative":cumulative,"complete":True});seq+=1
+   p.write_text("\n".join(json.dumps(x) for x in rows)+"\n")
    self.assertTrue(m.counter_conservation(p)["valid"])
+   p.write_text(p.read_text().replace('"value": 2','"value": -1',1))
+   with self.assertRaises(ValueError):m.counter_conservation(p)
+   duplicate=json.loads(json.dumps(rows));duplicate[-1]["snapshot_seq"]=duplicate[-2]["snapshot_seq"]
+   p.write_text("\n".join(json.dumps(x) for x in duplicate)+"\n")
+   with self.assertRaises(ValueError):m.counter_conservation(p)
+   unknown=json.loads(json.dumps(rows));unknown[0]["unexpected"]=1
+   p.write_text("\n".join(json.dumps(x) for x in unknown)+"\n")
+   with self.assertRaises(ValueError):m.counter_conservation(p)
+ def test_counter_conservation_rejects_retry_above_per_attempt_bound(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d)/"metrics.jsonl";rows=[];seq=1
+   for type_name in m.COUNTER_TYPES:
+    common={"pkg":"core","module":"IoxLoanedCtxPublisherModule","topic":"iox_bench_ctx_topic","type":type_name}
+    for kind,cumulative in (("logical_publish",{**common,"attempted":0,"rejected":0}),("logical_loan",{**common,"loan_attempted":0,"loan_succeeded":0,"loan_failed":0}),("driver_send",{**common,"driver":"iceoryx","attempted":0,"returned":0})):
+     rows.append({"schema":"ibmw.core_metrics.v1","snapshot_seq":seq,"kind":kind,"cumulative":cumulative,"complete":True});seq+=1
+   rows.append({"schema":"ibmw.core_metrics.v1","snapshot_seq":seq,"kind":"source_driver_loan","cumulative":{"driver":"iceoryx","loan_publish_called":0,"loan_release_called":0},"complete":True});seq+=1
+   for type_name in m.COUNTER_TYPES:
+    for metric in m.COUNTER_METRICS:
+     value=31 if type_name==m.COUNTER_TYPES[1] and metric=="internal_retry" else 2 if type_name==m.COUNTER_TYPES[1] and metric in ("logical_attempt","logical_success","publish") else 0
+     cumulative={"metric":metric,"topic":"iox_bench_ctx_topic","type":type_name,"driver":"iceoryx","value":value}
+     rows.append({"schema":"ibmw.core_metrics.v1","snapshot_seq":seq,"kind":"direct_iceoryx_loan",**cumulative,"cumulative":cumulative,"complete":True});seq+=1
+   p.write_text("\n".join(json.dumps(x) for x in rows)+"\n")
+   result=m.counter_conservation(p)
+   self.assertEqual(result["values"]["logical_attempt"],2);self.assertEqual(result["values"]["internal_retry"],31)
+   self.assertFalse(result["valid"])
  def test_proc_read_failure_is_invalid_not_zero(self):
   self.assertIsNone(m.proc_ticks(999999999)); self.assertIsNone(m.pss_kib(999999999))
  def test_cleanup_removes_only_explicit_owned_resources(self):
@@ -223,14 +322,14 @@ class PerfRunnerTest(unittest.TestCase):
    self.assertFalse(m.reconcile_status(pub,bad,10,20)["valid"])
  def test_reporter_hot_value_requires_exact_metric(self):
   with tempfile.TemporaryDirectory() as d:
-   p=Path(d)/"metrics.jsonl";p.write_text('{"kind":"direct_iceoryx_loan","metric":"hot_hook","value":22000000}\n')
+   p=Path(d)/"metrics.jsonl";cumulative={"metric":"hot_hook","topic":"","type":"","driver":"","value":22000000};p.write_text(json.dumps({"schema":"ibmw.core_metrics.v1","snapshot_seq":1,"kind":"direct_iceoryx_loan",**cumulative,"cumulative":cumulative,"complete":True})+"\n")
    self.assertEqual(m.reporter_hot_value(p),[22000000])
  def test_gate_uses_running_markers_and_reconciled_confirmation(self):
   source=P.read_text()
   self.assertIn('"PERF_SUBSCRIBER_RUNNING"',source)
   self.assertIn('"PERF_PUBLISHER_RUNNING"',source)
   self.assertIn('publisher did not complete controlled shutdown',source)
-  self.assertNotIn('add_argument("--resume"',source)
+  self.assertIn('add_argument("--resume",action="store_true")',source)
  def test_unpaced_probe_is_diagnostic_only_even_when_lossless(self):
   lossy=m.classify_unpaced_probe({"valid":False,"throughput":500000,"reconciliation":{"valid":False}})
   lossless=m.classify_unpaced_probe({"valid":True,"throughput":400000,"reconciliation":{"valid":True}})

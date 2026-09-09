@@ -12,7 +12,26 @@
 
 工具不会替你选择公平场景，也不会自动把非等价 Transport 变成 DDS 等价方案。正式结论应先阅读[设计基线](../architecture/performance-observability-design.zh.md)。
 
-## 2. 当前已实现能力
+## 2. 前置条件：构建、安装与关闭
+
+- 先按被测场景构建 IBMW；需要 Core Metrics 时必须使用
+  `-DIBMW_ENABLE_CORE_METRICS=ON`，需要内部 `comm_trace` 时还必须使用
+  `-DIBMW_ENABLE_COMM_TRACE=ON`。`comm_trace` 是内部 trace skeleton，不是
+  公共应用 API，业务代码不得依赖它。
+- 若从安装布局运行 collector 或被测程序，必须先完成
+  `cmake --install <build-dir> --prefix <install-prefix>`，并从同一安装前缀
+  解析运行时库、扩展和工具；不能把 build-tree 私有头文件当作安装契约。
+- managed 采集要求 SUT 能响应正常的 Engine shutdown。Core Metrics、producer
+  latency 和最终 artifact 依赖优雅关闭；`SIGKILL`、超时强杀或 attached 模式
+  不能产生 required 的最终证据。attached 只采集已有进程，不负责启动或停止。
+
+本指南区分四种证据等级：**functional**（功能成功或失败）、**descriptive**
+（环境、构建、资源和观测摘要）、**formal**（满足已版本化合同、完整性和
+provenance 校验的指标/比较证据）、**product claim**（面向产品的性能、能力或
+兼容性承诺）。前一级不能自动升级为后一级；没有合同、样本不完整、来源不明
+或校验失败时必须 `unsupported` 或 fail-closed，不能用 0、推测或局部数字补齐。
+
+## 3. 当前已实现能力
 
 | 能力 | 当前状态 |
 |---|---|
@@ -33,7 +52,7 @@
 COLLECTOR=./tools/mw_perf_collect/mw-perf-collect
 ```
 
-## 3. 前置条件
+## 4. 前置条件
 
 - Linux，且可读取目标进程的 `/proc`；PSS 需要读取 `/proc/<pid>/smaps_rollup`；
 - Python 3；JSON 配置不依赖第三方包，YAML 配置需要 PyYAML；
@@ -46,7 +65,7 @@ COLLECTOR=./tools/mw_perf_collect/mw-perf-collect
 
 配置 `ros2_prefix` 时，工具要求 `<prefix>/bin/ros2` 是 prefix 内 canonical executable，并从其无参数 absolute Python shebang 验证 interpreter identity 和 Python 版本；随后仅从该 prefix 派生 `ros2cli` package path 与共享库路径。Graph 子命令使用 `--no-daemon` 直接发现，不依赖或复用后台 ROS 2 daemon。调用方或 SUT 的 `PYTHONPATH`、`PYTHONHOME`、`LD_PRELOAD`、`LD_LIBRARY_PATH` 不会进入该可信 CLI 环境；prefix、shebang 或包闭包不满足条件时 doctor 降级/失败，不应退回污染环境补齐。
 
-## 4. managed 与 attached
+## 5. managed 与 attached
 
 ### managed
 
@@ -80,7 +99,7 @@ managed 会跟踪 leader 与后代进程。若配置中已有 `sut.command`，�
 
 attached 会校验 PID start ticks，目标在采样期退出则运行无效。由于 collector 不控制目标最终关闭，required producer latency/Core Metrics 不适用于 attached；optional artifact 只能作为诊断数据。
 
-## 5. 完整 JSON 配置
+## 6. 完整 JSON 配置
 
 下面是一份包含当前公共字段、ROS2 Adapter 和 IBMW Adapter 的完整参考。单次运行只选择一个 `--adapter`，未选 Adapter 的配置不会执行。路径相对于仓库根目录；按你的构建产物修改。
 
@@ -185,9 +204,9 @@ attached 会校验 PID start ticks，目标在采样期退出则运行无效。�
 - `latency_artifact.path` 必须由本轮 producer 写入，旧文件不算本轮证据；
 - JSON Schema 允许扩展字段，但工具只执行当前实现读取的字段。
 
-## 6. ROS2 使用流程
+## 7. ROS2 使用流程
 
-### 6.1 doctor
+### 7.1 doctor
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -196,7 +215,7 @@ $COLLECTOR doctor --adapter ros2 --config ros2-run.json
 
 `doctor` 不启动 SUT。重点检查 `status`、ROS 环境、ROS 2 CLI 可达性、RMW 以及公共 `/proc`、sysfs network 和 YAML 能力。ROS 发行版从 `ROS_DISTRO` 记录；工具不调用 Humble 不支持的 `ros2 --version`。
 
-### 6.2 run
+### 7.2 run
 
 ```bash
 $COLLECTOR run --adapter ros2 --config ros2-run.json --output runs/ros2
@@ -211,7 +230,7 @@ $COLLECTOR run --adapter ros2 --config ros2-run.json \
 
 ROS Adapter 只做 Graph/readiness 和 artifact 校验。逐消息 latency 不是 `ros2 topic hz` 推导值；producer 必须输出 `mw_perf.latency.v1` JSONL。
 
-### 6.3 validate
+### 7.3 validate
 
 ```bash
 $COLLECTOR validate runs/ros2/<run-id>
@@ -219,7 +238,7 @@ $COLLECTOR validate runs/ros2/<run-id>
 
 检查 `valid_for_collection`、`valid_for_metric`、`valid_for_comparison` 和 `failure_codes`。required latency 的 completion、运行身份、hash 或优雅 finalization 任一失败，结果不可比较。
 
-### 6.4 report
+### 7.4 report
 
 ```bash
 $COLLECTOR report runs/ros2/<run-id>
@@ -227,9 +246,16 @@ $COLLECTOR report runs/ros2/<run-id>
 
 该命令从现有 artifact 重建 `validation.json` 和 `report.md`，不重跑 SUT。当前报告是单轮摘要，不是正式 A/B/C 统计报告。
 
-## 7. IBMW External 与 Core Metrics
+## 8. IBMW External、Core Metrics 与 comm_trace
 
-### 7.1 仅 External P0
+External metrics 是 collector 从 SUT 外部采集的环境、进程、网络、构建和
+Transport/provenance 信息；它不需要 Core Metrics。Core Metrics 是 IBMW runtime
+内部按 schema 输出的 `metrics.jsonl`，须由启用的构建和正常 Engine shutdown
+完成归档。`comm_trace` 是更低层的内部通信 trace，用于受控诊断/候选验证；它
+既不是 External metrics，也不是 Core Metrics 的公共替代品，更不是公共应用 API。
+不要把 trace 事件数量当成性能指标或产品能力证明。
+
+### 8.1 仅 External P0
 
 不要求 Core Metrics 时，删除 `core_metrics` 或设为 optional，并执行：
 
@@ -240,7 +266,7 @@ $COLLECTOR run --adapter ibmw --config ibmw-external.json --output runs/ibmw
 
 你仍会得到 source/build/Transport 摘要、进程资源、网络和 capability。Core Metrics 显示 `unsupported` 不代表 External P0 失败。
 
-### 7.2 开启 Core Metrics
+### 8.2 开启 Core Metrics
 
 在 managed SUT 环境中设置：
 
@@ -276,7 +302,7 @@ SUT 必须正常走 Engine shutdown 才会生成 final `metrics.jsonl`。collect
 
 Core Metrics 的 formal host 性能门已在既定 host capability/合同上通过，但 counters 仍不应在生产环境中默认打开，也不能用内部计数替代 A/B/C 公共外部指标或外推到 OHOS。
 
-### 7.3 OHOS remote capture candidate
+### 8.3 OHOS remote capture candidate
 
 OHOS 上 host collector 的 inherited FD 不能穿过 HDC。需要验证设备端 DDS exact capture 时，可分别启用默认关闭的 native agent 与 production candidate：
 
@@ -313,7 +339,7 @@ importer 严格验证 canonical USTAR、request challenge、archive/tree hash、
 
 该流程是 remote candidate，不是正式 OHOS P0a：summary 固定 `formal_p0a=false`，不会生成 `directory_finalization.json`，也不提供 trusted remote contract/campaign、runtime image attestation、fault/rollback、metric 或 comparison 证据。`metric_availability=unsupported`、`valid_for_metric=false`、`valid_for_comparison=false`，不得从 capture 数量或 exact correlation 发布性能结论。
 
-## 8. 输出产物解释
+## 9. 输出产物解释
 
 | 路径 | 内容 |
 |---|---|
@@ -334,9 +360,9 @@ importer 严格验证 canonical USTAR、request challenge、archive/tree hash、
 
 网络字段是接口累计计数，需要用采样差值除以时间窗口；它不是 DDS/RTPS wire bytes。PSS 为正式内存口径，RSS 仅辅助诊断，共享页场景不要直接对 RSS 求和作结论。
 
-## 9. 如何做 A/B/C
+## 10. 如何做 A/B/C
 
-### 9.1 通用 collector 边界
+### 10.1 通用 collector 边界
 
 `compare` 只消费已经具备比较元数据的运行目录。除有效的单轮 validation 外，每个 manifest 还必须由上游集成流程在生成时写入一致的 `scenario_contract_hash`、resource profile、comparison block、sequence index 和 order policy。当前通用 `run` 不会自动生成这些 block/order 元数据；版本化 `mw_perf.comparison-plan.v1` 会 fail-closed 检查每个 block 恰好包含 A、B、C 各一个 lane，并校验 block/lane identity、合同与 scope/order 元数据、run/path 唯一性及 validation 新鲜度。未声明该 schema 的旧 `runs` plan 仅保留 MVP 兼容。因此不能把任意三个普通 run 直接交给 `compare`，也不要通过手工修改 manifest 绕过 provenance。
 
@@ -361,7 +387,7 @@ $COLLECTOR compare --plan comparison-plan.json \
 
 当前 `compare` 只重校验已有运行并生成 `comparison.json` MVP；不会替你启动三条 lane、补齐比较元数据，也不计算完整 latency ratio、置信区间或正式 pass/fail。
 
-### 9.2 独立 runner 原型
+### 10.2 独立 runner 原型
 
 固定 4 KiB interop 场景由独立 runner 执行。先在已 source ROS 2 环境中构建三条 lane：
 
@@ -389,7 +415,7 @@ runner 默认读取上述 CMake 路径文件；需要覆盖时传入 `--roudi /p
 
 独立 runner 的 `summary.json` 不是 `mw-perf-collect compare` 的正式统计输出；二者目前是两个原型边界，不能声称已经形成任意场景的一键 A/B/C 产品能力。
 
-## 10. 结果解读
+## 11. 结果解读
 
 先看 validity，再看数值：
 
@@ -402,7 +428,7 @@ runner 默认读取上述 CMake 路径文件；需要覆盖时传入 `--roudi /p
 
 比较时固定 payload、QoS、offered load、进程边界和资源范围。B/A 用于兼容迁移成本，C/B 或 C/A 只有在语义等价时才可直接比较；非等价 C 只展示 Pareto 结果。
 
-## 11. 通用性与约束
+## 12. 通用性与约束
 
 - 工具是 Linux 单机 MVP，不提供多 host 时钟同步或单向时延；
 - ROS Adapter 对 ROS 发行版和 RMW 保持结构通用，但当前验证基线不能自动外推到所有组合；
@@ -412,7 +438,7 @@ runner 默认读取上述 CMake 路径文件；需要覆盖时传入 `--roudi /p
 - collector 不自动扣除自身开销，应将 harness 与 solution 资源分开设计；
 - required provenance 会因源码、untracked source、二进制或 CMake cache 变化失败，运行期间不要重编译或改源码。
 
-## 12. 故障排查
+## 13. 故障排查
 
 ### `doctor` 显示 ROS degraded
 
@@ -450,7 +476,7 @@ runner 默认读取上述 CMake 路径文件；需要覆盖时传入 `--roudi /p
 
 检查接口名和 namespace。回环测试通常使用 `lo`；跨网卡测试使用实际接口。不存在的接口不会产生伪造的零计数，但当前会被静默跳过且不使validation失败；必须确认`raw/network.jsonl`中的`interfaces`包含目标名称。
 
-## 13. 可复现 ROS2 案例
+## 14. 可复现 ROS2 案例
 
 先构建包含 `ibmw_abc_ros2_endpoint` 的 benchmark，并直接运行一次 `ibmw_abc_ros2_endpoint --help` 或短消息 smoke，确认其动态库来自目标 ROS/系统环境而不是冲突的 Conda/toolchain 运行库。创建 `ros2-abc.json`：
 
@@ -507,7 +533,7 @@ $COLLECTOR report runs/ros2-abc/<run-id>
 
 这个案例的 shell 将 publisher 作为后代启动，并 `exec` subscriber 作为 collector leader；subscriber 负责生成严格 latency artifact 和 completion。
 
-## 14. 可复现 IBMW 案例
+## 15. 可复现 IBMW 案例
 
 以下案例使用已有 retained/direct loan E2E 样例的 managed helper。先构建：
 

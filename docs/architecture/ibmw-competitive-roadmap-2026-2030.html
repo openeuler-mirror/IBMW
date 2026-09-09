@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="IBMW 核心竞争力构建 2026—2030：竞争力摘要与规划目标">
+  <title>IBMW 核心竞争力构建 2026—2030</title>
+  <style>
+    :root {
+      --paper: #f3f0e9; --paper-2: #fbfaf6; --ink: #20211f; --muted: #656861;
+      --line: #c9c6bc; --line-dark: #868880; --red: #c5392f; --red-soft: #f1ded9;
+      --cyan: #087f86; --cyan-soft: #d9ecea; --green: #2e754c; --green-soft: #dfeade;
+      --white: #fffefa; --shadow: 0 18px 50px rgba(38,37,32,.08);
+      --sans: "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+      --mono: "SFMono-Regular", "Cascadia Mono", "Roboto Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; color: var(--ink); background: linear-gradient(rgba(32,33,31,.022) 1px, transparent 1px), var(--paper); background-size: 100% 28px; font-family: var(--sans); font-size: 16px; line-height: 1.6; text-rendering: optimizeLegibility; }
+    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 20; opacity: .2; background-image: radial-gradient(circle at 18% 27%, rgba(32,33,31,.16) 0 .45px, transparent .6px), radial-gradient(circle at 72% 64%, rgba(32,33,31,.12) 0 .4px, transparent .55px); background-size: 11px 13px, 17px 19px; }
+    a { color: inherit; } button { font: inherit; } ::selection { color: var(--white); background: var(--red); }
+    .progress { position: fixed; inset: 0 auto auto 0; z-index: 100; width: 0; height: 3px; background: var(--red); }
+    .shell { width: min(1260px, calc(100% - 48px)); margin-inline: auto; }
+    .topbar { position: sticky; top: 0; z-index: 40; border-bottom: 1px solid rgba(134,136,128,.55); background: rgba(243,240,233,.94); backdrop-filter: blur(12px); }
+    .topbar-inner { min-height: 58px; display: flex; align-items: center; gap: 28px; }
+    .brand { display: flex; align-items: center; gap: 10px; margin-right: auto; font-size: 13px; font-weight: 800; white-space: nowrap; }
+    .brand-mark { width: 25px; height: 25px; display: grid; place-items: center; color: var(--white); background: var(--ink); font-family: var(--mono); font-size: 11px; }
+    nav { display: flex; align-items: center; gap: 22px; }
+    nav a { position: relative; padding: 18px 0 16px; color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 700; white-space: nowrap; }
+    nav a:hover, nav a.active { color: var(--ink); } nav a.active::after { content: ""; position: absolute; inset: auto 0 -1px; height: 3px; background: var(--red); }
+    .status, .plan-flag, .proposal { padding: 4px 8px; color: var(--red); border: 1px solid currentColor; font-family: var(--mono); font-size: 10px; font-weight: 800; white-space: nowrap; }
+    main { overflow: clip; } section { scroll-margin-top: 74px; }
+    .hero { min-height: calc(100vh - 58px); display: grid; align-items: center; padding: 72px 0 54px; border-bottom: 1px solid var(--line-dark); }
+    .hero-grid { display: grid; grid-template-columns: minmax(0,1.42fr) minmax(320px,.58fr); gap: clamp(44px,7vw,100px); align-items: end; }
+    .eyebrow, .section-kicker { display: flex; align-items: center; gap: 12px; margin: 0 0 18px; color: var(--red); font-family: var(--mono); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+    .eyebrow::before, .section-kicker::before { content: ""; width: 34px; height: 3px; background: currentColor; }
+    h1, h2, h3, p { margin-top: 0; } h1 { max-width: 880px; margin-bottom: 26px; font-size: 96px; line-height: .93; font-weight: 900; }
+    h1 .year { display: block; margin-top: 14px; color: transparent; -webkit-text-stroke: 1.5px var(--ink); font-family: var(--mono); font-size: .49em; }
+    .hero-claim { max-width: 900px; margin: 0; padding-left: 25px; border-left: 5px solid var(--red); font-size: 30px; font-weight: 720; line-height: 1.4; }
+    .hero-claim strong, em { color: var(--red); font-style: normal; } .boundary-note { max-width: 850px; margin: 18px 0 0; color: var(--muted); font-size: 13px; }
+    .phase-rail { position: relative; padding-left: 28px; border-left: 1px solid var(--line-dark); }
+    .phase-rail::before { content: "STRATEGIC SCALE"; position: absolute; top: -32px; left: -4px; padding: 0 8px; color: var(--muted); background: var(--paper); font-family: var(--mono); font-size: 9px; }
+    .phase { position: relative; display: grid; grid-template-columns: 84px 1fr; gap: 14px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+    .phase::before { content: ""; position: absolute; width: 9px; height: 9px; left: -33px; top: 27px; border: 2px solid var(--paper); background: var(--stage); box-shadow: 0 0 0 1px var(--stage); }
+    .phase:last-child { border-bottom: 0; } .phase-number { color: var(--stage); font-family: var(--mono); font-size: 23px; font-weight: 900; white-space: nowrap; }
+    .phase b { display: block; margin-bottom: 3px; font-size: 15px; } .phase span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .s26 { --stage: var(--red); } .s27 { --stage: var(--cyan); } .s30 { --stage: var(--green); }
+    .section-pad { padding: 88px 0; } .section-head { display: grid; grid-template-columns: minmax(0,1fr) minmax(260px,410px); gap: 52px; align-items: end; margin-bottom: 36px; }
+    .section-num { display: block; margin-bottom: 6px; color: var(--line-dark); font-family: var(--mono); font-size: 12px; } h2 { margin-bottom: 0; font-size: 64px; line-height: 1.04; font-weight: 900; }
+    .section-intro { margin: 0; color: var(--muted); font-size: 15px; } .section-intro b, .section-intro strong { color: var(--ink); }
+    .plan-flag { display: inline-block; margin-top: 13px; }
+    /* The architecture is the single source of truth for when a capability enters the plan. */
+    .architecture-wrap { border-top: 4px solid var(--ink); border-bottom: 1px solid var(--ink); background: rgba(251,250,246,.74); box-shadow: var(--shadow); }
+    .arch-toolbar { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 11px 16px; background: var(--ink); color: var(--white); }
+    .arch-toolbar b { font-size: 12px; } .legend { display: flex; flex-wrap: wrap; gap: 13px; color: #dcddd6; font-size: 10px; } .legend span { display: inline-flex; align-items: center; gap: 6px; } .legend i { width: 15px; height: 4px; background: var(--stage); }
+    .arch { padding: 12px; } .arch-row { display: grid; grid-template-columns: 174px repeat(3,minmax(0,1fr)); border: 1px solid var(--line-dark); border-bottom: 0; } .arch-row:last-child { border-bottom: 1px solid var(--line-dark); }
+    .layer-name { display: flex; flex-direction: column; justify-content: center; padding: 11px 13px; border-right: 1px solid var(--line-dark); background: #e7e3da; } .layer-name b { font-size: 12px; line-height: 1.3; } .layer-name small { margin-top: 3px; color: var(--muted); font-family: var(--mono); font-size: 8px; }
+    .module { min-width: 0; margin: 6px 4px; padding: 9px 10px 10px; border: 1px solid var(--line); border-top: 3px solid var(--stage); background: var(--paper-2); } .module .tag { display: block; margin-bottom: 4px; color: var(--stage); font-family: var(--mono); font-size: 8px; font-weight: 900; } .module b { display: block; font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; } .module p { margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+    .arch-caption { display: flex; justify-content: space-between; gap: 20px; padding: 13px 16px; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; } .arch-caption strong { color: var(--ink); }
+    .stage-section { position: relative; border-top: 1px solid var(--line-dark); } .stage-section::before { content: attr(data-year); position: absolute; right: max(24px,calc((100vw - 1260px)/2)); top: 52px; color: rgba(32,33,31,.04); font-family: var(--mono); font-size: 210px; line-height: 1; font-weight: 900; pointer-events: none; } .stage-section .section-kicker { color: var(--stage); } .stage-section h2 em { color: var(--stage); }
+    .claim-line { position: relative; z-index: 1; max-width: 1000px; margin: 0 0 34px; font-size: 31px; line-height: 1.38; font-weight: 780; }
+    .proof-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px; border: 1px solid var(--line-dark); background: var(--line-dark); } .proof-card { min-width: 0; padding: 22px 20px; background: var(--paper-2); } .proof-card .index { display: block; margin-bottom: 13px; color: var(--stage); font-family: var(--mono); font-size: 10px; font-weight: 900; } .proof-card h3 { margin-bottom: 8px; font-size: 17px; line-height: 1.25; } .proof-card p, .proof-card li { margin-bottom: 0; color: var(--muted); font-size: 12px; line-height: 1.55; } .proof-card ul { margin: 0; padding-left: 16px; }
+    .evidence-strip { display: grid; grid-template-columns: 180px 1fr; margin-top: 20px; border: 1px solid var(--ink); background: var(--paper-2); } .evidence-label { padding: 20px; color: var(--white); background: var(--ink); } .evidence-label small { display: block; color: #bfc1ba; font-family: var(--mono); font-size: 9px; } .evidence-label b { display: block; margin-top: 7px; font-size: 25px; } .evidence-body { display: grid; grid-template-columns: repeat(3,1fr); } .evidence-item { padding: 18px; border-right: 1px solid var(--line); } .evidence-item:last-child { border-right: 0; } .evidence-item b { display: block; font-size: 14px; } .evidence-item span { color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .target-board { margin-top: 20px; border-top: 4px solid var(--stage); background: var(--white); box-shadow: var(--shadow); } .target-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-bottom: 1px solid var(--line); } .target-head b { font-size: 15px; } .proposal { color: var(--stage); }
+    .targets { display: grid; grid-template-columns: repeat(4,1fr); } .target { min-height: 116px; padding: 16px 18px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); } .target:nth-child(4n) { border-right: 0; } .target .metric { display: block; color: var(--muted); font-size: 11px; } .target strong { display: block; margin: 7px 0 4px; color: var(--stage); font-family: var(--mono); font-size: 27px; line-height: 1; } .target p, .target-note { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; } .target-note { padding: 13px 18px; } .target-note strong { color: var(--ink); }
+    .path-note { margin: 18px 0 0; padding: 14px 17px; border-left: 4px solid var(--stage); color: var(--muted); background: rgba(255,255,255,.54); font-size: 12px; } .path-note b { color: var(--ink); }
+    /* 2027: one closed loop, not a second specification table. */
+    .loop-summary { display: grid; grid-template-columns: 1fr 1.1fr 1fr; border: 1px solid var(--ink); background: var(--paper-2); } .loop-col { padding: 24px; } .loop-col + .loop-col { border-left: 1px solid var(--line-dark); } .loop-col.core { display: flex; flex-direction: column; justify-content: center; color: var(--white); background: var(--ink); text-align: center; } .board-label { display: block; margin-bottom: 15px; color: var(--stage); font-family: var(--mono); font-size: 9px; font-weight: 900; } .core-title { margin: 0 auto 17px; width: 142px; height: 142px; display: grid; place-items: center; border: 1px solid #858983; outline: 8px solid rgba(8,127,134,.17); border-radius: 50%; font-size: 17px; font-weight: 800; line-height: 1.25; } .core-rule { color: #c8cac4; font-family: var(--mono); font-size: 10px; line-height: 1.6; } .loop-item { padding: 9px 0; border-bottom: 1px solid var(--line); } .loop-item:last-child { border-bottom: 0; } .loop-item b { display: block; font-size: 13px; } .loop-item span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+    .exit-line { display: grid; grid-template-columns: repeat(3,1fr); margin-top: 20px; border: 1px solid var(--line-dark); } .exit { padding: 17px; border-right: 1px solid var(--line); } .exit:last-child { border-right: 0; } .exit span { color: var(--cyan); font-family: var(--mono); font-size: 9px; font-weight: 900; } .exit b { display: block; margin: 6px 0 3px; font-size: 16px; } .exit p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    /* 2028—2030: scale the framework already established in 2026 and deepened in 2027. */
+    .scale-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 1px; border: 1px solid var(--line-dark); background: var(--line-dark); } .scale-card { min-width: 0; padding: 22px; background: var(--paper-2); } .scale-card .index { color: var(--green); font-family: var(--mono); font-size: 10px; font-weight: 900; } .scale-card h3 { margin: 10px 0 8px; font-size: 19px; } .scale-card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; } .scale-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 13px; } .scale-tags span { padding: 4px 7px; border: 1px solid rgba(46,117,76,.35); color: #335f42; background: var(--green-soft); font-size: 11px; }
+    .scale-gates { display: grid; grid-template-columns: repeat(3,1fr); margin-top: 20px; border-top: 4px solid var(--green); background: var(--paper-2); box-shadow: var(--shadow); } .scale-gate { padding: 18px; border-right: 1px solid var(--line); } .scale-gate:last-child { border-right: 0; } .scale-gate span { color: var(--green); font-family: var(--mono); font-size: 9px; font-weight: 900; } .scale-gate b { display: block; margin: 6px 0 4px; font-size: 16px; } .scale-gate p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .moat { color: var(--white); background: var(--ink); border-top: 6px solid var(--red); } .moat .section-kicker { color: #ed786f; } .moat .section-num { color: #969a93; } .moat .section-intro { color: #bfc2bb; } .moat h2 { max-width: 850px; }
+    .moat-stack { border-top: 1px solid #70736d; } .moat-row { display: grid; grid-template-columns: 105px 1fr 340px; gap: 24px; align-items: center; min-height: 92px; border-bottom: 1px solid #70736d; } .moat-no { color: #ed786f; font-family: var(--mono); font-size: 11px; font-weight: 900; } .moat-row h3 { margin: 0; font-size: 19px; } .moat-row p { margin: 0; color: #bfc2bb; font-size: 12px; line-height: 1.45; } .win-statement { margin: 36px 0 0; padding: 22px 0 0 22px; border-top: 4px solid #ed786f; font-size: 37px; font-weight: 850; line-height: 1.3; } .win-statement em { color: #ed786f; }
+    footer { padding: 25px 0 38px; color: var(--muted); background: var(--paper); } .footer-inner { display: flex; justify-content: space-between; gap: 24px; font-family: var(--mono); font-size: 9px; } .footer-inner b { color: var(--ink); }
+    .reveal { opacity: 0; transform: translateY(14px); transition: opacity .6s ease, transform .6s ease; } .reveal.visible { opacity: 1; transform: none; }
+    @media (max-width: 980px) {
+      h1 { font-size: 72px; } h2 { font-size: 52px; } .hero-claim { font-size: 25px; } .claim-line { font-size: 27px; } .win-statement { font-size: 32px; }
+      .hero-grid, .section-head { grid-template-columns: 1fr; } .hero { min-height: auto; } .phase-rail { margin-top: 28px; } .proof-grid { grid-template-columns: repeat(2,1fr); } .targets { grid-template-columns: repeat(2,1fr); } .target:nth-child(2n) { border-right: 0; } .loop-summary { grid-template-columns: 1fr 1fr; } .loop-col.core { grid-column: 1 / -1; grid-row: 1; min-height: 270px; } .loop-col:first-child { border-left: 0; } .loop-col:last-child { border-left: 1px solid var(--line-dark); } .scale-card { padding: 19px; } .moat-row { grid-template-columns: 72px 1fr; padding: 17px 0; } .moat-row p { grid-column: 2; }
+    }
+    @media (max-width: 700px) {
+      .shell { width: min(100% - 28px,1260px); } .topbar-inner { min-height: 52px; gap: 12px; } .brand { flex: 0 0 auto; margin-right: 0; font-size: 0; } nav { flex: 1 1 auto; gap: 14px; min-width: 0; overflow-x: auto; scrollbar-width: none; } nav::-webkit-scrollbar { display: none; } nav a { display: block; flex: 0 0 auto; font-size: 10px; padding-block: 16px 14px; } .status { display: none; } .hero { padding: 52px 0 42px; } h1 { font-size: 48px; } h2 { font-size: 39px; } .hero-claim { padding-left: 17px; border-left-width: 4px; font-size: 20px; } .boundary-note { font-size: 12px; } .phase { grid-template-columns: 72px 1fr; } .section-pad { padding: 66px 0; } .section-head { gap: 20px; margin-bottom: 28px; } .stage-section::before { top: 48px; font-size: 100px; } .claim-line { margin-bottom: 26px; font-size: 22px; } .arch-toolbar, .arch-caption { align-items: flex-start; flex-direction: column; } .arch-row { display: block; } .layer-name { padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--line-dark); } .module { display: grid; grid-template-columns: 108px 1fr; gap: 0 8px; margin: 5px; padding: 8px; } .module .tag { grid-row: 1 / span 2; margin: 0; } .module p { grid-column: 2; margin-top: 2px; } .arch-caption { padding: 12px 14px; } .proof-grid, .targets, .evidence-body, .scale-grid { grid-template-columns: 1fr; } .proof-card { padding: 18px; } .evidence-strip { grid-template-columns: 1fr; } .evidence-body { display: grid; } .evidence-item, .target, .scale-gate { border-right: 0; } .target { min-height: 0; } .target-head { align-items: flex-start; flex-direction: column; gap: 8px; } .loop-summary { grid-template-columns: 1fr; } .loop-col.core { grid-column: auto; } .loop-col + .loop-col, .loop-col:last-child { border-left: 0; border-top: 1px solid var(--line-dark); } .exit-line, .scale-gates { grid-template-columns: 1fr; } .exit, .scale-gate { border-right: 0; border-bottom: 1px solid var(--line); } .exit:last-child, .scale-gate:last-child { border-bottom: 0; } .scale-card { padding: 18px; } .moat-row { grid-template-columns: 45px 1fr; gap: 11px; } .moat-row h3 { font-size: 17px; } .moat-row p { font-size: 11px; } .footer-inner { flex-direction: column; gap: 7px; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .reveal { opacity: 1; transform: none; transition: none; } }
+    @media print { @page { size: A4 landscape; margin: 12mm; } body { background: #fff; font-size: 8.5pt; line-height: 1.45; } body::before, .progress, .topbar { display: none; } main { overflow: visible; } .shell { width: 100%; } .hero { min-height: 0; padding: 5mm 0; } h1 { font-size: 50pt; } .hero-claim { font-size: 14pt; } .section-pad { padding: 6mm 0; } .architecture-wrap, .target-board { box-shadow: none; } .reveal { opacity: 1; transform: none; } .moat { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
+  </style>
+</head>
+<body>
+  <div class="progress" id="progress" aria-hidden="true"></div>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div class="brand"><span class="brand-mark">IW</span> IBMW / STRATEGY</div>
+      <nav aria-label="章节导航">
+        <a href="#architecture">总框架</a><a href="#y2026">2026 基座</a><a href="#y2027">2027 深化协同</a><a href="#y2030">2028—30 规模化</a><a href="#why-win">为什么会赢</a>
+      </nav>
+      <span class="status">规划目标 · 内部评审</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" id="top">
+      <div class="shell hero-grid">
+        <div>
+          <p class="eyebrow">Core competitiveness / 2026—2030</p>
+          <h1>IBMW<br>核心竞争力<span class="year">2026 → 2030</span></h1>
+          <p class="hero-claim">不是“轻量版 ROS 2”，而是在明确边界内复用 ROS 2 接口资产与 Fast DDS 互通能力，<strong>运行时不绑定 rcl / rclcpp</strong>；以此建立具身智能的高性能通信、自适应调度、异构资源协同与可验证确定性。</p>
+          <p class="boundary-note"><b>战略边界：</b>兼容是入口，竞争力必须由公平基线、真实负载和可追溯证据证明。以下均为规划目标，不代表当前已实现。</p>
+        </div>
+        <aside class="phase-rail" aria-label="三阶段战略">
+          <div class="phase s26"><div class="phase-number">0→1</div><div><b>2026 · 建立可信基座</b><span>生态兼容、轻量完整，并把数据连接与性能证据做成基础框架。</span></div></div>
+          <div class="phase s27"><div class="phase-number">1→10</div><div><b>2027 · 深化通信计算协同</b><span>围绕 310P RC 打通具身闭环的预算、策略与控制。</span></div></div>
+          <div class="phase s30"><div class="phase-number">10→100</div><div><b>2028—2030 · 规模化复制确定性</b><span>跨域、跨平台、跨业务协同，形成生态复利。</span></div></div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section-pad" id="architecture">
+      <div class="shell">
+        <div class="section-head reveal">
+          <div><span class="section-num">01 / SYSTEM FRAMEWORK</span><p class="section-kicker">全局总架构规划</p><h2>一套能力主干，<br>三段竞争跃迁</h2></div>
+          <div><p class="section-intro">纵向贯通生态、API、运行时、数据连接、调度和异构资源；横向只表达能力进入规划后的<strong>基座 → 深化协同 → 规模化治理</strong>。</p><span class="plan-flag">规划目标 · 非当前实现</span></div>
+        </div>
+
+        <div class="architecture-wrap reveal">
+          <div class="arch-toolbar"><b>IBMW LAYERED MODULE FRAMEWORK · TARGET STATE</b><div class="legend" aria-label="阶段图例"><span class="s26"><i></i>2026 基础框架</span><span class="s27"><i></i>2027 深化协同</span><span class="s30"><i></i>2028—2030 规模治理</span></div></div>
+          <div class="arch" aria-label="IBMW 分层架构图">
+            <div class="arch-row"><div class="layer-name"><b>应用与生态</b><small>ECOSYSTEM</small></div><div class="module s26"><span class="tag">2026 / 入口基座</span><b>ROS 2 资产复用</b><p>SLAM · 激光雷达 · 相机 · IMU</p></div><div class="module s27"><span class="tag">2027 / 场景深化</span><b>LeRobot + IB-Robot</b><p>具身负载增强入口</p></div><div class="module s30"><span class="tag">2028—2030 / 规模</span><b>全业务域与云边协同</b><p>VLA · WBC · 感知 · 规划控制</p></div></div>
+            <div class="arch-row"><div class="layer-name"><b>Application / API / ABI</b><small>DEVELOPER SURFACE</small></div><div class="module s26"><span class="tag">2026 / 完整基座</span><b>Module · Node · PubSub · RPC · Executor · Parameter</b><p>轻量完整，运行时不绑定 rcl / rclcpp</p></div><div class="module s27"><span class="tag">2027 / 策略深化</span><b>负载画像与场景策略</b><p>模型、传感器、后台任务动态组合</p></div><div class="module s30"><span class="tag">2028—2030 / 契约治理</span><b>稳定 Package ABI · 能力协商</b><p>跨平台原生能力可发现、可组合</p></div></div>
+            <div class="arch-row"><div class="layer-name"><b>Schema 与生成</b><small>TYPE SYSTEM</small></div><div class="module s26"><span class="tag">2026 / 类型基线</span><b>DDS IDL · ROS 2 msg / srv / action</b><p>常用接口类型 500+ 的建议覆盖边界</p></div><div class="module s27"><span class="tag">2027 / 闭环适配</span><b>类型、节拍与预算关联</b><p>服务具身数据流的策略选择</p></div><div class="module s30"><span class="tag">2028—2030 / 治理</span><b>Schema 演进与认证</b><p>版本、兼容等级、证据可追溯</p></div></div>
+            <div class="arch-row"><div class="layer-name"><b>Core Runtime</b><small>RUNTIME BACKBONE</small></div><div class="module s26"><span class="tag">2026 / 核心骨架</span><b>Engine · ModuleBus · ExecutorBus · TransportBus</b><p>统一生命周期、注册、执行、通信与配置</p></div><div class="module s27"><span class="tag">2027 / 协同调度</span><b>Scheduler Plugin · Adaptive Policy</b><p>硬件与场景策略解耦</p></div><div class="module s30"><span class="tag">2028—2030 / 治理</span><b>Profile · fallback · 版本契约</b><p>能力边界可声明、可审计</p></div></div>
+            <div class="arch-row"><div class="layer-name"><b>调度与确定性</b><small>DETERMINISM</small></div><div class="module s26"><span class="tag">2026 / 可测基线</span><b>Executor 基线 · Timing 观测</b><p>先冻结口径，再承诺确定性</p></div><div class="module s27"><span class="tag">2027 / 通信计算协同</span><b>Priority · Deadline · Timing Budget</b><p>DSF ↔ RTOS Budget 贯通闭环</p></div><div class="module s30"><span class="tag">2028—2030 / 跨域验证</span><b>跨平台可验证确定性</b><p>工况、失效、恢复与契约化证据</p></div></div>
+            <div class="arch-row"><div class="layer-name"><b>数据与连接基础框架</b><small>DATA / CONNECTIVITY</small></div><div class="module s26"><span class="tag">2026 / 基础框架</span><b>DDS · SHM · Local · Net · MQTT · Zenoh</b><p>DDS 互通基线；SHM / Local / Net 数据路径；MQTT / Zenoh 连接扩展；云边与边端连接拓扑</p></div><div class="module s27"><span class="tag">2027 / 协同优化</span><b>通信计算协同、策略深化</b><p>到达节拍、数据位置、执行优先级与算力选择联动</p></div><div class="module s30"><span class="tag">2028—2030 / 跨域规模化</span><b>跨域确定性与规模化协同</b><p>云边 / 边端连接治理、能力契约与受控数据路径</p></div></div>
+            <div class="arch-row"><div class="layer-name"><b>异构资源与工程证据</b><small>FABRIC / EVIDENCE</small></div><div class="module s26"><span class="tag">2026 / 可复现基线</span><b>x86 · AArch64 · OHOS / openEuler · SDK / CI</b><p>A / B / C 与 fallback 可观测</p></div><div class="module s27"><span class="tag">2027 / 310P RC 做深</span><b>CPU · NPU · GPU · ISP · DSP · RTOS</b><p>正常、突发、降级、恢复闭环验证</p></div><div class="module s30"><span class="tag">2028—2030 / 规模交付</span><b>多 SoC · 多加速器 · 多 RTOS / MCU</b><p>适配方法、认证与真实负载数据复用</p></div></div>
+          </div>
+          <div class="arch-caption"><span><strong>读图：</strong>2026 目标状态即包含连接基础框架；后续阶段只表示深化、协同优化与规模治理。</span><span>PoC 不等同于产品化，所有目标须经功能门禁与证据验证。</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="stage-section section-pad s26" id="y2026" data-year="26">
+      <div class="shell">
+        <div class="section-head reveal"><div><span class="section-num">02 / PHASE 0→1</span><p class="section-kicker">2026 · 可信替代</p><h2>兼容不交性能税；<br><em>先把基座做成证据</em></h2></div><p class="section-intro">以 ROS 2 生态为入口，同时完成数据连接基础框架、轻量运行时和可复现对标。竞争优势是<strong>迁移成本低、资源开销低、性能路径可解释</strong>。</p></div>
+        <p class="claim-line reveal">2026 的核心不是堆功能，而是让同一份应用资产在 IBMW 上<strong style="color:var(--red)">进得来、跑得轻、比得公平</strong>。</p>
+        <div class="proof-grid reveal">
+          <article class="proof-card"><span class="index">A / PLATFORM BOUNDARY</span><h3>平台边界清楚</h3><p>x86 Host Ubuntu；OHOS Xiaoyi CPro；openEuler Embedded AArch64。</p></article>
+          <article class="proof-card"><span class="index">B / REFERENCE</span><h3>参照口径冻结</h3><p><strong>仅对比 ROS 2 Humble + Fast DDS</strong>（<code style="font-family:var(--mono);font-size:11px">rmw_fastrtps_cpp</code>），同硬件、同负载、同 QoS、同等优化。</p></article>
+          <article class="proof-card"><span class="index">C / ECOSYSTEM</span><h3>生态覆盖可验</h3><p>主流 SLAM、激光雷达 / 相机 / IMU；常用接口类型 <strong>500+</strong> 为建议验收边界，不是完成度声明。</p></article>
+          <article class="proof-card"><span class="index">D / DATA PATH</span><h3>连接基座完整</h3><p>DDS / SHM / Local / Net / MQTT / Zenoh 规划纳入 2026 基础框架；云边与边端作为连接拓扑规划。</p></article>
+        </div>
+        <div class="evidence-strip reveal"><div class="evidence-label"><small>ONE CONTRACT / THREE PATHS</small><b>A / B / C</b></div><div class="evidence-body"><div class="evidence-item"><b>A · ROS 2 / RMW</b><span>Humble + rmw_fastrtps_cpp 正式参照</span></div><div class="evidence-item"><b>B · IBMW DDS / Net</b><span>Fast DDS 互通，衡量迁移成本</span></div><div class="evidence-item"><b>C · IBMW SHM / Local</b><span>语义等价的同机跨进程快路径</span></div></div></div>
+        <div class="target-board reveal" aria-label="2026 建议竞争目标"><div class="target-head"><b>2026 最有说服力的竞争门槛</b><span class="proposal">PROPOSED · 待基线固化</span></div><div class="targets"><div class="target"><span class="metric">DDS 兼容迁移</span><strong>PSS / CPU ≤ A</strong><p>B 组不增加 PSS 与 CPU。</p></div><div class="target"><span class="metric">部署包体积</span><strong>−50%</strong><p>至少缩小 50%，挑战 70%。</p></div><div class="target"><span class="metric">构建效率</span><strong>−30% / −50%</strong><p>clean / 增量构建建议目标。</p></div><div class="target"><span class="metric">SHM / Loaned</span><strong>Basic ✓</strong><p>fallback 必须可观测、可归因。</p></div><div class="target"><span class="metric">256 KB—1 MB · P99</span><strong>C ≤ B / 3</strong><p>挑战达到 B.P99 / 5。</p></div><div class="target"><span class="metric">同场景 CPU</span><strong>≥ −30%</strong><p>C 相对 B 的建议降幅。</p></div><div class="target"><span class="metric">最大稳定吞吐</span><strong>≥ 2×</strong><p>同时满足丢失率、P99、无持续积压。</p></div><div class="target"><span class="metric">兼容主张</span><strong>No Tax</strong><p>退化可见、可解释、可修复。</p></div></div><p class="target-note"><strong>限定：</strong>全部为建议目标，不是当前结果；须在首轮 A / B / C 与 pilot run 后结合离散度、置信区间和平台现实固化阈值。支撑路径：统一 SDK / CI、ibmw-gen、playback 与 <code style="font-family:var(--mono);font-size:10px">mw-perf-collect</code> 规划，共享公共外部指标。</p></div>
+      </div>
+    </section>
+
+    <section class="stage-section section-pad s27" id="y2027" data-year="27">
+      <div class="shell">
+        <div class="section-head reveal"><div><span class="section-num">03 / PHASE 1→10</span><p class="section-kicker">2027 · 深化协同</p><h2>把“按时到达”<br>推进到<em>按预算完成</em></h2></div><p class="section-intro">以<strong>昇腾 310 系列 RC（以 310P RC 为主）</strong>为聚焦对象，选择 LeRobot、由 IB-Robot 增强；目标是做深一类具身闭环，不把硬件数量写成能力深度。</p></div>
+        <div class="loop-summary reveal">
+          <div class="loop-col"><span class="board-label">EMBODIED LOAD / 场景压力</span><div class="loop-item"><b>多模型 + 多传感器</b><span>推理队列、内存与激光雷达 / 相机 / IMU 节拍争用</span></div><div class="loop-item"><b>异构算力竞争</b><span>CPU / NPU / GPU / ISP / DSP / RTOS 协同</span></div><div class="loop-item"><b>动态闭环</b><span>感知 → 推理 → 控制，叠加突发、建图与录制</span></div></div>
+          <div class="loop-col core"><div class="core-title">通信<br>× 计算<br>× 控制</div><div class="core-rule">Priority → Deadline → Timing Budget<br>Scheduler Plugin · Adaptive Policy<br>DSF ↔ RTOS Budget</div></div>
+          <div class="loop-col"><span class="board-label">IBMW RESPONSE / 差异化能力</span><div class="loop-item"><b>预算语言贯通</b><span>业务意图跨通信、执行与控制边界</span></div><div class="loop-item"><b>策略选择资源</b><span>按负载自适应，触发受控降级</span></div><div class="loop-item"><b>解释失约与恢复</b><span>记录预算命中、归因、恢复轨迹</span></div></div>
+        </div>
+        <div class="exit-line reveal"><div class="exit"><span>01 / CONTRACT</span><b>预算可表达</b><p>Priority、Deadline、Timing Budget 成为共同语言。</p></div><div class="exit"><span>02 / ADAPT</span><b>策略可响应</b><p>在正常、突发、降级、恢复中保持关键链路。</p></div><div class="exit"><span>03 / GATE</span><b>出口可复核</b><p>建议门槛仅适用于冻结的 310P RC 场景矩阵。</p></div></div>
+        <div class="target-board stage-gate reveal" aria-label="2027 建议阶段出口"><div class="target-head"><b>2027 最少量阶段出口</b><span class="proposal">PROPOSED · 场景冻结后固化</span></div><div class="targets"><div class="target"><span class="metric">关键闭环 Deadline</span><strong>≥ 99.9%</strong><p>连续失约须可归因并触发门禁。</p></div><div class="target"><span class="metric">突发尾延迟</span><strong>P99 ≤ +15%</strong><p>相对稳态的建议增幅。</p></div><div class="target"><span class="metric">降级 / 恢复</span><strong>2 / 5 周期</strong><p>受控进入与稳定恢复建议窗口。</p></div><div class="target"><span class="metric">自适应收益</span><strong>≥ 20%</strong><p>P99 降低或同预算并发提升。</p></div></div><p class="target-note"><strong>限定：</strong>不外推为全部硬件或全部具身负载的产品结论。</p></div>
+      </div>
+    </section>
+
+    <section class="stage-section section-pad s30" id="y2030" data-year="30">
+      <div class="shell">
+        <div class="section-head reveal"><div><span class="section-num">04 / PHASE 10→100</span><p class="section-kicker">2028—2030 · 规模化复制</p><h2>跨域确定性，<br><em>规模化协同</em></h2></div><p class="section-intro">该阶段不再规划首次建设 MQTT、Zenoh 或云边 / 边端连接，而是深化 2026 基础框架与 2027 协同策略，复制到更多平台、业务与生态，并由契约和认证治理边界。</p></div>
+        <p class="claim-line reveal">规模化的竞争力：<strong style="color:var(--green)">同一套确定性承诺跨平台复验，软件包原生消费 IBMW 优势。</strong></p>
+        <div class="scale-grid reveal"><article class="scale-card"><span class="index">PLATFORM</span><h3>适配方法复制</h3><p>从 310P RC 计划验证路径扩展至多 SoC、加速器与 RTOS / MCU，减少重复移植。</p><div class="scale-tags"><span>资源发现</span><span>调度映射</span><span>RTOS 对接</span></div></article><article class="scale-card"><span class="index">BUSINESS</span><h3>业务域原生使用</h3><p>覆盖 SLAM、VLA、WBC、感知、规划控制与大小模型，让通信、调度、预算成为业务优势。</p><div class="scale-tags"><span>端侧闭环</span><span>云边协同</span><span>边端协同</span></div></article><article class="scale-card"><span class="index">ECOSYSTEM</span><h3>连接与能力治理</h3><p>以 MQTT / Zenoh 和云边 / 边端拓扑承载跨域协同；以 API / ABI、Schema、Profile、fallback 契约化演进。</p><div class="scale-tags"><span>跨域确定性</span><span>能力协商</span><span>可审计</span></div></article><article class="scale-card"><span class="index">EVIDENCE</span><h3>认证与真实数据复利</h3><p>真实负载、故障注入、长稳与回归证据进入持续交付，新平台继承方法而非重建可信度。</p><div class="scale-tags"><span>统一口径</span><span>版本回归</span><span>支持等级</span></div></article></div>
+        <div class="scale-gates reveal"><div class="scale-gate"><span>2028 / REPRODUCE</span><b>完成首次复制</b><p>建议：除 310P RC 外 ≥2 个认证 Profile、≥2 类重点负载；适配周期 P50 ≤12 周；核心软件包原生能力使用率 20%。</p></div><div class="scale-gate"><span>2029 / PRODUCTIZE</span><b>形成规模交付</b><p>建议：累计 ≥4 个受控 Profile、≥3 类重点负载；适配周期较 2028 缩短 40%；原生能力使用率 50%。</p></div><div class="scale-gate"><span>2030 / ECOSYSTEM</span><b>建立生态门槛</b><p>建议：累计 ≥6 个认证 Profile、≥5 类具身业务域；适配周期较 2028 缩短 60%；原生能力使用率 80%，认证矩阵回归 100%。</p></div></div>
+        <p class="path-note"><b>受控边界：</b>每年冻结首批 Platform Profile、重点业务、支持等级和排除项；新增平台须通过资源发现、调度映射、传输、RTOS 对接及统一验收门禁。未进入 Profile 的平台不构成支持承诺。以上为规划目标。</p>
+      </div>
+    </section>
+
+    <section class="moat section-pad" id="why-win">
+      <div class="shell">
+        <div class="section-head reveal"><div><span class="section-num">05 / COMPOUNDING MOAT</span><p class="section-kicker">为什么会赢</p><h2>边界清晰，<br>证据复利</h2></div><p class="section-intro">ROS 2 提供接口资产与生态惯性；IBMW 在具身关键约束上给出更强答案，并把每次验证沉淀为下一次交付的确定性资产。</p></div>
+        <div class="moat-stack reveal"><div class="moat-row"><span class="moat-no">01 / ENTER</span><h3>兼容降低采用门槛</h3><p>复用 ROS 2 接口类型与 Fast DDS 互通，运行时保持独立。</p></div><div class="moat-row"><span class="moat-no">02 / PROVE</span><h3>公平证据赢得信任</h3><p>同硬件、负载、QoS、优化条件；A / B / C 证明迁移与快路径价值。</p></div><div class="moat-row"><span class="moat-no">03 / DEEPEN</span><h3>具身闭环形成差异</h3><p>通信、计算、异构资源与 RTOS 控制预算贯通。</p></div><div class="moat-row"><span class="moat-no">04 / REPEAT</span><h3>契约和方法复制确定性</h3><p>从 310P RC 的计划验证路径抽象 Profile、适配与认证规则。</p></div><div class="moat-row"><span class="moat-no">05 / COMPOUND</span><h3>真实失效数据增厚壁垒</h3><p>版本、工况、故障与恢复数据回流，提升策略、诊断与认证可信度。</p></div></div>
+        <p class="win-statement reveal">最终要证明的不是功能删减，而是：<em>兼容得更低成本；在具身关键链路上，运行得更快、更稳、更可证明。</em></p>
+      </div>
+    </section>
+  </main>
+
+  <footer><div class="shell footer-inner"><span><b>IBMW CORE COMPETITIVENESS / 2026—2030</b></span><span>INTERNAL STRATEGY REVIEW · PLANNING TARGETS, NOT CURRENT CLAIMS</span></div></footer>
+  <script>
+    (() => {
+      const progress = document.getElementById('progress');
+      const links = [...document.querySelectorAll('nav a')];
+      const sections = links.map(link => document.querySelector(link.getAttribute('href'))).filter(Boolean);
+      const update = () => {
+        const max = document.documentElement.scrollHeight - innerHeight;
+        progress.style.width = `${max > 0 ? (scrollY / max) * 100 : 0}%`;
+        let current = sections[0]; sections.forEach(section => { if (section.getBoundingClientRect().top <= 120) current = section; });
+        links.forEach(link => { const active = current && link.getAttribute('href') === `#${current.id}`; link.classList.toggle('active', active); active ? link.setAttribute('aria-current', 'true') : link.removeAttribute('aria-current'); });
+      };
+      const observer = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { entry.target.classList.add('visible'); observer.unobserve(entry.target); } }), { threshold: .08 });
+      document.querySelectorAll('.reveal').forEach(node => observer.observe(node)); addEventListener('scroll', update, { passive: true }); addEventListener('resize', update, { passive: true }); update();
+    })();
+  </script>
+</body>
+</html>

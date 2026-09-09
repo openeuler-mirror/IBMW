@@ -22,6 +22,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+# Keep all Iceoryx clients on the same build/runtime dependency set.  The
+# extension is loaded from SCRIPT_DIR by the YAML config, while the binaries'
+# RUNPATH may point at the parent build directory; loading both copies would
+# create two independent PoshRuntime singletons in one process.
+export LD_LIBRARY_PATH="${SCRIPT_DIR}:${LD_LIBRARY_PATH:-}:/opt/ros/humble/lib"
+
 ROUDI_BIN="${SCRIPT_DIR}/iox-roudi"
 PUB_BIN="${SCRIPT_DIR}/iox_loan_v2_publisher_app"
 SUB_BIN="${SCRIPT_DIR}/iox_loan_v2_subscriber_app"

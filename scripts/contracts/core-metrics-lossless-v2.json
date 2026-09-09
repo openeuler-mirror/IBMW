@@ -1,0 +1,44 @@
+{
+  "batch": 128,
+  "blocks": 24,
+  "bootstrap": 100000,
+  "cooldown_sec": 5,
+  "delivery_profile": {
+    "name": "core_metrics_e2e_lossless_v1",
+    "publisher_too_slow_policy": "WAIT_FOR_CONSUMER",
+    "queue_capacity": 256,
+    "subscriber_queue_full_policy": "BLOCK_PRODUCER"
+  },
+  "frozen_load": 448000,
+  "measured_sec": 60,
+  "payload_bytes": 4096,
+  "protocol": "core-metrics-lossless-v2",
+  "schema": "ibmw-core-metrics-protocol-contract-v1",
+  "thresholds": {
+    "counters_off": {
+      "cpu": 0.05,
+      "micro": 0.05,
+      "p50": 0.05,
+      "p99": 0.1,
+      "pss_abs_kib": 4096,
+      "pss_pct": 0.05,
+      "throughput": 0.05
+    },
+    "counters_out": {
+      "cpu": 0.07,
+      "micro": 0.07,
+      "p99": 0.15,
+      "throughput": 0.07
+    },
+    "off_out": {
+      "cpu": 0.02,
+      "micro": 0.02,
+      "p50": 0.03,
+      "p99": 0.05,
+      "pss_abs_kib": 2048,
+      "pss_pct": 0.02,
+      "throughput": 0.02
+    }
+  },
+  "warmup_sec": 10
+}

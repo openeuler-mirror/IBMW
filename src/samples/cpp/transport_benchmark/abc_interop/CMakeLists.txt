@@ -47,7 +47,7 @@ if(IBMW_BUILD_ROS2_TYPES AND IBMW_BUILD_DDS_EXTENSION AND
   target_link_libraries(ibmw_abc_uint8_multi_array_serializer PRIVATE
     ibmw::extensions::ros2_types)
 
-  add_executable(ibmw_abc_dds_endpoint dds_endpoint.cc)
+  add_executable(ibmw_abc_dds_endpoint dds_endpoint.cc ros2_latency_artifact.cc)
   target_compile_features(ibmw_abc_dds_endpoint PRIVATE cxx_std_20)
   target_include_directories(ibmw_abc_dds_endpoint PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR})

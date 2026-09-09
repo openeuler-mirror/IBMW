@@ -8,6 +8,13 @@ if(IBMW_BUILD_DDS_XML_VALIDATION)
 endif()
 
 if(IBMW_BUILD_EXAMPLES)
+  if(CMAKE_SYSTEM_NAME STREQUAL "OHOS" AND
+     (IBMW_BUILD_BENCHMARKS OR
+      (IBMW_BUILD_ROS2_TYPES AND IBMW_BUILD_DDS_EXTENSION)))
+    add_subdirectory(transport_benchmark)
+    return()
+  endif()
+
   add_subdirectory(quickstart)
   add_subdirectory(executor_demo)
   add_subdirectory(logging_demo)

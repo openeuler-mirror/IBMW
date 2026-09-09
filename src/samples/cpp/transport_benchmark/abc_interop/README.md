@@ -77,6 +77,9 @@ not be described as DDS reliable delivery.
 
 ## Gates and smoke
 
+The manually assembled OHOS test bundle must include executable
+`validate_ohos_artifact.sh` beside `run_ohos_lane.sh` at the bundle root.
+
 The Python runner requires exactly one `LatencyStats` CSV row with the fixed
 schema, lane label, finite numeric values, and `count=3000`. Every status must
 be a complete JSON object with boolean `valid`, integer attempted/sent,
@@ -121,3 +124,26 @@ evidence: those capabilities and omitted declarations are marked unsupported,
 and its validation is intentionally invalid for comparison. Formal compare
 therefore accepts the plan shape but fails closed until each lane directory is
 replaced by a genuinely collected and validated run carrying matching metadata.
+
+Each OHOS lane also records CPU evidence: `cpu-uptime-start.txt`,
+`cpu-uptime-end.txt`, `pub-proc-stat-start.txt`, `sub-proc-stat-start.txt`,
+`pub-proc-stat-end.txt`, `sub-proc-stat-end.txt`, `top-mid.txt`, `top-end.txt`,
+and `cpu-summary.json`. The summary uses `/proc/<pid>/stat` fields 14 and 15
+(user and system CPU ticks), `/proc/uptime`, and `CLK_TCK=100`:
+`cpu_pct = ((end_utime + end_stime) - (start_utime + start_stime)) /
+(CLK_TCK * elapsed_seconds) * 100`. `pair_cpu_pct` is the sum of publisher and
+subscriber CPU percentages, so overlapping CPU use is intentionally retained.
+After the subscriber starts and initial proc setup, both endpoint processes must
+remain alive for a fixed five-second startup settle; this settle is excluded from
+CPU measurement. The CPU interval then uses
+`floor((warmup_messages + message_count) / hz) - 5 - 5` seconds, with a minimum
+of one second. The final five-second margin is reserved for publisher-first
+discovery and startup; for the 100 Hz, 50-warmup, 3000-measured contract the
+post-settle CPU window is 20 seconds. Its start uptime and proc-stat snapshots
+are captured after the settle, and its end snapshots are captured together
+before publisher shutdown.
+An endpoint exiting before that boundary invalidates the CPU summary and run;
+later cleanup never replaces the boundary files. The midpoint and end `top`
+snapshots remain supporting evidence and are validity-gated: each must be
+nonempty and contain both endpoint PIDs. `cpu-summary.json` uses the same
+uptime/proc-stat start and end boundaries as this fixed window.

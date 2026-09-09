@@ -12,13 +12,18 @@ payload registry, so latency numbers are directly comparable across rows.
 ## Build gate
 
 The whole subtree is gated by `IBMW_BUILD_BENCHMARKS=ON` (declared in the
-top-level `CMakeLists.txt`). The `full` preset enables it; `minimal` does
-not. Iceoryx-based samples additionally require
+top-level `CMakeLists.txt`). The `full` preset does not enable it. The benchmark
+option depends on `IBMW_BUILD_EXAMPLES=ON` and
 `IBMW_BUILD_ICEORYX_EXTENSION=ON`.
 
 ```bash
-cmake --preset full -DIBMW_BUILD_BENCHMARKS=ON
-cmake --build build -j$(nproc)
+cmake -S . -B ./build \
+  -DIBMW_BUILD_EXAMPLES=ON \
+  -DIBMW_BUILD_BENCHMARKS=ON \
+  -DIBMW_BUILD_ICEORYX_EXTENSION=ON \
+  -DIBMW_BUILD_DDS_EXTENSION=ON \
+  -DIBMW_BUILD_ROS2_TYPES=ON
+cmake --build ./build --parallel
 ```
 
 ## Benchmark sample set
@@ -84,7 +89,7 @@ process-management idiom (no `pkill`):
 set +u; source /opt/ros/humble/setup.bash; set -u
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 
-bash scripts/run_bench_sweep.sh --reset-csv
+bash ./scripts/run_bench_sweep.sh --reset-csv
 ```
 
 The sweep writes the configured CSV and per-sample logs under

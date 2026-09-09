@@ -61,8 +61,9 @@ cmake --build build/source-fastdds2-deps --target ibmw_third_party_source_prefix
   同步、异步回调、Future、协程
 - **Transport（发布/订阅）** —— 基于 Topic 的 Pub/Sub，支持后端路由
 - **零拷贝支持** —— 用于共享内存传输的 LoanedMessage API
-- **多 Driver Module** —— 单个 Module 可通过变参宏 `IBMW_USE_DRIVERS(...)`
-  将 DDS、Iceoryx 等多个 Transport Driver 绑定到 typed slot
+- **多 Driver direct 模块** —— 明确命名的 `direct_<transport>_*`、benchmark
+  或 transport-specific 零拷贝模块可通过 `IBMW_USE_DRIVERS(...)` 将多个具体
+  Driver 绑定到 typed slot；普通 managed Module 应使用 transport-neutral API
 - **Context API** —— 模块生命周期管理与资源隔离
 - **ROS2 互操作** —— 直接通过 FastDDS 与 ROS2 节点通信；产品端无需 RCL、RCLCPP
   或 RMW implementation，但静态消息闭包可包含 ROSIDL typesupport、`rcutils` 和基础
@@ -80,6 +81,12 @@ cmake --build build/source-fastdds2-deps --target ibmw_third_party_source_prefix
 | [故障排除](docs/guides/troubleshooting.md) | FastDDS/FastCDR、GLIBCXX、DDS discovery、p99、include 路径与进程清理 |
 | [User Guide](docs/guides/user-guide.zh.md) | 入门指南、配置、运行 Demo、YAML 参考 |
 | [Developer Guide](docs/contributing/developer-guide.zh.md) | 构建系统、代码结构、编写 Module 与 Extension |
+| [架构约束](docs/contributing/architecture-rules.md) | Public API、Extension SPI、internal/direct 边界与依赖方向 |
+| [性能可观测性设计](docs/architecture/performance-observability-design.zh.md) | ROS2 采集、IBMW 采集与本体适配的设计基线和证据边界 |
+| [通用通信时延采集方案](docs/architecture/generic-communication-latency-observation-proposal.zh.md) | 待审核的ROS2/IBMW通用时延对标、低扰动和分阶段实施方案 |
+| [性能可观测性实施说明](docs/contributing/performance-observability-implementation.zh.md) | 维护者实现结构、门禁与验收要求 |
+| [性能可观测性当前进展矩阵](docs/contributing/performance-observability-progress.zh.md) | 三条主线、DDS P0a 边界和 A/B/C 集成就绪状态 |
+| [性能采集指南](docs/guides/performance-collection.zh.md) | ROS2/IBMW 配置、运行、验证、报告与 A/B/C 原型流程 |
 | [AArch64 交叉编译](docs/guides/cross-compilation.md) | Linux target DDS source-prefix、sysroot 与支持边界 |
 | [OHOS 小艺 Humble 交叉构建指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only 指南 |
 | minimal ROS2 编译部署 | 第一入口：`IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`；[IBMW 指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md)仅作概念与边界索引 |
