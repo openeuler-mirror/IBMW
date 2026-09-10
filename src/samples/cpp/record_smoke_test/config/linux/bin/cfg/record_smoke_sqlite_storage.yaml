@@ -1,0 +1,3 @@
+pragmas:
+  journal_mode: WAL
+  synchronous: OFF

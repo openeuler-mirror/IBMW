@@ -7,7 +7,7 @@
 #include <optional>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "my_msg/my_msg_dds_types.h"
 
 namespace my_project {

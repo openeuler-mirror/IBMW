@@ -98,7 +98,17 @@ void IceoryxExtension::RegisterIceoryxTransportDriver() {
               concrete_ptr),
           .retained_loan_v1 = static_cast<
               runtime::core::transport::RetainedLoanCapabilityV1*>(
-              concrete_ptr)});
+              concrete_ptr)},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,
+          .schema = runtime::core::transport::SerializedSchemaSupport::kTypeSupportPackage,
+          .loan = runtime::core::transport::SerializedLoanSupport::kSharedPayload,
+          .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
+          .capture_priority = 0,
+          .provider_name = Name(),
+          .provider_instance_option = "runtime_id"});
 }
 
 }  // namespace ibmw::extensions::iceoryx_extension

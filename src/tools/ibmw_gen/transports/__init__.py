@@ -131,7 +131,7 @@ class TransportSpec:
     # with keys:
     #     * "msg_type_cpp"       - fully-qualified message C++ type
     #     * "inc_h_content"      - full text for <module>_typesupport.inc.h
-    #                              (transport + driver includes + the 8
+    #                              (public TypeSupport binding + the seven
     #                              IBMW_TS_LOANED_PUB_* macros below)
     #     * "inc_cc_content"     - full text for <module>_typesupport.inc.cc
     #                              (today: namespace stub + populate marker
@@ -139,50 +139,33 @@ class TransportSpec:
     #                              transport TU code)
     #   OR returns None to defer to the legacy emit_module path.
     #
-    # Plugin contract — the inc.h MUST `#define` all 8 macros below.
+    # Plugin contract — the inc.h MUST `#define` all seven macros below.
     # User-facing <module>.{h,cc} only references these macros; it never
     # names a transport/driver type directly (R1/R2/R3/R9/R11).
     #
     #   * IBMW_TS_LOANED_PUB_MSG_TYPE
     #         inc.h-private alias for the chosen C++ message type.
     #   * IBMW_TS_LOANED_PUB_STATIC_ASSERT
-    #         expands at top of class body. iceoryx asserts trivially-
-    #         copyable; dds expands to /* no-op */.
-    #   * IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL
-    #         expands inside `public:` and provides BOTH the named setter
-    #         (SetDdsDriver / SetIceoryxDriver — preserves existing
-    #         generated app `main.cc` call sites, see R-4 risk in plan)
-    #         AND the engine-contract typed-slot override
-    #         `void SetDriverSlot(ibmw_driver_slot_t, void*) override`.
-    #   * IBMW_TS_LOANED_PUB_DRIVER_SETTER_IMPL(name_expr, ptr_expr)
-    #         body of the override; matches transport name and casts.
+    #         expands at top of class body and enforces trivially-copyable
+    #         storage for the strict in-place loan contract.
     #   * IBMW_TS_LOANED_PUB_MEMBER
-    #         expands inside `private:` and declares the publisher
-    #         handle + driver pointer (multi-statement; uses backslash
-    #         line continuations).
+    #         expands inside `private:` and declares a public
+    #         SenderAccess<T> handle.
     #   * IBMW_TS_LOANED_PUB_SETUP(core_expr)
     #         expands inside Setup() body. Performs GetPublisher,
-    #         RegisterSendType<T>, and any compile-time plain-type
-    #         logging (dds) or sizeof logging (iceoryx).
+    #         RegisterSendType<T>, and capability setup where required.
     #   * IBMW_TS_LOANED_PUB_RUN_INIT(core_expr)
     #         expands inside Run() before the publish thread is launched.
-    #         Performs driver_-validity check + driver-aware publisher
-    #         construction (dds: create_publisher_with_driver_config;
-    #         iceoryx: EnsurePodTopic).
+    #         Validates that the public publisher handle was initialized.
     #   * IBMW_TS_LOANED_PUB_HOT_LOOP_BODY(loop_var)
     #         expands as the WHOLE body of the PublishLoop while-loop
-    #         (single-macro hot loop, plan §3.a decision: borrow / publish /
-    #         is_zero_copy semantics differ enough between transports that
-    #         a 3-macro split would force divergent control flow into the
-    #         user-facing .cc, defeating R2). Macro definitions retain all
-    #         original transport comments so reading inc.h still explains
-    #         the loop. The user-code marker `populate_loaned_message`
+    #         through SenderAccess<T>::Loan/Publish. The user-code marker
+    #         `populate_loaned_message`
     #         (a double-comment marker hint pair) sits
     #         inside the macro body just before the publish call.
     #   * IBMW_TS_LOANED_PUB_PRINT_STATS
-    #         expands inside PrintStatistics body. dds: 4 lines + driver
-    #         GetZeroCopyStats 4 lines + separator. iceoryx: 4 lines +
-    #         strict-mode comment.
+    #         expands inside PrintStatistics body with transport-neutral
+    #         strict-loan counters.
     emit_loaned_publisher_typesupport: AnyCallable | None = None
 
     # ── Unified RPC typesupport hooks ────────────────────────────────────

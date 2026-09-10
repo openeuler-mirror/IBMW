@@ -210,8 +210,10 @@ bool HttpTransportDriver::OnMessage(
       // Read other fields from http header into context
       for (auto const& field : req) {
         ctx_ptr->SetMetaValue(
-            ibmw::common::util::HttpHeaderDecode(field.name_string()),
-            ibmw::common::util::HttpHeaderDecode(field.value()));
+            ibmw::common::util::HttpHeaderDecode(
+                ibmw::common::net::ToStdStringView(field.name_string())),
+            ibmw::common::util::HttpHeaderDecode(
+                ibmw::common::net::ToStdStringView(field.value())));
       }
 
       ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());

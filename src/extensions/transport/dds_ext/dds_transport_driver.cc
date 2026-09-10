@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "dds_ext/dds_transport_driver.h"
+#include "dds_ext/detail/dds_qos_descriptor.h"
 #include "dds_ext/global.h"
 #include "dds_ext/ros2_type_helper.h"
 
@@ -13,6 +14,7 @@
 #include <regex>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 #include <fastdds/dds/core/LoanableSequence.hpp>
 #include <fastdds/dds/core/status/PublicationMatchedStatus.hpp>
@@ -20,11 +22,15 @@
 #include <fastdds/dds/subscriber/qos/SubscriberQos.hpp>
 #include <fastdds/dds/publisher/qos/DataWriterQos.hpp>
 #include <fastdds/dds/subscriber/qos/DataReaderQos.hpp>
+#include <fastdds/dds/subscriber/SampleInfo.hpp>
+
 #if __has_include(<fastdds/rtps/common/InstanceHandle.hpp>)
 #include <fastdds/rtps/common/InstanceHandle.hpp>
 #else
 #include <fastdds/rtps/common/InstanceHandle.h>
 #endif
+
+#include "base/time_util.h"
 
 // Compatibility for ReturnCode_t (FastDDS 3.x vs FastRTPS 2.x)
 #if __has_include(<fastdds/dds/core/detail/DDSReturnCode.hpp>)
@@ -174,6 +180,196 @@ struct convert<ibmw::extensions::dds_extension::DdsTransportDriver::Options> {
 
 namespace ibmw::extensions::dds_extension {
 
+namespace {
+
+struct RawCdrSample {
+  std::vector<uint8_t> bytes;
+};
+
+constexpr size_t kMaxRawPayloadSize = 64u * 1024u * 1024u;
+
+class RawCdrTopicDataType final
+    : public eprosima::fastdds::dds::TopicDataType {
+ public:
+  explicit RawCdrTopicDataType(const std::string& type_name) {
+#if IBMW_FASTDDS_V3_PLUS
+    set_name(type_name);
+    max_serialized_type_size = kMaxRawPayloadSize;
+    is_compute_key_provided = false;
+#else
+    setName(type_name.c_str());
+    m_typeSize = kMaxRawPayloadSize;
+    m_isGetKeyDefined = false;
+    auto_fill_type_object(false);
+    auto_fill_type_information(false);
+#endif
+  }
+
+#if IBMW_FASTDDS_V3_PLUS
+  bool serialize(
+      const void* const data,
+      eprosima::fastdds::rtps::SerializedPayload_t& payload,
+      eprosima::fastdds::dds::DataRepresentationId_t) override {
+    return CopyToPayload(*static_cast<const RawCdrSample*>(data), payload);
+  }
+
+  bool deserialize(
+      eprosima::fastdds::rtps::SerializedPayload_t& payload,
+      void* data) override {
+    return CopyFromPayload(payload, *static_cast<RawCdrSample*>(data));
+  }
+
+  uint32_t calculate_serialized_size(
+      const void* const data,
+      eprosima::fastdds::dds::DataRepresentationId_t) override {
+    return static_cast<uint32_t>(
+        static_cast<const RawCdrSample*>(data)->bytes.size());
+  }
+
+  void* create_data() override { return new RawCdrSample(); }
+  void delete_data(void* data) override {
+    delete static_cast<RawCdrSample*>(data);
+  }
+  bool compute_key(
+      eprosima::fastdds::rtps::SerializedPayload_t&,
+      eprosima::fastdds::rtps::InstanceHandle_t&,
+      bool) override {
+    return false;
+  }
+  bool compute_key(
+      const void* const,
+      eprosima::fastdds::rtps::InstanceHandle_t&,
+      bool) override {
+    return false;
+  }
+#else
+  bool serialize(
+      void* data,
+      eprosima::fastrtps::rtps::SerializedPayload_t* payload) override {
+    return CopyToPayload(
+        *static_cast<const RawCdrSample*>(data), *payload);
+  }
+
+  bool deserialize(
+      eprosima::fastrtps::rtps::SerializedPayload_t* payload,
+      void* data) override {
+    return CopyFromPayload(*payload, *static_cast<RawCdrSample*>(data));
+  }
+
+  std::function<uint32_t()> getSerializedSizeProvider(void* data) override {
+    return [sample = static_cast<RawCdrSample*>(data)] {
+      return static_cast<uint32_t>(sample->bytes.size());
+    };
+  }
+
+  void* createData() override { return new RawCdrSample(); }
+  void deleteData(void* data) override {
+    delete static_cast<RawCdrSample*>(data);
+  }
+  bool getKey(
+      void*, eprosima::fastrtps::rtps::InstanceHandle_t*, bool) override {
+    return false;
+  }
+#endif
+
+ private:
+  template <typename Payload>
+  static bool CopyToPayload(const RawCdrSample& sample, Payload& payload) {
+    if (sample.bytes.size() > std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
+    const auto size = static_cast<uint32_t>(sample.bytes.size());
+    if (payload.max_size < size) {
+      payload.reserve(size);
+      if (payload.max_size < size) {
+        return false;
+      }
+    }
+    if (size != 0) {
+      std::memcpy(payload.data, sample.bytes.data(), size);
+    }
+    payload.length = size;
+    if (size >= 2) {
+      payload.encapsulation = sample.bytes[1] == 0 ? CDR_BE : CDR_LE;
+    }
+    return true;
+  }
+
+  template <typename Payload>
+  static bool CopyFromPayload(const Payload& payload, RawCdrSample& sample) {
+    if (payload.length > kMaxRawPayloadSize || payload.length > payload.max_size) {
+      return false;
+    }
+    if (payload.length == 0) {
+      sample.bytes.clear();
+      return true;
+    }
+    if (payload.data == nullptr) {
+      return false;
+    }
+    sample.bytes.assign(payload.data, payload.data + payload.length);
+    return true;
+  }
+};
+
+std::shared_ptr<ibmw::util::BufferArrayView> MakeOwnedPayload(
+    std::vector<uint8_t> bytes) {
+  auto storage = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
+  auto* view = new ibmw::util::BufferArrayView(
+      storage->data(), storage->size());
+  return std::shared_ptr<ibmw::util::BufferArrayView>(
+      view, [storage](const ibmw::util::BufferArrayView* ptr) { delete ptr; });
+}
+
+class SerializedDataReaderListener final
+    : public eprosima::fastdds::dds::DataReaderListener {
+ public:
+  SerializedDataReaderListener(
+      runtime::core::transport::TopicDescriptor descriptor,
+      runtime::core::transport::SerializedMessageCallback callback)
+      : descriptor_(std::move(descriptor)), callback_(std::move(callback)) {}
+
+  void on_data_available(
+      eprosima::fastdds::dds::DataReader* reader) override {
+    RawCdrSample sample;
+    eprosima::fastdds::dds::SampleInfo info;
+    while (reader->take_next_sample(&sample, &info) == compat_dds::RETCODE_OK) {
+      if (!info.valid_data) {
+        continue;
+      }
+      std::ostringstream publisher;
+      publisher << info.sample_identity.writer_guid();
+      const uint64_t sequence =
+          info.sample_identity.sequence_number().to64long();
+      const auto publish_ns = info.source_timestamp.to_ns();
+      try {
+        callback_(runtime::core::transport::SerializedMessage{
+            .topic = descriptor_,
+            .identity =
+                {.source_id = "dds",
+                 .publisher_id = publisher.str(),
+                 .sequence = sequence},
+            .publish_timestamp =
+                publish_ns > 0 ? static_cast<uint64_t>(publish_ns) : 0,
+            .receive_timestamp = ibmw::common::util::GetCurTimestampNs(),
+            .source_driver = "dds",
+            .payload = MakeOwnedPayload(std::move(sample.bytes))});
+      } catch (const std::exception& error) {
+        MW_ERROR("Raw DDS subscriber callback failed: {}", error.what());
+      } catch (...) {
+        MW_ERROR("Raw DDS subscriber callback failed.");
+      }
+      sample.bytes.clear();
+    }
+  }
+
+ private:
+  runtime::core::transport::TopicDescriptor descriptor_;
+  runtime::core::transport::SerializedMessageCallback callback_;
+};
+
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
@@ -314,6 +510,28 @@ void DdsTransportDriver::Shutdown() {
     }
   }
 
+  {
+    std::lock_guard lock(serialized_subscriber_mutex_);
+    for (auto& [handle, sub_info] : serialized_subscriber_map_) {
+      static_cast<void>(handle);
+      if (sub_info.reader) {
+        sub_info.reader->set_listener(nullptr);
+        subscriber_->delete_datareader(sub_info.reader);
+      }
+    }
+    serialized_subscriber_map_.clear();
+  }
+  {
+    std::lock_guard lock(serialized_publisher_mutex_);
+    for (auto& [handle, pub_info] : serialized_publisher_map_) {
+      static_cast<void>(handle);
+      if (pub_info.writer) {
+        publisher_->delete_datawriter(pub_info.writer);
+      }
+    }
+    serialized_publisher_map_.clear();
+  }
+
   // Detach listeners before draining. FastDDS DataSharing can otherwise start
   // a fresh on_data_available while shutdown is waiting on the previous batch,
   // and delete_datareader may deadlock with a callback thread returning a loan.
@@ -421,6 +639,9 @@ DdsTransportDriver::GenInitializationReport() const noexcept {
   std::list<std::pair<std::string, std::string>> report;
 
   report.emplace_back("DDS publishers", std::to_string(publisher_map_.size()));
+  report.emplace_back(
+      "DDS raw publishers",
+      std::to_string(serialized_publisher_map_.size()));
   report.emplace_back("DDS subscribers", std::to_string(subscriber_map_.size()));
   report.emplace_back("ROS2 compatible", options_.ros2_compatible ? "true" : "false");
   report.emplace_back("DataSharing enabled", options_.enable_data_sharing ? "true" : "false");
@@ -668,6 +889,65 @@ eprosima::fastdds::dds::DataReaderQos DdsTransportDriver::GetReaderQos(
   }
 
   return qos;
+}
+
+namespace {
+
+template <typename Qos>
+runtime::core::transport::QosDescriptor DescribeDdsQos(const Qos& qos) {
+  runtime::core::transport::QosDescriptor descriptor;
+  descriptor.policies.emplace(
+      "history",
+      qos.history().kind == eprosima::fastdds::dds::KEEP_ALL_HISTORY_QOS
+          ? "keep_all"
+          : "keep_last");
+  descriptor.policies.emplace(
+      "depth", std::to_string(qos.history().depth));
+  descriptor.policies.emplace(
+      "reliability",
+      qos.reliability().kind ==
+              eprosima::fastdds::dds::BEST_EFFORT_RELIABILITY_QOS
+          ? "best_effort"
+          : "reliable");
+  descriptor.policies.emplace(
+      "durability",
+      qos.durability().kind ==
+              eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS
+          ? "transient_local"
+          : "volatile");
+  return descriptor;
+}
+
+}  // namespace
+
+runtime::core::transport::QosDescriptor
+DdsTransportDriver::PublisherQos(
+    std::string_view topic,
+    std::string_view msg_type) const noexcept {
+  try {
+    const std::string topic_name(topic);
+    const std::string type_name(msg_type);
+    return DescribeDdsQos(GetWriterQos(
+        topic_name, GetDdsTopicName(topic_name, type_name)));
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot describe DDS Publisher QoS: {}", error.what());
+    return {};
+  }
+}
+
+runtime::core::transport::QosDescriptor
+DdsTransportDriver::SubscriberQos(
+    std::string_view topic,
+    std::string_view msg_type) const noexcept {
+  try {
+    const std::string topic_name(topic);
+    const std::string type_name(msg_type);
+    return DescribeDdsQos(GetReaderQos(
+        topic_name, GetDdsTopicName(topic_name, type_name)));
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot describe DDS Subscriber QoS: {}", error.what());
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +1222,7 @@ bool DdsTransportDriver::OnMessage(
 
     // Get QoS
     auto reader_qos = GetReaderQos(info.topic_name, dds_topic_name);
+    detail::ApplyQosDescriptor(message_handler.requested_qos, reader_qos);
 
     // Reader-side DataSharing gate -- mirror the writer-side decision.
     if (options_.enable_data_sharing) {
@@ -1000,6 +1281,233 @@ bool DdsTransportDriver::OnMessage(
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("Subscribe failed: {}.", e.what());
+    return false;
+  }
+}
+
+runtime::core::transport::SerializedSubscriberHandle
+DdsTransportDriver::AttachSerializedSubscriber(
+    const runtime::core::transport::SerializedSubscriberOptions& options,
+    runtime::core::transport::SerializedMessageCallback callback) noexcept {
+  try {
+    MW_REQUIRE(
+        state_ == State::kInit || state_ == State::kStart,
+        "Serialized subscription requires an initialized DDS driver.");
+    MW_REQUIRE(callback, "Serialized subscriber callback cannot be empty.");
+    const auto& descriptor = options.topic;
+    MW_REQUIRE(!descriptor.topic.empty(), "DDS topic cannot be empty.");
+    const bool is_ros2_type = ROS2TypeHelper::IsROS2Type(descriptor.msg_type);
+    MW_REQUIRE(
+        descriptor.msg_type.starts_with("dds:") || is_ros2_type,
+        "Raw DDS subscription requires a 'dds:' or 'ros2:' message type, got "
+        "'{}'.",
+        descriptor.msg_type);
+    MW_REQUIRE(
+        descriptor.serialization_type == "cdr" ||
+            (is_ros2_type && descriptor.serialization_type == "ros2"),
+        "Raw DDS subscription only supports 'cdr' for DDS or 'ros2' CDR for "
+        "ROS2, got '{}'.",
+        descriptor.serialization_type);
+
+    const std::string dds_type_name =
+        is_ros2_type
+            ? ROS2TypeHelper::ConvertToDdsTypeName(
+                  ROS2TypeHelper::ExtractROS2TypeName(descriptor.msg_type))
+            : descriptor.msg_type.substr(4);
+    const std::string dds_topic_name =
+        GetDdsTopicName(descriptor.topic, descriptor.msg_type);
+    eprosima::fastdds::dds::TypeSupport type(
+        new RawCdrTopicDataType(dds_type_name));
+    type.register_type(dds_bus_.GetParticipant());
+
+    auto* topic = GetOrCreateTopic(
+        dds_bus_.GetParticipant(), dds_topic_name, type.get_type_name(),
+        topic_map_);
+    MW_REQUIRE(topic != nullptr, "Failed to create DDS topic '{}'.", dds_topic_name);
+
+    auto listener = std::make_unique<SerializedDataReaderListener>(
+        descriptor, std::move(callback));
+    auto reader_qos = GetReaderQos(descriptor.topic, dds_topic_name);
+    detail::ApplyQosDescriptor(
+        options.requested_qos.Empty() ? descriptor.qos
+                                      : options.requested_qos,
+        reader_qos);
+    auto* reader = subscriber_->create_datareader(
+        topic, reader_qos, listener.get());
+    MW_REQUIRE(
+        reader != nullptr,
+        "Failed to create raw DDS DataReader for '{}'.", dds_topic_name);
+
+    const uint64_t handle =
+        next_serialized_subscriber_handle_.fetch_add(1);
+    {
+      std::lock_guard lock(serialized_subscriber_mutex_);
+      serialized_subscriber_map_.emplace(
+          handle,
+          SerializedSubscriberInfo{
+              .topic = topic,
+              .reader = reader,
+              .native_type_support = std::move(type),
+              .listener = std::move(listener)});
+    }
+    MW_INFO(
+        "Raw DDS subscriber registered: ibmw_topic='{}', dds_topic='{}', "
+        "dds_type='{}'.",
+        descriptor.topic, dds_topic_name, dds_type_name);
+    return {.value = handle};
+  } catch (const std::exception& error) {
+    MW_ERROR("AttachSerializedSubscriber failed: {}", error.what());
+    return {};
+  }
+}
+
+bool DdsTransportDriver::DetachSerializedSubscriber(
+    runtime::core::transport::SerializedSubscriberHandle handle) noexcept {
+  try {
+    std::lock_guard lock(serialized_subscriber_mutex_);
+    const auto found = serialized_subscriber_map_.find(handle.value);
+    if (found == serialized_subscriber_map_.end()) {
+      return false;
+    }
+    if (found->second.reader) {
+      found->second.reader->set_listener(nullptr);
+      const auto result = subscriber_->delete_datareader(found->second.reader);
+      if (result != compat_dds::RETCODE_OK) {
+        MW_ERROR("Failed to delete raw DDS DataReader.");
+        return false;
+      }
+    }
+    serialized_subscriber_map_.erase(found);
+    return true;
+  } catch (const std::exception& error) {
+    MW_ERROR("DetachSerializedSubscriber failed: {}", error.what());
+    return false;
+  }
+}
+
+runtime::core::transport::SerializedPublisherHandle
+DdsTransportDriver::RegisterSerializedPublisher(
+    const runtime::core::transport::SerializedPublisherOptions& options)
+    noexcept {
+  try {
+    MW_REQUIRE(
+        state_ == State::kInit || state_ == State::kStart,
+        "Serialized publisher requires an initialized DDS driver.");
+    const auto& descriptor = options.topic;
+    MW_REQUIRE(!descriptor.topic.empty(), "DDS topic cannot be empty.");
+    const bool is_ros2_type = ROS2TypeHelper::IsROS2Type(descriptor.msg_type);
+    MW_REQUIRE(
+        descriptor.msg_type.starts_with("dds:") || is_ros2_type,
+        "Raw DDS publisher requires a 'dds:' or 'ros2:' message type, got "
+        "'{}'.",
+        descriptor.msg_type);
+    MW_REQUIRE(
+        descriptor.serialization_type == "cdr" ||
+            (is_ros2_type && descriptor.serialization_type == "ros2"),
+        "Raw DDS publisher only supports 'cdr' for DDS or 'ros2' CDR for "
+        "ROS2, got '{}'.",
+        descriptor.serialization_type);
+
+    const std::string dds_type_name =
+        is_ros2_type
+            ? ROS2TypeHelper::ConvertToDdsTypeName(
+                  ROS2TypeHelper::ExtractROS2TypeName(descriptor.msg_type))
+            : descriptor.msg_type.substr(4);
+    const std::string dds_topic_name =
+        GetDdsTopicName(descriptor.topic, descriptor.msg_type);
+    eprosima::fastdds::dds::TypeSupport type(
+        new RawCdrTopicDataType(dds_type_name));
+    type.register_type(dds_bus_.GetParticipant());
+    auto* topic = GetOrCreateTopic(
+        dds_bus_.GetParticipant(), dds_topic_name, type.get_type_name(),
+        topic_map_);
+    MW_REQUIRE(topic != nullptr, "Failed to create DDS topic '{}'.", dds_topic_name);
+    auto writer_qos = GetWriterQos(descriptor.topic, dds_topic_name);
+    detail::ApplyQosDescriptor(descriptor.qos, writer_qos);
+    auto* writer = publisher_->create_datawriter(topic, writer_qos);
+    MW_REQUIRE(
+        writer != nullptr,
+        "Failed to create raw DDS DataWriter for '{}'.", dds_topic_name);
+
+    const uint64_t handle = next_serialized_publisher_handle_.fetch_add(1);
+    {
+      std::lock_guard lock(serialized_publisher_mutex_);
+      serialized_publisher_map_.emplace(
+          handle,
+          SerializedPublisherInfo{
+              .descriptor = descriptor,
+              .topic = topic,
+              .writer = writer,
+              .native_type_support = std::move(type)});
+    }
+    MW_INFO(
+        "Raw DDS publisher registered: ibmw_topic='{}', dds_topic='{}', "
+        "dds_type='{}'.",
+        descriptor.topic, dds_topic_name, dds_type_name);
+    return {.value = handle};
+  } catch (const std::exception& error) {
+    MW_ERROR("RegisterSerializedPublisher failed: {}", error.what());
+    return {};
+  }
+}
+
+bool DdsTransportDriver::SendSerialized(
+    runtime::core::transport::SerializedPublisherHandle handle,
+    const runtime::core::transport::SerializedMessage& message) noexcept {
+  try {
+    MW_REQUIRE(
+        state_ == State::kStart,
+        "Serialized publish requires a started DDS driver.");
+    MW_REQUIRE(message.payload != nullptr, "Serialized payload cannot be null.");
+    std::lock_guard lock(serialized_publisher_mutex_);
+    const auto found = serialized_publisher_map_.find(handle.value);
+    MW_REQUIRE(found != serialized_publisher_map_.end(), "Unknown publisher handle.");
+    MW_REQUIRE(
+        message.topic.topic == found->second.descriptor.topic &&
+            message.topic.msg_type == found->second.descriptor.msg_type &&
+            message.topic.serialization_type ==
+                found->second.descriptor.serialization_type,
+        "Serialized message does not match its DDS publisher.");
+    const std::string payload = message.payload->JoinToString();
+    RawCdrSample sample{
+        .bytes = std::vector<uint8_t>(payload.begin(), payload.end())};
+    const auto result = found->second.writer->write(&sample);
+    return COMPAT_WRITE_SUCCESS(result);
+  } catch (const std::exception& error) {
+    MW_ERROR("SendSerialized failed: {}", error.what());
+    return false;
+  }
+}
+
+bool DdsTransportDriver::WaitForSerializedAcknowledgments(
+    std::chrono::milliseconds timeout) noexcept {
+  try {
+    std::lock_guard lock(serialized_publisher_mutex_);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (const auto& [handle, publisher] : serialized_publisher_map_) {
+      static_cast<void>(handle);
+      const auto now = std::chrono::steady_clock::now();
+      const auto remaining =
+          now >= deadline
+              ? std::chrono::milliseconds::zero()
+              : std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now);
+      const auto seconds =
+          std::chrono::duration_cast<std::chrono::seconds>(remaining);
+      const auto nanoseconds =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              remaining - seconds);
+      const eprosima::fastrtps::Duration_t duration(
+          static_cast<int32_t>(seconds.count()),
+          static_cast<uint32_t>(nanoseconds.count()));
+      if (!CompatWriteSuccess(
+              publisher.writer->wait_for_acknowledgments(duration))) {
+        return false;
+      }
+    }
+    return true;
+  } catch (const std::exception& error) {
+    MW_ERROR("WaitForSerializedAcknowledgments failed: {}", error.what());
     return false;
   }
 }

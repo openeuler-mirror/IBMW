@@ -16,7 +16,7 @@
 
 #include <memory>
 
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <geometry_msgs/msg/point.hpp>
 
 // Convenience alias for use by the ATTACH macro and the default

@@ -1,0 +1,29 @@
+ibmw_bagfile_information:
+  version: 1
+  storage_id: mcap
+  message_count: 0
+  start_timestamp: 0
+  end_timestamp: 0
+  duration_ns: 0
+  closed_cleanly: true
+  error_message: ""
+  dropped_message_count: 0
+  duplicate_message_count: 0
+  compression_mode: none
+  compression_format: ""
+  compression_queue_size: 1
+  compression_threads: 1
+  files:
+    - path: data_0.mcap
+      start_timestamp: 0
+      end_timestamp: 0
+      message_count: 0
+      size: 173
+      compression: none
+      split_reason: ""
+  schemas:
+    []
+  topics:
+    []
+  channels:
+    []

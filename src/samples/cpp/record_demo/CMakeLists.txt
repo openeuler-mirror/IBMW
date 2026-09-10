@@ -1,0 +1,105 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+# Mixed-transport bag record/info demonstration.
+#
+# Three processes use the same native DDS/CDR message and select DDS, Iceoryx
+# or MQTT in their Runtime YAML.  The fourth process publishes a real ROS2
+# message through the (deprecated) rcl-based ROS2 transport.  Keeping the
+# message implementations separate makes the resulting bag visibly contain
+# both `cdr` and `ros2` channels.
+
+if(NOT IBMW_BUILD_DDS_EXTENSION OR
+   NOT IBMW_BUILD_PROTOCOLS OR
+   NOT IBMW_BUILD_ICEORYX_EXTENSION OR
+   NOT IBMW_BUILD_MQTT_EXTENSION OR
+   NOT IBMW_BUILD_RECORD_PLAYBACK_EXTENSION OR
+   NOT IBMW_BUILD_WITH_ROS2 OR
+   NOT IBMW_BUILD_ROS2_EXTENSION OR
+   NOT IBMW_BUILD_ROS2_TYPES)
+  message(STATUS "Skip record_demo: complete DDS/Iceoryx/MQTT/ROS2 record matrix is disabled")
+  return()
+endif()
+
+get_filename_component(CUR_DIR "${CMAKE_CURRENT_SOURCE_DIR}" NAME)
+set_namespace()
+
+get_namespace(CUR_SUPERIOR_NAMESPACE)
+string(REPLACE "::" "_" CUR_SUPERIOR_NAMESPACE_UNDERLINE ${CUR_SUPERIOR_NAMESPACE})
+
+# Keep native DDS/ROS2 TypeSupport details out of editable managed modules.
+# This adapter is the sample's generated/framework-owned transport boundary.
+set(RECORD_DEMO_PUBLISHERS_TARGET
+    ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_generated_publishers)
+add_library(
+  ${RECORD_DEMO_PUBLISHERS_TARGET} STATIC
+  generated/record_demo_publishers.cc
+  generated/record_demo_ros2_publisher.cc)
+add_library(
+  ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR}::generated_publishers ALIAS
+  ${RECORD_DEMO_PUBLISHERS_TARGET})
+
+target_include_directories(
+  ${RECORD_DEMO_PUBLISHERS_TARGET}
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+
+target_link_libraries(
+  ${RECORD_DEMO_PUBLISHERS_TARGET}
+  PUBLIC ibmw::api::cpp
+  PRIVATE ibmw::extensions::dds_types
+          ibmw::extensions::ros2_types
+          ibmw::schema::common_idl_gencode
+          rclcpp::rclcpp
+          example_ros2::example_ros2__rosidl_generator_cpp
+          example_ros2::example_ros2__rosidl_typesupport_cpp
+          example_ros2::example_ros2__rosidl_typesupport_fastrtps_cpp
+          example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
+
+add_subdirectory(managed/cdr_publisher_module)
+add_subdirectory(managed/ros2_publisher_module)
+add_subdirectory(package/record_demo_pkg)
+
+if(NOT CMAKE_SYSTEM_NAME MATCHES "Linux")
+  message(FATAL_ERROR "record_demo currently supports Linux only")
+endif()
+
+add_custom_target(
+  ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_CURRENT_SOURCE_DIR}/config/linux/bin ${CMAKE_BINARY_DIR}
+  # The deprecated rcl-based ROS2 driver resolves a type-support library from
+  # the package prefix returned by ament_index_cpp.  Build a tiny private
+  # prefix for example_ros2 instead of installing the entire IBMW tree (whose
+  # install rules also reference unrelated plugins and Python type support).
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          ${CMAKE_BINARY_DIR}/record_demo_ros2_runtime/share/ament_index/resource_index/packages
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          ${CMAKE_BINARY_DIR}/record_demo_ros2_runtime/lib
+  COMMAND ${CMAKE_COMMAND} -E touch
+          ${CMAKE_BINARY_DIR}/record_demo_ros2_runtime/share/ament_index/resource_index/packages/example_ros2
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          $<TARGET_FILE:example_ros2__rosidl_typesupport_cpp>
+          ${CMAKE_BINARY_DIR}/record_demo_ros2_runtime/lib/
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          $<TARGET_FILE:example_ros2__rosidl_typesupport_fastrtps_cpp>
+          ${CMAKE_BINARY_DIR}/record_demo_ros2_runtime/lib/
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          $<TARGET_FILE:example_ros2__rosidl_typesupport_introspection_cpp>
+          ${CMAKE_BINARY_DIR}/record_demo_ros2_runtime/lib/
+  DEPENDS ibmw::core::main
+          ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR}::record_demo_pkg
+          ibmw_schema_common_ts
+          ibmw_schema_example_ros2_ts
+          example_ros2__rosidl_typesupport_cpp
+          example_ros2__rosidl_typesupport_fastrtps_cpp
+          example_ros2__rosidl_typesupport_introspection_cpp
+          # The runtime YAML loads these shared libraries directly.  They are
+          # not linked by the Module package because they are runtime plugins,
+          # so list them explicitly to make this sample self-contained when a
+          # fresh build invokes only the aggregate demo target.
+          ibmw_dds_extension
+          ibmw_extensions_iceoryx_ext
+          iox-roudi
+          ibmw_extensions_mqtt_ext
+          ibmw_extensions_ros2_ext
+          ibmw_extensions_record_playback_ext)

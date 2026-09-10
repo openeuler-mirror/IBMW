@@ -31,7 +31,13 @@ constexpr uint32_t kLogLevelFatal = 5;
 
 class SimpleLogger {
  public:
-  static uint32_t GetLogLevel() { return 0; }
+  static uint32_t GetLogLevel() {
+    return log_level_.load(std::memory_order_relaxed);
+  }
+
+  static void SetLogLevel(uint32_t level) {
+    log_level_.store(level, std::memory_order_relaxed);
+  }
 
   static void Log(uint32_t lvl,
                   uint32_t line,
@@ -65,6 +71,9 @@ class SimpleLogger {
 
     fprintf(stderr, "%s\n", log_str.c_str());
   }
+
+ private:
+  inline static std::atomic<uint32_t> log_level_{kLogLevelTrace};
 };
 
 class SimpleAsyncLogger {

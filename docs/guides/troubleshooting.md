@@ -70,10 +70,11 @@ current run. Prefer graceful TERM before KILL and verify no owned process remain
 
 ## Public/internal include failures
 
-User code should include `cpp/...`; in-tree implementation code may receive
-`internal/...` only through `ibmw::internal`. An `api/`-prefixed public include or
-an installed `internal/typesupport/...` dependency usually indicates the wrong
-include lane. See [Compatibility Boundaries](../reference/compatibility.md).
+User code should include `cpp/...` or an installed
+`type_support/<transport>/...` adapter. An `api/`-prefixed include, an
+`internal/typesupport/...` include, or an `ibmw::internal` dependency in a
+generated package indicates the wrong include lane. See
+[Compatibility Boundaries](../reference/compatibility.md).
 
 ## ROS2 and Action scope confusion
 

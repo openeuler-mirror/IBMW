@@ -1,0 +1,20 @@
+ibmw:
+  bag_playback:
+    type_support_pkgs: [../libplay_smoke_ts.so]
+  extensions:
+    items:
+      - name: zenoh_extension
+        path: ../libibmw_zenoh_transport.so
+        options: {limit_domain: ibmw_play_smoke, shm_pool_size: 10485760, shm_init_loan_size: 1024}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 2}}
+  messaging:
+    drivers:
+      - type: zenoh
+        options:
+          publishers:
+            - {topic: /ibmw_play_smoke/data, shm_enabled: false}
+    publishers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [zenoh]}

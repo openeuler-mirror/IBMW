@@ -4,7 +4,7 @@
 # R8 validation sample (positive case).
 #
 # Link surface is intentionally minimal -- no iceoryx_ext, no iceoryx_posh,
-# no internal/typesupport include path. The sample asserts at compile time
+# no private TypeSupport include path. The sample asserts at compile time
 # that publisher_for<T>() reaches a fully usable SenderAccess<T> through
 # the public v2 facade alone, given a publicly-registered DDS type
 # (BenchPlainPayload1KB from bench_payload, registered via

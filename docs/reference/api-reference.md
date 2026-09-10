@@ -617,7 +617,7 @@ and nlohmann `to_json`/`from_json` ADL functions. Serialization type: `"json"`.
 | `Shutdown` | `virtual void Shutdown() noexcept = 0` | Clean up |
 | `GenInitializationReport` | `virtual list<pair<string,string>>` | Startup log data |
 
-### Entry Points
+### Entry Point
 
 ```cpp
 // Must be exported from extension .so
@@ -683,11 +683,20 @@ Type support packages provide serialization for message types at runtime.
 
 ```cpp
 IBMW_TYPE_SUPPORT_PKG_EXPORT
-size_t IbmwDynlibGetTypeSupportArrayLength();
-
-IBMW_TYPE_SUPPORT_PKG_EXPORT
-const ibmw_type_support_base_t** IbmwDynlibGetTypeSupportArray();
+const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1();
 ```
+
+The descriptor contains the TypeSupport array and, when available, an
+embedded `ibmw_schema_support_package_v1_t` containing immutable
+`ibmw_schema_support_v1_t` descriptors.  Both structures begin with
+`abi_version` and `struct_size`; consumers must verify the version and ensure
+`struct_size` is at least the corresponding `*_V1_REQUIRED_SIZE` before reading
+the mandatory fields.  Producers may append fields in a future ABI revision
+without changing the existing prefix.  String views and schema bytes remain
+owned by the package until it is unloaded.  V1 uses canonical lower-case
+serialization/schema encodings and an `fnv1a64:<16 lowercase hex digits>` hash
+over the exact schema bytes; the hash is an accelerator, not a collision-free
+identity.  Empty required strings or schema data are invalid.
 
 ---
 

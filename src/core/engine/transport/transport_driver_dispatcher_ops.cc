@@ -303,6 +303,89 @@ class GatedLoanedSubscriptionHandle final : public LoanedSubscriptionHandle {
 };
 }  // namespace
 
+uint64_t TransportDriverDispatcher::RegisterPublishTap(PublishTap tap) {
+  if (!tap) {
+    return 0;
+  }
+  std::lock_guard lock(publish_taps_mutex_);
+  const uint64_t handle = next_publish_tap_handle_++;
+  publish_taps_.emplace(
+      handle, std::make_shared<PublishTapState>(std::move(tap)));
+  return handle;
+}
+
+bool TransportDriverDispatcher::UnregisterPublishTap(uint64_t handle) {
+  if (handle == 0) {
+    return false;
+  }
+  std::shared_ptr<PublishTapState> tap_state;
+  {
+    std::lock_guard lock(publish_taps_mutex_);
+    const auto found = publish_taps_.find(handle);
+    if (found == publish_taps_.end()) {
+      return false;
+    }
+    tap_state = std::move(found->second);
+    publish_taps_.erase(found);
+  }
+  DeactivatePublishTap(tap_state);
+  return true;
+}
+
+void TransportDriverDispatcher::DeactivatePublishTap(
+    const std::shared_ptr<PublishTapState>& tap_state) {
+  std::unique_lock lock(tap_state->mutex);
+  tap_state->active = false;
+  const size_t own_depth = tap_state->CurrentDepth();
+  tap_state->idle_cv.wait(
+      lock, [&] { return tap_state->in_flight <= own_depth; });
+}
+
+void TransportDriverDispatcher::InvokePublishTaps(MessageFrame& frame) noexcept {
+  std::vector<std::shared_ptr<PublishTapState>> taps;
+  {
+    std::lock_guard lock(publish_taps_mutex_);
+    taps.reserve(publish_taps_.size());
+    for (const auto& [handle, tap_state] : publish_taps_) {
+      static_cast<void>(handle);
+      taps.emplace_back(tap_state);
+    }
+  }
+  for (const auto& tap_state : taps) {
+    {
+      std::lock_guard lock(tap_state->mutex);
+      if (!tap_state->active) {
+        continue;
+      }
+      ++tap_state->in_flight;
+    }
+    struct ActiveCall {
+      PublishTapState::InvocationToken token;
+      explicit ActiveCall(PublishTapState* state)
+          : token{state, PublishTapState::CurrentInvocation()} {
+        PublishTapState::CurrentInvocation() = &token;
+      }
+      ~ActiveCall() {
+        PublishTapState::CurrentInvocation() = token.previous;
+        std::lock_guard lock(token.state->mutex);
+        --token.state->in_flight;
+        // Wake unregister waiters after every invocation leaves.  A waiter
+        // may be waiting for the count to drop to its own re-entrant depth,
+        // not necessarily all the way to zero (another thread may still be
+        // inside the tap).
+        token.state->idle_cv.notify_all();
+      }
+    } active_call(tap_state.get());
+    try {
+      tap_state->tap(frame);
+    } catch (const std::exception& error) {
+      MW_ERROR("Publish tap failed: {}", error.what());
+    } catch (...) {
+      MW_ERROR("Publish tap failed with an unknown exception.");
+    }
+  }
+}
+
 bool TransportDriverDispatcher::OnMessage(MessageHandlerAccessInfoWrapper&& wrapper) {
   if (state_.load() != State::kInit) [[unlikely]] {
     MW_ERROR("Msg can only be subscribed when state is 'Init'.");
@@ -731,6 +814,10 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
        , metric_slots
 #endif
       ](MessageFrame& msg_wrapper) {
+        InvokePublishTaps(msg_wrapper);
+        if (state_.load() != State::kStart) {
+          return;
+        }
         for (size_t driver_index = 0; driver_index < cached_drivers.size(); ++driver_index) {
           auto* itr = cached_drivers[driver_index];
           MW_TRACE("Publish msg '{}' for topic '{}' to transport driver '{}'",
@@ -910,6 +997,66 @@ bool TransportDriverDispatcher::RegisterSendType(SendTypeWrapper&& wrapper) {
   return ret;
 }
 
+bool TransportDriverDispatcher::RegisterSendType(
+    SendTypeWrapper&& wrapper,
+    const std::vector<TransportDriver*>& drivers) {
+  if (state_.load() != State::kInit) [[unlikely]] {
+    MW_ERROR("Publish type can only be registered when state is 'Init'.");
+    return false;
+  }
+  if (drivers.empty() ||
+      std::any_of(
+          drivers.begin(), drivers.end(), [this](const auto* driver) {
+            return driver == nullptr ||
+                   std::find(
+                       transport_driver_index_vec_.begin(),
+                       transport_driver_index_vec_.end(), driver) ==
+                       transport_driver_index_vec_.end();
+          })) {
+    MW_ERROR("Explicit publisher registration requires registered drivers.");
+    return false;
+  }
+
+  auto send_type_wrapper_ptr =
+      std::make_unique<SendTypeWrapper>(std::move(wrapper));
+  const std::string_view topic_name =
+      send_type_wrapper_ptr->info.topic_name;
+  const std::string_view msg_type = send_type_wrapper_ptr->info.msg_type;
+  auto seq_emplace =
+      pub_topic_seq_map_.try_emplace(std::string(topic_name), 0);
+  auto filter_names = GetFilterRules(topic_name, publish_filters_rules_);
+  publish_filter_bus_ptr_->CreateFilterCollectorIfNotExist(
+      topic_name, filter_names);
+  send_type_wrapper_ptr->cached_drivers = drivers;
+  send_type_wrapper_ptr->cached_seq_counter = &seq_emplace.first->second;
+  send_type_wrapper_ptr->cached_filter_collector =
+      &publish_filter_bus_ptr_->GetFilterCollector(topic_name);
+  const auto& send_type_wrapper = *send_type_wrapper_ptr;
+  pub_topics_driver_index_map_.try_emplace(
+      std::string(topic_name), drivers);
+
+#ifdef IBMW_ENABLE_CORE_METRICS
+  try {
+    (void)observability::CoreMetricsController().Register(
+        this, &send_type_wrapper, send_type_wrapper.info.pkg_path,
+        send_type_wrapper.info.module_name, topic_name, msg_type, drivers);
+  } catch (...) {
+  }
+#endif
+  if (!transport_catalog_ptr_->RegisterSendType(
+          std::move(send_type_wrapper_ptr))) {
+    return false;
+  }
+
+  bool result = true;
+  for (auto* driver : drivers) {
+    MW_TRACE("Explicitly register publish type '{}' for topic '{}' to driver '{}'.",
+             msg_type, topic_name, driver->Name());
+    result &= driver->RegisterSendType(send_type_wrapper);
+  }
+  return result;
+}
+
 void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
   if (state_.load() != State::kStart) [[unlikely]] {
     MW_WARN("Method can only be called when state is 'Start'.");
@@ -965,6 +1112,10 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
        , metric_slots
 #endif
       ](MessageFrame& msg_wrapper) {
+        InvokePublishTaps(msg_wrapper);
+        if (state_.load() != State::kStart) {
+          return;
+        }
         std::string_view topic_name = msg_wrapper.info.topic_name;
 
         auto find_itr = pub_topics_driver_index_map_.find(topic_name);

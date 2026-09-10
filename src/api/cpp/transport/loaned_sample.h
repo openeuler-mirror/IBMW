@@ -49,18 +49,12 @@
 
 #include "cpp/transport/transport_handle.h"
 
-#include <ibmw/transport_features.h>
-
 namespace ibmw::transport {
 
 template <typename T>
 class LoanedSample {
   static_assert(std::is_trivially_copyable_v<T>,
                 "LoanedSample<T> requires T to be trivially copyable.");
-  static_assert(IBMW_HAS_SHM || sizeof(T) == 0 || IBMW_LOANED_SHM_OPT_OUT,
-                "LoanedSample<T> requires an SHM-capable transport "
-                "(IBMW_HAS_ICEORYX or future IBMW_HAS_SHM_DDS). "
-                "Define IBMW_ALLOW_LOANED_WITHOUT_SHM to opt out for testing/header-only builds.");
 
  public:
   /// Empty / consumed state.

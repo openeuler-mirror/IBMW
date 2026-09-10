@@ -26,6 +26,13 @@ set_namespace()
 add_subdirectory(bench_payload)
 add_subdirectory(bench_common)
 
+# In-process microbenchmark for the dispatcher publish-tap hot path.  This is
+# deliberately a benchmark executable rather than a CTest: results are
+# machine-local evidence and are never compared with a repository-wide fixed
+# threshold.  It reuses the same LatencyStats implementation as the transport
+# matrix and exercises the real dispatcher RegisterSendType/Send path.
+add_subdirectory(publish_tap)
+
 # Sample sub-directories are added in stages 6.2.2 .. 6.2.7.
 add_subdirectory(iox_loaned_pod)
 add_subdirectory(iox_loaned_ctx)

@@ -1,0 +1,4 @@
+busy_timeout_ms: 100
+pragmas:
+  cache_size: 2000
+  mmap_size: 0

@@ -8,6 +8,7 @@
 
 #include "engine/isubsystem.h"
 #include "engine/extension/extension_loader.h"
+#include "extension_api/ibmw_extension_runtime.h"
 
 #include "yaml-cpp/yaml.h"
 
@@ -54,6 +55,7 @@ class ExtensionBus : public ISubsystem {
   Options options_;
 
   Engine* core_ptr_ = nullptr;
+  std::unique_ptr<ibmw::extension::RuntimeV1> runtime_v1_;
 
   // Register extension directly
   std::vector<EngineExtensionBase*> registered_extension_vec_;

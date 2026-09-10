@@ -4,8 +4,12 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -81,6 +85,8 @@ struct MessageHandlerAccessInfoWrapper {
 
 class TransportDriverDispatcher {
  public:
+  using PublishTap = std::function<void(MessageFrame&)>;
+
   enum class State : uint32_t {
     kPreInit,
     kInit,
@@ -159,7 +165,29 @@ class TransportDriverDispatcher {
   // for framework
   bool OnMessage(MessageHandlerWrapper&& wrapper);
   bool RegisterSendType(SendTypeWrapper&& wrapper);
+  bool RegisterSendType(
+      SendTypeWrapper&& wrapper,
+      const std::vector<TransportDriver*>& drivers);
   void Send(MessageFrame&& wrapper);
+
+  // Publish taps observe each ordinary Send() after the topic's filters have
+  // forwarded it and before any transport driver is called. Taps run
+  // synchronously on the publishing thread, once per logical publish and in
+  // registration order. Exceptions are logged and do not suppress later taps
+  // or driver delivery. The MessageFrame and every view reachable from it are
+  // valid only for the callback; a tap retaining data must make an owned copy.
+  //
+  // UnregisterPublishTap() prevents new callback entries and, when called from
+  // outside that tap, waits for callbacks already in flight. Self-unregister
+  // and dispatcher Shutdown() from inside a callback wait only for invocations
+  // on other threads, so they cannot wait for the current callback to return.
+  // Callbacks may re-enter Send(), but should only enqueue bounded work because
+  // their latency is part of the publisher hot path.
+  //
+  // The explicit Loan()/PublishLoaned() zero-copy fast path bypasses filters,
+  // context metadata and publish taps by design.
+  uint64_t RegisterPublishTap(PublishTap tap);
+  bool UnregisterPublishTap(uint64_t handle);
 
   using TopicDriverInfoMap = std::unordered_map<std::string_view, std::vector<std::string_view>>;
   TopicDriverInfoMap GetPubTopicDriverInfo() const;
@@ -173,6 +201,11 @@ class TransportDriverDispatcher {
   std::vector<std::string> GetFilterRules(
       std::string_view topic_name,
       const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
+
+  struct PublishTapState;
+  void InvokePublishTaps(MessageFrame& frame) noexcept;
+  void DeactivatePublishTap(
+      const std::shared_ptr<PublishTapState>& tap_state);
 
  private:
   std::atomic<State> state_ = State::kPreInit;
@@ -233,6 +266,37 @@ class TransportDriverDispatcher {
   // driver has completed Shutdown().
   std::vector<std::unique_ptr<MessageHandlerWrapper>>
       owned_legacy_message_handler_pool_;
+
+  std::mutex publish_taps_mutex_;
+  struct PublishTapState {
+    struct InvocationToken {
+      PublishTapState* state;
+      InvocationToken* previous;
+    };
+
+    explicit PublishTapState(PublishTap input_tap)
+        : tap(std::move(input_tap)) {}
+
+    static InvocationToken*& CurrentInvocation() {
+      static thread_local InvocationToken* current = nullptr;
+      return current;
+    }
+    size_t CurrentDepth() const noexcept {
+      size_t depth = 0;
+      for (auto* call = CurrentInvocation(); call; call = call->previous) {
+        if (call->state == this) ++depth;
+      }
+      return depth;
+    }
+
+    PublishTap tap;
+    std::mutex mutex;
+    std::condition_variable idle_cv;
+    bool active = true;
+    size_t in_flight = 0;
+  };
+  std::map<uint64_t, std::shared_ptr<PublishTapState>> publish_taps_;
+  uint64_t next_publish_tap_handle_ = 1;
 };
 
 }  // namespace ibmw::runtime::core::transport

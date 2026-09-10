@@ -52,6 +52,20 @@ void TransportDriverDispatcher::Shutdown() {
   observability::CoreMetricsController().DisableLoanedReceive(this);
 #endif
 
+  std::vector<std::shared_ptr<PublishTapState>> publish_taps;
+  {
+    std::lock_guard lock(publish_taps_mutex_);
+    publish_taps.reserve(publish_taps_.size());
+    for (auto& [handle, tap_state] : publish_taps_) {
+      static_cast<void>(handle);
+      publish_taps.emplace_back(std::move(tap_state));
+    }
+    publish_taps_.clear();
+  }
+  for (const auto& tap_state : publish_taps) {
+    DeactivatePublishTap(tap_state);
+  }
+
   const bool shutdown_profile = IsTransportShutdownProfileEnabled();
   size_t error_count = 0;
   std::string first_error;

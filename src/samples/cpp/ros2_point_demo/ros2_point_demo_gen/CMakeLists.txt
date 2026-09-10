@@ -60,6 +60,22 @@ ibmw_add_pkg(ros2_point_pkg
   SRCS src/ros2_point_pkg/pkg_main.cc
   MODULES point_publisher_module point_subscriber_module)
 
+add_library(ros2_point_pkg_ts SHARED
+  src/ros2_point_pkg/type_support_pkg_main.cc)
+target_include_directories(ros2_point_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ros2_point_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  geometry_msgs::geometry_msgs__rosidl_generator_cpp
+  geometry_msgs::geometry_msgs__rosidl_typesupport_introspection_cpp)
+set_target_properties(ros2_point_pkg_ts PROPERTIES
+  OUTPUT_NAME "ros2_point_pkg_ts")
+install(TARGETS ros2_point_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(ros2_point_app
   SRCS src/ros2_point_app/main.cc
   MODULES point_publisher_module point_subscriber_module)

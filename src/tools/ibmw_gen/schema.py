@@ -1010,11 +1010,9 @@ def _validate_modules(data: dict):
                     f"({sorted(_SHM_CAPABLE_TRANSPORTS)}). Found: {_t}.\n"
                 )
 
-        # loaned_publisher — uses zero-copy loan API. Two transports supported:
-        #   - dds      : LoanedMessage<T> via Fast-DDS (auto/strict/compat)
-        #   - iceoryx  : LoanedSample<T>  via iceoryx SHM (strict-only;
-        #                requires trivially_copyable T enforced at compile-time
-        #                via static_assert in generated code)
+        # loaned_publisher uses the public SenderAccess<T> + LoanedSample<T>
+        # API for both supported transports. It is strict-only and requires a
+        # trivially copyable message type, enforced by generated code.
         if mod["type"] == "loaned_publisher":
             if "topic" not in mod:
                 _error(f"Module '{mod['name']}' (loaned_publisher) requires 'topic'")
@@ -1054,19 +1052,16 @@ def _validate_modules(data: dict):
                 # dds_type_name default: same as ros2_type_name (DDS wire format).
                 if "dds_type_name" not in mod:
                     mod["dds_type_name"] = mod["ros2_type_name"]
-                # zero_copy_config default: 'auto' (DDS supports all three modes).
-                zc = mod.get("zero_copy_config", "auto")
-                if zc not in VALID_ZERO_COPY_CONFIG:
-                    _error(f"Module '{mod['name']}' (loaned_publisher,dds): invalid "
-                           f"zero_copy_config '{zc}' "
-                           f"(valid: {sorted(VALID_ZERO_COPY_CONFIG)})")
-                mod["zero_copy_config"] = zc
+                zc = mod.get("zero_copy_config", "strict")
+                if zc != "strict":
+                    _error(f"Module '{mod['name']}' (loaned_publisher,dds): "
+                           f"zero_copy_config must be 'strict' (got '{zc}'); "
+                           "the public loaned API has no copy fallback")
+                mod["zero_copy_config"] = "strict"
                 # NOTE: loaned_publisher does NOT set _is_ros2_interop. cmake_gen
                 # has its own dedicated _is_loaned_publisher branch which links
-                # the same ros2_types + ${pkg}_TARGETS deps (because the loan
-                # publisher still uses ROS2 typesupport for RegisterSendType<T>),
-                # plus the transport-specific extension (dds_ext / iceoryx_ext).
-                # This remains separate from the ROS2 interop flag.
+                # public ROS2 TypeSupport + ${pkg}_TARGETS deps. Concrete
+                # transport selection remains in runtime configuration.
             else:  # transport == "iceoryx"
                 # iceoryx loaned_publisher: `iceoryx_msg_type` was removed from
                 # required fields because it is only a logging placeholder (the wire key is derived from
@@ -1085,9 +1080,7 @@ def _validate_modules(data: dict):
                            f"you need '{zc}' semantics.")
                 mod["zero_copy_config"] = "strict"
                 # NOTE: iceoryx branch does NOT set _is_ros2_interop. cmake_gen
-                # has its own iceoryx branch that emits ibmw::extensions::iceoryx_ext
-                # + iceoryx_posh::iceoryx_posh deps and (optionally) ros2_types
-                # for the message struct definition.
+                # has its own public TypeSupport dependency branch.
 
             mod["_is_loaned_publisher"] = True
             # ros2_packages list (cmake_gen iterates it for ${pkg}_TARGETS)

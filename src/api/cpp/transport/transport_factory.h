@@ -6,10 +6,11 @@
 #include "cpp/core.h"
 #include "cpp/transport/transport_handle.h"
 
-// Public factory header: stays free of internal/typesupport/* includes.
+// Public factory header: stays free of transport-extension implementation
+// includes.
 // SenderAccess<T> / ReceiverAccess<T> are forward-declared in
 // transport_handle.h; the typesupport header that supplies the specialization
-// for a given T (e.g. internal/typesupport/dds/dds_transport.h for DDS message
+// for a given T (e.g. type_support/dds/dds_transport.h for DDS message
 // types) is included by the consumer TU. This keeps DDS-only and local-only
 // modules free of transitive rosidl/json dependencies.
 

@@ -21,9 +21,10 @@ case-specific verification.
 - Package loading has one public entry, `IbmwPkgEntry`, with typed-slot driver
   injection. Slot IDs are stable; string driver names and dual-entry ABI behavior
   are not public contracts. See [API Reference](api-reference.md).
-- Public user includes use `cpp/...`. Transport-specific typesupport internals use
-  `internal/typesupport/...`, are exposed in-tree through `ibmw::internal`, and
-  are not an installed public API. Public JSON serialization is
+- Public user includes use `cpp/...` and the installed
+  `type_support/<transport>/...` adapters. Generated code must not include
+  `internal/typesupport/...` or depend on an `ibmw::internal` target. Public
+  JSON transport and serialization APIs are `cpp/util/json_transport.h` and
   `cpp/util/json_serialization.h`.
 
 ## ROS2, DDS, Action, and OHOS

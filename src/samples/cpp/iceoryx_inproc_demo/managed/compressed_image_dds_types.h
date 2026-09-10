@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 
 #include "Header.hpp"
 #include "HeaderCdrAux.ipp"

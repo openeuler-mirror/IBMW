@@ -4,6 +4,7 @@
 #include "engine/extension/extension_bus.h"
 
 #include "base/string_util.h"
+#include "engine/extension/extension_runtime.h"
 
 namespace YAML {
 template <>
@@ -114,7 +115,16 @@ void ExtensionBus::Initialize(YAML::Node options_node) {
     }
 
     // Initialize the extension
-    bool ret = extension_ptr->Initialize(core_ptr_);
+    bool ret = false;
+    if (extension_ptr->RequiredRuntimeAbi() ==
+        ibmw::extension::kRuntimeAbiVersionV1) {
+      if (!runtime_v1_) {
+        runtime_v1_ = MakeExtensionRuntimeV1(*core_ptr_);
+      }
+      ret = extension_ptr->InitializeRuntime(runtime_v1_.get());
+    } else {
+      ret = extension_ptr->Initialize(core_ptr_);
+    }
     MW_REQUIRE(ret, "Init extension '{}' failed.", extension_options.name);
 
     used_extension_vec_.emplace_back(extension_ptr);

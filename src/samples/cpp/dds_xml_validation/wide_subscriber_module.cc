@@ -6,7 +6,7 @@
 #include <chrono>
 #include <iostream>
 
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 
 namespace ibmw::samples::dds_xml_wide {
 namespace {

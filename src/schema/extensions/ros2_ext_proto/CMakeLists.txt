@@ -64,11 +64,12 @@ if(CMAKE_CROSSCOMPILING)
 endif()
 target_link_libraries(
   ${CUR_TARGET_NAME}_ts
-  PRIVATE ibmw::api::type_support
-          ibmw::extensions::ros2_types
+  PRIVATE ibmw::api::ros2_type_support
           ${_ibmw_ros2_fastcdr}
           ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_generator_cpp
-          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp)
+          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_cpp
+          ${CUR_PACKAGE_NAME}::${CUR_PACKAGE_NAME}__rosidl_typesupport_fastrtps_cpp
+          ${CUR_PACKAGE_NAME}__rosidl_typesupport_introspection_cpp)
 set_target_properties(${CUR_TARGET_NAME}_ts PROPERTIES OUTPUT_NAME ${CUR_DIR}_ros2_ts)
 
 if(IBMW_INSTALL)

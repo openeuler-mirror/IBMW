@@ -695,7 +695,11 @@ logging:
 
 ### json_types（可选）
 
-定义可 JSON 序列化的类型（生成基于 nlohmann/json 的头文件）。
+定义可 JSON 序列化的类型。生成器会同时生成：
+
+- `src/json_custom_types.h`：C++ 类型、JSON 序列化和 JSON Schema。
+- `src/json_type_support_pkg_main.cc`：TypeSupport/SchemaSupport 动态包入口。
+- `<project>_json_ts`：可由 Bag 的 `TypeSupportPkgLoader` 加载的共享库目标。
 
 ```yaml
 json_types:
@@ -721,6 +725,8 @@ my_project_gen/
   protocol/
     my_message.h                 # 自定义类型头文件（struct + CDR）
   src/
+    json_custom_types.h            # JSON 类型及内嵌 JSON Schema
+    json_type_support_pkg_main.cc  # JSON TypeSupport/SchemaSupport 动态包入口
     my_app/
       main.cc                    # App 入口（自动生成）
     publisher_module/

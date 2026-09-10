@@ -1,0 +1,51 @@
+# Independently owned HTTP loopback configuration for record smoke.
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-smoke-http
+  extensions:
+    items:
+      - name: net_extension
+        path: ./libibmw_net_transport.so
+        options:
+          thread_num: 2
+          http_options: {listen_ip: 127.0.0.1, listen_port: 50183}
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-smoke-http
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libcommon_dds_ts.so
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: record_smoke_executor
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: http
+        options:
+          publishers:
+            - topic: /ibmw_record_smoke/transport/http
+              server_url_list: [127.0.0.1:50183]
+    publishers:
+      - topic: /ibmw_record_smoke/transport/http
+        enable_drivers: [http]
+    subscribers:
+      - topic: /ibmw_record_smoke/transport/http
+        enable_drivers: [http]
+  modules:
+    packages:
+      - path: ./librecord_smoke_pkg.so
+        enable_modules: [RecordSmokeCdrModule]
+    modules:
+      - name: RecordSmokeCdrModule
+        log_level: INFO
+RecordSmokeCdrModule:
+  publish_topics: [/ibmw_record_smoke/transport/http]
+  subscribe_topics: [/ibmw_record_smoke/transport/http]
+  frequency_hz: 10.0

@@ -12,13 +12,15 @@
 #   ibmw::api::cpp          - C++ API (header-only, depends on unifex/stdexec)
 #   ibmw::api::pkg          - Pkg-mode entry point (header-only)
 #   ibmw::api::type_support - Type support plugin API (header-only)
+#   ibmw::api::dds_type_support  - DDS TypeSupport package adapter
+#   ibmw::api::ros2_type_support - ROS2 TypeSupport package adapter
 #   ibmw::core::extension_api - Extension development API (header-only)
 #   ibmw::core::engine      - Engine static library (App-mode, links asio/yaml-cpp/TBB/backward)
 #   ibmw::core::main        - The ibmw executable (Pkg-mode runner)
 #
 # Conditionally exported (when built with DDS/ROS2):
-#   ibmw::extensions::dds_types            - DDS type support
-#   ibmw::extensions::ros2_types           - ROS2 type support
+#   ibmw::extensions::dds_types            - DDS transport integration
+#   ibmw::extensions::ros2_types           - ROS2 transport integration
 #   ibmw::schema::*_idl_gencode            - IDL-generated schema code
 #   ibmw::schema::*_rpc_gencode            - RPC-generated schema code
 

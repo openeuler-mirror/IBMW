@@ -104,19 +104,15 @@ class TestIceoryxPluginEmit(unittest.TestCase):
         inc_h = ts_info["inc_h_content"]
         inc_cc = ts_info["inc_cc_content"]
 
-        # inc.h carries the transport-specific includes and the 8-macro
-        # contract.
-        self.assertIn("cpp/transport/loaned_sample.h", inc_h)
-        self.assertIn("iceoryx_transport_driver.h", inc_h)
-        self.assertIn("internal/typesupport/ros2/ros2_transport.h", inc_h)
+        # The sidecar binds only to stable public APIs.
+        self.assertIn("cpp/transport/transport_factory.h", inc_h)
+        self.assertIn("type_support/ros2/ros2_transport.h", inc_h)
         self.assertIn("geometry_msgs/msg/point.hpp", inc_h)
         self.assertIn("std::is_trivially_copyable_v", inc_h)
-        # 8 macro contract.
+        # Seven-macro public loan contract.
         for macro in (
             "IBMW_TS_LOANED_PUB_MSG_TYPE",
             "IBMW_TS_LOANED_PUB_STATIC_ASSERT",
-            "IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL",
-            "IBMW_TS_LOANED_PUB_DRIVER_SETTER_IMPL",
             "IBMW_TS_LOANED_PUB_MEMBER",
             "IBMW_TS_LOANED_PUB_SETUP",
             "IBMW_TS_LOANED_PUB_RUN_INIT",
@@ -125,13 +121,15 @@ class TestIceoryxPluginEmit(unittest.TestCase):
         ):
             self.assertIn(f"#define {macro}", inc_h,
                           f"inc.h must define {macro}")
-        # Driver setter contract: named setter + v2 typed-slot override
-        # via IceoryxTransportDriver::kStableDriverId.
-        self.assertIn("SetIceoryxDriver", inc_h)
-        self.assertIn("SetDriverSlot(", inc_h)
-        self.assertIn("IceoryxTransportDriver::kStableDriverId", inc_h)
-        self.assertIn("LoanedSample<", inc_h)
-        self.assertIn("EnsurePodTopic", inc_h)
+        self.assertIn("SenderAccess<", inc_h)
+        self.assertIn("RegisterLoanedPodTopic", inc_h)
+        self.assertIn("publisher_->Loan()", inc_h)
+        self.assertIn("publisher_->Publish", inc_h)
+        self.assertNotIn("iceoryx_ext/", inc_h)
+        self.assertNotIn("IceoryxTransportDriver", inc_h)
+        self.assertNotIn("SetIceoryxDriver", inc_h)
+        self.assertNotIn("SetDriverSlot(", inc_h)
+        self.assertNotIn("EnsurePodTopic", inc_h)
         # Hot-loop user-code marker pair lives inside the macro.
         self.assertIn("populate_loaned_message", inc_h)
 
@@ -204,7 +202,7 @@ class TestIceoryxPluginEmit(unittest.TestCase):
         inc_cc = ts_info["inc_cc_content"]
         # inc.h carries the transport-specific includes and macro contract.
         self.assertIn("cpp/transport/loaned_subscriber.h", inc_h)
-        self.assertIn("internal/typesupport/ros2/ros2_transport.h", inc_h)
+        self.assertIn("type_support/ros2/ros2_transport.h", inc_h)
         self.assertIn("geometry_msgs/msg/point.hpp", inc_h)
         self.assertIn("IBMW_TS_LOANED_SUB_MSG_TYPE", inc_h)
         self.assertIn("IBMW_TS_LOANED_SUB_STATIC_ASSERT", inc_h)

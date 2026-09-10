@@ -13,7 +13,7 @@
 
 #pragma once
 
-#include "dds_types/transport/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "dds_types/util/dds_type_support.h"
 
 /**

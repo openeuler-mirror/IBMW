@@ -11,6 +11,7 @@
 
 #include <boost/asio.hpp>
 
+#include "net_base/asio_endpoint_hash.h"
 #include "base/buffer_util.h"
 #include "base/log_util.h"
 #include "base/string_util.h"
@@ -530,8 +531,7 @@ class AsioTcpClientPool
             co_return std::shared_ptr<AsioTcpClient>();
           }
 
-          const size_t client_hash =
-              std::hash<boost::asio::ip::tcp::endpoint>{}(client_options.svr_ep);
+          const size_t client_hash = AsioEndpointHash{}(client_options.svr_ep);
 
           auto itr = client_map_.find(client_hash);
           if (itr != client_map_.end()) {

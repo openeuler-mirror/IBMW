@@ -78,7 +78,7 @@ def _gen_dds_publisher_header(mod: dict, ns: str) -> str:
 #include <optional>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "{dds_types_header}"
 
 namespace {ns} {{
@@ -185,7 +185,7 @@ def _gen_dds_subscriber_header(mod: dict, ns: str) -> str:
 #pragma once
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 
 namespace {ns} {{
 
@@ -284,7 +284,7 @@ def _gen_direct_ros2_publisher_header(mod: dict, ns: str) -> str:
 #include <thread>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <{ros2_msg_include}>
 
 namespace {ns} {{
@@ -406,7 +406,7 @@ def _gen_direct_ros2_subscriber_header(mod: dict, ns: str) -> str:
 #pragma once
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <{ros2_msg_include}>
 
 namespace {ns} {{
@@ -500,232 +500,6 @@ void {name}::OnMessage(
 """
 
 
-def _gen_loaned_publisher_dds_header(mod: dict, ns: str) -> str:
-    name = mod["name"]
-    msg_type = mod["message_type"]
-    ros2_msg_include = mod["ros2_msg_include"]
-
-    return f"""{_COPYRIGHT}
-//
-// Loaned Publisher (DDS) — zero-copy publish via Ros2StylePublisher /
-// LoanedMessage API. Plain-type detection is compile-time.
-
-#pragma once
-
-#include <atomic>
-#include <string_view>
-#include <thread>
-#include <type_traits>
-
-#include "cpp/module_base.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
-#include "dds_ext/ros2_style_api.h"
-#include "dds_ext/dds_transport_driver.h"
-#include <{ros2_msg_include}>
-
-namespace {ns} {{
-
-class {name} : public ibmw::Module {{
- public:
-  {name}() = default;
-  ~{name}() override = default;
-
-  ibmw::ModuleDescriptor Info() const override {{
-    return ibmw::ModuleDescriptor{{.module_name = "{name}"}};
-  }}
-
-  bool Setup(ibmw::Runtime core) override;
-  bool Run() override;
-  void Stop() override;
-
-  // Driver injection setter — the generated app `main.cc` calls this
-  // after `core.Initialize()` and BEFORE `core.Start()`. The driver is
-  // first consumed in Run() (engine calls Setup() during its own
-  // Initialize() phase, before the host can inject).
-  //
-  // STANDALONE mode entry point.
-  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {{
-    dds_driver_ = driver;
-  }}
-
-  // PKG mode entry point. Typed-slot dispatch: host engine broadcasts
-  // (slot_id, driver_ptr); IBMW_USE_DRIVER generates a SetDriverSlot
-  // override that matches DdsTransportDriver::kStableDriverId at
-  // compile time and stores the typed pointer into dds_driver_.
-  IBMW_USE_DRIVER(ibmw::extensions::dds_extension::DdsTransportDriver, dds_driver_)
-
- private:
-  void PublishLoop();
-  void PrintStatistics();
-  auto GetLogger() {{ return core_.GetLogger(); }}
-
-  ibmw::Runtime core_;
-
-  // Cached DDS driver pointer (injected via SetDdsDriver before Start).
-  ibmw::extensions::dds_extension::DdsTransportDriver* dds_driver_ = nullptr;
-
-  using LoanedPub = ibmw::extensions::dds_extension::Ros2StylePublisher<{msg_type}>;
-  std::shared_ptr<LoanedPub> loaned_publisher_;
-
-  std::thread publish_thread_;
-  std::atomic<bool> running_{{false}};
-  uint64_t publish_count_{{0}};
-  uint64_t zero_copy_count_{{0}};
-  uint64_t fallback_count_{{0}};
-}};
-
-}}  // namespace {ns}
-"""
-
-
-def _gen_loaned_publisher_dds_cc(mod: dict, ns: str, snake_dir: str) -> str:
-    name = mod["name"]
-    msg_type = mod["message_type"]
-    topic = mod["topic"]
-    ros2_type_name = mod["ros2_type_name"]   # e.g. "geometry_msgs/msg/Point"
-    dds_type_name = mod["dds_type_name"]     # default == ros2_type_name
-    zc_config = mod["zero_copy_config"]      # auto | strict | compat
-
-    return f"""{_COPYRIGHT}
-#include "{snake_dir}/{_snake(name)}.h"
-
-namespace {ns} {{
-
-bool {name}::Setup(ibmw::Runtime core) {{
-  core_ = core;
-
-  // Register send type with the publisher handle so the underlying DDS
-  // transport knows how to (de)serialize this message.
-  auto publisher = core_.GetTransport().GetPublisher("{topic}");
-  bool success = ibmw::ros2::transport::RegisterSendType<{msg_type}>(
-      publisher, "{ros2_type_name}");
-  if (!success) {{
-    MW_ERROR("Failed to register send type '{ros2_type_name}'");
-    return false;
-  }}
-
-  // Compile-time plain-type detection. The generated code keeps both
-  // branches; the compiler eliminates the unused one.
-  if constexpr (std::is_trivially_copyable_v<{msg_type}>
-                && std::is_standard_layout_v<{msg_type}>) {{
-    MW_INFO("{name}: '{msg_type}' is plain ({{}} bytes), zero-copy candidate",
-            sizeof({msg_type}));
-  }} else {{
-    MW_INFO("{name}: '{msg_type}' is non-plain, will fallback to copy path");
-  }}
-
-  // NOTE: dds_driver_ is NOT validated here — the engine calls Setup() during
-  // its own Initialize() phase, but the host application can only inject the
-  // driver via SetDdsDriver() AFTER Initialize() returns. The driver is first
-  // consumed in Run(), at which point injection has happened.
-
-  MW_INFO("{name}::Setup succeeded "
-          "(topic='{topic}', zero_copy_config='{zc_config}').");
-  return true;
-}}
-
-bool {name}::Run() {{
-  if (!dds_driver_) {{
-    MW_ERROR("DDS driver not injected; call SetDdsDriver() before "
-             "engine Start (loaned_publisher requires DDS transport)");
-    return false;
-  }}
-
-  // Build the LoanedMessage-capable publisher now (driver is ready).
-  loaned_publisher_ =
-      ibmw::extensions::dds_extension::create_publisher_with_driver_config<{msg_type}>(
-          dds_driver_, "{topic}", "{dds_type_name}");
-  if (!loaned_publisher_) {{
-    MW_ERROR("Failed to create loaned publisher for '{topic}'");
-    return false;
-  }}
-  MW_INFO("Loaned publisher created: topic='{topic}', "
-          "can_loan_messages={{}}, is_plain={{}}",
-          loaned_publisher_->can_loan_messages(),
-          dds_driver_->IsPlainType(loaned_publisher_->get_topic_name()));
-
-  running_ = true;
-  publish_thread_ = std::thread([this]() {{ PublishLoop(); }});
-  MW_INFO("{name}::Run succeeded.");
-  return true;
-}}
-
-void {name}::Stop() {{
-  running_ = false;
-  if (publish_thread_.joinable()) {{
-    publish_thread_.join();
-  }}
-  PrintStatistics();
-  MW_INFO("{name}::Stop succeeded (total published: {{}}).", publish_count_);
-}}
-
-void {name}::PublishLoop() {{
-  if (!loaned_publisher_) {{
-    MW_ERROR("Loaned publisher not initialized; PublishLoop aborting");
-    return;
-  }}
-
-  while (running_) {{
-    auto loaned = loaned_publisher_->borrow_loaned_message();
-    if (!loaned.is_valid()) {{
-      MW_ERROR("borrow_loaned_message failed: {{}}", loaned.error_message());
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      continue;
-    }}
-
-    if (loaned.is_zero_copy()) {{
-      ++zero_copy_count_;
-    }} else {{
-      ++fallback_count_;
-    }}
-
-    // TODO: populate `*loaned` (or `loaned->field`) here.
-    // For plain types this writes directly into the DDS shared buffer
-    // (zero-copy); for non-plain types it writes into a heap message that
-    // is serialized on publish().
-
-    if ((publish_count_ % 50) == 0) {{
-      MW_INFO("[SEND] {{}} #{{}} zero_copy={{}} ptr={{}}",
-              "{topic}", publish_count_,
-              loaned.is_zero_copy(), loaned.GetRawPointer());
-    }}
-
-    bool ok = loaned_publisher_->publish(std::move(loaned));
-    if (ok) {{
-      ++publish_count_;
-    }} else {{
-      MW_ERROR("publish(loaned) failed");
-    }}
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  }}
-}}
-
-void {name}::PrintStatistics() {{
-  uint64_t total = zero_copy_count_ + fallback_count_;
-  double ratio = total > 0
-      ? static_cast<double>(zero_copy_count_) / total * 100.0 : 0.0;
-  MW_INFO("========== Loaned Publisher Statistics ==========");
-  MW_INFO("Total published : {{}}", publish_count_);
-  MW_INFO("Zero-copy       : {{}} ({{:.1f}}%)", zero_copy_count_, ratio);
-  MW_INFO("Fallback        : {{}}", fallback_count_);
-
-  if (dds_driver_ && loaned_publisher_) {{
-    const auto* st = dds_driver_->GetZeroCopyStats(loaned_publisher_->get_topic_name());
-    if (st) {{
-      MW_INFO("Driver loan_success      : {{}}", st->loan_success.load());
-      MW_INFO("Driver loan_failure      : {{}}", st->loan_failure.load());
-      MW_INFO("Driver zero_copy_publish : {{}}", st->zero_copy_publish.load());
-      MW_INFO("Driver fallback_publish  : {{}}", st->fallback_publish.load());
-    }}
-  }}
-  MW_INFO("=================================================");
-}}
-
-}}  // namespace {ns}
-"""
-
-
 def _gen_loaned_subscriber_dds_header(mod: dict, ns: str) -> str:
     name = mod["name"]
     style = mod["subscriber_style"]
@@ -753,7 +527,7 @@ def _gen_loaned_subscriber_dds_header(mod: dict, ns: str) -> str:
 #include <memory>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <{ros2_msg_include}>
 
 namespace {ns} {{
@@ -876,8 +650,6 @@ _DDS_GENERATORS = {
         _gen_direct_ros2_publisher_header, _gen_direct_ros2_publisher_cc),
     ("ros2_interop_subscriber", "dds"): (
         _gen_direct_ros2_subscriber_header, _gen_direct_ros2_subscriber_cc),
-    ("loaned_publisher", "dds"): (
-        _gen_loaned_publisher_dds_header, _gen_loaned_publisher_dds_cc),
     ("loaned_subscriber", "dds"): (
         _gen_loaned_subscriber_dds_header, _gen_loaned_subscriber_dds_cc),
 }
@@ -966,7 +738,7 @@ def _emit_publisher_typesupport(mod: dict, ns: str):
 
 #include <optional>
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "{dds_types_header}"
 
 // Fully-qualified message type used by the unified template's
@@ -1039,7 +811,7 @@ def _emit_subscriber_typesupport(mod: dict, ns: str):
 // <module>.h and <module>.cc; it defines the transport-coupled symbols
 // the unified subscriber template depends on.
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "{dds_types_header}"
 
 // Message C++ type used by the unified template's OnMessage lambda.
@@ -1114,7 +886,7 @@ def _emit_loaned_subscriber_typesupport(mod: dict, ns: str):
 
 #include <memory>
 
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <{ros2_msg_include}>
 
 // Convenience alias for use by the ATTACH macro and the default
@@ -1194,195 +966,89 @@ void {name}::OnMessage(
 
 # ── Unified loaned-publisher typesupport emission ──────────────────────────
 #
-# Byte-semantic equivalent of the legacy
-# _gen_loaned_publisher_dds_{header,cc} path. The 8 IBMW_TS_LOANED_PUB_*
-# macros below capture every dds-specific concern (Ros2StylePublisher
-# alias, DdsTransportDriver pointer + injection setter, plain-type
-# detection in Setup, create_publisher_with_driver_config in Run,
-# borrow + is_zero_copy three-counter hot loop, GetZeroCopyStats in
-# PrintStatistics) so user-facing <module>.{h,cc} stays
-# transport-agnostic (R1/R2/R3/R9/R11).
+# The emitted module binds only to SenderAccess<T>/LoanedSample<T>. Concrete
+# transport selection and initialization remain runtime concerns.
 def _emit_loaned_publisher_typesupport(mod: dict, ns: str):
-    """Emit transport-specific loaned_publisher typesupport for dds.
-
-    Byte-semantic equivalent of legacy _gen_loaned_publisher_dds_*.
-    Contract: see TransportSpec.emit_loaned_publisher_typesupport
-    docstring in transports/__init__.py for the full 8-macro list.
-    """
+    """Bind a DDS-declared loaned publisher to the public loan API."""
     name = mod["name"]
     msg_type = mod["message_type"]
     topic = mod["topic"]
-    ros2_type_name = mod["ros2_type_name"]
-    dds_type_name = mod["dds_type_name"]
-    zc_config = mod["zero_copy_config"]
     ros2_msg_include = mod["ros2_msg_include"]
 
     inc_h = f"""{_COPYRIGHT}
 #pragma once
 
-// Transport-specific typesupport for a dds loaned_publisher module.
-// Auto-generated by ibmw_gen for the DDS transport.
-//
-// Publishes via Ros2StylePublisher<T>::borrow_loaned_message +
-// publish (zero-copy when the driver reports the type as plain on
-// the configured DDS QoS). Driver pointer is injected by the host
-// app (standalone) or the engine (pkg) via SetDdsDriver / the
-// SetDriverSlot(slot_id, void*) typed-slot override.
-//
-// User-facing <name>.{{h,cc}} only references the 8
-// IBMW_TS_LOANED_PUB_* macros below; this is the only place dds-
-// specific symbols (Ros2StylePublisher, DdsTransportDriver,
-// create_publisher_with_driver_config) appear.
+// Public TypeSupport binding for a loaned publisher. The generated module is
+// independent of the concrete transport selected by runtime configuration.
 
-#include <memory>
+#include <chrono>
+#include <optional>
 #include <type_traits>
+#include <utility>
 
-#include "c/driver_slot.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
-#include "dds_ext/ros2_style_api.h"
-#include "dds_ext/dds_transport_driver.h"
+#include "cpp/transport/transport_factory.h"
+#include "type_support/ros2/ros2_transport.h"
 #include <{ros2_msg_include}>
 
 #define IBMW_TS_LOANED_PUB_MSG_TYPE {msg_type}
 
-// dds: no compile-time POD constraint (the create_publisher path
-// supports non-plain types via copy fallback).
-#define IBMW_TS_LOANED_PUB_STATIC_ASSERT /* no-op (dds accepts any) */
+#define IBMW_TS_LOANED_PUB_STATIC_ASSERT                                      \\
+  static_assert(std::is_trivially_copyable_v<IBMW_TS_LOANED_PUB_MSG_TYPE>,    \\
+                "loaned_publisher requires a trivially_copyable message "    \\
+                "type ({msg_type})")
 
-// SetDriverSlot(slot_id, ptr) override body. Typed-slot dispatch:
-// match DdsTransportDriver::kStableDriverId at compile time and
-// forward via static_cast. Used inside the DECL macro below.
-#define IBMW_TS_LOANED_PUB_DRIVER_SETTER_IMPL(slot_expr, ptr_expr)            \\
-  do {{                                                                        \\
-    if ((slot_expr) ==                                                        \\
-            ibmw::extensions::dds_extension::DdsTransportDriver               \\
-                ::kStableDriverId &&                                          \\
-        (ptr_expr)) {{                                                         \\
-      SetDdsDriver(                                                           \\
-          static_cast<                                                        \\
-              ibmw::extensions::dds_extension::DdsTransportDriver*>(          \\
-              ptr_expr));                                                     \\
-    }}                                                                         \\
-  }} while (0)
-
-// Driver injection setters — both the named setter (preserves existing
-// `main.cc` call sites that call SetDdsDriver directly) and the
-// engine-contract typed-slot override.
-#define IBMW_TS_LOANED_PUB_DRIVER_SETTER_DECL                                 \\
-  void SetDdsDriver(                                                          \\
-      ibmw::extensions::dds_extension::DdsTransportDriver* driver) {{          \\
-    dds_driver_ = driver;                                                     \\
-  }}                                                                           \\
-  void SetDriverSlot(ibmw_driver_slot_t slot_id,                              \\
-                     void* driver_ptr) override {{                             \\
-    IBMW_TS_LOANED_PUB_DRIVER_SETTER_IMPL(slot_id, driver_ptr);               \\
-  }}
-
-// Member fields: publisher handle alias + handle + cached driver
-// pointer (multi-statement; declared inside the user-facing class
-// `private:` region).
 #define IBMW_TS_LOANED_PUB_MEMBER                                             \\
-  using LoanedPub = ibmw::extensions::dds_extension::Ros2StylePublisher<      \\
-      IBMW_TS_LOANED_PUB_MSG_TYPE>;                                           \\
-  std::shared_ptr<LoanedPub> loaned_publisher_;                               \\
-  ibmw::extensions::dds_extension::DdsTransportDriver* dds_driver_ = nullptr
+  std::optional<ibmw::transport::SenderAccess<                                \\
+      IBMW_TS_LOANED_PUB_MSG_TYPE>> publisher_
 
-// Setup body: GetPublisher + RegisterSendType<T> + compile-time
-// plain-type detection log. The dds_driver_ is intentionally NOT
-// validated here — host can only inject between Initialize() and
-// Start(); we revalidate in RUN_INIT.
 #define IBMW_TS_LOANED_PUB_SETUP(core_expr)                                   \\
   do {{                                                                        \\
-    auto _ibmw_pub = (core_expr).GetTransport().GetPublisher("{topic}");      \\
-    bool _ibmw_ok = ibmw::ros2::transport::RegisterSendType<                  \\
-        IBMW_TS_LOANED_PUB_MSG_TYPE>(_ibmw_pub, "{ros2_type_name}");          \\
-    if (!_ibmw_ok) {{                                                          \\
-      MW_ERROR("Failed to register send type '{ros2_type_name}'");            \\
+    publisher_.emplace(                                                       \\
+        (core_expr).GetTransport().GetPublisher("{topic}"));                  \\
+    if (!publisher_->RegisterSendType()) {{                                    \\
+      MW_ERROR("{name}: RegisterSendType failed for topic '{topic}'");        \\
       return false;                                                           \\
     }}                                                                         \\
-    if constexpr (std::is_trivially_copyable_v<                               \\
-                      IBMW_TS_LOANED_PUB_MSG_TYPE>                            \\
-                  && std::is_standard_layout_v<                               \\
-                      IBMW_TS_LOANED_PUB_MSG_TYPE>) {{                         \\
-      MW_INFO("{name}: '{msg_type}' is plain ({{}} bytes), zero-copy "        \\
-              "candidate", sizeof(IBMW_TS_LOANED_PUB_MSG_TYPE));              \\
-    }} else {{                                                                  \\
-      MW_INFO("{name}: '{msg_type}' is non-plain, will fallback to "          \\
-              "copy path");                                                   \\
-    }}                                                                         \\
-    MW_INFO("{name}::Setup detail "                                           \\
-            "(topic='{topic}', zero_copy_config='{zc_config}').");            \\
+    MW_INFO("{name}: public loaned publisher ready on '{topic}' ({{}} bytes)", \\
+            sizeof(IBMW_TS_LOANED_PUB_MSG_TYPE));                             \\
   }} while (0)
 
-// Run body, pre-thread: validate driver was injected, then build the
-// driver-aware LoanedMessage publisher.
 #define IBMW_TS_LOANED_PUB_RUN_INIT(core_expr)                                \\
   do {{                                                                        \\
     (void)(core_expr);                                                        \\
-    if (!dds_driver_) {{                                                       \\
-      MW_ERROR("DDS driver not injected; call SetDdsDriver() before "         \\
-               "engine Start (loaned_publisher requires DDS transport)");    \\
+    if (!publisher_) {{                                                        \\
+      MW_ERROR("{name}: loaned publisher was not initialized");              \\
       return false;                                                           \\
     }}                                                                         \\
-    loaned_publisher_ = ibmw::extensions::dds_extension::                     \\
-        create_publisher_with_driver_config<                                  \\
-            IBMW_TS_LOANED_PUB_MSG_TYPE>(                                     \\
-            dds_driver_, "{topic}", "{dds_type_name}");                       \\
-    if (!loaned_publisher_) {{                                                 \\
-      MW_ERROR("Failed to create loaned publisher for '{topic}'");            \\
-      return false;                                                           \\
-    }}                                                                         \\
-    MW_INFO("Loaned publisher created: topic='{topic}', "                     \\
-            "can_loan_messages={{}}, is_plain={{}}",                            \\
-            loaned_publisher_->can_loan_messages(),                           \\
-            dds_driver_->IsPlainType(                                         \\
-                loaned_publisher_->get_topic_name()));                        \\
   }} while (0)
 
-// Whole PublishLoop while-body: borrow + is_zero_copy three-counter +
-// populate user-code marker pair + publish + sleep.
-// Single macro is mandatory — see plan §3.a: dds borrow-failure
-// semantics (continue) differ from iceoryx (fallback_count_++) so a
-// 3-macro split would force divergent control flow into the user-
-// facing .cc, breaking R2.
 #define IBMW_TS_LOANED_PUB_HOT_LOOP_BODY(loop_var)                            \\
   do {{                                                                        \\
-    auto loop_var = loaned_publisher_->borrow_loaned_message();               \\
+    auto loop_var = publisher_->Loan();                                       \\
     if (!loop_var.is_valid()) {{                                               \\
-      MW_ERROR("borrow_loaned_message failed: {{}}",                            \\
-               loop_var.error_message());                                     \\
+      ++fallback_count_;                                                      \\
+      MW_ERROR("{name}: loan failed for topic '{topic}'");                    \\
       std::this_thread::sleep_for(std::chrono::milliseconds(100));            \\
       break;                                                                  \\
     }}                                                                         \\
-    if (loop_var.is_zero_copy()) {{                                            \\
-      ++zero_copy_count_;                                                     \\
-    }} else {{                                                                  \\
-      ++fallback_count_;                                                      \\
-    }}                                                                         \\
+    ++zero_copy_count_;                                                       \\
     /* IBMW_PUBSUB_LOANED_PUBLISHER_BODY_BEGIN */                             \\
     /* IBMW: user code begin (populate_loaned_message) */                     \\
-    /* TODO: populate `*loop_var` (or `loop_var->field`) here. For */         \\
-    /* plain types this writes directly into the DDS shared buffer */         \\
-    /* (zero-copy); for non-plain types it writes into a heap message */      \\
-    /* that is serialized on publish(). */                                    \\
+    /* TODO: populate `*loop_var` (or `loop_var->field`) here. */             \\
     /* IBMW: user code end (populate_loaned_message) */                       \\
     /* IBMW_PUBSUB_LOANED_PUBLISHER_BODY_END */                               \\
     if ((publish_count_ % 50) == 0) {{                                         \\
-      MW_INFO("[SEND] {{}} #{{}} zero_copy={{}} ptr={{}}",                          \\
-              "{topic}", publish_count_,                                      \\
-              loop_var.is_zero_copy(), loop_var.GetRawPointer());             \\
+      MW_INFO("[SEND] {{}} #{{}} loaned=true", "{topic}", publish_count_);    \\
     }}                                                                         \\
-    bool _ibmw_pub_ok = loaned_publisher_->publish(std::move(loop_var));      \\
+    bool _ibmw_pub_ok = publisher_->Publish(std::move(loop_var));             \\
     if (_ibmw_pub_ok) {{                                                       \\
       ++publish_count_;                                                       \\
     }} else {{                                                                  \\
-      MW_ERROR("publish(loaned) failed");                                     \\
+      MW_ERROR("{name}: loaned publish failed");                             \\
     }}                                                                         \\
     std::this_thread::sleep_for(std::chrono::milliseconds(100));              \\
   }} while (0)
 
-// PrintStatistics body: 4 base lines + 4 driver GetZeroCopyStats lines
-// (when both driver and publisher are still alive) + separator.
 #define IBMW_TS_LOANED_PUB_PRINT_STATS                                        \\
   do {{                                                                        \\
     uint64_t _ibmw_total = zero_copy_count_ + fallback_count_;                \\
@@ -1391,21 +1057,7 @@ def _emit_loaned_publisher_typesupport(mod: dict, ns: str):
     MW_INFO("========== Loaned Publisher Statistics ==========");             \\
     MW_INFO("Total published : {{}}", publish_count_);                          \\
     MW_INFO("Zero-copy       : {{}} ({{:.1f}}%)", zero_copy_count_, _ibmw_ratio); \\
-    MW_INFO("Fallback        : {{}}", fallback_count_);                         \\
-    if (dds_driver_ && loaned_publisher_) {{                                   \\
-      const auto* _ibmw_st = dds_driver_->GetZeroCopyStats(                   \\
-          loaned_publisher_->get_topic_name());                               \\
-      if (_ibmw_st) {{                                                         \\
-        MW_INFO("Driver loan_success      : {{}}",                              \\
-                _ibmw_st->loan_success.load());                               \\
-        MW_INFO("Driver loan_failure      : {{}}",                              \\
-                _ibmw_st->loan_failure.load());                               \\
-        MW_INFO("Driver zero_copy_publish : {{}}",                              \\
-                _ibmw_st->zero_copy_publish.load());                          \\
-        MW_INFO("Driver fallback_publish  : {{}}",                              \\
-                _ibmw_st->fallback_publish.load());                           \\
-      }}                                                                       \\
-    }}                                                                         \\
+    MW_INFO("Loan failures   : {{}} (strict mode)", fallback_count_);          \\
     MW_INFO("=================================================");             \\
   }} while (0)
 """

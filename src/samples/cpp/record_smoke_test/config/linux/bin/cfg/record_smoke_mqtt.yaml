@@ -1,0 +1,50 @@
+# Independently owned MQTT transport configuration for record smoke.
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-smoke-mqtt
+  extensions:
+    items:
+      - name: mqtt_extension
+        path: ./libibmw_mqtt_transport.so
+        options:
+          broker_addr: tcp://127.0.0.1:18884
+          client_id: record_smoke_mqtt_publisher
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-smoke-mqtt
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libcommon_dds_ts.so
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: record_smoke_executor
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: mqtt
+        options:
+          publishers:
+            - topic: /ibmw_record_smoke/transport/mqtt
+              qos: 1
+          subscribers:
+            - topic: /ibmw_record_smoke/transport/mqtt
+              qos: 1
+    publishers:
+      - topic: /ibmw_record_smoke/transport/mqtt
+        enable_drivers: [mqtt]
+  modules:
+    packages:
+      - path: ./librecord_smoke_pkg.so
+        enable_modules: [RecordSmokeCdrModule]
+    modules:
+      - name: RecordSmokeCdrModule
+        log_level: INFO
+RecordSmokeCdrModule:
+  publish_topics: [/ibmw_record_smoke/transport/mqtt]
+  frequency_hz: 10.0

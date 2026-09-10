@@ -9,7 +9,7 @@ import unittest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-SERIALIZER = REPO_ROOT / "extensions" / "transport" / "ros2_types" / "util" / "ros2_cdr_serializer.h"
+SERIALIZER = REPO_ROOT / "api" / "type_support" / "ros2" / "ros2_cdr_serializer.h"
 
 
 class Ros2CdrSerializerHardeningTests(unittest.TestCase):

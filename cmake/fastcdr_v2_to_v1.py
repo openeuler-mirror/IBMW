@@ -26,8 +26,14 @@ def transform_cdraux(content):
     # 1. Replace CdrSizeCalculator include with our compat header
     content = content.replace(
         '#include <fastcdr/CdrSizeCalculator.hpp>',
-        '#include "dds_types/util/fastcdr_v1_compat.h"'
+        '#include "type_support/dds/fastcdr_v1_compat.h"'
     )
+    # Older generated fixtures may already contain the former transport-local
+    # include.  Normalize it while regenerating so installed consumers only
+    # see the framework-owned TypeSupport path.
+    content = content.replace(
+        '#include "dds_types/util/fastcdr_v1_compat.h"',
+        '#include "type_support/dds/fastcdr_v1_compat.h"')
 
     # 1b. Remove v2-only fixed_size_string.hpp include (not available in v1)
     # This header is included by generated .hpp files but typically unused.
@@ -452,8 +458,11 @@ def transform_pubsubtypes(content):
     # 1. Replace CdrSizeCalculator include with our compat header (same as CdrAux)
     content = content.replace(
         '#include <fastcdr/CdrSizeCalculator.hpp>',
-        '#include "dds_types/util/fastcdr_v1_compat.h"'
+        '#include "type_support/dds/fastcdr_v1_compat.h"'
     )
+    content = content.replace(
+        '#include "dds_types/util/fastcdr_v1_compat.h"',
+        '#include "type_support/dds/fastcdr_v1_compat.h"')
 
     # 2. Remove v2-only fixed_size_string.hpp include
     content = content.replace(

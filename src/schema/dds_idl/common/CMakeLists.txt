@@ -31,6 +31,21 @@ add_dds_idl_gencode_target(
 )
 add_library(${CUR_TARGET_ALIAS_NAME}_idl_gencode ALIAS ${CUR_TARGET_NAME}_idl_gencode)
 
+# A real loadable DDS TypeSupport Package used by Bag Schema discovery.
+# dds_types is available when DDS or Iceoryx support is enabled.
+if(TARGET ibmw::extensions::dds_types)
+  add_library(
+    ${CUR_TARGET_NAME}_ts SHARED
+    ${CMAKE_CURRENT_SOURCE_DIR}/type_support_pkg_main.cc)
+  add_library(${CUR_TARGET_ALIAS_NAME}_ts ALIAS ${CUR_TARGET_NAME}_ts)
+  target_link_libraries(
+    ${CUR_TARGET_NAME}_ts
+    PRIVATE ibmw::api::dds_type_support
+            ${CUR_TARGET_NAME}_idl_gencode)
+  set_target_properties(
+    ${CUR_TARGET_NAME}_ts PROPERTIES OUTPUT_NAME "${CUR_DIR}_dds_ts")
+endif()
+
 # Install
 if(IBMW_INSTALL)
   install(
@@ -46,4 +61,8 @@ if(IBMW_INSTALL)
     ARCHIVE DESTINATION lib
             FILE_SET HEADERS
             DESTINATION include/${CUR_TARGET_NAME}_idl_gencode)
+
+  if(TARGET ${CUR_TARGET_NAME}_ts)
+    install(TARGETS ${CUR_TARGET_NAME}_ts LIBRARY DESTINATION bin)
+  endif()
 endif()

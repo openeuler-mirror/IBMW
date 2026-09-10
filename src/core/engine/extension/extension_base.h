@@ -5,7 +5,8 @@
 //
 // Eliminates per-extension boilerplate:
 //  - IBMW_EXT_ENTRY(Class) replaces identical *_main.cc files
-//  - Automatic logger lifecycle hooks (After(kInitialize, kLogger) / BeforePhase(kStopping))
+//  - Automatic logger lifecycle hooks (After(kInitialize, kLogger) /
+//    Before(kStopping, kLogger))
 //  - Thread-safe logger storage via ExtensionLogger helper
 //
 // Subclasses override:
@@ -16,13 +17,13 @@
 
 #pragma once
 
-#include <atomic>
 #include <list>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "extension_api/ibmw_extension_base.h"
+#include "extension_api/extension_logger.h"
 #include "extension_api/ibmw_extension_export.h"
 #include "extension_api/ibmw_extension_main.h"
 #include "cpp/logger/logger.h"
@@ -38,7 +39,7 @@ namespace ibmw {
 //
 // Each extension places one instance in its translation unit (typically in the
 // extension's global.cc or at file scope).  ExtensionBase auto-manages it via
-// the After(kInitialize, kLogger) / BeforePhase(kStopping) hooks.
+// the After(kInitialize, kLogger) / Before(kStopping, kLogger) hooks.
 //
 // Usage in extension global.h:
 //   extern ExtensionLogger g_logger;
@@ -48,23 +49,6 @@ namespace ibmw {
 // Usage in extension global.cc:
 //   ExtensionLogger g_logger;
 // ---------------------------------------------------------------------------
-class ExtensionLogger {
- public:
-  ExtensionLogger() = default;
-
-  void Set(ibmw::logger::LoggerRef ref) {
-    logger_.store(ref, std::memory_order_release);
-  }
-
-  ibmw::logger::LoggerRef Get() const {
-    auto ref = logger_.load(std::memory_order_acquire);
-    return ref ? ref : ibmw::logger::GetSimpleLoggerRef();
-  }
-
- private:
-  std::atomic<ibmw::logger::LoggerRef> logger_{};
-};
-
 // ---------------------------------------------------------------------------
 // ExtensionBase — base class for IBMW extensions.
 //

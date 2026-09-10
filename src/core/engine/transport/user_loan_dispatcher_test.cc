@@ -112,6 +112,11 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
 #endif
   dispatcher.Start();
 
+  int tap_calls = 0;
+  const auto tap_handle =
+      dispatcher.RegisterPublishTap([&](MessageFrame&) { ++tap_calls; });
+  ASSERT_NE(tap_handle, 0U);
+
   auto publish = dispatcher.Loan(LoanRequest());
   ASSERT_EQ(publish.source_driver, &good);
   EXPECT_TRUE(dirty.saw_clean_input);
@@ -122,6 +127,8 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
   dispatcher.ReleaseLoaned(publish);
   EXPECT_EQ(good.publish_calls, 1);
   EXPECT_EQ(good.release_calls, 0);
+  EXPECT_EQ(tap_calls, 0)
+      << "The documented zero-copy fast path must bypass publish taps";
 
   auto release = dispatcher.Loan(LoanRequest());
   ASSERT_EQ(release.source_driver, &good);
@@ -129,6 +136,7 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
   dispatcher.PublishLoaned(release);
   EXPECT_EQ(good.publish_calls, 1);
   EXPECT_EQ(good.release_calls, 1);
+  EXPECT_TRUE(dispatcher.UnregisterPublishTap(tap_handle));
 
   // The established handle contract routes solely by source_driver. Side data
   // and dispatcher membership are driver-private and must not be validated by

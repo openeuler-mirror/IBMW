@@ -25,19 +25,39 @@ endif()
 # --------------------------------------------------------------------------
 find_package(ibmw 0.1.0 REQUIRED)
 
+# --------------------------------------------------------------------------
+# FastCDR — required for custom DDS type serialization.
+# --------------------------------------------------------------------------
+find_package(fastcdr REQUIRED)
+
 ibmw_add_module(publisher_module
   SRCS src/publisher_module/publisher_module.cc
-  DEPS ibmw::extensions::dds_types)
+  DEPS ibmw::extensions::dds_types fastcdr)
 target_include_directories(publisher_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 ibmw_add_module(subscriber_module
   SRCS src/subscriber_module/subscriber_module.cc
-  DEPS ibmw::extensions::dds_types)
+  DEPS ibmw::extensions::dds_types fastcdr)
 target_include_directories(subscriber_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 ibmw_add_pkg(dds_native_pkg
   SRCS src/dds_native_pkg/pkg_main.cc
   MODULES publisher_module subscriber_module)
+
+add_library(dds_native_pkg_ts SHARED
+  src/dds_native_pkg/type_support_pkg_main.cc)
+target_include_directories(dds_native_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dds_native_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::dds_type_support
+  fastcdr)
+set_target_properties(dds_native_pkg_ts PROPERTIES
+  OUTPUT_NAME "dds_native_pkg_ts")
+install(TARGETS dds_native_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(dds_native_app
   SRCS src/dds_native_app/main.cc

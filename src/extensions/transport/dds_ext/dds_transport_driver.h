@@ -29,6 +29,7 @@
 
 #include "engine/transport/transport_driver.h"
 #include "engine/transport/transport_driver_tools.h"
+#include "engine/transport/serialized_transport_driver.h"
 #include "dds_ext/dds_loan_bus.h"
 #include "dds_ext/dds_bus.h"
 #include "dds_ext/loaned_message.h"
@@ -79,7 +80,9 @@ struct ZeroCopyStats {
  * Implements the TransportDriver interface using FastDDS for
  * DDS-native publish/subscribe with zero-copy support.
  */
-class __attribute__((visibility("default"))) DdsTransportDriver : public runtime::core::transport::TransportDriver {
+class __attribute__((visibility("default"))) DdsTransportDriver
+    : public runtime::core::transport::TransportDriver,
+      public runtime::core::transport::SerializedTransportDriver {
  public:
   // QoS configuration
   struct QosOptions {
@@ -137,6 +140,32 @@ class __attribute__((visibility("default"))) DdsTransportDriver : public runtime
   bool OnMessage(
       const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept override;
   void Send(runtime::core::transport::MessageFrame& msg_wrapper) noexcept override;
+
+  runtime::core::transport::SerializedSubscriberHandle
+  AttachSerializedSubscriber(
+      const runtime::core::transport::SerializedSubscriberOptions& options,
+      runtime::core::transport::SerializedMessageCallback callback)
+      noexcept;
+  bool DetachSerializedSubscriber(
+      runtime::core::transport::SerializedSubscriberHandle handle)
+      noexcept;
+  runtime::core::transport::SerializedPublisherHandle
+  RegisterSerializedPublisher(
+      const runtime::core::transport::SerializedPublisherOptions& options)
+      noexcept;
+  bool SendSerialized(
+      runtime::core::transport::SerializedPublisherHandle handle,
+      const runtime::core::transport::SerializedMessage& message)
+      noexcept;
+  bool WaitForSerializedAcknowledgments(
+      std::chrono::milliseconds timeout) noexcept;
+
+  runtime::core::transport::QosDescriptor PublisherQos(
+      std::string_view topic,
+      std::string_view msg_type) const noexcept;
+  runtime::core::transport::QosDescriptor SubscriberQos(
+      std::string_view topic,
+      std::string_view msg_type) const noexcept;
 
   // ----- Phase 7 §7.3 §K-3.6: user-level zero-copy loan fast lane -----
   //
@@ -316,6 +345,20 @@ class __attribute__((visibility("default"))) DdsTransportDriver : public runtime
     LoanMode loan_mode = LoanMode::AUTO;
   };
 
+  struct SerializedSubscriberInfo {
+    eprosima::fastdds::dds::Topic* topic = nullptr;
+    eprosima::fastdds::dds::DataReader* reader = nullptr;
+    eprosima::fastdds::dds::TypeSupport native_type_support;
+    std::unique_ptr<eprosima::fastdds::dds::DataReaderListener> listener;
+  };
+
+  struct SerializedPublisherInfo {
+    runtime::core::transport::TopicDescriptor descriptor;
+    eprosima::fastdds::dds::Topic* topic = nullptr;
+    eprosima::fastdds::dds::DataWriter* writer = nullptr;
+    eprosima::fastdds::dds::TypeSupport native_type_support;
+  };
+
  private:
   std::string GetDdsTopicName(
       const std::string& ibmw_topic,
@@ -358,6 +401,14 @@ class __attribute__((visibility("default"))) DdsTransportDriver : public runtime
   std::unordered_map<std::string, PublisherInfo> publisher_map_;
   // topic_name -> SubscriberInfo
   std::unordered_map<std::string, SubscriberInfo> subscriber_map_;
+  std::mutex serialized_subscriber_mutex_;
+  std::unordered_map<uint64_t, SerializedSubscriberInfo>
+      serialized_subscriber_map_;
+  std::atomic<uint64_t> next_serialized_subscriber_handle_{1};
+  std::mutex serialized_publisher_mutex_;
+  std::unordered_map<uint64_t, SerializedPublisherInfo>
+      serialized_publisher_map_;
+  std::atomic<uint64_t> next_serialized_publisher_handle_{1};
   // DDS topic_name -> ibmw topic_name (for reverse lookup)
   std::unordered_map<std::string, std::string> dds_topic_to_ibmw_topic_;
   // registered DDS topics

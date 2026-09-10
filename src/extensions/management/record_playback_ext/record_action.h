@@ -4,9 +4,11 @@
 #pragma once
 
 #include <cstdint>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,12 +18,12 @@
 #include "cpp/executor/executor.h"
 #include "cpp/executor/timer.h"
 #include "cpp/util/buffer.h"
+#include "cpp/util/schema_support.h"
 #include "cpp/util/type_support.h"
-#include "engine/core_types.h"
+#include "cpp/transport/topic_descriptor.h"
 #include "mcap/writer.hpp"
 #include "record_playback_ext/metadata_yaml.h"
 #include "record_playback_ext/topic_meta.h"
-#include "ros_storage.h"
 #include "topic_meta.h"
 
 namespace ibmw::extensions::record_playback_extension {
@@ -69,7 +71,7 @@ class RecordAction {
 
  public:
   RecordAction() = default;
-  ~RecordAction() = default;
+  ~RecordAction() noexcept;
 
   RecordAction(const RecordAction&) = delete;
   RecordAction& operator=(const RecordAction&) = delete;
@@ -95,6 +97,10 @@ class RecordAction {
   void RegisterGetTypeSupportFunc(
       const std::function<ibmw::util::TypeSupportRef(std::string_view)>& get_type_support_func);
 
+  void RegisterGetSchemaSupportFunc(
+      const std::function<std::optional<ibmw::util::SchemaDescriptor>(
+          std::string_view, std::string_view)>& get_schema_support_func);
+
   const auto& GetTopicMetaMap() const { return topic_meta_map_; }
   void AddRecord(OneRecord&& record);
 
@@ -107,6 +113,51 @@ class RecordAction {
   void UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled);
 
  private:
+  struct TaskState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    RecordAction* owner = nullptr;
+    bool stopping = false;
+    size_t active = 0;
+    inline static thread_local TaskState* current_state = nullptr;
+    inline static thread_local size_t current_depth = 0;
+
+    bool Enter(RecordAction*& action) {
+      std::lock_guard lock(mutex);
+      if (stopping || owner == nullptr) {
+        return false;
+      }
+      ++active;
+      if (current_state == this) {
+        ++current_depth;
+      } else {
+        current_state = this;
+        current_depth = 1;
+      }
+      action = owner;
+      return true;
+    }
+
+    void Leave() {
+      std::lock_guard lock(mutex);
+      MW_ASSERT(active > 0, "Record task accounting underflow.");
+      --active;
+      if (current_state == this) {
+        MW_ASSERT(current_depth > 0, "Record task depth accounting underflow.");
+        if (--current_depth == 0) current_state = nullptr;
+      }
+      cv.notify_all();
+    }
+
+    void StopAndWait() {
+      std::unique_lock lock(mutex);
+      stopping = true;
+      owner = nullptr;
+      const size_t own_depth = current_state == this ? current_depth : 0;
+      cv.wait(lock, [this, own_depth] { return active <= own_depth; });
+    }
+  };
+
   void AddRecordImpl(OneRecord&& record);
   void OpenNewMcapToRecord(uint64_t start_timestamp);
   bool OpenNewFolderToRecord();
@@ -119,8 +170,6 @@ class RecordAction {
 
   size_t GetFileSize() const;
   bool IsNewFolderNeeded(uint64_t timestamp) const;
-
-  std::string BuildROS2Schema(const MessageMembers* members, int indent);
 
   size_t GetDbFileSize() const;
 
@@ -142,6 +191,7 @@ class RecordAction {
     std::string schema_name;
     std::string schema_format;
     std::string schema_data;
+    std::string schema_hash;
     std::string transport_name;
     std::string transport_format;
   };
@@ -177,8 +227,10 @@ class RecordAction {
   double estimated_overhead_ = 1.5;
 
   std::function<ibmw::util::TypeSupportRef(std::string_view)> get_type_support_func_;
-  std::unordered_map<ibmw::runtime::core::util::TopicMetaKey, TopicMeta,
-                     ibmw::runtime::core::util::TopicMetaKey::Hash>
+  std::function<std::optional<ibmw::util::SchemaDescriptor>(
+      std::string_view, std::string_view)> get_schema_support_func_;
+  std::unordered_map<ibmw::transport::TopicMetaKey, TopicMeta,
+                     ibmw::transport::TopicMetaKey::Hash>
       topic_meta_map_;
 
   std::shared_ptr<ibmw::executor::TimerBase> sync_timer_;
@@ -190,6 +242,7 @@ class RecordAction {
 
   std::filesystem::path metadata_yaml_file_path_;
   MetaData metadata_;
+  std::shared_ptr<TaskState> task_state_;
 
   // only for signal mode
   bool recording_flag_ = false;

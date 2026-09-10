@@ -6,12 +6,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <unistd.h>
 
 #include "engine/engine.h"
 #include "engine/core_types.h"
+#include "bag_command_loader.h"
 
 using namespace ibmw::runtime::core;
 
@@ -37,6 +39,7 @@ void PrintUsage() {
       << "\n\n"
          "USAGE:\n"
          "  ibmw run <config.yaml> [options]    Start the runtime with the given config\n"
+         "  ibmw [--cli-config <path>] bag ...  Run a configured CLI provider\n"
          "  ibmw version                        Show version\n"
          "  ibmw help                           Show this help\n"
          "\n"
@@ -66,7 +69,29 @@ int32_t main(int32_t argc, char** argv) {
     return 0;
   }
 
-  std::string subcmd = argv[1];
+  int command_index = 1;
+  std::filesystem::path cli_config_path;
+  if (std::string(argv[command_index]) == "--cli-config") {
+    if (argc < command_index + 3) {
+      std::cerr << "Error: '--cli-config' requires a path and a command.\n";
+      return 1;
+    }
+    cli_config_path = argv[command_index + 1];
+    command_index += 2;
+  } else if (StartsWith(argv[command_index], "--cli-config=")) {
+    cli_config_path = OptionValue(argv[command_index], "--cli-config");
+    if (cli_config_path.empty() || argc < command_index + 2) {
+      std::cerr << "Error: '--cli-config' requires a path and a command.\n";
+      return 1;
+    }
+    ++command_index;
+  }
+
+  if (command_index >= argc) {
+    PrintUsage();
+    return 0;
+  }
+  std::string subcmd = argv[command_index];
 
   // ---- ibmw version ----
   if (subcmd == "version" || subcmd == "--version" || subcmd == "-v") {
@@ -80,10 +105,24 @@ int32_t main(int32_t argc, char** argv) {
     return 0;
   }
 
-  // ---- ibmw run <config.yaml> [options] ----
+  // Built-in runtime command.  Every other command is offered to the
+  // configured CLI providers, so adding a provider command does not require
+  // changing Core's command switch.
   if (subcmd != "run") {
+    const int command_argc = argc - command_index;
+    const int result = RunCliCommandFromProviders(
+        command_argc, argv + command_index, cli_config_path);
+    if (result != kCliCommandNotFound) {
+      return result;
+    }
     std::cerr << "Unknown command: " << subcmd << "\n\n";
     PrintUsage();
+    return 1;
+  }
+
+  if (!cli_config_path.empty()) {
+    std::cerr << "Error: '--cli-config' applies only to provider commands, "
+                 "not to 'run'.\n";
     return 1;
   }
 

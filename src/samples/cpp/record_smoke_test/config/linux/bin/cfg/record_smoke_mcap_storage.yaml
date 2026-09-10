@@ -1,0 +1,4 @@
+chunk_size: 4096
+no_chunking: false
+force_compression: false
+compression_level: fastest

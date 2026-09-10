@@ -142,7 +142,19 @@ void MqttExtension::RegisterMqttTransportDriver() {
       [ptr = static_cast<MqttTransportDriver *>(mqtt_transport_driver_ptr.get())]() {
         ptr->SubscribeMqttTopic();
       });
-  core_ptr_->GetTransportBus().RegisterTransportDriver(std::move(mqtt_transport_driver_ptr));
+  core_ptr_->GetTransportBus().RegisterTransportDriver(
+      std::move(mqtt_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,
+          .schema = runtime::core::transport::SerializedSchemaSupport::kTypeSupportPackage,
+          .loan = runtime::core::transport::SerializedLoanSupport::kSharedPayload,
+          .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
+          .capture_priority = 3,
+          .provider_name = Name(),
+          .provider_instance_option = "client_id",
+          .provider_clear_option = "callback_executor_name"});
 }
 
 void MqttExtension::RegisterMqttRpcDriver() {

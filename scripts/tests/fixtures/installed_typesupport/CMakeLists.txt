@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(ibmw_installed_typesupport_loader LANGUAGES CXX)
+
+find_package(ibmw REQUIRED CONFIG)
+
+add_executable(installed_typesupport_loader installed_typesupport_loader.cc)
+target_compile_features(installed_typesupport_loader PRIVATE cxx_std_20)
+target_link_libraries(installed_typesupport_loader PRIVATE ibmw::core::engine)

@@ -13,6 +13,7 @@ try:
     from typing import Any
 
     from .. import config as _ibmw_gen_config
+    from .type_support_pkg_gen import collect_package_type_support
 except ImportError:  # pragma: no cover — direct-script invocation fallback
     from typing import Any
 
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover — direct-script invocation fallback
     import os as _os
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     import config as _ibmw_gen_config  # type: ignore
+    from generators.type_support_pkg_gen import collect_package_type_support
 
 
 def _snake(name: str) -> str:
@@ -142,12 +144,14 @@ def generate_cmake(project: dict) -> str:
     apps = project.get("apps", [])
     dds = project.get("dds_types")
     json_types = project.get("json_types")
+    json_messages = (json_types or {}).get("messages", [])
     cdt = project.get("custom_dds_types")
     experimental_actions = project.get("experimental_actions", [])
 
     # Determine what features are used
     has_dds = any(m.get("transport") == "dds" for m in modules)
-    has_json = any(m.get("transport") == "json" for m in modules)
+    has_json = (any(m.get("transport") == "json" for m in modules)
+                or bool(json_messages))
     has_ros2 = any(m.get("transport") == "ros2" for m in modules)
     imported_srv_adapter_packages = sorted({
         str(m.get("ros2_package"))
@@ -162,37 +166,21 @@ def generate_cmake(project: dict) -> str:
     needs_fastcdr = project.get("_needs_fastcdr", False)
     has_ros2_interop = project.get("_has_ros2_interop", False)
     ros2_interop_packages = project.get("_ros2_interop_packages", [])
-    # Use independent loaned_publisher signals rather than piggybacking on
-    # _is_ros2_interop). loaned_publisher modules use the same ros2_types
-    # whole-archive infrastructure (for ROS2 typesupport registrars consumed
-    # by RegisterSendType<T>) but are conceptually a distinct path.
-    has_loaned_publisher = project.get("_has_loaned_publisher", False)
+    # Loaned modules use public header-only TypeSupport adapters. Their ROS2
+    # packages are still discovered here, but they do not need transport
+    # extension libraries or ros2_types static registrars.
     loaned_publisher_packages = project.get("_loaned_publisher_packages", [])
-    # loaned_subscriber project-level signals mirror loaned_publisher
-    # (both use ros2_types whole-archive + per-package targets; iceoryx
-    # subscriber additionally needs iceoryx_posh + iceoryx_ext deps).
-    has_loaned_subscriber = project.get("_has_loaned_subscriber", False)
+    # loaned_subscriber project-level signals mirror loaned_publisher.
     loaned_subscriber_packages = project.get("_loaned_subscriber_packages", [])
     has_direct_iceoryx = project.get("_has_direct_iceoryx", False)
     direct_iceoryx_packages = project.get("_direct_iceoryx_packages", [])
-    # Union: anything that needs the whole-archive helper + ROS2 message
-    # find_package() calls + ros2_types link is captured by either flag.
-    needs_ros2_msg_infra = (has_ros2_interop or has_loaned_publisher
-                            or has_loaned_subscriber or has_direct_iceoryx)
+    needs_ros2_whole_archive = has_ros2_interop or has_direct_iceoryx
     ros2_msg_packages = sorted(set(ros2_interop_packages)
                                | set(loaned_publisher_packages)
                                | set(loaned_subscriber_packages)
                                | set(direct_iceoryx_packages))
-    # iceoryx_ext links iceoryx_posh PRIVATE, so any
-    # downstream target consuming iceoryx_ext must independently locate
-    # iceoryx_posh::iceoryx_posh — emit a find_package() for it at top level.
-    has_iceoryx_loaned_publisher = project.get(
-        "_has_iceoryx_loaned_publisher", False)
-    has_iceoryx_loaned_subscriber = project.get(
-        "_has_iceoryx_loaned_subscriber", False)
-    needs_iceoryx_posh_top = (has_iceoryx_loaned_publisher
-                              or has_iceoryx_loaned_subscriber
-                              or has_direct_iceoryx)
+    # Only explicit direct iceoryx modules compile against the implementation.
+    needs_iceoryx_posh_top = has_direct_iceoryx
 
     lines = []
 
@@ -227,12 +215,12 @@ def generate_cmake(project: dict) -> str:
     lines.append("find_package(ibmw 0.1.0 REQUIRED)")
     lines.append("")
 
-    # Whole-archive helper for ROS2 interop / loaned_publisher modules
+    # Whole-archive helper for ROS2 interop and explicit direct modules
     # (static type registrars in ros2_types_impl must be force-loaded).
-    if needs_ros2_msg_infra:
+    if needs_ros2_whole_archive:
         lines.append("# --------------------------------------------------------------------------")
         lines.append("# Helper: force whole-archive link for ros2_types_impl static registrars.")
-        lines.append("# Used by ros2_interop_* and loaned_publisher modules.")
+        lines.append("# Used by ros2_interop_* and direct_iceoryx_* modules.")
         lines.append("# --------------------------------------------------------------------------")
         lines.append("function(ibmw_whole_archive_link TARGET LIB)")
         lines.append("  if(APPLE)")
@@ -492,6 +480,27 @@ def generate_cmake(project: dict) -> str:
                         not mod.get("ros2_rpc_gencode_target")):
                     mod["_auto_ros2_rpc_gencode_target"] = target
 
+    json_ts_target = None
+    if json_messages:
+        json_ts_target = f"{_snake(proj_name)}_json_ts"
+        lines.append("# --------------------------------------------------------------------------")
+        lines.append("# JSON TypeSupport Package for Bag schema discovery and playback.")
+        lines.append("# --------------------------------------------------------------------------")
+        lines.append(f"add_library({json_ts_target} SHARED")
+        lines.append("  src/json_type_support_pkg_main.cc)")
+        lines.append(f"target_include_directories({json_ts_target} PRIVATE")
+        lines.append("  ${CMAKE_CURRENT_SOURCE_DIR}/src)")
+        lines.append(f"target_link_libraries({json_ts_target} PRIVATE")
+        lines.append("  ibmw::api::type_support")
+        lines.append("  ibmw::api::cpp")
+        lines.append("  nlohmann_json::nlohmann_json)")
+        lines.append(f"set_target_properties({json_ts_target} PROPERTIES")
+        lines.append(f"  OUTPUT_NAME \"{_snake(proj_name)}_json_ts\")")
+        lines.append(f"install(TARGETS {json_ts_target}")
+        lines.append("  LIBRARY DESTINATION lib")
+        lines.append("  RUNTIME DESTINATION bin)")
+        lines.append("")
+
     for action in experimental_actions:
         if action.get("name") == "fibonacci":
             _emit_experimental_fibonacci_action(lines, action)
@@ -515,34 +524,11 @@ def generate_cmake(project: dict) -> str:
         extra_include_dirs = []
 
         if transport == "dds":
-            # loaned_publisher,dds — handled by the dedicated branch below
-            # (no longer piggybacks on _is_ros2_interop; this avoids coupling
-            # known-issue #3).
-            if mod.get("_is_loaned_publisher"):
-                # ros2_types: needed for ROS2 typesupport registrars consumed
-                # by RegisterSendType<T>. Whole-archive link is added later
-                # (search for `_is_loaned_publisher` near end of module loop).
-                deps.append("ibmw::extensions::ros2_types")
-                # Per-package targets bring the message struct .hpp + rosidl
-                # generator deps (e.g. geometry_msgs__rosidl_generator_cpp).
+            if (mod.get("_is_loaned_publisher") or
+                    mod.get("_is_loaned_subscriber")):
+                deps.append("ibmw::api::ros2_type_support")
                 for pkg in mod.get("ros2_packages", []):
                     deps.append(f"${{{pkg}_TARGETS}}")
-                # dds_ext: provides Ros2StylePublisher / DdsTransportDriver /
-                # LoanedMessage. Transitively brings in fastdds / fastcdr /
-                # ibmw::core::engine — no need to list them here.
-                deps.append("ibmw::extensions::dds_ext")
-            elif mod.get("_is_loaned_subscriber"):
-                # loaned_subscriber,dds mirrors loaned_publisher,dds.
-                # Goes through ibmw::ros2::transport::OnMessage<T>(subscriber_ref,
-                # ros2_type_name, callback). Needs ros2_types (typesupport
-                # registrars consumed by the engine to deserialize ROS2
-                # messages) + per-package targets (message struct .hpp +
-                # rosidl generator deps) + dds_ext (Ros2StyleSubscriber /
-                # DdsTransportDriver). Whole-archive link added later.
-                deps.append("ibmw::extensions::ros2_types")
-                for pkg in mod.get("ros2_packages", []):
-                    deps.append(f"${{{pkg}_TARGETS}}")
-                deps.append("ibmw::extensions::dds_ext")
             elif mod.get("_is_ros2_interop"):
                 # ros2_interop_publisher / ros2_interop_subscriber modules
                 # need ros2_types + per-package targets (whole-archive link
@@ -604,37 +590,9 @@ def generate_cmake(project: dict) -> str:
                 deps.append("ibmw::extensions::ros2_types")
                 for pkg in mod.get("ros2_packages", []):
                     deps.append(f"${{{pkg}_TARGETS}}")
-            elif mod.get("_is_loaned_publisher"):
-                # iceoryx_ext: provides IceoryxTransportDriver / EnsurePodTopic
-                # for the one-time SHM topic registration on Run(). Per Option B
-                # iceoryx_ext SHARED links iceoryx_posh PRIVATE,
-                # so downstream consumers MUST add iceoryx_posh explicitly.
-                deps.append("ibmw::extensions::iceoryx_ext")
-                deps.append("iceoryx_posh::iceoryx_posh")
-                # ros2_types: needed for ROS2 typesupport registrars consumed
-                # by RegisterSendType<T> on the SenderRef. Whole-archive link
-                # is added later (search for `_is_loaned_publisher` near end
-                # of module loop).
-                deps.append("ibmw::extensions::ros2_types")
-                # Per-package targets bring the message struct .hpp + rosidl
-                # generator deps. NOTE: iceoryx loan path further requires the
-                # message type to be trivially_copyable; the generated header
-                # has a `static_assert` that will reject non-POD ROS2 types
-                # at compile time (C1 design).
-                for pkg in mod.get("ros2_packages", []):
-                    deps.append(f"${{{pkg}_TARGETS}}")
-            elif mod.get("_is_loaned_subscriber"):
-                # loaned_subscriber,iceoryx uses
-                # ibmw::transport::LoanedSubscriber<T>::AttachBytes which goes
-                # through the ReceiverRef vtable. Same dep set as the iceoryx
-                # publisher branch: iceoryx_ext (dispatcher routing) +
-                # iceoryx_posh (transitive PRIVATE link) + ros2_types
-                # (typesupport registrars consumed by SubscriberRef +
-                # GetRos2TypeName<T>) + per-package targets (message struct
-                # + static_assert(is_trivially_copyable) target).
-                deps.append("ibmw::extensions::iceoryx_ext")
-                deps.append("iceoryx_posh::iceoryx_posh")
-                deps.append("ibmw::extensions::ros2_types")
+            elif (mod.get("_is_loaned_publisher") or
+                  mod.get("_is_loaned_subscriber")):
+                deps.append("ibmw::api::ros2_type_support")
                 for pkg in mod.get("ros2_packages", []):
                     deps.append(f"${{{pkg}_TARGETS}}")
             # else: no other module type uses iceoryx today; future module
@@ -678,15 +636,9 @@ def generate_cmake(project: dict) -> str:
                 f"target_include_directories({snake_name} PUBLIC {mod['ros2_imported_srv_adapter_include_dir']})"
             )
 
-        # ROS2 interop modules and loaned_publisher / loaned_subscriber modules
-        # all need whole-archive link for ros2_types_impl to ensure static
-        # ROS2 typesupport registrars are initialized at load time.
-        # The loaned_publisher condition is independent of _is_ros2_interop.
-        # loaned_subscriber follows the same rationale,
-        # the subscriber path also resolves typesupport via static registrars.)
-        if (mod.get("_is_ros2_interop") or mod.get("_is_loaned_publisher")
-                or mod.get("_is_direct_iceoryx")
-                or mod.get("_is_loaned_subscriber")):
+        # Only interop and explicitly direct modules rely on the static
+        # ros2_types registrar library.
+        if mod.get("_is_ros2_interop") or mod.get("_is_direct_iceoryx"):
             lines.append(f"ibmw_whole_archive_link({snake_name} ibmw_extensions_ros2_types_impl)")
 
         lines.append("")
@@ -701,12 +653,29 @@ def generate_cmake(project: dict) -> str:
         app_type = app.get("type", "pubsub")
 
         module_targets = [module_cmake_targets.get(m, _snake(m)) for m in mod_names]
+        package_type_support = collect_package_type_support(project, mod_names)
 
         # Pkg
         lines.append(f"ibmw_add_pkg({pkg_name}")
         lines.append(f"  SRCS src/{pkg_name}/pkg_main.cc")
         lines.append(f"  MODULES {' '.join(module_targets)})")
         lines.append("")
+
+        if package_type_support.entries:
+            ts_target = f"{pkg_name}_ts"
+            lines.append(f"add_library({ts_target} SHARED")
+            lines.append(f"  src/{pkg_name}/type_support_pkg_main.cc)")
+            lines.append(f"target_include_directories({ts_target} PRIVATE")
+            lines.append("  ${CMAKE_CURRENT_SOURCE_DIR}")
+            lines.append("  ${CMAKE_CURRENT_SOURCE_DIR}/src)")
+            lines.append(f"target_link_libraries({ts_target} PRIVATE")
+            lines.append("  " + "\n  ".join(package_type_support.cmake_dependencies()) + ")")
+            lines.append(f"set_target_properties({ts_target} PROPERTIES")
+            lines.append(f"  OUTPUT_NAME \"{ts_target}\")")
+            lines.append(f"install(TARGETS {ts_target}")
+            lines.append("  LIBRARY DESTINATION lib")
+            lines.append("  RUNTIME DESTINATION bin)")
+            lines.append("")
 
         # App
         if app_type == "bare":

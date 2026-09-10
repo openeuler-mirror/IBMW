@@ -39,6 +39,22 @@ ibmw_add_pkg(ros2_rpc_pkg
   SRCS src/ros2_rpc_pkg/pkg_main.cc
   MODULES rpc_server_module rpc_client_module)
 
+add_library(ros2_rpc_pkg_ts SHARED
+  src/ros2_rpc_pkg/type_support_pkg_main.cc)
+target_include_directories(ros2_rpc_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ros2_rpc_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  example_ros2::example_ros2__rosidl_generator_cpp
+  example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
+set_target_properties(ros2_rpc_pkg_ts PROPERTIES
+  OUTPUT_NAME "ros2_rpc_pkg_ts")
+install(TARGETS ros2_rpc_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(ros2_rpc_app
   SRCS src/ros2_rpc_app/main.cc
   MODULES rpc_server_module rpc_client_module)

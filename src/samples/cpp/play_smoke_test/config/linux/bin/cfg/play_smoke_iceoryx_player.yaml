@@ -1,0 +1,16 @@
+ibmw:
+  bag_playback:
+    type_support_pkgs: [../libplay_smoke_ts.so]
+  extensions:
+    items:
+      - name: iceoryx_extension
+        path: ../libibmw_iceoryx_transport.so
+        options: {shm_init_size: 1024, runtime_id: play_smoke_iceoryx_player}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 2}}
+  messaging:
+    drivers: [{type: iceoryx}]
+    publishers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [iceoryx]}

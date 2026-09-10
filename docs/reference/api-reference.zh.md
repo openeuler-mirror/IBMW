@@ -684,11 +684,18 @@ Type support package 在运行时为消息类型提供序列化能力。
 
 ```cpp
 IBMW_TYPE_SUPPORT_PKG_EXPORT
-size_t IbmwDynlibGetTypeSupportArrayLength();
-
-IBMW_TYPE_SUPPORT_PKG_EXPORT
-const ibmw_type_support_base_t** IbmwDynlibGetTypeSupportArray();
+const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1();
 ```
+
+descriptor 中可选的 `ibmw_schema_support_package_v1_t` 保存
+`ibmw_schema_support_package_v1_t`，其中保存不可变的
+`ibmw_schema_support_v1_t` 描述符。两个结构均以 `abi_version` 和
+`struct_size` 开头；消费者读取必选字段前，必须检查版本，并确认
+`struct_size` 不小于相应的 `*_V1_REQUIRED_SIZE`。未来 ABI 修订可以在不改变
+既有前缀的情况下追加字段。字符串视图和 schema 字节由包持有，生命周期持续
+到包卸载。V1 使用规范化的小写 serialization/schema encoding，并对原始 schema
+字节计算 `fnv1a64:<16 位小写十六进制>`；hash 仅用于加速查找，不能作为无冲突
+标识。必选字符串或 schema 数据为空时，描述符无效。
 
 ---
 

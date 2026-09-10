@@ -24,13 +24,19 @@ else:
     sys.path.insert(0, _SCRIPT_DIR)
 
 from schema import load_and_validate
-from generators.json_types_gen import generate_json_types, needs_json_custom_types_header
+from generators.json_types_gen import (
+    generate_json_type_support_package,
+    generate_json_types,
+    has_generated_json_types,
+    needs_json_custom_types_header,
+)
 from generators.dds_idl_gen import generate_dds_idl_files
 from generators.dds_types_gen import generate_dds_type_bridges
 from generators.dds_rpc_yaml_gen import generate_dds_rpc_yamls
 from generators.module_gen import generate_modules
 from generators.app_gen import generate_app_mains
 from generators.pkg_gen import generate_pkg_mains
+from generators.type_support_pkg_gen import generate_type_support_package_sources
 from generators.config_gen import generate_configs
 from generators.cmake_gen import generate_cmake
 from generators.action_gen import generate_experimental_actions
@@ -52,7 +58,12 @@ ALWAYS_OVERWRITE_PATTERNS = {
 
 def _is_always_overwrite(rel_path: str) -> bool:
     """Return True if the file should always be overwritten."""
-    if rel_path in ("CMakeLists.txt", "src/json_types.h", "src/json_custom_types.h"):
+    if rel_path in (
+        "CMakeLists.txt",
+        "src/json_types.h",
+        "src/json_custom_types.h",
+        "src/json_type_support_pkg_main.cc",
+    ):
         return True
     if rel_path.startswith("cfg/") or rel_path.startswith("schema/") or rel_path.startswith("protocol/"):
         return True
@@ -63,7 +74,7 @@ def _is_always_overwrite(rel_path: str) -> bool:
     if base.endswith("_dds_types.h") or base.endswith("_cdr_impl.cc"):
         return True
     # main.cc, pkg_main.cc
-    if base in ("main.cc", "pkg_main.cc"):
+    if base in ("main.cc", "pkg_main.cc", "type_support_pkg_main.cc"):
         return True
     return False
 
@@ -607,6 +618,9 @@ def main():
         if needs_json_custom_types_header(project):
             content = generate_json_types(project)
             emit("src/json_custom_types.h", content)
+        if has_generated_json_types(project):
+            content = generate_json_type_support_package(project)
+            emit("src/json_type_support_pkg_main.cc", content)
 
         # DDS IDL files
         if project.get("dds_types"):
@@ -636,6 +650,10 @@ def main():
         for rel_path, content in generate_app_mains(project):
             emit(rel_path, content)
         for rel_path, content in generate_pkg_mains(project):
+            emit(rel_path, content)
+
+    if categories & {"apps", "types", "schema"}:
+        for rel_path, content in generate_type_support_package_sources(project):
             emit(rel_path, content)
 
     if "configs" in categories:

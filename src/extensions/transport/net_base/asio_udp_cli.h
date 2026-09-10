@@ -8,9 +8,11 @@
 #include <list>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 #include <boost/asio.hpp>
-#include <utility>
+
+#include "net_base/asio_endpoint_hash.h"
 
 #include "base/log_util.h"
 #include "base/string_util.h"
@@ -423,8 +425,7 @@ class AsioUdpClientPool
             co_return std::shared_ptr<AsioUdpClient>();
           }
 
-          const size_t client_hash =
-              std::hash<boost::asio::ip::udp::endpoint>{}(client_options.svr_ep);
+          const size_t client_hash = AsioEndpointHash{}(client_options.svr_ep);
 
           auto itr = client_map_.find(client_hash);
           if (itr != client_map_.end()) {

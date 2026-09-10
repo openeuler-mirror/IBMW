@@ -6,7 +6,7 @@
 #include <chrono>
 #include <iostream>
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 #include "protocol/hello_msg.h"
 
 namespace ibmw::examples::dds_native_demo {

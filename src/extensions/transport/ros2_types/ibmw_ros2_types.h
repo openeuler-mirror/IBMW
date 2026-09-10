@@ -3,6 +3,6 @@
 
 #pragma once
 
-#include "ros2_types/transport/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 #include "ros2_types/util/ros2_rcl_serialized_message_adapter.h"
 #include "ros2_types/util/ros2_type_support.h"

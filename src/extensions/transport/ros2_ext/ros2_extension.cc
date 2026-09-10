@@ -144,11 +144,21 @@ bool Ros2Extension::OnInit(runtime::core::Engine* core_ptr) {
 }
 
 void Ros2Extension::OnShutdown() {
+  if (ros2_node_executor_ptr_) {
+    ros2_node_executor_ptr_->cancel();
+  }
   auto default_context = rclcpp::contexts::get_global_default_context();
-  default_context->shutdown("user called rclcpp::shutdown()");
+  if (default_context && default_context->is_valid()) {
+    default_context->shutdown("user called rclcpp::shutdown()");
+  }
   rclcpp::uninstall_signal_handlers();
 
-  ros2_thread_ptr_->join();
+  if (ros2_thread_ptr_ && ros2_thread_ptr_->joinable()) {
+    ros2_thread_ptr_->join();
+  }
+  ros2_thread_ptr_.reset();
+  ros2_node_executor_ptr_.reset();
+  ros2_node_ptr_.reset();
 }
 
 void Ros2Extension::SetExecutorThreadSchedOption() {
@@ -187,7 +197,17 @@ void Ros2Extension::RegisterRos2TransportDriver() {
       ->SetNodePtr(ros2_node_ptr_);
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
-      std::move(ros2_transport_driver_ptr));
+      std::move(ros2_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,
+          .schema = runtime::core::transport::SerializedSchemaSupport::kTypeSupportPackage,
+          .loan = runtime::core::transport::SerializedLoanSupport::kSharedPayload,
+          .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
+          .capture_priority = 4,
+          .provider_name = Name(),
+          .provider_instance_option = "node_name"});
 }
 
 }  // namespace ibmw::extensions::ros2_extension

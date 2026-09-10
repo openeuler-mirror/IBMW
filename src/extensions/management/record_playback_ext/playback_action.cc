@@ -3,6 +3,7 @@
 
 #include "record_playback_ext/playback_action.h"
 #include "record_playback_ext/global.h"
+#include "record_playback_ext/storage/path_safety.h"
 #include "base/string_util.h"
 
 #include <filesystem>
@@ -78,6 +79,13 @@ struct convert<ibmw::extensions::record_playback_extension::PlaybackAction::Opti
 
 namespace ibmw::extensions::record_playback_extension {
 
+PlaybackAction::~PlaybackAction() noexcept {
+  try {
+    Shutdown();
+  } catch (...) {
+  }
+}
+
 void PlaybackAction::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
@@ -91,6 +99,8 @@ void PlaybackAction::Initialize(YAML::Node options_node) {
       "Get type support function is not set before initialize.");
 
   options_.bag_path = std::filesystem::canonical(std::filesystem::absolute(options_.bag_path)).string();
+  task_state_ = std::make_shared<TaskState>();
+  task_state_->owner = this;
 
   // check metadata.yaml
   auto metadata_yaml_file_path = std::filesystem::path(options_.bag_path) / "metadata.yaml";
@@ -151,9 +161,23 @@ void PlaybackAction::Initialize(YAML::Node options_node) {
                           "Empty bag! bag path: {}", options_.bag_path);
 
   metadata_.files.erase(std::remove_if(metadata_.files.begin(), metadata_.files.end(), [this](const auto& item) {
-                          const auto db_file_path = std::filesystem::path(options_.bag_path) / item.path;
-                          if (!std::filesystem::exists(db_file_path) || !std::filesystem::is_regular_file(db_file_path)) {
-                            MW_WARN("Can not find bag file '{}' in bag path '{}', this file will be ignored.", db_file_path.string(), options_.bag_path);
+                          const auto relative = std::filesystem::path(item.path);
+                          const bool has_parent = std::any_of(
+                              relative.begin(), relative.end(),
+                              [](const auto& component) { return component == ".."; });
+                          if (relative.is_absolute() || has_parent) {
+                            // Unsafe metadata is a malformed bag, not a
+                            // missing optional shard: fail closed.
+                            static_cast<void>(SafeBagFilePath(options_.bag_path, relative));
+                          }
+                          if (!std::filesystem::exists(
+                                  std::filesystem::path(options_.bag_path) / relative)) {
+                            MW_WARN("Can not find bag file '{}' in bag path '{}', this file will be ignored.", item.path, options_.bag_path);
+                            return true;
+                          }
+                          const auto path = SafeBagFilePath(options_.bag_path, relative);
+                          if (!std::filesystem::is_regular_file(path)) {
+                            MW_WARN("Can not find bag file '{}' in bag path '{}', this file will be ignored.", item.path, options_.bag_path);
                             return true;
                           }
                           return false;
@@ -190,12 +214,25 @@ void PlaybackAction::Start() {
 
   // start imd mode
   if (options_.mode == Options::Mode::kImd) {
-    std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    if (playback_state_ == PlayBackState::kReadyToPlay) {
+    {
+      std::lock_guard<std::mutex> lck(playback_state_mutex_);
+      if (playback_state_ != PlayBackState::kReadyToPlay) {
+        return;
+      }
       playback_state_ = PlayBackState::kPlaying;
-      playback_state_mutex_.unlock();
-      StartPlaybackImpl(options_.skip_duration_s, options_.play_duration_s);
     }
+
+    auto task_state = task_state_;
+    PlaybackAction* action = nullptr;
+    if (!task_state || !task_state->Enter(action)) {
+      return;
+    }
+    struct Guard {
+      std::shared_ptr<TaskState> state;
+      ~Guard() { state->Leave(); }
+    } guard{task_state};
+    action->StartPlaybackImpl(options_.skip_duration_s,
+                              options_.play_duration_s);
   }
 }
 
@@ -215,10 +252,16 @@ void PlaybackAction::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
-  std::lock_guard<std::mutex> lck(playback_state_mutex_);
-  if (playback_state_ == PlayBackState::kPlaying)
-    playback_state_ = PlayBackState::kGetStopSignal;
+  {
+    std::lock_guard<std::mutex> lck(playback_state_mutex_);
+    if (playback_state_ == PlayBackState::kPlaying)
+      playback_state_ = PlayBackState::kGetStopSignal;
+  }
 
+  if (task_state_) {
+    task_state_->StopAndWait();
+  }
+  std::lock_guard<std::mutex> db_lck(db_mutex_);
   ClosePlayback();
 }
 
@@ -277,16 +320,26 @@ bool PlaybackAction::StartSignalPlayback(uint64_t skip_duration_s, uint64_t play
 
   {
     std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    if (playback_state_ == PlayBackState::kReadyToPlay) {
-      playback_state_ = PlayBackState::kPlaying;
-      playback_state_mutex_.unlock();
-      StartPlaybackImpl(skip_duration_s, play_duration_s);
-      return true;
+    if (playback_state_ != PlayBackState::kReadyToPlay) {
+      MW_WARN("Playback is already running.");
+      return false;
     }
+    playback_state_ = PlayBackState::kPlaying;
   }
 
-  MW_WARN("Playback is already running.");
-  return false;
+  auto task_state = task_state_;
+  PlaybackAction* action = nullptr;
+  if (!task_state || !task_state->Enter(action)) {
+    std::lock_guard<std::mutex> lck(playback_state_mutex_);
+    playback_state_ = PlayBackState::kGetStopSignal;
+    return false;
+  }
+  struct Guard {
+    std::shared_ptr<TaskState> state;
+    ~Guard() { state->Leave(); }
+  } guard{task_state};
+  action->StartPlaybackImpl(skip_duration_s, play_duration_s);
+  return true;
 }
 
 void PlaybackAction::StopSignalPlayback() {
@@ -318,16 +371,10 @@ void PlaybackAction::StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_d
 
   start_timestamp_ = ibmw::common::util::GetCurTimestampNs();
 
-  // start two task
-  std::shared_ptr<void> task_counter_ptr(
-      nullptr,
-      [this](...) {
-        std::lock_guard<std::mutex> lck(playback_state_mutex_);
-        playback_state_ = PlayBackState::kReadyToPlay;
-      });
-
-  AddPlaybackTasks(task_counter_ptr);
-  AddPlaybackTasks(task_counter_ptr);
+  auto task_state = task_state_;
+  MW_ASSERT(task_state != nullptr, "Playback task state is not initialized.");
+  AddPlaybackTasks(task_state);
+  AddPlaybackTasks(task_state);
 }
 
 bool PlaybackAction::OpenNewMcaptoPlayBack() {
@@ -337,7 +384,8 @@ bool PlaybackAction::OpenNewMcaptoPlayBack() {
     return false;
   }
   const auto& mcap_file_meta = metadata_.files[cur_mcap_file_index_];
-  const auto mcap_file_path = (real_bag_path_ / mcap_file_meta.path).string();
+  const auto mcap_file_path =
+      SafeBagFilePath(real_bag_path_, mcap_file_meta.path);
   ++cur_mcap_file_index_;
   uint64_t cur_mcap_start_timestamp = mcap_file_meta.start_timestamp;
 
@@ -346,16 +394,16 @@ bool PlaybackAction::OpenNewMcaptoPlayBack() {
     return false;
   }
   reader_ = std::make_unique<mcap::McapReader>();
-  auto ret = reader_->open(mcap_file_path);
+  auto ret = reader_->open(mcap_file_path.string());
   if (!ret.ok()) [[unlikely]] {
-    MW_ERROR("open mcap file {} failed, error: {}", mcap_file_path, ret.message);
+    MW_ERROR("open mcap file {} failed, error: {}", mcap_file_path.string(), ret.message);
     return false;
   }
   auto summary = reader_->readSummary(mcap::ReadSummaryMethod::AllowFallbackScan);
   const auto& channels = reader_->channels();
 
   if (channels.empty()) [[unlikely]] {
-    MW_ERROR("No channels found in mcap file: {}", mcap_file_path);
+    MW_ERROR("No channels found in mcap file: {}", mcap_file_path.string());
     return false;
   }
 
@@ -390,7 +438,10 @@ bool PlaybackAction::OpenNewMcaptoPlayBack() {
   return true;
 }
 
-void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<void>& task_counter_ptr) {
+void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_state) {
+  if (!task_state) {
+    return;
+  }
   {
     std::lock_guard<std::mutex> lck(playback_state_mutex_);
     if (playback_state_ == PlayBackState::kGetStopSignal) [[unlikely]] {
@@ -398,59 +449,58 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<void>& task_counter_
     }
   }
 
-  std::lock_guard<std::mutex> db_lck(db_mutex_);
-
   // Output up to 1s of data or up to 1000 records at a time
   constexpr size_t kMaxRecordSize = 1000;
-  uint64_t cur_start_timestamp = 0;
-
   std::vector<OneRecord> records;
   records.reserve(kMaxRecordSize);
 
-  while (true) {
-    if (!msg_reader_itr_ || *msg_reader_itr_ == msg_reader_ptr_->end()) {
-      if (!OpenNewMcaptoPlayBack()) {
+  {
+    std::lock_guard<std::mutex> db_lck(db_mutex_);
+    uint64_t cur_start_timestamp = 0;
+
+    while (true) {
+      if (!msg_reader_itr_ || *msg_reader_itr_ == msg_reader_ptr_->end()) {
+        if (!OpenNewMcaptoPlayBack()) {
+          break;
+        }
+      }
+      const auto& message = (**msg_reader_itr_).message;
+      uint64_t topic_id = channel_id_to_topic_id_map_[message.channelId];
+      uint64_t timestamp = message.logTime;
+      size_t size = message.dataSize;
+      std::unique_ptr<char[]> data = std::make_unique<char[]>(size);
+      std::memcpy(data.get(), message.data, size);
+      (*msg_reader_itr_)++;
+
+      if (stop_playback_timestamp_ > 0 && timestamp > stop_playback_timestamp_) {
+        MW_INFO("Stop playback");
+        std::lock_guard<std::mutex> lck(playback_state_mutex_);
+        playback_state_ = PlayBackState::kGetStopSignal;
+        break;
+      }
+
+      ibmw_buffer_view_t buffer_view{
+          .data = data.get(),
+          .len = size};
+
+      ibmw_buffer_array_view_t buffer_array_view{
+          .data = &buffer_view,
+          .len = 1};
+      records.emplace_back(
+          OneRecord{
+              .topic_index = static_cast<uint64_t>(topic_id),
+              .dt = timestamp - start_playback_timestamp_,
+              .buffer_view_ptr = std::shared_ptr<ibmw::util::BufferArrayView>(
+                  new ibmw::util::BufferArrayView(buffer_array_view),
+                  [data_ptr = std::move(data)](const auto* ptr) { delete ptr; })});
+
+      if (cur_start_timestamp == 0) [[unlikely]] {
+        cur_start_timestamp = timestamp;
+      } else if ((timestamp - cur_start_timestamp) >= 1000000000 || records.size() >= kMaxRecordSize) [[unlikely]] {
         break;
       }
     }
-    const auto& message = (**msg_reader_itr_).message;
-    uint64_t topic_id = channel_id_to_topic_id_map_[message.channelId];
-    uint64_t timestamp = message.logTime;
-    size_t size = message.dataSize;
-    std::unique_ptr<char[]> data = std::make_unique<char[]>(size);
-    std::memcpy(data.get(), message.data, size);
-    (*msg_reader_itr_)++;
-
-    if (stop_playback_timestamp_ > 0 && timestamp > stop_playback_timestamp_) {
-      MW_INFO("Stop playback");
-      std::lock_guard<std::mutex> lck(playback_state_mutex_);
-      playback_state_ = PlayBackState::kGetStopSignal;
-      break;
-    }
-
-    ibmw_buffer_view_t buffer_view{
-        .data = data.get(),
-        .len = size};
-
-    ibmw_buffer_array_view_t buffer_array_view{
-        .data = &buffer_view,
-        .len = 1};
-    records.emplace_back(
-        OneRecord{
-            .topic_index = static_cast<uint64_t>(topic_id),
-            .dt = timestamp - start_playback_timestamp_,
-            .buffer_view_ptr = std::shared_ptr<ibmw::util::BufferArrayView>(
-                new ibmw::util::BufferArrayView(buffer_array_view),
-                [data_ptr = std::move(data)](const auto* ptr) { delete ptr; })});
-
-    if (cur_start_timestamp == 0) [[unlikely]] {
-      cur_start_timestamp = timestamp;
-    } else if ((timestamp - cur_start_timestamp) >= 1000000000 || records.size() >= kMaxRecordSize) [[unlikely]] {
-      break;
-    }
   }
-
-  db_mutex_.unlock();
 
   MW_TRACE("Get {} record.", records.size());
 
@@ -469,17 +519,33 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<void>& task_counter_
     if (ii < len - 1) {
       executor_.DispatchAt(
           tp,
-          [this, record{std::move(record)}]() {
-            pub_record_func_(record);
+          [task_state, record{std::move(record)}]() {
+            PlaybackAction* action = nullptr;
+            if (!task_state->Enter(action)) {
+              return;
+            }
+            struct Guard {
+              std::shared_ptr<TaskState> state;
+              ~Guard() { state->Leave(); }
+            } guard{task_state};
+            action->pub_record_func_(record);
           });
     } else {
       executor_.DispatchAt(
           tp,
-          [this, record{std::move(record)}, task_counter_ptr]() {
-            pub_record_func_(record);
+          [task_state, record{std::move(record)}]() {
+            PlaybackAction* action = nullptr;
+            if (!task_state->Enter(action)) {
+              return;
+            }
+            struct Guard {
+              std::shared_ptr<TaskState> state;
+              ~Guard() { state->Leave(); }
+            } guard{task_state};
+            action->pub_record_func_(record);
 
             // add new playback tasks to last publish task
-            AddPlaybackTasks(task_counter_ptr);
+            action->AddPlaybackTasks(task_state);
           });
     }
   }

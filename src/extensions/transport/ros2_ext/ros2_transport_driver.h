@@ -15,6 +15,7 @@
 #include "ros2_ext/ros2_adapter_subscription.h"
 
 #include "rclcpp/rclcpp.hpp"
+#include "rcpputils/shared_library.hpp"
 
 #include "rcl/publisher.h"
 
@@ -117,6 +118,7 @@ class Ros2TransportDriver : public runtime::core::transport::TransportDriver {
   struct RosPubWrapper {
     std::unique_ptr<rcl_publisher_t> publisher_ptr;
     bool use_serialized;
+    std::shared_ptr<rcpputils::SharedLibrary> type_support_library;
   };
 
   std::unordered_map<
@@ -129,6 +131,7 @@ class Ros2TransportDriver : public runtime::core::transport::TransportDriver {
   struct RosSubWrapper {
     std::unique_ptr<ibmw::runtime::core::transport::MessageHandlerTool> msg_handler_tool_ptr;
     std::shared_ptr<rclcpp::SubscriptionBase> ros_sub_handle_ptr;
+    std::shared_ptr<rcpputils::SharedLibrary> type_support_library;
   };
 
   std::unordered_map<

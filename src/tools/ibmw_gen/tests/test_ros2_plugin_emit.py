@@ -119,7 +119,7 @@ class TestRos2PluginEmit(unittest.TestCase):
         self.assertEqual(ts_info["msg_type_cpp"],
                          "example_ros2::msg::RosTestMsg")
         inc_h = ts_info["inc_h_content"]
-        self.assertIn("internal/typesupport/ros2/ros2_transport.h", inc_h)
+        self.assertIn("type_support/ros2/ros2_transport.h", inc_h)
         self.assertIn("example_ros2/msg/ros_test_msg.hpp", inc_h)
         self.assertIn("IBMW_TS_SENDER_ACCESS_MEMBER", inc_h)
         # Stability.
@@ -175,7 +175,7 @@ class TestRos2PluginEmit(unittest.TestCase):
         self.assertIsNotNone(ts_info)
         self.assertEqual(ts_info["msg_type_cpp"],
                          "example_ros2::msg::RosTestMsg")
-        self.assertIn("internal/typesupport/ros2/ros2_transport.h",
+        self.assertIn("type_support/ros2/ros2_transport.h",
                       ts_info["inc_h_content"])
         self.assertIn("example_ros2/msg/ros_test_msg.hpp",
                       ts_info["inc_h_content"])

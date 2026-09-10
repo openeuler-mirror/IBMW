@@ -1,7 +1,7 @@
 # ibmw-gen project definition for loaned_publisher + loaned_subscriber demo (DDS).
 #
-# Generates a publisher module that uses the DDS LoanedMessage zero-copy
-#      API (Ros2StylePublisher / borrow_loaned_message).
+# Generates a publisher module that uses the public strict loan API. The
+# concrete transport is selected by the runtime configuration.
 # Also generates a subscriber module that consumes the same topic via
 #      ibmw::ros2::transport::OnMessage<T> — the user only fills in
 #      OnMessage(const std::shared_ptr<const T>&) override.
@@ -37,8 +37,6 @@ modules:
     #     ros2_msg_include  = "geometry_msgs/msg/point.hpp"
     # ros2_type_name auto-derived as "geometry_msgs/msg/Point".
     # dds_type_name defaults to ros2_type_name.
-    zero_copy_config: auto
-
   # Subscriber side. transport=dds → callback signature is
   # OnMessage(const std::shared_ptr<const geometry_msgs::msg::Point>&).
   - name: PointLoanedSubscriber

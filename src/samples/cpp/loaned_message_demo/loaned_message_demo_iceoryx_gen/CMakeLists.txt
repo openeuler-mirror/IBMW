@@ -26,60 +26,38 @@ endif()
 find_package(ibmw 0.1.0 REQUIRED)
 
 # --------------------------------------------------------------------------
-# Helper: force whole-archive link for ros2_types_impl static registrars.
-# Used by ros2_interop_* and loaned_publisher modules.
-# --------------------------------------------------------------------------
-function(ibmw_whole_archive_link TARGET LIB)
-  if(APPLE)
-    target_link_libraries(${TARGET} PUBLIC -Wl,-force_load ${LIB})
-  elseif(UNIX)
-    target_link_libraries(${TARGET} PUBLIC
-      -Wl,--whole-archive ${LIB} -Wl,--no-whole-archive)
-  else()
-    target_link_libraries(${TARGET} PUBLIC ${LIB})
-  endif()
-endfunction()
-
-# --------------------------------------------------------------------------
 # ROS2 message packages required by ros2_interop / loaned_* / direct_iceoryx_* modules.
 # --------------------------------------------------------------------------
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 
-# --------------------------------------------------------------------------
-# iceoryx_posh — required by loaned_publisher / loaned_subscriber modules
-# with transport: iceoryx.
-# --------------------------------------------------------------------------
-# Materialize the `cpptoml` INTERFACE import target (transitively required
-# by iceoryx_poshTargets.cmake; upstream cpptomlConfig.cmake is empty).
-find_package(cpptoml QUIET)
-if(NOT TARGET cpptoml)
-  find_file(_ibmw_cpptoml_targets cpptomlTargets.cmake
-    PATHS ${CMAKE_PREFIX_PATH} ${ibmw_DIR}/../../..
-    PATH_SUFFIXES lib/cmake/cpptoml
-    NO_DEFAULT_PATH)
-  if(_ibmw_cpptoml_targets)
-    include(${_ibmw_cpptoml_targets})
-  else()
-    message(FATAL_ERROR "cpptomlTargets.cmake not found; iceoryx_posh requires it. "
-      "Add the directory containing lib/cmake/cpptoml/ to CMAKE_PREFIX_PATH.")
-  endif()
-endif()
-find_package(iceoryx_posh REQUIRED)
-
 ibmw_add_module(point_iceoryx_loaned_publisher
   SRCS src/point_iceoryx_loaned_publisher_module/point_iceoryx_loaned_publisher.cc
-  DEPS ibmw::extensions::iceoryx_ext iceoryx_posh::iceoryx_posh ibmw::extensions::ros2_types ${geometry_msgs_TARGETS})
-ibmw_whole_archive_link(point_iceoryx_loaned_publisher ibmw_extensions_ros2_types_impl)
+  DEPS ibmw::api::ros2_type_support ${geometry_msgs_TARGETS})
 
 ibmw_add_module(point_iceoryx_loaned_subscriber
   SRCS src/point_iceoryx_loaned_subscriber_module/point_iceoryx_loaned_subscriber.cc
-  DEPS ibmw::extensions::iceoryx_ext iceoryx_posh::iceoryx_posh ibmw::extensions::ros2_types ${geometry_msgs_TARGETS})
-ibmw_whole_archive_link(point_iceoryx_loaned_subscriber ibmw_extensions_ros2_types_impl)
+  DEPS ibmw::api::ros2_type_support ${geometry_msgs_TARGETS})
 
 ibmw_add_pkg(point_iceoryx_loaned_publisher_pkg
   SRCS src/point_iceoryx_loaned_publisher_pkg/pkg_main.cc
   MODULES point_iceoryx_loaned_publisher)
+
+add_library(point_iceoryx_loaned_publisher_pkg_ts SHARED
+  src/point_iceoryx_loaned_publisher_pkg/type_support_pkg_main.cc)
+target_include_directories(point_iceoryx_loaned_publisher_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(point_iceoryx_loaned_publisher_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  geometry_msgs::geometry_msgs__rosidl_generator_cpp
+  geometry_msgs::geometry_msgs__rosidl_typesupport_introspection_cpp)
+set_target_properties(point_iceoryx_loaned_publisher_pkg_ts PROPERTIES
+  OUTPUT_NAME "point_iceoryx_loaned_publisher_pkg_ts")
+install(TARGETS point_iceoryx_loaned_publisher_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(loaned_pub_iox_app
   SRCS src/loaned_pub_iox_app/main.cc
@@ -88,6 +66,22 @@ ibmw_add_app(loaned_pub_iox_app
 ibmw_add_pkg(point_iceoryx_loaned_subscriber_pkg
   SRCS src/point_iceoryx_loaned_subscriber_pkg/pkg_main.cc
   MODULES point_iceoryx_loaned_subscriber)
+
+add_library(point_iceoryx_loaned_subscriber_pkg_ts SHARED
+  src/point_iceoryx_loaned_subscriber_pkg/type_support_pkg_main.cc)
+target_include_directories(point_iceoryx_loaned_subscriber_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(point_iceoryx_loaned_subscriber_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  geometry_msgs::geometry_msgs__rosidl_generator_cpp
+  geometry_msgs::geometry_msgs__rosidl_typesupport_introspection_cpp)
+set_target_properties(point_iceoryx_loaned_subscriber_pkg_ts PROPERTIES
+  OUTPUT_NAME "point_iceoryx_loaned_subscriber_pkg_ts")
+install(TARGETS point_iceoryx_loaned_subscriber_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(loaned_sub_iox_app
   SRCS src/loaned_sub_iox_app/main.cc

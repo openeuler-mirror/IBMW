@@ -1,0 +1,63 @@
+# ROS2 publisher process for record_demo.
+# This deliberately uses the deprecated rcl-based ros2_extension so the bag
+# contains a distinct `ros2` driver/channel.  New ROS2 interoperability code
+# should generally use dds_extension with ros2_compatible: true instead.
+
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-demo-ros2
+
+  extensions:
+    items:
+      - name: ros2_extension
+        path: ./libibmw_ros2_transport.so
+        options:
+          node_name: record_demo_ros2_publisher
+          executor_type: MultiThreaded
+          executor_thread_num: 2
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options:
+          enable_runtime_agent: true
+          runtime_id: record-demo-ros2
+          runtime_registry_path: /tmp/ibmw/runtimes
+          type_support_pkgs:
+            - path: ./libexample_ros2_ros2_ts.so
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: ros2
+        options:
+          publishers:
+            - topic: record_demo_ros2_topic
+              use_serialized: true
+          subscribers:
+            - topic: record_demo_ros2_topic
+              use_serialized: true
+    publishers:
+      - topic: record_demo_ros2_topic
+        enable_drivers: [ros2]
+
+  modules:
+    packages:
+      - path: ./librecord_demo_pkg.so
+        enable_modules: [Ros2PublisherModule]
+    modules:
+      - name: Ros2PublisherModule
+        log_level: INFO
+
+Ros2PublisherModule:
+  topic: record_demo_ros2_topic
+  transport_frq: 1.0

@@ -34,7 +34,6 @@ target_link_libraries(
   ${CUR_TARGET_NAME}
   INTERFACE ibmw::base
             ibmw::api::c
-            ibmw::internal
             ibmw::config)
 
 # Executor

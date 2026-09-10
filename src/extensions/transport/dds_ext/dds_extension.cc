@@ -7,6 +7,57 @@
 #include "dds_ext/global.h"
 #include "yaml-cpp/yaml.h"
 
+namespace {
+
+using ibmw::extensions::dds_extension::DdsTransportDriver;
+using namespace ibmw::runtime::core::transport;
+
+bool DdsSupportsTopic(void* context, const TopicDescriptor& topic) noexcept {
+  static_cast<void>(context);
+  const bool ros2 = topic.msg_type.starts_with("ros2:");
+  return (topic.msg_type.starts_with("dds:") || ros2) &&
+         (topic.serialization_type == "cdr" ||
+          (ros2 && topic.serialization_type == "ros2"));
+}
+
+SerializedSubscriberHandle DdsAttachSubscriber(
+    void* context, const SerializedSubscriberOptions& options,
+    SerializedMessageCallback callback) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->AttachSerializedSubscriber(
+      options, std::move(callback));
+}
+
+bool DdsDetachSubscriber(void* context,
+                         SerializedSubscriberHandle handle) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->DetachSerializedSubscriber(handle);
+}
+
+SerializedPublisherHandle DdsRegisterPublisher(
+    void* context, const SerializedPublisherOptions& options) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->RegisterSerializedPublisher(options);
+}
+
+bool DdsSend(void* context, SerializedPublisherHandle handle,
+             const SerializedMessage& message) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->SendSerialized(handle, message);
+}
+
+bool DdsWaitForAcks(void* context, std::chrono::milliseconds timeout) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->WaitForSerializedAcknowledgments(timeout);
+}
+
+QosDescriptor DdsPublisherQos(void* context, std::string_view topic,
+                              std::string_view msg_type) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->PublisherQos(topic, msg_type);
+}
+
+QosDescriptor DdsSubscriberQos(void* context, std::string_view topic,
+                               std::string_view msg_type) noexcept {
+  return static_cast<DdsTransportDriver*>(context)->SubscriberQos(topic, msg_type);
+}
+
+}  // namespace
+
 namespace YAML {
 template <>
 struct convert<ibmw::extensions::dds_extension::DdsExtension::Options> {
@@ -172,7 +223,29 @@ void DdsExtension::RegisterDdsTransportDriver() {
   SetDdsTransportDriver(driver_ptr);
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
-      std::move(dds_transport_driver_ptr));
+      std::move(dds_transport_driver_ptr), {},
+      runtime::core::transport::SerializedTransportCapabilityV1{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kNativeSerialized,
+          .publish_mode = runtime::core::transport::SerializedPublishMode::kNativeSerialized,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kNative,
+          .schema = runtime::core::transport::SerializedSchemaSupport::kRuntimeAdvertisement,
+          .loan = runtime::core::transport::SerializedLoanSupport::kNone,
+          .backpressure = runtime::core::transport::SerializedBackpressure::kTransportManaged,
+          .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
+          .capture_priority = 1,
+          .supports_ack = true,
+          .provider_name = Name(),
+          .provider_instance_option = "participant_name",
+          .operations =
+              {.context = driver_ptr,
+               .supports_topic = &DdsSupportsTopic,
+               .attach_subscriber = &DdsAttachSubscriber,
+               .detach_subscriber = &DdsDetachSubscriber,
+               .register_publisher = &DdsRegisterPublisher,
+               .send = &DdsSend,
+               .wait_for_acknowledgments = &DdsWaitForAcks,
+               .publisher_qos = &DdsPublisherQos,
+               .subscriber_qos = &DdsSubscriberQos}});
 }
 
 void DdsExtension::RegisterDdsRpcDriver() {

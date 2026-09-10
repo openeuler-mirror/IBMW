@@ -268,6 +268,39 @@ endif()
 if(IBMW_BUILD_TESTS)
   include(GetGTest)
   enable_testing()
+
+  if(IBMW_MASTER_PROJECT AND IBMW_BUILD_RUNTIME AND
+     CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
+    find_program(IBMW_TEST_BASH_EXECUTABLE NAMES bash)
+    find_program(IBMW_TEST_LDD_EXECUTABLE NAMES ldd)
+    find_program(IBMW_TEST_PYTHON3_EXECUTABLE NAMES python3)
+    if(IBMW_TEST_BASH_EXECUTABLE AND IBMW_TEST_LDD_EXECUTABLE AND
+       IBMW_TEST_PYTHON3_EXECUTABLE)
+      add_test(
+        NAME ibmw_installed_typesupport_package_test
+        COMMAND ${IBMW_TEST_BASH_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/scripts/tests/test_installed_typesupport_package.sh)
+      set(IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
+          "IBMW_INSTALLED_TYPESUPPORT_IBMW_BUILD=${CMAKE_BINARY_DIR}"
+          "IBMW_INSTALLED_TYPESUPPORT_NLOHMANN_SOURCE=${FETCHCONTENT_BASE_DIR}/nlohmann_json-src")
+      if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT ADDRESS_SANITIZER
+                                                     AND NOT THREAD_SANITIZER)
+        list(APPEND IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
+             "IBMW_INSTALLED_TYPESUPPORT_LOADER_LINK_COVERAGE=1")
+      endif()
+      set_tests_properties(
+        ibmw_installed_typesupport_package_test
+        PROPERTIES ENVIRONMENT "${IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT}"
+                   LABELS "integration;install;typesupport"
+                   PROCESSORS 2
+                   RUN_SERIAL TRUE
+                   TIMEOUT 1800)
+    else()
+      message(
+        WARNING
+          "Skipping installed TypeSupport package test: bash, ldd, and python3 are required.")
+    endif()
+  endif()
 endif()
 
 if(IBMW_EXECUTOR_USE_STDEXEC)

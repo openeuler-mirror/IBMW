@@ -6,7 +6,7 @@
 #include <chrono>
 #include <string>
 
-#include "internal/typesupport/dds/dds_transport.h"
+#include "type_support/dds/dds_transport.h"
 
 namespace ibmw::samples::transport_benchmark::iox_loan_v2 {
 

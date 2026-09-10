@@ -5,7 +5,9 @@
 
 #include <span>
 
+#include "c/util/schema_support_base.h"
 #include "c/util/type_support_base.h"
+#include "type_support/type_support_pkg_main.h"
 
 #include "engine/dynamic_lib.h"
 
@@ -25,10 +27,13 @@ class TypeSupportPkgLoader {
   TypeSupportPkgLoader& operator=(const TypeSupportPkgLoader&) = delete;
 
   void LoadTypeSupportPkg(std::string_view path);
+  bool TryLoadTypeSupportPkg(std::string_view path);
 
   void UnLoadTypeSupportPkg();
 
   auto GetTypeSupportArray() const { return type_support_array_; }
+
+  auto GetSchemaSupportArray() const { return schema_support_array_; }
 
   auto& GetDynamicLib() { return dynamic_lib_; }
 
@@ -37,6 +42,7 @@ class TypeSupportPkgLoader {
   ibmw::common::util::DynamicLib dynamic_lib_;
 
   std::span<const ibmw_type_support_base_t*> type_support_array_;
+  std::span<const ibmw_schema_support_base_t* const> schema_support_array_;
 };
 
 }  // namespace ibmw::runtime::core::util

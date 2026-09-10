@@ -1,0 +1,204 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
+#include "record_playback_ext/storage/compression_codec.h"
+
+#include <algorithm>
+#include <array>
+#include <fstream>
+#include <limits>
+#include <vector>
+
+#include <lz4frame.h>
+#include <zstd.h>
+
+#include "base/exception.h"
+
+namespace ibmw::extensions::record_playback_extension {
+
+namespace {
+
+constexpr size_t kStreamBufferSize = 64 * 1024;
+
+std::string ReadFile(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary | std::ios::ate);
+  MW_ASSERT(input.is_open(), "Cannot open '{}' for compression.", path.string());
+  const auto end = input.tellg();
+  MW_ASSERT(end >= 0, "Cannot determine size of '{}'.", path.string());
+  MW_ASSERT(
+      static_cast<uint64_t>(end) <=
+          static_cast<uint64_t>(std::numeric_limits<size_t>::max()),
+      "File '{}' is too large to compress.", path.string());
+  std::string data(static_cast<size_t>(end), '\0');
+  input.seekg(0);
+  input.read(data.data(), static_cast<std::streamsize>(data.size()));
+  MW_ASSERT(
+      input.good() || input.eof(), "Cannot read '{}'.", path.string());
+  MW_ASSERT(
+      static_cast<size_t>(input.gcount()) == data.size(),
+      "Short read from '{}'.", path.string());
+  return data;
+}
+
+void WriteFile(const std::filesystem::path& path, std::string_view data) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  MW_ASSERT(output.is_open(), "Cannot create compressed file '{}'.", path.string());
+  output.write(data.data(), static_cast<std::streamsize>(data.size()));
+  output.close();
+  MW_ASSERT(output.good(), "Cannot write compressed file '{}'.", path.string());
+}
+
+std::string CompressZstd(std::string_view input, int compression_level) {
+  const size_t bound = ZSTD_compressBound(input.size());
+  std::string output(bound, '\0');
+  const int level = compression_level == 0 ? ZSTD_CLEVEL_DEFAULT
+                                            : compression_level;
+  const size_t size = ZSTD_compress(
+      output.data(), output.size(), input.data(), input.size(), level);
+  MW_ASSERT(
+      !ZSTD_isError(size), "Zstd compression failed: {}.",
+      ZSTD_getErrorName(size));
+  output.resize(size);
+  return output;
+}
+
+std::string DecompressZstd(std::string_view input) {
+  ZSTD_DStream* stream = ZSTD_createDStream();
+  MW_ASSERT(stream != nullptr, "Cannot create a Zstd decompressor.");
+  struct Guard {
+    ZSTD_DStream* stream;
+    ~Guard() { ZSTD_freeDStream(stream); }
+  } guard{stream};
+  const size_t initialized = ZSTD_initDStream(stream);
+  MW_ASSERT(
+      !ZSTD_isError(initialized), "Cannot initialize Zstd decompression: {}.",
+      ZSTD_getErrorName(initialized));
+
+  ZSTD_inBuffer source{input.data(), input.size(), 0};
+  std::array<char, kStreamBufferSize> buffer{};
+  std::string output;
+  size_t remaining = 1;
+  while (source.pos < source.size || remaining != 0) {
+    ZSTD_outBuffer destination{buffer.data(), buffer.size(), 0};
+    remaining = ZSTD_decompressStream(stream, &destination, &source);
+    MW_ASSERT(
+        !ZSTD_isError(remaining), "Zstd decompression failed: {}.",
+        ZSTD_getErrorName(remaining));
+    output.append(buffer.data(), destination.pos);
+    MW_ASSERT(
+        destination.pos != 0 || source.pos < source.size || remaining == 0,
+        "Truncated Zstd frame.");
+  }
+  MW_ASSERT(source.pos == source.size, "Trailing data after Zstd frame.");
+  return output;
+}
+
+std::string CompressLz4(std::string_view input, int compression_level) {
+  LZ4F_preferences_t preferences{};
+  preferences.frameInfo.contentSize = input.size();
+  preferences.compressionLevel = compression_level;
+  const size_t bound = LZ4F_compressFrameBound(input.size(), &preferences);
+  MW_ASSERT(
+      !LZ4F_isError(bound), "Cannot calculate LZ4 compression bound: {}.",
+      LZ4F_getErrorName(bound));
+  std::string output(bound, '\0');
+  const size_t size = LZ4F_compressFrame(
+      output.data(), output.size(), input.data(), input.size(), &preferences);
+  MW_ASSERT(
+      !LZ4F_isError(size), "LZ4 compression failed: {}.",
+      LZ4F_getErrorName(size));
+  output.resize(size);
+  return output;
+}
+
+std::string DecompressLz4(std::string_view input) {
+  LZ4F_dctx* context = nullptr;
+  const size_t created =
+      LZ4F_createDecompressionContext(&context, LZ4F_VERSION);
+  MW_ASSERT(
+      !LZ4F_isError(created) && context != nullptr,
+      "Cannot create an LZ4 decompressor: {}.", LZ4F_getErrorName(created));
+  struct Guard {
+    LZ4F_dctx* context;
+    ~Guard() { LZ4F_freeDecompressionContext(context); }
+  } guard{context};
+
+  size_t source_offset = 0;
+  size_t remaining = 1;
+  std::array<char, kStreamBufferSize> buffer{};
+  std::string output;
+  while (source_offset < input.size() || remaining != 0) {
+    size_t source_size = input.size() - source_offset;
+    size_t destination_size = buffer.size();
+    remaining = LZ4F_decompress(
+        context, buffer.data(), &destination_size,
+        input.data() + source_offset, &source_size, nullptr);
+    MW_ASSERT(
+        !LZ4F_isError(remaining), "LZ4 decompression failed: {}.",
+        LZ4F_getErrorName(remaining));
+    source_offset += source_size;
+    output.append(buffer.data(), destination_size);
+    MW_ASSERT(
+        destination_size != 0 || source_size != 0 || remaining == 0,
+        "Truncated LZ4 frame.");
+  }
+  MW_ASSERT(source_offset == input.size(), "Trailing data after LZ4 frame.");
+  return output;
+}
+
+}  // namespace
+
+std::string CompressBuffer(
+    std::string_view input,
+    std::string_view format,
+    int compression_level) {
+  if (format == "zstd") {
+    return CompressZstd(input, compression_level);
+  }
+  if (format == "lz4") {
+    return CompressLz4(input, compression_level);
+  }
+  MW_ASSERT(false, "Unsupported compression format '{}'.", format);
+  return {};
+}
+
+std::string DecompressBuffer(
+    std::string_view input,
+    std::string_view format) {
+  if (format == "zstd") {
+    return DecompressZstd(input);
+  }
+  if (format == "lz4") {
+    return DecompressLz4(input);
+  }
+  MW_ASSERT(false, "Unsupported compression format '{}'.", format);
+  return {};
+}
+
+std::filesystem::path CompressedFilePath(
+    const std::filesystem::path& input_path,
+    std::string_view format) {
+  return input_path.string() + "." + std::string(format);
+}
+
+std::filesystem::path CompressFile(
+    const std::filesystem::path& input_path,
+    std::string_view format,
+    int compression_level) {
+  const auto output_path = CompressedFilePath(input_path, format);
+  const auto temporary_path = output_path.string() + ".tmp";
+  WriteFile(
+      temporary_path,
+      CompressBuffer(ReadFile(input_path), format, compression_level));
+  std::filesystem::rename(temporary_path, output_path);
+  std::filesystem::remove(input_path);
+  return output_path;
+}
+
+std::string ReadCompressedFile(
+    const std::filesystem::path& input_path,
+    std::string_view format) {
+  return DecompressBuffer(ReadFile(input_path), format);
+}
+
+}  // namespace ibmw::extensions::record_playback_extension

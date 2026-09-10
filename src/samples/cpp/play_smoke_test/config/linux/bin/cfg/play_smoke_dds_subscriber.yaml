@@ -1,0 +1,27 @@
+ibmw:
+  config: {temp_cfg_path: ./cfg/tmp/play-smoke-dds}
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options: {domain_id: 88, participant_name: play_smoke_dds_subscriber}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 1}}
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          subscribers:
+            - topic: /ibmw_play_smoke/data
+              qos: {history: keep_last, depth: 20, reliability: reliable, durability: volatile}
+    subscribers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [dds]}
+  modules:
+    packages:
+      - {path: ./libplay_smoke_pkg.so, enable_modules: [PlaySmokeCdrSubscriberModule]}
+    modules:
+      - {name: PlaySmokeCdrSubscriberModule, log_level: INFO}
+PlaySmokeCdrSubscriberModule:
+  topics: [/ibmw_play_smoke/data]

@@ -168,6 +168,60 @@ for cfg in "${EXT_CONFIGS[@]}"; do
     fi
 done
 
+if [ -f "./record_smoke_required" ] && $QUICK; then
+    skip_test "ext: bag_record_transport_and_cli_matrix (--quick)"
+elif [ -f "./record_smoke_required" ] && [ ! -x "./validate_record_smoke.sh" ]; then
+    run_strict_test "ext: bag_record_transport_and_cli_matrix (required artifact missing)" 1 false
+elif ! $QUICK && [ -x "./validate_record_smoke.sh" ]; then
+    run_strict_test "ext: bag_record_transport_and_cli_matrix" 300 \
+        env BUILD_DIR="$BUILD_DIR" CFG_DIR="$BUILD_DIR/cfg" TMP_DIR="$BUILD_DIR/strict-test-logs" \
+        ./validate_record_smoke.sh
+else
+    skip_test "ext: bag_record_transport_and_cli_matrix (missing or --quick)"
+fi
+
+if [ -f "./info_smoke_required" ] && $QUICK; then
+    skip_test "ext: bag_info_cli_and_metadata_matrix (--quick)"
+elif [ -f "./info_smoke_required" ] && [ ! -x "./validate_info_smoke.sh" ]; then
+    run_strict_test "ext: bag_info_cli_and_metadata_matrix (required artifact missing)" 1 false
+elif ! $QUICK && [ -x "./validate_info_smoke.sh" ]; then
+    run_strict_test "ext: bag_info_cli_and_metadata_matrix" 120 \
+        env BUILD_DIR="$BUILD_DIR" BAGS_DIR="$BUILD_DIR/info_smoke_bags" \
+        ./validate_info_smoke.sh
+else
+    skip_test "ext: bag_info_cli_and_metadata_matrix (missing or --quick)"
+fi
+
+if [ -f "./convert_smoke_required" ] && $QUICK; then
+    skip_test "ext: bag_convert_cli_and_conversion_matrix (--quick)"
+elif [ -f "./convert_smoke_required" ] && [ ! -x "./validate_convert_smoke.sh" ]; then
+    run_strict_test "ext: bag_convert_cli_and_conversion_matrix (required artifact missing)" 1 false
+elif ! $QUICK && [ -x "./validate_convert_smoke.sh" ]; then
+    run_strict_test "ext: bag_convert_cli_and_conversion_matrix" 180 \
+        env BUILD_DIR="$BUILD_DIR" \
+        BAGS_DIR="$BUILD_DIR/convert_smoke_bags" \
+        CFG_DIR="$BUILD_DIR/convert_smoke_cfg" \
+        TMP_DIR="$BUILD_DIR/strict-test-logs" \
+        ./validate_convert_smoke.sh
+else
+    skip_test "ext: bag_convert_cli_and_conversion_matrix (missing or --quick)"
+fi
+
+if [ -f "./play_smoke_required" ] && $QUICK; then
+    skip_test "ext: bag_play_transport_and_cli_matrix (--quick)"
+elif [ -f "./play_smoke_required" ] && [ ! -x "./validate_play_smoke.sh" ]; then
+    run_strict_test "ext: bag_play_transport_and_cli_matrix (required artifact missing)" 1 false
+elif ! $QUICK && [ -x "./validate_play_smoke.sh" ]; then
+    run_strict_test "ext: bag_play_transport_and_cli_matrix" 300 \
+        env BUILD_DIR="$BUILD_DIR" \
+        BAGS_DIR="$BUILD_DIR/play_smoke_bags" \
+        CFG_DIR="$BUILD_DIR/play_smoke_cfg" \
+        TMP_DIR="$BUILD_DIR/strict-test-logs" \
+        ./validate_play_smoke.sh
+else
+    skip_test "ext: bag_play_transport_and_cli_matrix (missing or --quick)"
+fi
+
 if $EXT_ONLY; then
     # Jump to summary
     section "Summary"

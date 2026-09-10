@@ -132,6 +132,15 @@ function(add_dds_idl_gencode_target)
     list(APPEND UPSTREAM_DIR_ARGS "--upstream-dir" "${UP_DIR}")
   endforeach()
 
+  set(SCHEMA_INCLUDE_ARGS)
+  set(SCHEMA_DEP_IDLS)
+  foreach(INC_DIR ${ARG_INCLUDE_DIRS})
+    list(APPEND SCHEMA_INCLUDE_ARGS "--include-dir" "${INC_DIR}")
+    file(GLOB _INC_SCHEMA_IDLS "${INC_DIR}/*.idl")
+    list(APPEND SCHEMA_DEP_IDLS ${_INC_SCHEMA_IDLS})
+  endforeach()
+  list(REMOVE_DUPLICATES SCHEMA_DEP_IDLS)
+
   set(GEN_SRCS)
   set(GEN_HDRS)
   # cdr_impl wrapper TUs auto-generated below (one per IDL); compiled into
@@ -160,15 +169,16 @@ function(add_dds_idl_gencode_target)
     set(GEN_PUBSUB_HPP "${ARG_GENCODE_PATH}/${IDL_NAME}PubSubTypes.hpp")
     set(GEN_CDR_IPP "${ARG_GENCODE_PATH}/${IDL_NAME}CdrAux.ipp")
     set(GEN_CDR_HPP "${ARG_GENCODE_PATH}/${IDL_NAME}CdrAux.hpp")
+    set(GEN_SCHEMA_HPP "${ARG_GENCODE_PATH}/${IDL_NAME}Schema.hpp")
     # Auto-generated 2-line wrapper TU that #includes the .ipp once so the
     # inline FastCDR specializations get emitted into the static library.
     set(GEN_CDR_IMPL_TU "${ARG_GENCODE_PATH}/${IDL_NAME}CdrImpl.cc")
 
     # Per-IDL output list for this custom command
-    set(CUR_IDL_OUTPUTS ${GEN_TYPE_HPP} ${GEN_PUBSUB_CXX} ${GEN_PUBSUB_HPP} ${GEN_CDR_IPP} ${GEN_CDR_HPP})
+    set(CUR_IDL_OUTPUTS ${GEN_TYPE_HPP} ${GEN_PUBSUB_CXX} ${GEN_PUBSUB_HPP} ${GEN_CDR_IPP} ${GEN_CDR_HPP} ${GEN_SCHEMA_HPP})
 
     # Accumulate headers and sources across all IDL files
-    list(APPEND GEN_HDRS ${GEN_TYPE_HPP} ${GEN_CDR_HPP} ${GEN_CDR_IPP})
+    list(APPEND GEN_HDRS ${GEN_TYPE_HPP} ${GEN_CDR_HPP} ${GEN_CDR_IPP} ${GEN_SCHEMA_HPP})
 
     # Only wrap IDLs explicitly opted-in via WRAP_IDLS. This avoids forcing
     # the py CDR transformer to handle every IDL pattern (unions, nested-struct
@@ -221,12 +231,22 @@ function(add_dds_idl_gencode_target)
         -replace
         ${INCLUDE_ARGS}
         ${IDL_BASENAME}
+      COMMAND ${CMAKE_COMMAND} -E env python3
+        ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/embed_idl_schema.py
+        --input ${IDL_FILE}
+        --output ${GEN_SCHEMA_HPP}
+        --symbol k${IDL_NAME}Idl
+        ${SCHEMA_INCLUDE_ARGS}
       ${_POSTPROCESS_COMMAND}
       # DEPENDS the IDL source plus the .ipp outputs of all previously processed
       # IDLs in this target. The latter forces serial execution under `make -j`
       # so inject_dependent_ipp_includes can see same-target dependent .ipp
       # files (e.g. ExampleRpc -> ExampleCommon). See §6.2.2.18.
-      DEPENDS ${IDL_FILE} ${_PREV_IDL_IPP_OUTPUTS}
+      DEPENDS
+        ${IDL_FILE}
+        ${SCHEMA_DEP_IDLS}
+        ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/embed_idl_schema.py
+        ${_PREV_IDL_IPP_OUTPUTS}
       WORKING_DIRECTORY ${IDL_DIR}
       COMMENT "${_GENCODE_COMMENT}"
       VERBATIM
@@ -274,7 +294,8 @@ function(add_dds_idl_gencode_target)
     )
     target_link_libraries(${ARG_TARGET_NAME} PUBLIC fastcdr fastdds)
     if(IBMW_DDS_IDL_FASTCDR_V1_COMPAT)
-      # Transformed CdrAux.ipp helpers include dds_types/util/fastcdr_v1_compat.h.
+      # Transformed CdrAux.ipp helpers include the public CDR compatibility
+      # header under type_support/dds/.
       # Use the schema-layer helper target rather than the DDS extension target
       # so protocol/schema builds do not acquire a reverse dependency on
       # IBMW_BUILD_DDS_EXTENSION.
@@ -300,7 +321,7 @@ function(add_dds_idl_gencode_target)
     )
     target_link_libraries(${ARG_TARGET_NAME} PUBLIC fastcdr)
     if(IBMW_DDS_IDL_FASTCDR_V1_COMPAT)
-      # The wrapper TU pulls in dds_types/util/fastcdr_v1_compat.h via the
+      # The wrapper TU pulls in type_support/dds/fastcdr_v1_compat.h via the
       # transformed .ipp. Link the schema-layer CDR-only helpers target (NOT the
       # dds_extension dds_types target) to avoid a reverse dependency: schema
       # must not require IBMW_BUILD_DDS_EXTENSION. See src/schema/CMakeLists.txt

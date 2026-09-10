@@ -126,7 +126,7 @@ class TestJsonPluginEmit(unittest.TestCase):
         ts_info = self.spec.emit_publisher_typesupport(mod, ns)
         self.assertIsNotNone(ts_info)
         self.assertEqual(ts_info["msg_type_cpp"], "demo::CustomType")
-        self.assertIn("internal/typesupport/json/json_transport.h", ts_info["inc_h_content"])
+        self.assertIn("cpp/util/json_transport.h", ts_info["inc_h_content"])
         self.assertIn("json_custom_types.h", ts_info["inc_h_content"])
         self.assertIn("IBMW_TS_SENDER_ACCESS_MEMBER",
                       ts_info["inc_h_content"])
@@ -179,7 +179,7 @@ class TestJsonPluginEmit(unittest.TestCase):
         self.assertIsNotNone(ts_info)
         self.assertEqual(ts_info["msg_type_cpp"], "demo::CustomType")
         self.assertIn("json_custom_types.h", ts_info["inc_h_content"])
-        self.assertIn("internal/typesupport/json/json_transport.h", ts_info["inc_h_content"])
+        self.assertIn("cpp/util/json_transport.h", ts_info["inc_h_content"])
         self.assertIn("IBMW_TS_RECEIVER_MSG_TYPE",
                       ts_info["inc_h_content"])
         self.assertIn("IBMW_TS_RECEIVER_ACCESS_SETUP",
@@ -242,11 +242,11 @@ class TestJsonPluginEmit(unittest.TestCase):
         self.assertNotIn('#include "json_custom_types.h"', sub_ts["inc_h_content"])
         self.assertLess(
             pub_ts["inc_h_content"].index('#include "demo_json_types.hpp"'),
-            pub_ts["inc_h_content"].index('#include "internal/typesupport/json/json_transport.h"'),
+            pub_ts["inc_h_content"].index('#include "cpp/util/json_transport.h"'),
         )
         self.assertLess(
             sub_ts["inc_h_content"].index('#include "demo_json_types.hpp"'),
-            sub_ts["inc_h_content"].index('#include "internal/typesupport/json/json_transport.h"'),
+            sub_ts["inc_h_content"].index('#include "cpp/util/json_transport.h"'),
         )
 
     def test_cli_json_project_without_json_types_emits_placeholder_header(self):

@@ -25,19 +25,39 @@ endif()
 # --------------------------------------------------------------------------
 find_package(ibmw 0.1.0 REQUIRED)
 
+# --------------------------------------------------------------------------
+# FastCDR — required for custom DDS type serialization.
+# --------------------------------------------------------------------------
+find_package(fastcdr REQUIRED)
+
 ibmw_add_module(image_publisher
   SRCS src/image_publisher_module/image_publisher.cc
-  DEPS ibmw::extensions::dds_types)
+  DEPS ibmw::extensions::dds_types fastcdr)
 target_include_directories(image_publisher PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 ibmw_add_module(image_subscriber
   SRCS src/image_subscriber_module/image_subscriber.cc
-  DEPS ibmw::extensions::dds_types)
+  DEPS ibmw::extensions::dds_types fastcdr)
 target_include_directories(image_subscriber PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 ibmw_add_pkg(dds_image_pkg
   SRCS src/dds_image_pkg/pkg_main.cc
   MODULES image_publisher image_subscriber)
+
+add_library(dds_image_pkg_ts SHARED
+  src/dds_image_pkg/type_support_pkg_main.cc)
+target_include_directories(dds_image_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dds_image_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::dds_type_support
+  fastcdr)
+set_target_properties(dds_image_pkg_ts PROPERTIES
+  OUTPUT_NAME "dds_image_pkg_ts")
+install(TARGETS dds_image_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(dds_image_app
   SRCS src/dds_image_app/main.cc

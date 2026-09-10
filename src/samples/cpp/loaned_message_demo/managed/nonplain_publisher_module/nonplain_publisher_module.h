@@ -7,7 +7,7 @@
 #include <thread>
 
 #include "cpp/module_base.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 // IBMW_R1_EXEMPT_BEGIN
 #include "dds_ext/ros2_style_api.h"
 #include "dds_ext/dds_transport_driver.h"

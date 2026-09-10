@@ -1,0 +1,52 @@
+ibmw_bagfile_information:
+  version: 1
+  storage_id: mcap
+  message_count: 19
+  start_timestamp: 1787120300389004842
+  end_timestamp: 1787120302190726026
+  duration_ns: 1801721184
+  closed_cleanly: true
+  error_message: ""
+  dropped_message_count: 0
+  duplicate_message_count: 0
+  compression_mode: none
+  compression_format: ""
+  compression_queue_size: 1
+  compression_threads: 1
+  files:
+    - path: data_0.mcap
+      start_timestamp: 1787120300389004842
+      end_timestamp: 1787120301389926145
+      message_count: 11
+      size: 2849
+      compression: none
+      split_reason: size
+    - path: data_1.mcap
+      start_timestamp: 1787120301490009678
+      end_timestamp: 1787120302190726026
+      message_count: 8
+      size: 2576
+      compression: none
+      split_reason: ""
+  schemas:
+    - id: 1
+      type: dds:ibmw::protocols::common::Header
+      serialization_type: cdr
+      name: ibmw::protocols::common::Header
+      encoding: omgidl
+      hash: fnv1a64:31cc1f944e68859f
+      data_size: 472
+  topics:
+    - id: 1
+      topic: /ibmw_record_smoke/features/data
+      msg_type: dds:ibmw::protocols::common::Header
+      serialization_type: cdr
+  channels:
+    - id: 1
+      schema_id: 1
+      topic: /ibmw_record_smoke/features/data
+      msg_type: dds:ibmw::protocols::common::Header
+      serialization_type: cdr
+      schema_hash: fnv1a64:31cc1f944e68859f
+      message_count: 19
+      qos: ~

@@ -3,7 +3,7 @@
 
 #include "json_subscriber_module/json_subscriber_module.h"
 
-#include "internal/typesupport/json/json_transport.h"
+#include "cpp/util/json_transport.h"
 #include "json_custom_types.h"
 
 namespace my_project {
