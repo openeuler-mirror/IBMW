@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <future>
 #include <mutex>
 #include <stdexcept>
@@ -12,6 +13,9 @@
 #include <vector>
 
 #include "engine/transport/transport_driver_dispatcher.h"
+#ifdef IBMW_ENABLE_CORE_METRICS
+#include "observability/core_metrics.h"
+#endif
 
 namespace ibmw::runtime::core::transport {
 namespace {
@@ -123,6 +127,116 @@ TEST_F(PublishTapTest, ShutdownFromCallbackDoesNotDeadlockOrSendAfterShutdown) {
   EXPECT_EQ(driver_.shutdown_calls, 1);
   EXPECT_EQ(driver_.send_calls, 0);
 }
+
+#ifdef IBMW_ENABLE_CORE_METRICS
+class MetricsPublishTapTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (const char* mode = std::getenv("IBMW_CORE_METRICS")) {
+      had_metrics_mode_ = true;
+      metrics_mode_ = mode;
+    }
+    ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+
+    auto& metrics = observability::CoreMetricsController();
+    metrics.ResetForTesting();
+    metrics.Initialize(&dispatcher_);
+    dispatcher_.SetTransportCatalog(&catalog_);
+    dispatcher_.SetPublishFrameworkAsyncTransportFilterBus(&filters_);
+    dispatcher_.SetPubTopicsDriversRules({{".*", {"publish-tap"}}});
+    dispatcher_.RegisterTransportDriver(&driver_);
+    dispatcher_.Initialize();
+    SendTypeWrapper wrapper;
+    wrapper.info = info_;
+    ASSERT_TRUE(dispatcher_.RegisterSendType(std::move(wrapper)));
+    metrics.Start(&dispatcher_);
+    dispatcher_.Start();
+
+    ASSERT_TRUE(metrics.Enabled());
+    const auto* registered = catalog_.GetSendTypeWrapperPtr(
+        info_.msg_type, info_.topic_name, info_.pkg_path, info_.module_name);
+    ASSERT_NE(registered, nullptr);
+    ASSERT_NE(registered->cached_metrics, nullptr);
+    ASSERT_NE(registered->cached_metrics_gate, nullptr);
+  }
+
+  void TearDown() override {
+    if (dispatcher_.GetState() != TransportDriverDispatcher::State::kShutdown) {
+      dispatcher_.Shutdown();
+    }
+    EXPECT_TRUE(
+        observability::CoreMetricsController().FinalizeSnapshot(&dispatcher_));
+    if (had_metrics_mode_) {
+      setenv("IBMW_CORE_METRICS", metrics_mode_.c_str(), 1);
+    } else {
+      unsetenv("IBMW_CORE_METRICS");
+    }
+  }
+
+  void RegisterShutdownTap() {
+    ASSERT_NE(
+        dispatcher_.RegisterPublishTap(
+            [&](MessageFrame&) { dispatcher_.Shutdown(); }),
+        0U);
+  }
+
+  TransportCatalog catalog_;
+  FrameworkAsyncTransportFilterBus filters_;
+  PublishTapDriver driver_;
+  TransportDriverDispatcher dispatcher_;
+  TransportInfo info_{.msg_type = "TestMessage",
+                      .topic_name = "publish_tap_metrics_test",
+                      .pkg_path = "test",
+                      .module_name = "publisher",
+                      .index = 1};
+  int payload_ = 42;
+  bool had_metrics_mode_ = false;
+  std::string metrics_mode_;
+};
+
+TEST_F(MetricsPublishTapTest,
+       MessageFrameShutdownFromTapDoesNotDeadlockOrCallDriver) {
+  RegisterShutdownTap();
+
+  auto send = std::async(std::launch::async, [&] {
+    ibmw::transport::Context context;
+    dispatcher_.Send(MessageFrame{
+        .info = info_,
+        .msg_ptr = &payload_,
+        .ctx_ref = ibmw::transport::ContextRef(context)});
+  });
+
+  ASSERT_EQ(send.wait_for(2s), std::future_status::ready);
+  send.get();
+  EXPECT_EQ(
+      dispatcher_.GetState(), TransportDriverDispatcher::State::kShutdown);
+  EXPECT_EQ(driver_.shutdown_calls, 1);
+  EXPECT_EQ(driver_.send_calls, 0);
+}
+
+TEST_F(MetricsPublishTapTest,
+       SendAccessInfoShutdownFromTapDoesNotDeadlockOrCallDriver) {
+  RegisterShutdownTap();
+
+  auto send = std::async(std::launch::async, [&] {
+    dispatcher_.Send(SendAccessInfoWrapper{
+        .pkg_path = info_.pkg_path,
+        .module_name = info_.module_name,
+        .topic_name = info_.topic_name,
+        .msg_type = ibmw_string_view_t{info_.msg_type.data(),
+                                      info_.msg_type.size()},
+        .ctx_ptr = nullptr,
+        .msg_ptr = &payload_});
+  });
+
+  ASSERT_EQ(send.wait_for(2s), std::future_status::ready);
+  send.get();
+  EXPECT_EQ(
+      dispatcher_.GetState(), TransportDriverDispatcher::State::kShutdown);
+  EXPECT_EQ(driver_.shutdown_calls, 1);
+  EXPECT_EQ(driver_.send_calls, 0);
+}
+#endif
 
 TEST_F(PublishTapTest, ExternalUnregisterWaitsForInFlightCallback) {
   std::mutex mutex;

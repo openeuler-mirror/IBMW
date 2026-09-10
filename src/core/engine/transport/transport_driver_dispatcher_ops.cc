@@ -870,23 +870,27 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
     return;
   }
 
-#ifdef IBMW_ENABLE_CORE_METRICS
-  std::optional<observability::CachedMetricsReadGuard> metrics_guard;
-  if (send_type_wrapper_ptr->cached_metrics_gate)
-    metrics_guard.emplace(send_type_wrapper_ptr->cached_metrics_gate);
-  auto* metric_slots = metrics_guard && *metrics_guard
-                           ? send_type_wrapper_ptr->cached_metrics : nullptr;
-  if (metric_slots)
-    metric_slots->logical->attempted.fetch_add(1, std::memory_order_relaxed);
-#endif
-
   // Check ctx
-  if (ctx_ref.GetType() != ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
-      ctx_ref.CheckUsed()) {
+  const bool invalid_context =
+      ctx_ref.GetType() !=
+          ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
+      ctx_ref.CheckUsed();
 #ifdef IBMW_ENABLE_CORE_METRICS
-    if (metric_slots)
-      metric_slots->logical->rejected.fetch_add(1, std::memory_order_relaxed);
+  {
+    std::optional<observability::CachedMetricsReadGuard> metrics_guard;
+    if (send_type_wrapper_ptr->cached_metrics_gate)
+      metrics_guard.emplace(send_type_wrapper_ptr->cached_metrics_gate);
+    auto* metric_slots = metrics_guard && *metrics_guard
+                             ? send_type_wrapper_ptr->cached_metrics : nullptr;
+    if (metric_slots) {
+      metric_slots->logical->attempted.fetch_add(1, std::memory_order_relaxed);
+      if (invalid_context)
+        metric_slots->logical->rejected.fetch_add(1,
+                                                  std::memory_order_relaxed);
+    }
+  }
 #endif
+  if (invalid_context) {
     MW_WARN("Publish context has been used!");
     return;
   }
@@ -936,7 +940,7 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
        , observed_overlay, publish_envelope
 #endif
 #ifdef IBMW_ENABLE_CORE_METRICS
-       , metric_slots
+       , send_type_wrapper_ptr
 #endif
       ](MessageFrame& msg_wrapper) {
         InvokePublishTaps(msg_wrapper);
@@ -944,6 +948,12 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
           return;
         }
 #ifdef IBMW_ENABLE_CORE_METRICS
+        std::optional<observability::CachedMetricsReadGuard> metrics_guard;
+        if (send_type_wrapper_ptr->cached_metrics_gate)
+          metrics_guard.emplace(send_type_wrapper_ptr->cached_metrics_gate);
+        auto* metric_slots = metrics_guard && *metrics_guard
+                                 ? send_type_wrapper_ptr->cached_metrics
+                                 : nullptr;
         if (metric_slots == nullptr) {
           for (auto* itr : cached_drivers) {
             MW_TRACE("Publish msg '{}' for topic '{}' to transport driver '{}'",
@@ -1269,31 +1279,35 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
 
   auto publish_msg_wrapper_ptr = std::make_shared<MessageFrame>(std::move(wrapper));
 
-#ifdef IBMW_ENABLE_CORE_METRICS
-  std::optional<observability::CachedMetricsReadGuard> metrics_guard;
-  if (cached_metrics_gate_) metrics_guard.emplace(cached_metrics_gate_);
-  observability::MetricsEntry* metric_slots = nullptr;
-  if (metrics_guard && *metrics_guard) {
-    const auto* send_type = transport_catalog_ptr_->GetSendTypeWrapperPtr(
-        publish_msg_wrapper_ptr->info.msg_type,
-        publish_msg_wrapper_ptr->info.topic_name,
-        publish_msg_wrapper_ptr->info.pkg_path,
-        publish_msg_wrapper_ptr->info.module_name);
-    if (send_type) metric_slots = send_type->cached_metrics;
-  }
-  if (metric_slots)
-    metric_slots->logical->attempted.fetch_add(1, std::memory_order_relaxed);
-#endif
-
   auto ctx_ref = publish_msg_wrapper_ptr->ctx_ref;
 
   // Check ctx
-  if (ctx_ref.GetType() != ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
-      ctx_ref.CheckUsed()) {
+  const bool invalid_context =
+      ctx_ref.GetType() !=
+          ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
+      ctx_ref.CheckUsed();
 #ifdef IBMW_ENABLE_CORE_METRICS
-    if (metric_slots)
-      metric_slots->logical->rejected.fetch_add(1, std::memory_order_relaxed);
+  {
+    std::optional<observability::CachedMetricsReadGuard> metrics_guard;
+    if (cached_metrics_gate_) metrics_guard.emplace(cached_metrics_gate_);
+    observability::MetricsEntry* metric_slots = nullptr;
+    if (metrics_guard && *metrics_guard) {
+      const auto* send_type = transport_catalog_ptr_->GetSendTypeWrapperPtr(
+          publish_msg_wrapper_ptr->info.msg_type,
+          publish_msg_wrapper_ptr->info.topic_name,
+          publish_msg_wrapper_ptr->info.pkg_path,
+          publish_msg_wrapper_ptr->info.module_name);
+      if (send_type) metric_slots = send_type->cached_metrics;
+    }
+    if (metric_slots) {
+      metric_slots->logical->attempted.fetch_add(1, std::memory_order_relaxed);
+      if (invalid_context)
+        metric_slots->logical->rejected.fetch_add(1,
+                                                  std::memory_order_relaxed);
+    }
+  }
 #endif
+  if (invalid_context) {
     MW_WARN("Publish context has been used!");
     return;
   }
@@ -1316,11 +1330,7 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
 
   // Start publish
   filter_collector.InvokeTransport(
-      [this
-#ifdef IBMW_ENABLE_CORE_METRICS
-       , metric_slots
-#endif
-      ](MessageFrame& msg_wrapper) {
+      [this](MessageFrame& msg_wrapper) {
         InvokePublishTaps(msg_wrapper);
         if (state_.load() != State::kStart) {
           return;
@@ -1335,6 +1345,15 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
         }
 
 #ifdef IBMW_ENABLE_CORE_METRICS
+        std::optional<observability::CachedMetricsReadGuard> metrics_guard;
+        if (cached_metrics_gate_) metrics_guard.emplace(cached_metrics_gate_);
+        observability::MetricsEntry* metric_slots = nullptr;
+        if (metrics_guard && *metrics_guard) {
+          const auto* send_type = transport_catalog_ptr_->GetSendTypeWrapperPtr(
+              msg_wrapper.info.msg_type, msg_wrapper.info.topic_name,
+              msg_wrapper.info.pkg_path, msg_wrapper.info.module_name);
+          if (send_type) metric_slots = send_type->cached_metrics;
+        }
         if (metric_slots == nullptr) {
           for (auto* itr : find_itr->second) {
             MW_TRACE("Publish msg '{}' for topic '{}' to transport driver '{}'",

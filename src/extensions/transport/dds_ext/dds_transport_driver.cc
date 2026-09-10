@@ -39,6 +39,7 @@
 #if __has_include(<fastdds/dds/core/detail/DDSReturnCode.hpp>)
   // FastDDS 3.x
   namespace compat_dds = eprosima::fastdds::dds;
+  using compat_Duration_t = eprosima::fastdds::dds::Duration_t;
   inline bool CompatWriteSuccess(const eprosima::fastdds::dds::ReturnCode_t& ret) {
     return ret == eprosima::fastdds::dds::RETCODE_OK;
   }
@@ -71,6 +72,7 @@
   #define COMPAT_SERIALIZE(ts, data, payload) (ts)->serialize((data), &(payload))
   #define COMPAT_DESERIALIZE(ts, payload, data) (ts)->deserialize(&(payload), (data))
   using compat_SerializedPayload_t = eprosima::fastrtps::rtps::SerializedPayload_t;
+  using compat_Duration_t = eprosima::fastrtps::Duration_t;
   inline bool CompatWriteSuccess(bool ret) {
     return ret;
   }
@@ -1537,7 +1539,7 @@ bool DdsTransportDriver::WaitForSerializedAcknowledgments(
       const auto nanoseconds =
           std::chrono::duration_cast<std::chrono::nanoseconds>(
               remaining - seconds);
-      const eprosima::fastrtps::Duration_t duration(
+      const compat_Duration_t duration(
           static_cast<int32_t>(seconds.count()),
           static_cast<uint32_t>(nanoseconds.count()));
       if (!CompatWriteSuccess(

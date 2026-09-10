@@ -205,9 +205,10 @@ CachedTransportSubscriptionRegistry::Attach(
   handler->requested_qos = requested_qos;
   handler->require_cache_serialization_types.emplace(
       advertisement.topic.serialization_type);
-  handler->callback = [state](
-                          ibmw::runtime::core::transport::MessageFrame& frame,
-                          std::function<void()>&& release) {
+  handler->callback =
+      [state](ibmw::runtime::core::transport::MessageFrame& frame,
+              std::function<void()>&& release,
+              const ibmw::runtime::core::transport::internal::CallbackInvocationEnvelopeV1*) {
         CaptureFrame(state, frame, false, std::move(release));
       };
 

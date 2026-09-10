@@ -194,6 +194,7 @@ if(IBMW_BUILD_TESTS AND test_files)
                              PRIVATE IBMW_EXT_FIXTURE_DESTROY_THROWS)
 
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
+  set_tests_properties(${CUR_TARGET_NAME}_test PROPERTIES TIMEOUT 120)
   add_dependencies(${CUR_TARGET_NAME}_test
                    legacy_transport_driver_v1
                    extension_legacy_fixture
