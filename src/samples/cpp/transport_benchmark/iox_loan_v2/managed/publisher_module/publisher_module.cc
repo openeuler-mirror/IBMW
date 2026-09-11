@@ -78,17 +78,17 @@ bool PublisherModule::Setup(ibmw::Runtime core) {
   return true;
 }
 
-bool PublisherModule::Run() {
+bool PublisherModule::PreparePodTopics() {
   if (driver_ == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
-           "PublisherModule: iceoryx driver not injected before Run()");
+           "PublisherModule: iceoryx driver not injected before PreparePodTopics()");
     return false;
   }
 
   // One-time POD topic registration for EACH type on the iceoryx side.
   // This populates pod_pub_map_ (keyed on topic + msg_type) so the hot
-  // path LoanSample() lookup succeeds. Not on per-tick path -- does not
-  // bias the latency comparison.
+  // path LoanSample() lookup succeeds. This must run before Engine::Start(),
+  // while the driver is still in Init state and PoshRuntime is available.
 #define IBMW_LOAN_V2_RUN_ENSUREPOD(LBL, N, ALIAS)                              \
   {                                                                            \
     const std::string msg_type = MakeDdsMsgType<ALIAS>();                      \
@@ -100,6 +100,17 @@ bool PublisherModule::Run() {
   }
   IBMW_BENCH_PLAIN_FOR_EACH(IBMW_LOAN_V2_RUN_ENSUREPOD)
 #undef IBMW_LOAN_V2_RUN_ENSUREPOD
+
+  pod_topics_prepared_ = true;
+  return true;
+}
+
+bool PublisherModule::Run() {
+  if (!pod_topics_prepared_) {
+    MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+           "PublisherModule: PreparePodTopics() must succeed before Run()");
+    return false;
+  }
 
   running_ = true;
   thread_ = std::thread([this]() { PublishLoop(); });

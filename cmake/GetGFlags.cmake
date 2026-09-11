@@ -18,6 +18,7 @@ else()
   FetchContent_Declare(
     gflags
     URL ${gflags_DOWNLOAD_URL}
+    URL_HASH SHA256=34af2f15cf7367513b352bdcd2493ab14ce43692d2dcd9dfc499492966c64dcf
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()
@@ -30,10 +31,9 @@ function(get_gflags)
 
     set(BUILD_TESTING OFF)
 
-    file(READ ${gflags_SOURCE_DIR}/CMakeLists.txt TMP_VAR)
-    string(REPLACE "  set (PKGCONFIG_INSTALL_DIR " "# set (PKGCONFIG_INSTALL_DIR " TMP_VAR "${TMP_VAR}")
-    file(WRITE ${gflags_SOURCE_DIR}/CMakeLists.txt "${TMP_VAR}")
-
+    # Keep FetchContent sources immutable while pinning the intended pkg-config
+    # installation directory through gflags' cache setting.
+    set(PKGCONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/pkgconfig" CACHE PATH "" FORCE)
     add_subdirectory(${gflags_SOURCE_DIR} ${gflags_BINARY_DIR})
 
   endif()

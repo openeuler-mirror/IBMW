@@ -1,0 +1,20 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"mw_perf.evidence_campaign.v2","type":"object",
+  "required":["schema","campaign_id","classification","threat_model","registrations","retained_v8_source_descriptor"],
+  "properties":{
+    "schema":{"const":"mw_perf.evidence_campaign.v2"},"campaign_id":{"type":"string","minLength":1,"pattern":"^[^\\u0000]+$"},
+    "classification":{"const":{"valid_for_p0a_completion":true,"metric_availability":"unsupported","valid_for_comparison":false}},
+    "threat_model":{"const":"cooperative_contained_sut_no_active_same_uid"},
+    "registrations":{"type":"array","minItems":4,"maxItems":4,"items":{"$ref":"#/$defs/registration"}},
+    "retained_v8_source_descriptor":{"$ref":"#/$defs/source"}
+  },
+  "$defs":{
+    "hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "contract":{"type":"object","required":["id","sha256"],"properties":{"id":{"type":"string","minLength":1},"sha256":{"$ref":"#/$defs/hash"}},"additionalProperties":false},
+    "descriptor":{"type":"object","required":["campaign_id","role","companion_id","object_sha256","bundle_manifest_sha256","archive_tree_sha256","run_id","evidence_contract","root_manifest_sha256","evidence_manifest_sha256","build_identity_sha256"],"properties":{"campaign_id":{"type":"string","minLength":1},"role":{"enum":["exact_anchor","fault_evidence_tamper","fault_runtime_matrix","rollback_trace_off"]},"companion_id":{"type":"string","minLength":1},"object_sha256":{"$ref":"#/$defs/hash"},"bundle_manifest_sha256":{"$ref":"#/$defs/hash"},"archive_tree_sha256":{"$ref":"#/$defs/hash"},"run_id":{"type":"string","minLength":1},"evidence_contract":{"$ref":"#/$defs/contract"},"root_manifest_sha256":{"$ref":"#/$defs/hash"},"evidence_manifest_sha256":{"$ref":"#/$defs/hash"},"build_identity_sha256":{"$ref":"#/$defs/hash"}},"additionalProperties":false},
+    "source":{"allOf":[{"$ref":"#/$defs/descriptor"},{"properties":{"role":{"const":"exact_anchor"},"evidence_contract":{"properties":{"id":{"const":"mw_perf.p0a_contract.v8"}}}}}]},
+    "formal":{"allOf":[{"$ref":"#/$defs/descriptor"},{"properties":{"role":{"const":"exact_anchor"},"evidence_contract":{"properties":{"id":{"const":"mw_perf.p0a_contract.v9"}}}}}]},
+    "registration":{"type":"object","required":["role","descriptor"],"properties":{"role":{"enum":["exact_anchor","fault_evidence_tamper","fault_runtime_matrix","rollback_trace_off"]},"descriptor":{"oneOf":[{"$ref":"#/$defs/formal"},{"allOf":[{"$ref":"#/$defs/descriptor"},{"properties":{"role":{"const":"fault_evidence_tamper"},"evidence_contract":{"properties":{"id":{"const":"mw_perf.p0a_contract.v8"}}}}}]},{"allOf":[{"$ref":"#/$defs/descriptor"},{"properties":{"role":{"const":"fault_runtime_matrix"},"evidence_contract":{"properties":{"id":{"const":"mw_perf.p0a_contract.v8"}}}}}]},{"allOf":[{"$ref":"#/$defs/descriptor"},{"properties":{"role":{"const":"rollback_trace_off"},"evidence_contract":{"properties":{"id":{"const":"mw_perf.p0a_contract.v8"}}}}}]}]}},"additionalProperties":false}
+  },"additionalProperties":false
+}

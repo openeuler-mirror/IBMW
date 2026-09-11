@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.evidence_companion_bundle.v1",
+  "type": "object",
+  "required": ["schema", "campaign_id", "role", "companion_id", "run_id", "evidence_contract", "root_manifest_sha256", "evidence_manifest_sha256", "build_identity_sha256", "archive_tree_sha256", "payload_member_count"],
+  "properties": {
+    "schema": {"const": "mw_perf.evidence_companion_bundle.v1"},
+    "campaign_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+    "role": {"enum": ["exact_anchor", "fault_evidence_tamper", "fault_runtime_matrix", "rollback_trace_off"]},
+    "companion_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+    "evidence_contract": {
+      "type": "object",
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "root_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evidence_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "build_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "archive_tree_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payload_member_count": {"type": "integer", "minimum": 1}
+  },
+  "additionalProperties": false
+}

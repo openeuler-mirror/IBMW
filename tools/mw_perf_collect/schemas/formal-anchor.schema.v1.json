@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.formal_anchor.v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema", "formal_anchor_id", "run_id", "registration_contract", "source_anchor", "companions", "source_trace_quality_content_sha256", "finalized", "status", "conclusion"],
+  "properties": {
+    "schema": {"const": "mw_perf.formal_anchor.v1"},
+    "formal_anchor_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "run_id": {"type": "string", "minLength": 1},
+    "registration_contract": {"type": "object", "additionalProperties": false, "required": ["version", "sha256"], "properties": {"version": {"const": "mw_perf.p0a_contract.v9"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "source_anchor": {"$ref": "#/$defs/exact_anchor_descriptor"},
+    "companions": {"type": "object", "additionalProperties": false, "required": ["fault_evidence_tamper", "fault_runtime_matrix", "rollback_trace_off"], "properties": {"fault_evidence_tamper": {"$ref": "#/$defs/fault_evidence_tamper_descriptor"}, "fault_runtime_matrix": {"$ref": "#/$defs/fault_runtime_matrix_descriptor"}, "rollback_trace_off": {"$ref": "#/$defs/rollback_trace_off_descriptor"}}},
+    "source_trace_quality_content_sha256": {"$ref": "#/$defs/hash"},
+    "finalized": {"const": true},
+    "status": {"type": "object", "additionalProperties": false, "required": ["valid_for_p0a_completion", "metric_availability", "valid_for_comparison"], "properties": {"valid_for_p0a_completion": {"const": true}, "metric_availability": {"const": "unsupported"}, "valid_for_comparison": {"const": false}}},
+    "conclusion": {"const": "pass"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "descriptor_properties": {"type": "object", "additionalProperties": false, "required": ["campaign_id", "role", "companion_id", "object_sha256", "bundle_manifest_sha256", "archive_tree_sha256", "run_id", "evidence_contract", "root_manifest_sha256", "evidence_manifest_sha256", "build_identity_sha256"], "properties": {"campaign_id": {"type": "string", "minLength": 1}, "role": {"type": "string"}, "companion_id": {"type": "string", "minLength": 1}, "object_sha256": {"$ref": "#/$defs/hash"}, "bundle_manifest_sha256": {"$ref": "#/$defs/hash"}, "archive_tree_sha256": {"$ref": "#/$defs/hash"}, "run_id": {"type": "string", "minLength": 1}, "evidence_contract": {"type": "object", "additionalProperties": false, "required": ["id", "sha256"], "properties": {"id": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/hash"}}}, "root_manifest_sha256": {"$ref": "#/$defs/hash"}, "evidence_manifest_sha256": {"$ref": "#/$defs/hash"}, "build_identity_sha256": {"$ref": "#/$defs/hash"}}},
+    "exact_anchor_descriptor": {"allOf": [{"$ref": "#/$defs/descriptor_properties"}, {"properties": {"role": {"const": "exact_anchor"}}}]},
+    "fault_evidence_tamper_descriptor": {"allOf": [{"$ref": "#/$defs/descriptor_properties"}, {"properties": {"role": {"const": "fault_evidence_tamper"}}}]},
+    "fault_runtime_matrix_descriptor": {"allOf": [{"$ref": "#/$defs/descriptor_properties"}, {"properties": {"role": {"const": "fault_runtime_matrix"}}}]},
+    "rollback_trace_off_descriptor": {"allOf": [{"$ref": "#/$defs/descriptor_properties"}, {"properties": {"role": {"const": "rollback_trace_off"}}}]}
+  }
+}

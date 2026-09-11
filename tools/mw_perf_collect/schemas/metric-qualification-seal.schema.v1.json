@@ -1,0 +1,13 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"mw_perf.metric_qualification_seal.v1",
+  "type":"object","additionalProperties":false,
+  "required":["schema","qualification_id","artifact_sha256","declaration_sha256","latency_samples_sha256","metric_qualification_sha256","finalized"],
+  "properties":{
+    "schema":{"const":"mw_perf.metric_qualification_seal.v1"},
+    "qualification_id":{"$ref":"#/$defs/hash"},"artifact_sha256":{"$ref":"#/$defs/hash"},
+    "declaration_sha256":{"$ref":"#/$defs/hash"},"latency_samples_sha256":{"$ref":"#/$defs/hash"},
+    "metric_qualification_sha256":{"$ref":"#/$defs/hash"},"finalized":{"const":true}
+  },
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

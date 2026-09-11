@@ -29,17 +29,18 @@
 #include "cpp/executor/executor.h"
 #include "dds_ext/dds_bus.h"
 #include "dds_ext/global.h"
+#include "dds_ext/fastdds_compat.h"
 
 namespace ibmw::extensions::dds_extension {
 
-#if __has_include(<fastdds/rtps/common/WriteParams.hpp>)
-namespace dds_rpc_rtps = eprosima::fastdds::rtps;
-namespace dds_rpc_return = eprosima::fastdds::dds;
-inline constexpr auto kDdsRpcReturnOk = eprosima::fastdds::dds::RETCODE_OK;
+#if IBMW_FASTDDS_V3_PLUS
+namespace dds_rpc_rtps = fastdds_compat::rtps;
+namespace dds_rpc_return = fastdds_compat::return_code;
+inline constexpr auto kDdsRpcReturnOk = fastdds_compat::kReturnCodeOk;
 #else
-namespace dds_rpc_rtps = eprosima::fastrtps::rtps;
-namespace dds_rpc_return = eprosima::fastrtps::types;
-inline constexpr auto kDdsRpcReturnOk = eprosima::fastrtps::types::ReturnCode_t::RETCODE_OK;
+namespace dds_rpc_rtps = fastdds_compat::rtps;
+namespace dds_rpc_return = fastdds_compat::return_code;
+inline constexpr auto kDdsRpcReturnOk = fastdds_compat::kReturnCodeOk;
 #endif
 
 inline bool DdsRpcWriteSucceeded(bool ret) {

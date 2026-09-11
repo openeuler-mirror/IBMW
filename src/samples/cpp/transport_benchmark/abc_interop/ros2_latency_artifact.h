@@ -5,6 +5,7 @@
 #include <vector>
 namespace ibmw::abc {
 constexpr char kLatencySchema[] = "mw_perf.latency.v1";
+constexpr char kLatencyClockDomain[] = "producer_monotonic";
 constexpr char kRos2PayloadType[] = "std_msgs/msg/UInt8MultiArray";
 struct LatencyRecord { uint64_t seq, send_ns, receive_ns, payload_bytes; };
 bool ParseProcStartTimeTicks(const std::string& stat, uint64_t* ticks);

@@ -219,10 +219,10 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
           if (subscribe_executor_ref_) {
             subscribe_executor_ref_.Dispatch(
                 [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)}]() mutable {
-                  msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+                  msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
                 });
           } else {
-            msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+            msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
           }
         }
 
@@ -262,10 +262,10 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
           if (subscribe_executor_ref_) {
             subscribe_executor_ref_.Dispatch(
                 [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)}]() mutable {
-                  msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+                  msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
                 });
           } else {
-            msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {});
+            msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
           }
         }
       }

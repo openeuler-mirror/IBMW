@@ -1,0 +1,44 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v4",
+  "base_contract_version": "mw_perf.p0a_contract.v3",
+  "artifact_schemas": {
+    "mw_perf.p0a.identity_trace.v2": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "producer", "finalized", "identity_verified", "conclusion", "stream_id", "producer_pid", "producer_start_time_ticks", "topology_generation", "topology_sha256", "source_set_sha256", "writer_guid", "sequence_high", "sequence_low", "reader_guid", "callback_registration_id", "publish_start_ns", "publish_end_ns", "receive_start_ns", "receive_end_ns", "dispatch_start_ns", "dispatch_end_ns", "callback_start_ns", "callback_end_ns"],
+      "properties": {
+        "schema": {"const": "mw_perf.p0a.identity_trace.v2"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "producer": {"const": "mw_perf_collect"},
+        "finalized": {"const": true},
+        "identity_verified": {"const": true},
+        "conclusion": {"const": "pass"},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "topology_generation": {"type": "string", "minLength": 1},
+        "topology_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "writer_guid": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+        "sequence_high": {"type": "integer", "minimum": -2147483648, "maximum": 2147483647},
+        "sequence_low": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "reader_guid": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
+        "callback_registration_id": {"type": "integer", "minimum": 1},
+        "publish_start_ns": {"type": "integer", "minimum": 0},
+        "publish_end_ns": {"type": "integer", "minimum": 0},
+        "receive_start_ns": {"type": "integer", "minimum": 0},
+        "receive_end_ns": {"type": "integer", "minimum": 0},
+        "dispatch_start_ns": {"type": "integer", "minimum": 0},
+        "dispatch_end_ns": {"type": "integer", "minimum": 0},
+        "callback_start_ns": {"type": "integer", "minimum": 0},
+        "callback_end_ns": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "artifact_overrides": [
+    {"universe": "proof", "relative_path": "normalized/identity_trace.jsonl", "schema_version": "mw_perf.p0a.identity_trace.v2", "format": "jsonl", "record_count_rule": "physical_lines", "min_record_count": 1, "finalization": "complete"}
+  ]
+}

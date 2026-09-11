@@ -6,6 +6,7 @@
 #include "iceoryx_ext/global.h"
 #include "iceoryx_ext/internal/checked_size.h"
 #include "iceoryx_ext/internal/payload_size.h"
+#include "iceoryx_ext/internal/reporter_bridge.h"
 #ifdef IBMW_ENABLE_REPORTER_V1
 #include "iceoryx_ext/internal/reporter_sidecar.h"
 #endif
@@ -17,9 +18,13 @@
 #if !defined(_WIN32)
 #include <dlfcn.h>
 #endif
-#ifdef IBMW_ENABLE_REPORTER_V1
-#include <mutex>
-#include <unordered_map>
+
+#if defined(_MSC_VER)
+#define IBMW_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define IBMW_NOINLINE __attribute__((noinline))
+#else
+#define IBMW_NOINLINE
 #endif
 
 namespace YAML {
@@ -33,6 +38,10 @@ struct convert<ibmw::extensions::iceoryx_extension::IceoryxTransportDriver::Opti
     node["listener_thread_name"] = rhs.listener_thread_name;
     node["listener_thread_sched_policy"] = rhs.listener_thread_sched_policy;
     node["listener_thread_bind_cpu"] = rhs.listener_thread_bind_cpu;
+    node["benchmark_profile"] = rhs.benchmark_profile;
+    node["subscriber_queue_capacity"] = rhs.subscriber_queue_capacity;
+    node["publisher_too_slow_policy"] = rhs.publisher_too_slow_policy;
+    node["subscriber_queue_full_policy"] = rhs.subscriber_queue_full_policy;
 
     return node;
   }
@@ -49,12 +58,49 @@ struct convert<ibmw::extensions::iceoryx_extension::IceoryxTransportDriver::Opti
     if (node["listener_thread_bind_cpu"])
       rhs.listener_thread_bind_cpu = node["listener_thread_bind_cpu"].as<std::vector<uint32_t>>();
 
+    if (node["benchmark_profile"])
+      rhs.benchmark_profile = node["benchmark_profile"].as<std::string>();
+    if (node["subscriber_queue_capacity"])
+      rhs.subscriber_queue_capacity = node["subscriber_queue_capacity"].as<uint64_t>();
+    if (node["publisher_too_slow_policy"])
+      rhs.publisher_too_slow_policy = node["publisher_too_slow_policy"].as<std::string>();
+    if (node["subscriber_queue_full_policy"])
+      rhs.subscriber_queue_full_policy = node["subscriber_queue_full_policy"].as<std::string>();
+
     return true;
   }
 };
 }  // namespace YAML
 
 namespace ibmw::extensions::iceoryx_extension {
+namespace {
+constexpr std::string_view kCoreMetricsLosslessProfile =
+    "core_metrics_e2e_lossless_v1";
+constexpr uint64_t kCoreMetricsLosslessQueueCapacity = 256;
+
+}  // namespace
+
+std::optional<IoxDeliveryOptions>
+IceoryxTransportDriver::ResolveDeliveryOptions(const Options& options) noexcept {
+  const bool any_explicit = !options.benchmark_profile.empty() ||
+                            !options.publisher_too_slow_policy.empty() ||
+                            !options.subscriber_queue_full_policy.empty() ||
+                            options.subscriber_queue_capacity != 1;
+  if (!any_explicit) return IoxDeliveryOptions{};
+  if (options.benchmark_profile != kCoreMetricsLosslessProfile ||
+      options.publisher_too_slow_policy != "WAIT_FOR_CONSUMER" ||
+      options.subscriber_queue_full_policy != "BLOCK_PRODUCER" ||
+      options.subscriber_queue_capacity != kCoreMetricsLosslessQueueCapacity) {
+    return std::nullopt;
+  }
+  return IoxDeliveryOptions{.lossless = true,
+                            .queue_capacity = kCoreMetricsLosslessQueueCapacity};
+}
+
+IceoryxTransportDriver::~IceoryxTransportDriver() {
+  DestroyDriverReporterState(reporter_state_);
+}
+
 namespace {
 const ibmw_reporter_v1* QueryHostReporter() noexcept {
 #if defined(_WIN32)
@@ -72,48 +118,13 @@ const ibmw_reporter_v1* QueryHostReporter() noexcept {
 }  // namespace
 #ifdef IBMW_ENABLE_REPORTER_V1
 namespace {
-struct DirectReporterSlots {
-  ibmw_reporter_slot_v1* attempt{}; ibmw_reporter_slot_v1* success{};
-  ibmw_reporter_slot_v1* fail{}; ibmw_reporter_slot_v1* retry{};
-  ibmw_reporter_slot_v1* publish{}; ibmw_reporter_slot_v1* release{};
-};
-struct DirectReporterBinding {
-  const ibmw_reporter_v1* api{};
-  DirectReporterSlots slots;
-  IoxReceiveReporter receive;
-};
-struct ReporterSidecar {
-  const ibmw_reporter_v1* api{};
-  std::vector<std::unique_ptr<DirectReporterBinding>> bindings;
-  std::vector<const IoxPublisher*> publishers;
-};
-std::mutex g_reporter_sidecars_mutex;
-std::unordered_map<const IceoryxTransportDriver*, std::unique_ptr<ReporterSidecar>>
-    g_reporter_sidecars;
-std::unordered_map<const IoxPublisher*, DirectReporterBinding*>
-    g_publisher_reporters;
-ReporterSidecar* FindReporterSidecar(const IceoryxTransportDriver* driver) {
-  std::lock_guard lock(g_reporter_sidecars_mutex);
-  auto it = g_reporter_sidecars.find(driver);
-  return it == g_reporter_sidecars.end() ? nullptr : it->second.get();
-}
 bool ValidReporter(const ibmw_reporter_v1* api) noexcept {
   return api && api->abi_version == IBMW_REPORTER_ABI_VERSION_V1 &&
          api->struct_size >= offsetof(ibmw_reporter_v1, add) + sizeof(api->add) &&
          api->register_slot && api->add;
 }
-bool ValidSignedReporter(const ibmw_reporter_v1* api) noexcept {
-  return ValidReporter(api) &&
-         api->struct_size >= offsetof(ibmw_reporter_v1, add_signed) + sizeof(api->add_signed) &&
-         api->add_signed;
-}
-DirectReporterBinding* FindPublisherReporter(const IoxPublisher* publisher) {
-  std::lock_guard lock(g_reporter_sidecars_mutex);
-  const auto it = g_publisher_reporters.find(publisher);
-  return it == g_publisher_reporters.end() ? nullptr : it->second;
-}
 void ReporterAdd(const ibmw_reporter_v1* api, ibmw_reporter_slot_v1* slot,
-                 uint64_t value) noexcept {
+                  uint64_t value) noexcept {
   if (api && api->add && slot) api->add(api->owner, slot, value);
 }
 }  // namespace
@@ -129,35 +140,50 @@ ibmw_iceoryx_query_host_reporter_v1(void) noexcept {
 #endif
 }
 void IceoryxTransportDriver::Initialize(YAML::Node options_node) {
+  static_assert(std::is_nothrow_move_assignable_v<Options>);
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   // todo: check options_node->shm_init_size
 
   MW_REQUIRE(
-      std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
+      state_.load() == State::kPreInit,
       "Iceoryx transport driver can only be initialized once.");
 
+  Options options;
   if (options_node && !options_node.IsNull()) {
     MW_REQUIRE(
         !options_node["executor"] && !options_node["callback_executor"] &&
             !options_node["subscribers"],
         "Iceoryx transport driver does not support callback executor options; "
         "use listener_thread_* options or the Context::CreateSubscriber(..., executor, cb) API-layer binding.");
-    options_ = options_node.as<Options>();
+    options = options_node.as<Options>();
   }
 
-  options_node = options_;
-#ifdef IBMW_ENABLE_REPORTER_V1
-  auto sidecar = std::make_unique<ReporterSidecar>();
-  sidecar->api = QueryHostReporter();
-  if (!ValidReporter(sidecar->api)) sidecar->api = nullptr;
-  std::lock_guard lock(g_reporter_sidecars_mutex);
-  g_reporter_sidecars.emplace(this, std::move(sidecar));
-#endif
+  const auto delivery = ResolveDeliveryOptions(options);
+  MW_REQUIRE(delivery.has_value(),
+             "Iceoryx benchmark delivery controls must be omitted (legacy "
+             "defaults) or exactly core_metrics_e2e_lossless_v1 with "
+             "WAIT_FOR_CONSUMER, BLOCK_PRODUCER, and queue capacity 256.");
+  iceoryx_bus_.SetDeliveryOptions(*delivery);
+  options_ = std::move(options);
+  reporter_state_ = CreateDriverReporterState();
+  if (DriverReporterActive(reporter_state_)) {
+    raw_ctx_loan_dispatch_ = &IceoryxTransportDriver::ReportedRawCtxLoan;
+    serialized_ctx_loan_dispatch_ =
+        &IceoryxTransportDriver::ReportedSerializedCtxLoan;
+  } else {
+    raw_ctx_loan_dispatch_ = &IceoryxTransportDriver::PlainRawCtxLoan;
+    serialized_ctx_loan_dispatch_ =
+        &IceoryxTransportDriver::PlainSerializedCtxLoan;
+  }
+  state_.store(State::kInit);
 }
 
 void IceoryxTransportDriver::Start() {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   MW_REQUIRE(
-      std::atomic_exchange(&state_, State::kStart) == State::kInit,
+      state_.load() == State::kInit,
       "Method can only be called when state is 'Init'.");
+  state_.store(State::kStart);
 }
 
 bool IceoryxTransportDriver::CanShutdownFromCurrentThread() const noexcept {
@@ -167,6 +193,10 @@ bool IceoryxTransportDriver::CanShutdownFromCurrentThread() const noexcept {
 bool IceoryxTransportDriver::TryPrepareShutdown(
     std::chrono::milliseconds timeout) noexcept {
   if (!CanShutdownFromCurrentThread()) return false;
+  {
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    shutdown_started_ = true;
+  }
   return iceoryx_bus_.TryPrepareShutdown(timeout);
 }
 
@@ -183,23 +213,14 @@ void IceoryxTransportDriver::Shutdown() {
   }
 
   iceoryx_bus_.Shutdown();
-#ifdef IBMW_ENABLE_REPORTER_V1
-  {
-    std::lock_guard lock(g_reporter_sidecars_mutex);
-    if (const auto it = g_reporter_sidecars.find(this);
-        it != g_reporter_sidecars.end()) {
-      for (const auto* publisher : it->second->publishers)
-        g_publisher_reporters.erase(publisher);
-    }
-    g_reporter_sidecars.erase(this);
-  }
-#endif
   state_.store(State::kShutdown);
 }
 
 bool IceoryxTransportDriver::RegisterSendType(
     const runtime::core::transport::SendTypeWrapper& send_type_wrapper) noexcept {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   try {
+    if (shutdown_started_) return false;
     MW_REQUIRE(state_.load() == State::kInit,
                             "Method can only be called when state is 'Init'.");
     namespace util = ibmw::common::util;
@@ -209,37 +230,28 @@ bool IceoryxTransportDriver::RegisterSendType(
                           util::UrlEncode(info.topic_name) + "/" +
                           util::UrlEncode(info.msg_type);
 
-    // register publisher with url to iceoryx
-    iceoryx_bus_.RegisterPublisher(pattern);
-
-#ifdef IBMW_ENABLE_REPORTER_V1
-    try {
-      if (auto* sidecar = FindReporterSidecar(this); sidecar && sidecar->api) {
-      const auto* reporter = sidecar->api;
-      auto view=[](std::string_view s){return ibmw_reporter_string_view_v1{s.data(),static_cast<uint64_t>(s.size())};};
-      auto binding=std::make_unique<DirectReporterBinding>();
-      binding->api=reporter;
-      auto& slots=binding->slots;
-      auto reg=[&](std::string_view metric){ibmw_reporter_slot_descriptor_v1 d{};d.abi_version=IBMW_REPORTER_ABI_VERSION_V1;d.struct_size=sizeof(d);d.kind=view("direct_iceoryx_loan");d.metric=view(metric);d.topic=view(info.topic_name);d.type=view(info.msg_type);d.driver=view("iceoryx");return reporter->register_slot(reporter->owner,&d);};
-      slots.attempt=reg("logical_attempt");slots.success=reg("logical_success");slots.fail=reg("logical_fail");slots.retry=reg("internal_retry");slots.publish=reg("publish");slots.release=reg("release");
-      auto* pub=iceoryx_bus_.GetPublisher(pattern);
-      if (pub) {
-        std::lock_guard lock(g_reporter_sidecars_mutex);
-        g_publisher_reporters.emplace(pub, binding.get());
-        sidecar->publishers.push_back(pub);
-      }
-        sidecar->bindings.push_back(std::move(binding));
-      }
-    } catch (...) {
-      // Reporter setup is optional and cannot change transport registration.
+    bool publisher_created = false;
+    auto* publisher =
+        iceoryx_bus_.RegisterPublisher(pattern, 0, &publisher_created);
+    if (!publisher) return false;
+    if (!internal::PreparePublisherRegistration(
+            publisher_created,
+            [&] {
+              return PreparePublisherReporter(reporter_state_, publisher, info,
+                                              publisher_created);
+            },
+            [&] { iceoryx_bus_.RollbackPublisher(pattern, publisher); })) {
+      return false;
     }
-#endif
 
     MW_INFO("Register publish type to iceoryx transport, url: {}", pattern);
 
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
+    return false;
+  } catch (...) {
+    MW_ERROR("RegisterSendType failed with an unknown exception.");
     return false;
   }
 }
@@ -257,9 +269,13 @@ bool IceoryxTransportDriver::RegisterLoanedPodTopic(
 
 bool IceoryxTransportDriver::OnMessage(
     const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   try {
+    if (shutdown_started_) return false;
     MW_REQUIRE(state_.load() == State::kInit,
-                            "Method can only be called when state is 'Init'.");
+                             "Method can only be called when state is 'Init'.");
+    auto operation = iceoryx_bus_.TryAcquireOperation();
+    if (!operation) return false;
 
     namespace util = ibmw::common::util;
 
@@ -384,6 +400,8 @@ void IceoryxTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wr
     MW_REQUIRE(state_.load() == State::kStart,
                             "Method can only be called when state is 'Start'.");
 
+    auto operation = iceoryx_bus_.TryAcquireOperation();
+    if (!operation) return;
     namespace util = ibmw::common::util;
 
     const auto& info = msg_wrapper.info;
@@ -393,7 +411,8 @@ void IceoryxTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wr
                                     util::UrlEncode(info.msg_type);
 
     // find publisher
-    auto* iox_pub_ctx_ptr = iceoryx_bus_.GetPublisher(iceoryx_pub_topic);
+    auto* iox_pub_ctx_ptr =
+        iceoryx_bus_.GetPublisher(operation, iceoryx_pub_topic);
     MW_REQUIRE(iox_pub_ctx_ptr != nullptr,
                             "Url: {} not registered for publishing!", iceoryx_pub_topic);
 
@@ -418,7 +437,7 @@ void IceoryxTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wr
     // check serialization cache
     auto& serialization_cache = msg_wrapper.serialization_cache;
     auto finditr = serialization_cache.find(serialization_type);
-    if (finditr != serialization_cache.end()) [[unlikely]] {
+    if (finditr != serialization_cache.end()) {
       // publish with cache
       auto buffer_array_view_ptr = finditr->second;
 
@@ -549,20 +568,32 @@ inline std::string MakeStdTransportUrl(std::string_view topic, std::string_view 
          util::UrlEncode(msg_type);
 }
 
-// Bookkeeping kept alive across LoanSampleWithCtx -> PublishLoaned/ReleaseLoaned.
-// Allocated on borrow, freed on publish/release. Pointed to by
-// LoanedSampleHandle::driver_token. We never put this pointer into POD-mode
-// handles (POD mode stores IoxPublisher* directly to keep that path lean).
+// The handle mode distinguishes this two-pointer plain token from the
+// ops-backed reported token. POD handles store IoxPublisher* directly.
+struct PlainCtxMetaLoanToken {
+  ibmw::extensions::iceoryx_extension::IoxPublisher* pub;
+  void* chunk_ptr;
+};
+static_assert(sizeof(PlainCtxMetaLoanToken) ==
+              sizeof(IoxPublisher*) + sizeof(void*));
+
 struct CtxMetaLoanToken {
   ibmw::extensions::iceoryx_extension::IoxPublisher* pub;
   void* chunk_ptr;     // start of iceoryx user payload (i.e. base of header)
-  size_t total_size;   // header_size + payload_size, for pkg_size field
 #ifdef IBMW_ENABLE_REPORTER_V1
-  const ibmw_reporter_v1* reporter;
-  ibmw_reporter_slot_v1* publish_slot;
-  ibmw_reporter_slot_v1* release_slot;
+  const DirectPublisherOps* ops;
+#else
+  size_t total_size;   // header_size + payload_size, for pkg_size field
 #endif
 };
+static_assert(sizeof(CtxMetaLoanToken) ==
+              sizeof(IoxPublisher*) + sizeof(void*) +
+#ifdef IBMW_ENABLE_REPORTER_V1
+                  sizeof(DirectPublisherOps*)
+#else
+                  sizeof(size_t)
+#endif
+              );
 
 class RawLoanGuard {
  public:
@@ -587,7 +618,12 @@ bool IceoryxTransportDriver::EnsurePodTopic(std::string_view topic,
                                             std::string_view msg_type,
                                             size_t initial_size_hint,
                                             size_t alignment) noexcept {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   try {
+    if (shutdown_started_ || state_.load() != State::kInit)
+      return false;
+    auto operation = iceoryx_bus_.TryAcquireOperation();
+    if (!operation) return false;
     if (initial_size_hint == 0 ||
         initial_size_hint > std::numeric_limits<uint32_t>::max() ||
         alignment == 0 || alignment > std::numeric_limits<uint32_t>::max() ||
@@ -605,7 +641,7 @@ bool IceoryxTransportDriver::EnsurePodTopic(std::string_view topic,
 
     auto url = MakePodUrl(topic, msg_type);
     iceoryx_bus_.RegisterPublisher(url, initial_size_hint);
-    auto* pub = iceoryx_bus_.GetPublisher(url);
+    auto* pub = iceoryx_bus_.GetPublisher(operation, url);
     if (pub == nullptr) {
       MW_ERROR("EnsurePodTopic: failed to obtain publisher for url={}", url);
       return false;
@@ -624,7 +660,9 @@ bool IceoryxTransportDriver::EnsurePodTopic(std::string_view topic,
 bool IceoryxTransportDriver::RegisterPodSubscriber(std::string_view topic,
                                                    std::string_view msg_type,
                                                    PodMessageCallback callback) noexcept {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   try {
+    if (shutdown_started_ || state_.load() != State::kInit) return false;
     auto url = MakePodUrl(topic, msg_type);
 
     auto cb_storage =
@@ -661,10 +699,12 @@ bool IceoryxTransportDriver::RegisterPodSubscriber(std::string_view topic,
 // the real release token to the dispatcher.
 bool IceoryxTransportDriver::AttachLoaned(
     const runtime::core::transport::LoanedMessageHandlerWrapper& message_handler) noexcept {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   if (state_.load() != State::kInit) [[unlikely]] {
     MW_ERROR("AttachLoaned called outside Init state.");
     return false;
   }
+  if (shutdown_started_) return false;
 
   try {
     const auto& info = message_handler.info;
@@ -710,6 +750,7 @@ std::unique_ptr<runtime::core::transport::LoanedSubscriptionHandle>
 IceoryxTransportDriver::AttachLoanedRetained(
     const runtime::core::transport::LoanedMessageHandlerWrapper& message_handler,
     runtime::core::transport::RetainedLoanOptions options) noexcept {
+  std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   if (state_.load() != State::kInit || options.max_outstanding == 0 ||
       options.max_outstanding >
           iox::MAX_CHUNKS_HELD_PER_SUBSCRIBER_SIMULTANEOUSLY) {
@@ -718,48 +759,155 @@ IceoryxTransportDriver::AttachLoanedRetained(
              iox::MAX_CHUNKS_HELD_PER_SUBSCRIBER_SIMULTANEOUSLY);
     return nullptr;
   }
+  if (shutdown_started_) return nullptr;
 
   try {
     const auto& info = message_handler.info;
+    const auto url = MakePodUrl(info.topic_name, info.msg_type);
+    if (!iceoryx_bus_.ReserveSubscriberUrl(url)) return nullptr;
     auto callback = message_handler.callback;
-#ifdef IBMW_ENABLE_REPORTER_V1
-    DirectReporterBinding* reporter_binding = nullptr;
-    try {
-      if (auto* sidecar = FindReporterSidecar(this);
-          sidecar && ValidSignedReporter(sidecar->api)) {
-        auto binding = std::make_unique<DirectReporterBinding>();
-        binding->api = sidecar->api;
-        binding->receive.api = sidecar->api;
-        auto view=[](std::string_view s){return ibmw_reporter_string_view_v1{s.data(),static_cast<uint64_t>(s.size())};};
-        auto reg=[&](std::string_view metric){ibmw_reporter_slot_descriptor_v1 d{};d.abi_version=IBMW_REPORTER_ABI_VERSION_V1;d.struct_size=sizeof(d);d.kind=view("retained_iceoryx_receive");d.metric=view(metric);d.topic=view(info.topic_name);d.type=view(info.msg_type);d.driver=view("iceoryx");return sidecar->api->register_slot(sidecar->api->owner,&d);};
-        auto& r = binding->receive;
-        r.delivered=reg("receive_delivered");r.released=reg("receive_released");r.outstanding=reg("outstanding_current");r.outstanding_peak=reg("outstanding_peak");r.limit_drop=reg("limit_drop");
-        reporter_binding = binding.get();
-        sidecar->bindings.push_back(std::move(binding));
-      }
-    } catch (...) {
-      reporter_binding = nullptr;
+    IoxSubscriberRegistrationOptions registration_options{
+        .retained = true, .url_reserved = true,
+        .max_outstanding = options.max_outstanding};
+    if (!PrepareSubscriptionReporter(reporter_state_, registration_options,
+                                     info.topic_name, info.msg_type)) {
+      iceoryx_bus_.RollbackSubscriberUrl(url);
+      return nullptr;
     }
-#endif
-#ifdef IBMW_ENABLE_REPORTER_V1
-    ScopedPendingIoxReceiveReporter pending_reporter(
-        reporter_binding ? &reporter_binding->receive : nullptr);
-#endif
     auto state = iceoryx_bus_.RegisterSubscriber(
-        MakePodUrl(info.topic_name, info.msg_type),
+        url,
         [callback = std::move(callback)](
             const void* payload, size_t size,
             std::function<void()>&& release) {
           callback(nullptr, payload, size, std::move(release));
         },
-        IoxSubscriberRegistrationOptions{
-            .retained = true, .max_outstanding = options.max_outstanding});
+        std::move(registration_options));
+    if (!CommitSubscriptionReporter(state.get())) {
+      // The state owns the transaction. Its stop worker closes and detaches
+      // callbacks, waits for callbacks and retained loans, removes the
+      // committed URL, and only then destroys (aborts) the transaction.
+      iceoryx_bus_.AbortSubscriber(state);
+      return nullptr;
+    }
     return std::make_unique<IoxLoanedSubscriptionHandle>(std::move(state));
   } catch (const std::exception& e) {
+    iceoryx_bus_.RollbackSubscriberUrl(
+        MakePodUrl(message_handler.info.topic_name, message_handler.info.msg_type));
     MW_ERROR("AttachLoanedRetained exception: {}", e.what());
+    return nullptr;
+  } catch (...) {
+    iceoryx_bus_.RollbackSubscriberUrl(
+        MakePodUrl(message_handler.info.topic_name, message_handler.info.msg_type));
+    MW_ERROR("AttachLoanedRetained failed with an unknown exception.");
     return nullptr;
   }
 }
+
+#ifdef IBMW_ENABLE_REPORTER_V1
+template <bool Reported>
+IBMW_NOINLINE bool DirectPublisherOps::RawLoanImpl(
+    const DirectPublisherOps* ops, IceoryxTransportDriver* driver,
+    IoxPublisher* pub,
+    const runtime::core::transport::TransportInfo& info,
+    size_t requested_size, const ibmw::transport::Context& ctx,
+    runtime::core::transport::LoanedSampleHandle& out_handle) {
+  DirectLoanReporterOutcome<Reported> outcome(
+      Reported ? const_cast<DirectReporterBinding*>(&ops->binding) : nullptr);
+  std::string_view serialization_type = ctx.GetSerializationType();
+  if (serialization_type.empty()) {
+    serialization_type = info.msg_type_support_ref.DefaultSerializationType();
+  }
+  auto kv_map = ctx.GetMetaKeyVals();
+  const size_t header_size =
+      driver->ComputeCtxMetaHeaderSize(serialization_type, kv_map);
+  if (header_size == 0) return false;
+  size_t total_size = 0;
+  if (!internal::CheckedAddSize(header_size, requested_size, total_size) ||
+      total_size > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  void* chunk = pub->LoanRaw(total_size);
+  if (!chunk) return false;
+  RawLoanGuard chunk_guard(pub, chunk);
+  if (driver->EncodeCtxMetaHeader(
+          chunk, total_size, static_cast<uint32_t>(total_size),
+          serialization_type, kv_map) != header_size) {
+    return false;
+  }
+  auto* token = new CtxMetaLoanToken{pub, chunk, ops};
+  chunk_guard.Disarm();
+  out_handle.user_payload_ptr = static_cast<char*>(chunk) + header_size;
+  out_handle.user_payload_size = requested_size;
+  out_handle.mode = runtime::core::transport::LoanMode::kCtxMetaThenPayload;
+  out_handle.driver_token = token;
+  out_handle.source_driver = driver;
+  if constexpr (Reported) outcome.MarkSuccess();
+  return true;
+}
+
+bool IceoryxTransportDriver::ReportedRawCtxLoan(
+    IceoryxTransportDriver* driver, IoxPublisher* pub,
+    const runtime::core::transport::TransportInfo& info, size_t requested_size,
+    const ibmw::transport::Context& ctx,
+    runtime::core::transport::LoanedSampleHandle& out_handle) {
+  const auto* ops = ReporterSidecarAccess::DirectOps(pub);
+  if (ops == nullptr || ops->raw_loan == nullptr) return false;
+  return ops->raw_loan(ops, driver, pub, info, requested_size, ctx, out_handle);
+}
+
+template bool DirectPublisherOps::RawLoanImpl<true>(
+    const DirectPublisherOps*, IceoryxTransportDriver*, IoxPublisher*,
+    const runtime::core::transport::TransportInfo&, size_t,
+    const ibmw::transport::Context&,
+    runtime::core::transport::LoanedSampleHandle&);
+#endif
+
+bool IceoryxTransportDriver::PlainRawCtxLoan(
+    IceoryxTransportDriver* driver, IoxPublisher* pub,
+    const runtime::core::transport::TransportInfo& info, size_t requested_size,
+    const ibmw::transport::Context& ctx,
+    runtime::core::transport::LoanedSampleHandle& out_handle) {
+  std::string_view serialization_type = ctx.GetSerializationType();
+  if (serialization_type.empty()) {
+    serialization_type = info.msg_type_support_ref.DefaultSerializationType();
+  }
+  auto kv_map = ctx.GetMetaKeyVals();
+  const size_t header_size =
+      ComputeCtxMetaHeaderSize(serialization_type, kv_map);
+  if (header_size == 0) return false;
+  size_t total_size = 0;
+  if (!internal::CheckedAddSize(header_size, requested_size, total_size) ||
+      total_size > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  void* chunk = pub->LoanRaw(total_size);
+  if (chunk == nullptr) return false;
+  RawLoanGuard chunk_guard(pub, chunk);
+  if (EncodeCtxMetaHeader(chunk, total_size, static_cast<uint32_t>(total_size),
+                          serialization_type, kv_map) != header_size) {
+    return false;
+  }
+  auto* token = new PlainCtxMetaLoanToken{pub, chunk};
+  chunk_guard.Disarm();
+  out_handle.user_payload_ptr = static_cast<char*>(chunk) + header_size;
+  out_handle.user_payload_size = requested_size;
+  out_handle.mode =
+      runtime::core::transport::LoanMode::kCtxMetaThenPayloadUnreported;
+  out_handle.driver_token = token;
+  out_handle.source_driver = driver;
+  return true;
+}
+
+#ifndef IBMW_ENABLE_REPORTER_V1
+bool IceoryxTransportDriver::ReportedRawCtxLoan(
+    IceoryxTransportDriver* driver, IoxPublisher* publisher,
+    const runtime::core::transport::TransportInfo& info, size_t requested_size,
+    const ibmw::transport::Context& context,
+    runtime::core::transport::LoanedSampleHandle& handle) {
+  return PlainRawCtxLoan(driver, publisher, info, requested_size, context,
+                         handle);
+}
+#endif
 
 bool IceoryxTransportDriver::LoanSample(
     const runtime::core::transport::TransportInfo& info,
@@ -774,8 +922,10 @@ bool IceoryxTransportDriver::LoanSample(
       return false;
     }
     try {
+      auto operation = iceoryx_bus_.TryAcquireOperation();
+      if (!operation) return false;
       auto url = MakeStdTransportUrl(info.topic_name, info.msg_type);
-      auto* pub = iceoryx_bus_.GetPublisher(url);
+      auto* pub = iceoryx_bus_.GetPublisher(operation, url);
       if (pub == nullptr) {
         MW_WARN("LoanSample[ctx-meta]: standard topic not registered. "
                 "Call RegisterSendType() for topic={} msg_type={} first.",
@@ -783,47 +933,8 @@ bool IceoryxTransportDriver::LoanSample(
         return false;
       }
 
-      // Resolve serialization type the same way Send() does: prefer ctx, then
-      // type-support default.
-      std::string_view serialization_type = ctx->GetSerializationType();
-      if (serialization_type.empty()) {
-        serialization_type = info.msg_type_support_ref.DefaultSerializationType();
-      }
-
-      // Snapshot ctx-meta KVs. We carry *all* KVs (including the
-      // serialization-type key) to stay byte-identical with Send()'s layout.
-      auto kv_map = ctx->GetMetaKeyVals();
-
-      size_t header_size = ComputeCtxMetaHeaderSize(serialization_type, kv_map);
-      if (header_size == 0) return false;  // overflow detected
-
-      size_t total_size = 0;
-      if (!internal::CheckedAddSize(header_size, requested_size,
-                                    total_size)) {
-        return false;
-      }
-      void* chunk = pub->LoanRaw(total_size);
-      if (chunk == nullptr) return false;
-
-      size_t written = EncodeCtxMetaHeader(
-          chunk, total_size, static_cast<uint32_t>(total_size),
-          serialization_type, kv_map);
-      if (written != header_size) {
-        // Should not happen; defensive release.
-        pub->ReleaseRaw(chunk);
-        return false;
-      }
-
-      RawLoanGuard chunk_guard(pub, chunk);
-      auto* token = new CtxMetaLoanToken{pub, chunk, total_size};
-      chunk_guard.Disarm();
-      out_handle.user_payload_ptr =
-          static_cast<void*>(static_cast<char*>(chunk) + header_size);
-      out_handle.user_payload_size = requested_size;
-      out_handle.mode = runtime::core::transport::LoanMode::kCtxMetaThenPayload;
-      out_handle.driver_token = static_cast<void*>(token);
-      out_handle.source_driver = this;  // Phase 7 §7.3 §K-3.3
-      return true;
+      return raw_ctx_loan_dispatch_(this, pub, info, requested_size, *ctx,
+                                    out_handle);
     } catch (const std::exception& e) {
       MW_ERROR("LoanSample[ctx-meta] exception: {}", e.what());
       return false;
@@ -832,6 +943,8 @@ bool IceoryxTransportDriver::LoanSample(
 
   // kPodOnly path (ctx ignored).
   try {
+    auto operation = iceoryx_bus_.TryAcquireOperation();
+    if (!operation) return false;
     auto key = MakePodKey(info.topic_name, info.msg_type);
     auto it = pod_pub_map_.find(key);
     if (it == pod_pub_map_.end()) {
@@ -863,60 +976,94 @@ bool IceoryxTransportDriver::LoanSample(
 // keeps the post-condition simple: chunk is fully populated on success.
 //
 // `kInitialPayloadHint` is the starting payload region size when no better
-// hint is available. Sized to comfortably hold a CompressedImage with a
-// 1 KB data vector after CDR overhead, so the 1 KB benchmark row never
-// hits the grow path. Larger payloads grow geometrically.
+// hint is available. The small margin covers ordinary CDR encapsulation,
+// alignment, and sequence-length overhead around a 4 KiB value. Larger
+// payloads still grow geometrically.
 namespace {
-constexpr size_t kInitialPayloadHint = 4 * 1024;
+constexpr size_t kInitialPayloadHint = 4 * 1024 + 64;
 constexpr size_t kMaxLoanRetries = 16;  // 4 KB * 2^16 ~= 256 MB cap
-}  // namespace
 
-bool IceoryxTransportDriver::LoanSerializedSample(
+struct PlainSerializedLoanPolicy {
+  void Retry() noexcept {}
+  void MarkSuccess() noexcept {}
+  void* MakeToken(
+      IoxPublisher* pub, void* chunk,
+      runtime::core::transport::LoanedSampleHandle& out_handle) const {
+    out_handle.mode = runtime::core::transport::
+        LoanMode::kCtxMetaThenPayloadUnreported;
+    return new PlainCtxMetaLoanToken{pub, chunk};
+  }
+};
+
+#ifdef IBMW_ENABLE_REPORTER_V1
+struct ReportedSerializedLoanPolicy {
+  ReportedSerializedLoanPolicy(const DirectPublisherOps* direct_ops,
+                               DirectReporterBinding* reporter_binding)
+      : ops(direct_ops), binding(reporter_binding), outcome(binding) {}
+
+  void Retry() noexcept {
+    ReporterAdd(binding->api, binding->slots.retry, 1);
+  }
+  void MarkSuccess() noexcept { outcome.MarkSuccess(); }
+  void* MakeToken(
+      IoxPublisher* pub, void* chunk,
+      runtime::core::transport::LoanedSampleHandle& out_handle) const {
+    out_handle.mode =
+        runtime::core::transport::LoanMode::kCtxMetaThenPayload;
+    return new CtxMetaLoanToken{pub, chunk, ops};
+  }
+
+  const DirectPublisherOps* ops;
+  DirectReporterBinding* binding;
+  DirectLoanReporterOutcome<true> outcome;
+};
+
+struct UnreportedDirectSerializedLoanPolicy {
+  explicit UnreportedDirectSerializedLoanPolicy(
+      const DirectPublisherOps* direct_ops) noexcept
+      : ops(direct_ops) {}
+
+  void Retry() noexcept {}
+  void MarkSuccess() noexcept {}
+  void* MakeToken(
+      IoxPublisher* pub, void* chunk,
+      runtime::core::transport::LoanedSampleHandle& out_handle) const {
+    out_handle.mode =
+        runtime::core::transport::LoanMode::kCtxMetaThenPayload;
+    return new CtxMetaLoanToken{pub, chunk, ops};
+  }
+
+  const DirectPublisherOps* ops;
+};
+#endif
+
+template <typename LoanPolicy>
+IBMW_NOINLINE bool LoanSerializedSampleImpl(
+    IceoryxTransportDriver* driver,
+    IoxPublisher* pub,
     const runtime::core::transport::TransportInfo& info,
     const ibmw::transport::Context& ctx,
     const void* msg_ptr,
-    runtime::core::transport::LoanedSampleHandle& out_handle) noexcept {
-  try {
-    if (msg_ptr == nullptr) return false;
-    if (!info.msg_type_support_ref) {
-      MW_WARN("LoanSerializedSample: msg_type_support_ref is empty -- "
-              "caller must populate it (see IoxCtxMetaTypedPublisher).");
-      return false;
-    }
-
-    auto url = MakeStdTransportUrl(info.topic_name, info.msg_type);
-    auto* pub = iceoryx_bus_.GetPublisher(url);
-    if (pub == nullptr) {
-      MW_WARN("LoanSerializedSample: standard topic not registered. "
-              "Call RegisterSendType() for topic={} msg_type={} first.",
-              info.topic_name, info.msg_type);
-      return false;
-    }
-#ifdef IBMW_ENABLE_REPORTER_V1
-    auto* binding = FindPublisherReporter(pub);
-    auto* metrics = binding ? &binding->slots : nullptr;
-    const ibmw_reporter_v1* reporter = binding ? binding->api : nullptr;
-    ReporterAdd(reporter, metrics ? metrics->attempt : nullptr, 1);
-    struct Outcome {
-      const ibmw_reporter_v1* reporter;
-      DirectReporterSlots* slots;
-      bool success = false;
-      ~Outcome() { if (!success && slots) ReporterAdd(reporter, slots->fail, 1); }
-    } outcome{reporter, metrics};
-#endif
-
+    runtime::core::transport::LoanedSampleHandle& out_handle,
+    LoanPolicy& policy) {
     std::string_view serialization_type = ctx.GetSerializationType();
     if (serialization_type.empty()) {
       serialization_type = info.msg_type_support_ref.DefaultSerializationType();
     }
 
     auto kv_map = ctx.GetMetaKeyVals();
-    size_t header_size = ComputeCtxMetaHeaderSize(serialization_type, kv_map);
+    size_t header_size = IceoryxTransportDriver::ComputeCtxMetaHeaderSize(
+        serialization_type, kv_map);
     if (header_size == 0) return false;
 
     // Start with header_size + a generous payload hint. On serialize-OOM we
     // double the chunk size and retry. Capped to avoid runaway growth.
-    size_t chunk_size = header_size + kInitialPayloadHint;
+    size_t chunk_size = 0;
+    if (!internal::CheckedAddSize(header_size, kInitialPayloadHint,
+                                  chunk_size) ||
+        chunk_size > std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
     void* chunk = nullptr;
     size_t actual_payload_size = 0;
     bool ok = false;
@@ -948,8 +1095,14 @@ bool IceoryxTransportDriver::LoanSerializedSample(
       if (serialize_ret) {
         actual_payload_size = buffer_array.BufferSize();
         // Now write the header with the final pkg_size.
-        size_t total_size = header_size + actual_payload_size;
-        size_t written = EncodeCtxMetaHeader(
+        size_t total_size = 0;
+        if (!internal::CheckedAddSize(header_size, actual_payload_size,
+                                      total_size) ||
+            total_size > std::numeric_limits<uint32_t>::max()) {
+          pub->ReleaseRaw(chunk);
+          return false;
+        }
+        size_t written = IceoryxTransportDriver::EncodeCtxMetaHeader(
             chunk, chunk_size, static_cast<uint32_t>(total_size),
             serialization_type, kv_map);
         if (written != header_size) {
@@ -974,13 +1127,11 @@ bool IceoryxTransportDriver::LoanSerializedSample(
       // A retry means another LoanRaw/Serialize attempt will actually occur;
       // terminal OOM on the final allowed attempt is not a retry.
       if (attempt + 1 >= kMaxLoanRetries ||
-          chunk_size > std::numeric_limits<size_t>::max() / 2) {
+          chunk_size > std::numeric_limits<uint32_t>::max() / 2) {
         break;
       }
       chunk_size *= 2;
-#ifdef IBMW_ENABLE_REPORTER_V1
-      ReporterAdd(reporter, metrics ? metrics->retry : nullptr, 1);
-#endif
+      policy.Retry();
     }
 
     if (!ok || chunk == nullptr) {
@@ -990,23 +1141,140 @@ bool IceoryxTransportDriver::LoanSerializedSample(
     }
 
     RawLoanGuard chunk_guard(pub, chunk);
-    auto* token = new CtxMetaLoanToken{pub, chunk, header_size + actual_payload_size
-#ifdef IBMW_ENABLE_REPORTER_V1
-      ,reporter,metrics?metrics->publish:nullptr,metrics?metrics->release:nullptr
-#endif
-    };
+    void* token = policy.MakeToken(pub, chunk, out_handle);
     chunk_guard.Disarm();
     out_handle.user_payload_ptr =
         static_cast<void*>(static_cast<char*>(chunk) + header_size);
     out_handle.user_payload_size = actual_payload_size;
-    out_handle.mode = runtime::core::transport::LoanMode::kCtxMetaThenPayload;
     out_handle.driver_token = static_cast<void*>(token);
-    out_handle.source_driver = this;  // Phase 7 §7.3 §K-3.3
-#ifdef IBMW_ENABLE_REPORTER_V1
-    ReporterAdd(reporter, metrics ? metrics->success : nullptr, 1);
-    outcome.success=true;
-#endif
+    out_handle.source_driver = driver;  // Phase 7 §7.3 §K-3.3
+    policy.MarkSuccess();
     return true;
+}
+
+}  // namespace
+
+#ifdef IBMW_ENABLE_REPORTER_V1
+template <bool Reported>
+IBMW_NOINLINE bool DirectPublisherOps::LoanImpl(
+    const DirectPublisherOps* ops, IceoryxTransportDriver* driver,
+    IoxPublisher* pub,
+    const runtime::core::transport::TransportInfo& info,
+    const ibmw::transport::Context& ctx, const void* msg_ptr,
+    runtime::core::transport::LoanedSampleHandle& out_handle) {
+  if constexpr (Reported) {
+    ReportedSerializedLoanPolicy policy{
+        ops, const_cast<DirectReporterBinding*>(&ops->binding)};
+    return LoanSerializedSampleImpl(driver, pub, info, ctx, msg_ptr, out_handle,
+                                    policy);
+  } else {
+    UnreportedDirectSerializedLoanPolicy policy{ops};
+    return LoanSerializedSampleImpl(driver, pub, info, ctx, msg_ptr, out_handle,
+                                    policy);
+  }
+}
+
+bool IceoryxTransportDriver::ReportedSerializedCtxLoan(
+    IceoryxTransportDriver* driver, IoxPublisher* pub,
+    const runtime::core::transport::TransportInfo& info,
+    const ibmw::transport::Context& ctx, const void* msg_ptr,
+    runtime::core::transport::LoanedSampleHandle& out_handle) {
+  const auto* ops = ReporterSidecarAccess::DirectOps(pub);
+  if (ops == nullptr || ops->serialized_loan == nullptr) return false;
+  return ops->serialized_loan(ops, driver, pub, info, ctx, msg_ptr, out_handle);
+}
+
+template <bool Reported, bool Publish>
+IBMW_NOINLINE void DirectPublisherOps::CompleteImpl(const DirectPublisherOps* ops,
+                                      IoxPublisher* pub,
+                                      void* chunk_ptr) noexcept {
+  auto completion = [](void* context) noexcept {
+    if constexpr (Reported) {
+      const auto* direct_ops = static_cast<const DirectPublisherOps*>(context);
+      const auto& binding = direct_ops->binding;
+      ReporterAdd(binding.api,
+                  Publish ? binding.slots.publish : binding.slots.release, 1);
+    }
+  };
+  if (chunk_ptr == nullptr) return;
+  pub->loan_tracker_.CompleteTrackedLoan([pub, chunk_ptr, completion, ops] {
+    if constexpr (Publish) {
+      pub->publisher_.publish(chunk_ptr);
+    } else {
+      pub->publisher_.release(chunk_ptr);
+    }
+    completion(const_cast<DirectPublisherOps*>(ops));
+  });
+}
+
+template bool DirectPublisherOps::LoanImpl<true>(
+    const DirectPublisherOps*, IceoryxTransportDriver*, IoxPublisher*,
+    const runtime::core::transport::TransportInfo&,
+    const ibmw::transport::Context&, const void*,
+    runtime::core::transport::LoanedSampleHandle&);
+template void DirectPublisherOps::CompleteImpl<true, true>(
+    const DirectPublisherOps*, IoxPublisher*, void*) noexcept;
+template void DirectPublisherOps::CompleteImpl<true, false>(
+    const DirectPublisherOps*, IoxPublisher*, void*) noexcept;
+
+std::unique_ptr<const DirectPublisherOps> MakeUnreportedDirectPublisherOps() {
+  return std::make_unique<const DirectPublisherOps>(DirectPublisherOps{
+      &DirectPublisherOps::RawLoanImpl<false>,
+      &DirectPublisherOps::LoanImpl<false>,
+      &DirectPublisherOps::CompleteImpl<false, true>,
+      &DirectPublisherOps::CompleteImpl<false, false>, {}});
+}
+
+#endif
+
+bool IceoryxTransportDriver::PlainSerializedCtxLoan(
+    IceoryxTransportDriver* driver, IoxPublisher* pub,
+    const runtime::core::transport::TransportInfo& info,
+    const ibmw::transport::Context& ctx, const void* msg_ptr,
+    runtime::core::transport::LoanedSampleHandle& out_handle) {
+  PlainSerializedLoanPolicy policy;
+  return LoanSerializedSampleImpl(driver, pub, info, ctx, msg_ptr, out_handle,
+                                  policy);
+}
+
+#ifndef IBMW_ENABLE_REPORTER_V1
+bool IceoryxTransportDriver::ReportedSerializedCtxLoan(
+    IceoryxTransportDriver* driver, IoxPublisher* publisher,
+    const runtime::core::transport::TransportInfo& info,
+    const ibmw::transport::Context& context, const void* message,
+    runtime::core::transport::LoanedSampleHandle& handle) {
+  return PlainSerializedCtxLoan(driver, publisher, info, context, message,
+                                handle);
+}
+#endif
+
+#undef IBMW_NOINLINE
+
+bool IceoryxTransportDriver::LoanSerializedSample(
+    const runtime::core::transport::TransportInfo& info,
+    const ibmw::transport::Context& ctx,
+    const void* msg_ptr,
+    runtime::core::transport::LoanedSampleHandle& out_handle) noexcept {
+  try {
+    auto operation = iceoryx_bus_.TryAcquireOperation();
+    if (!operation) return false;
+    if (msg_ptr == nullptr) return false;
+    if (!info.msg_type_support_ref) {
+      MW_WARN("LoanSerializedSample: msg_type_support_ref is empty -- "
+              "caller must populate it (see IoxCtxMetaTypedPublisher).");
+      return false;
+    }
+
+    auto url = MakeStdTransportUrl(info.topic_name, info.msg_type);
+    auto* pub = iceoryx_bus_.GetPublisher(operation, url);
+    if (pub == nullptr) {
+      MW_WARN("LoanSerializedSample: standard topic not registered. "
+              "Call RegisterSendType() for topic={} msg_type={} first.",
+              info.topic_name, info.msg_type);
+      return false;
+    }
+    return serialized_ctx_loan_dispatch_(this, pub, info, ctx, msg_ptr,
+                                         out_handle);
   } catch (const std::exception& e) {
     MW_ERROR("LoanSerializedSample exception: {}", e.what());
     return false;
@@ -1061,16 +1329,27 @@ void IceoryxTransportDriver::PublishLoaned(
     runtime::core::transport::LoanedSampleHandle& handle) noexcept {
   if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr)
     return;
-  if (handle.mode == runtime::core::transport::LoanMode::kCtxMetaThenPayload) {
-    auto* token = static_cast<CtxMetaLoanToken*>(handle.driver_token);
-    token->pub->PublishRaw(token->chunk_ptr);
+  switch (handle.mode) {
+    case runtime::core::transport::LoanMode::kCtxMetaThenPayloadUnreported: {
+      auto* token = static_cast<PlainCtxMetaLoanToken*>(handle.driver_token);
+      token->pub->PublishRaw(token->chunk_ptr);
+      delete token;
+      break;
+    }
 #ifdef IBMW_ENABLE_REPORTER_V1
-    ReporterAdd(token->reporter, token->publish_slot, 1);
+    case runtime::core::transport::LoanMode::kCtxMetaThenPayload: {
+      auto* token = static_cast<CtxMetaLoanToken*>(handle.driver_token);
+      token->ops->publish(token->ops, token->pub, token->chunk_ptr);
+      delete token;
+      break;
+    }
 #endif
-    delete token;
-  } else {
-    auto* pub = static_cast<IoxPublisher*>(handle.driver_token);
-    pub->PublishRaw(handle.user_payload_ptr);
+    case runtime::core::transport::LoanMode::kPodOnly:
+      static_cast<IoxPublisher*>(handle.driver_token)
+          ->PublishRaw(handle.user_payload_ptr);
+      break;
+    default:
+      return;
   }
   handle.user_payload_ptr = nullptr;
   handle.driver_token = nullptr;
@@ -1082,16 +1361,27 @@ void IceoryxTransportDriver::ReleaseLoaned(
     runtime::core::transport::LoanedSampleHandle& handle) noexcept {
   if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr)
     return;
-  if (handle.mode == runtime::core::transport::LoanMode::kCtxMetaThenPayload) {
-    auto* token = static_cast<CtxMetaLoanToken*>(handle.driver_token);
-    token->pub->ReleaseRaw(token->chunk_ptr);
+  switch (handle.mode) {
+    case runtime::core::transport::LoanMode::kCtxMetaThenPayloadUnreported: {
+      auto* token = static_cast<PlainCtxMetaLoanToken*>(handle.driver_token);
+      token->pub->ReleaseRaw(token->chunk_ptr);
+      delete token;
+      break;
+    }
 #ifdef IBMW_ENABLE_REPORTER_V1
-    ReporterAdd(token->reporter, token->release_slot, 1);
+    case runtime::core::transport::LoanMode::kCtxMetaThenPayload: {
+      auto* token = static_cast<CtxMetaLoanToken*>(handle.driver_token);
+      token->ops->release(token->ops, token->pub, token->chunk_ptr);
+      delete token;
+      break;
+    }
 #endif
-    delete token;
-  } else {
-    auto* pub = static_cast<IoxPublisher*>(handle.driver_token);
-    pub->ReleaseRaw(handle.user_payload_ptr);
+    case runtime::core::transport::LoanMode::kPodOnly:
+      static_cast<IoxPublisher*>(handle.driver_token)
+          ->ReleaseRaw(handle.user_payload_ptr);
+      break;
+    default:
+      return;
   }
   handle.user_payload_ptr = nullptr;
   handle.driver_token = nullptr;

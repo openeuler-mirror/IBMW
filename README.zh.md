@@ -23,6 +23,30 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 ```
 `doctor` 与 `run` 必须传递相同参数。prefix 优先级是显式 `--dds-prefix`、有效的 `IBMW_ROS2_MINIMAL_SDK_PREFIX`、最后恰好一个规范候选；零个或多个候选必须显式指定。默认模式要求前缀包含完整消息支持（`std_msgs` 配置和生成头文件）；仅 DDS 基础层的 builder 输出必须添加 `--dds-only`。离线默认禁止网络，并要求 complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout；只有用户显式同意时使用 `--allow-network`。
 
+源码 provider 使用以下锁定版本矩阵：
+
+| Provider | Fast DDS | Fast-CDR | foonathan_memory |
+|----------|----------|----------|------------------|
+| `SOURCE_FASTDDS2` | 2.6.12 | 1.0.29 | 0.7.1 |
+| `SOURCE_FASTDDS3` | 3.2.2 | 2.3.0 | 0.7.3 |
+
+Fast DDS 3.2.2 的锁定源码闭包可独立构建：
+```bash
+cmake -S . -B build/source-fastdds3-deps \
+  -DIBMW_DDS_PROVIDER=SOURCE_FASTDDS3 \
+  -DIBMW_THIRD_PARTY_SOURCE_BUILD_ONLY=ON
+cmake --build build/source-fastdds3-deps --target ibmw_third_party_source_prefix -j"$(nproc)"
+bash scripts/tests/test_fastdds_source_dependency_lock.sh
+```
+
+Fast DDS 2.6.12 的锁定源码闭包使用相同流程，仅需选择 `SOURCE_FASTDDS2`：
+```bash
+cmake -S . -B build/source-fastdds2-deps \
+  -DIBMW_DDS_PROVIDER=SOURCE_FASTDDS2 \
+  -DIBMW_THIRD_PARTY_SOURCE_BUILD_ONLY=ON
+cmake --build build/source-fastdds2-deps --target ibmw_third_party_source_prefix -j"$(nproc)"
+```
+
 ## 特性
 
 - **Extension 架构** —— 通信后端、Logger 和服务以共享库 Extension 形式在运行时
@@ -37,8 +61,9 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
   同步、异步回调、Future、协程
 - **Transport（发布/订阅）** —— 基于 Topic 的 Pub/Sub，支持后端路由
 - **零拷贝支持** —— 用于共享内存传输的 LoanedMessage API
-- **多 Driver Module** —— 单个 Module 可通过变参宏 `IBMW_USE_DRIVERS(...)`
-  将 DDS、Iceoryx 等多个 Transport Driver 绑定到 typed slot
+- **多 Driver direct 模块** —— 明确命名的 `direct_<transport>_*`、benchmark
+  或 transport-specific 零拷贝模块可通过 `IBMW_USE_DRIVERS(...)` 将多个具体
+  Driver 绑定到 typed slot；普通 managed Module 应使用 transport-neutral API
 - **Context API** —— 模块生命周期管理与资源隔离
 - **ROS2 互操作** —— 直接通过 FastDDS 与 ROS2 节点通信；产品端无需 RCL、RCLCPP
   或 RMW implementation，但静态消息闭包可包含 ROSIDL typesupport、`rcutils` 和基础
@@ -56,6 +81,12 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 | [故障排除](docs/guides/troubleshooting.md) | FastDDS/FastCDR、GLIBCXX、DDS discovery、p99、include 路径与进程清理 |
 | [User Guide](docs/guides/user-guide.zh.md) | 入门指南、配置、运行 Demo、YAML 参考 |
 | [Developer Guide](docs/contributing/developer-guide.zh.md) | 构建系统、代码结构、编写 Module 与 Extension |
+| [架构约束](docs/contributing/architecture-rules.md) | Public API、Extension SPI、internal/direct 边界与依赖方向 |
+| [性能可观测性设计](docs/architecture/performance-observability-design.zh.md) | ROS2 采集、IBMW 采集与本体适配的设计基线和证据边界 |
+| [通用通信时延采集方案](docs/architecture/generic-communication-latency-observation-proposal.zh.md) | 待审核的ROS2/IBMW通用时延对标、低扰动和分阶段实施方案 |
+| [性能可观测性实施说明](docs/contributing/performance-observability-implementation.zh.md) | 维护者实现结构、门禁与验收要求 |
+| [性能可观测性当前进展矩阵](docs/contributing/performance-observability-progress.zh.md) | 三条主线、DDS P0a 边界和 A/B/C 集成就绪状态 |
+| [性能采集指南](docs/guides/performance-collection.zh.md) | ROS2/IBMW 配置、运行、验证、报告与 A/B/C 原型流程 |
 | [AArch64 交叉编译](docs/guides/cross-compilation.md) | Linux target DDS source-prefix、sysroot 与支持边界 |
 | [OHOS 小艺 Humble 交叉构建指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only 指南 |
 | minimal ROS2 编译部署 | 第一入口：`IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`；[IBMW 指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md)仅作概念与边界索引 |
@@ -76,7 +107,7 @@ python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --targ
 | 编译器 | GCC 11+ 或 Clang 14+ | 需 C++20 |
 | CMake | 3.24+ | |
 | ROS 2 Humble | （native 可选） | Native full 构建可仅为 FastDDS/FastCDR 头文件、库与生成器元数据 source ROS 2：`sudo apt install ros-humble-fastrtps`。**不需要** rcl 运行时。AArch64 交叉构建使用[交叉编译指南](docs/guides/cross-compilation.md)中的源码构建 DDS prefix workflow。OHOS 小艺 Humble compile-only 路径见[OHOS 指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md)，不要把 host ROS 2 当作目标依赖来源。 |
-| FastCDR | 2.x | 从源码构建或来自 `_deps/` |
+| Fast DDS / Fast-CDR | 按 provider 锁定 | `SOURCE_FASTDDS2` 使用 2.6.12/1.0.29，`SOURCE_FASTDDS3` 使用 3.2.2/2.3.0；完整矩阵见上文 |
 
 ## 构建
 

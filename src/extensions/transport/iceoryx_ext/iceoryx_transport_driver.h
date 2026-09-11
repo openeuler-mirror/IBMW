@@ -4,6 +4,7 @@
 #pragma once
 
 #include <type_traits>
+#include <mutex>
 
 #include "engine/transport/transport_driver.h"
 #include "engine/transport/transport_driver_capabilities.h"
@@ -28,6 +29,8 @@
 // vtable AND every member function in one go (g++/clang behaviour for
 // "type_visibility" promotion). This is preferred over annotating each
 // method individually because it keeps RTTI consistent for dynamic_cast.
+// This exported C++ ABI is an exact-build boundary: consumers must compile
+// against the installed headers from the same build as the shared library.
 #ifndef IBMW_ICEORYX_EXPORT
 #define IBMW_ICEORYX_EXPORT __attribute__((visibility("default")))
 #endif
@@ -44,13 +47,20 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver
     std::string listener_thread_name;
     std::string listener_thread_sched_policy;
     std::vector<uint32_t> listener_thread_bind_cpu;
+    std::string benchmark_profile;
+    uint64_t subscriber_queue_capacity = 1;
+    std::string publisher_too_slow_policy;
+    std::string subscriber_queue_full_policy;
   };
+
+  static std::optional<IoxDeliveryOptions> ResolveDeliveryOptions(
+      const Options& options) noexcept;
 
  public:
   IceoryxTransportDriver(IceoryxBus& iceoryx_bus)
       : iceoryx_bus_(iceoryx_bus) {}
 
-  ~IceoryxTransportDriver() override = default;
+  ~IceoryxTransportDriver() override;
 
   std::string_view Name() const noexcept override { return "iceoryx"; }
   IBMW_DECLARE_DRIVER_SLOT("iceoryx")
@@ -156,6 +166,38 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver
       const std::unordered_map<std::string_view, std::string_view>& kv) noexcept;
 
  private:
+  using RawCtxLoanDispatch = bool (*)(
+      IceoryxTransportDriver*, IoxPublisher*,
+      const runtime::core::transport::TransportInfo&, size_t,
+      const ibmw::transport::Context&,
+      runtime::core::transport::LoanedSampleHandle&);
+  using SerializedCtxLoanDispatch = bool (*)(
+      IceoryxTransportDriver*, IoxPublisher*,
+      const runtime::core::transport::TransportInfo&,
+      const ibmw::transport::Context&, const void*,
+      runtime::core::transport::LoanedSampleHandle&);
+
+  static bool PlainRawCtxLoan(
+      IceoryxTransportDriver*, IoxPublisher*,
+      const runtime::core::transport::TransportInfo&, size_t,
+      const ibmw::transport::Context&,
+      runtime::core::transport::LoanedSampleHandle&);
+  static bool PlainSerializedCtxLoan(
+      IceoryxTransportDriver*, IoxPublisher*,
+      const runtime::core::transport::TransportInfo&,
+      const ibmw::transport::Context&, const void*,
+      runtime::core::transport::LoanedSampleHandle&);
+  static bool ReportedRawCtxLoan(
+      IceoryxTransportDriver*, IoxPublisher*,
+      const runtime::core::transport::TransportInfo&, size_t,
+      const ibmw::transport::Context&,
+      runtime::core::transport::LoanedSampleHandle&);
+  static bool ReportedSerializedCtxLoan(
+      IceoryxTransportDriver*, IoxPublisher*,
+      const runtime::core::transport::TransportInfo&,
+      const ibmw::transport::Context&, const void*,
+      runtime::core::transport::LoanedSampleHandle&);
+
   enum class State : uint32_t {
     kPreInit,
     kInit,
@@ -165,6 +207,11 @@ class IBMW_ICEORYX_EXPORT IceoryxTransportDriver
 
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
+  mutable std::mutex lifecycle_mutex_;
+  bool shutdown_started_ = false;
+  RawCtxLoanDispatch raw_ctx_loan_dispatch_ = nullptr;
+  SerializedCtxLoanDispatch serialized_ctx_loan_dispatch_ = nullptr;
+  void* reporter_state_ = nullptr;
 
   const runtime::core::transport::TransportCatalog* transport_catalog_ptr_ = nullptr;
 

@@ -5,7 +5,9 @@
 #include "engine/transport/transport_driver.h"
 
 #include <cstdlib>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
@@ -169,6 +171,123 @@ TEST_F(CoreMetrics, FreezeKeepsStableConcurrentSlots) {
   EXPECT_NE(json.find("\"returned\":1000"), std::string::npos);
 }
 
+TEST_F(CoreMetrics, RegistrationReturnsStableHotPathEntry) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = Controller::Instance();
+  const void* lifecycle = reinterpret_cast<const void*>(0x1100);
+  const void* dispatcher = reinterpret_cast<const void*>(0x1101);
+  const auto* wrapper =
+      reinterpret_cast<const transport::SendTypeWrapper*>(0x1102);
+  ReceiveMetricsDriver driver;
+  controller.Initialize(lifecycle);
+
+  MetricsEntry* cached = nullptr;
+  ASSERT_TRUE(controller.Register(dispatcher, wrapper, "pkg", "module",
+                                  "topic", "type", {&driver}, &cached));
+  ASSERT_NE(cached, nullptr);
+  EXPECT_EQ(cached, controller.Find(dispatcher, wrapper));
+  ASSERT_EQ(cached->drivers.size(), 1U);
+
+  cached->logical->attempted.fetch_add(2, std::memory_order_relaxed);
+  cached->logical->rejected.fetch_add(1, std::memory_order_relaxed);
+  cached->drivers[0]->attempted.fetch_add(2, std::memory_order_relaxed);
+  cached->drivers[0]->returned.fetch_add(2, std::memory_order_relaxed);
+
+  const auto json = controller.registry().SnapshotJsonl();
+  EXPECT_NE(json.find("\"attempted\":2,\"rejected\":1"),
+            std::string::npos);
+  EXPECT_NE(json.find("\"driver\":\"receive-driver\",\"attempted\":2,"
+                      "\"returned\":2"),
+            std::string::npos);
+}
+
+TEST_F(CoreMetrics, MetricsOffDoesNotCreateCachedMetricsGate) {
+  ASSERT_EQ(unsetenv("IBMW_CORE_METRICS"), 0);
+  auto& controller = Controller::Instance();
+  const void* lifecycle = reinterpret_cast<const void*>(0x1150);
+  const void* dispatcher = reinterpret_cast<const void*>(0x1151);
+  controller.Initialize(lifecycle);
+
+  EXPECT_FALSE(controller.Enabled());
+  EXPECT_EQ(controller.GetCachedMetricsGate(dispatcher), nullptr);
+}
+
+TEST_F(CoreMetrics, DispatcherShutdownInvalidatesCachedMetricsBeforeFinalize) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = Controller::Instance();
+  transport::TransportCatalog catalog;
+  transport::TransportDriverDispatcher dispatcher;
+  ReceiveMetricsDriver driver;
+  transport::FrameworkAsyncTransportFilterBus publish_filters;
+  controller.Initialize(&dispatcher);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&publish_filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"receive-driver"}}});
+  dispatcher.RegisterTransportDriver(&driver);
+  dispatcher.Initialize();
+
+  transport::SendTypeWrapper wrapper;
+  wrapper.info.msg_type = "Frame";
+  wrapper.info.topic_name = "camera";
+  wrapper.info.pkg_path = "pkg";
+  wrapper.info.module_name = "module";
+  // The receive-only fake rejects its driver registration, while the
+  // dispatcher catalog retains the canonical wrapper used by the hot path.
+  EXPECT_FALSE(dispatcher.RegisterSendType(std::move(wrapper)));
+  controller.Start(&dispatcher);
+  dispatcher.Start();
+
+  const auto* registered = catalog.GetSendTypeWrapperPtr(
+      "Frame", "camera", "pkg", "module");
+  ASSERT_NE(registered, nullptr);
+  ASSERT_NE(registered->cached_metrics, nullptr);
+
+  EXPECT_FALSE(controller.FinalizeSnapshot(&dispatcher));
+  EXPECT_NE(registered->cached_metrics, nullptr);
+  EXPECT_GT(controller.StorageSizeForTesting(), 0U);
+  dispatcher.Shutdown();
+  EXPECT_EQ(registered->cached_metrics, nullptr);
+  EXPECT_TRUE(controller.FinalizeSnapshot(&dispatcher));
+  EXPECT_EQ(controller.StorageSizeForTesting(), 0U);
+}
+
+TEST_F(CoreMetrics, InvalidateWaitsForCachedMetricsReader) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = Controller::Instance();
+  const void* lifecycle = reinterpret_cast<const void*>(0x1200);
+  const void* dispatcher = reinterpret_cast<const void*>(0x1201);
+  transport::SendTypeWrapper wrapper;
+  ReceiveMetricsDriver driver;
+  controller.Initialize(lifecycle);
+  MetricsEntry* cached = nullptr;
+  ASSERT_TRUE(controller.Register(dispatcher, &wrapper, "pkg", "module",
+                                  "topic", "type", {&driver}, &cached));
+  ASSERT_NE(cached, nullptr);
+
+  auto gate = controller.GetCachedMetricsGate(dispatcher);
+  ASSERT_NE(gate, nullptr);
+  std::promise<void> entered;
+  std::promise<void> release;
+  auto reader = std::async(std::launch::async, [gate, &entered, &release] {
+    CachedMetricsReadGuard guard(gate);
+    ASSERT_TRUE(guard);
+    entered.set_value();
+    release.get_future().wait();
+  });
+  entered.get_future().wait();
+
+  auto invalidation = std::async(std::launch::async, [&controller, dispatcher] {
+    controller.InvalidateCachedEntries(dispatcher);
+  });
+  EXPECT_EQ(invalidation.wait_for(std::chrono::milliseconds(25)),
+            std::future_status::timeout);
+  release.set_value();
+  reader.get();
+  EXPECT_EQ(invalidation.wait_for(std::chrono::seconds(1)),
+            std::future_status::ready);
+  EXPECT_EQ(wrapper.cached_metrics, nullptr);
+}
+
 TEST_F(CoreMetrics, LoanCountersHaveAuditableJsonlKinds) {
   // This slice covers catalog-based user loans only. POD loans deliberately
   // bypass these slots and must not be represented by fabricated counters.
@@ -271,18 +390,19 @@ TEST_F(CoreMetrics, DispatcherReceiveUpdatesAuditableCounters) {
 
   int releases = 0;
   driver.Trigger(releases);
-  EXPECT_EQ(callbacks, 1);
-  EXPECT_EQ(releases, 1);
+  driver.Trigger(releases);
+  EXPECT_EQ(callbacks, 2);
+  EXPECT_EQ(releases, 2);
   const auto json = controller.registry().SnapshotJsonl();
   EXPECT_NE(json.find("\"kind\":\"loaned_receive_callback\""),
              std::string::npos);
   EXPECT_NE(json.find("\"topic\":\"camera\",\"type\":\"Frame\",\"driver\":\"receive-driver\""),
              std::string::npos);
-  EXPECT_NE(json.find("\"callback_entered\":1"), std::string::npos);
-  EXPECT_NE(json.find("\"callback_completed\":1"), std::string::npos);
+  EXPECT_NE(json.find("\"callback_entered\":2"), std::string::npos);
+  EXPECT_NE(json.find("\"callback_completed\":2"), std::string::npos);
   EXPECT_NE(json.find("\"callback_threw_std\":0"), std::string::npos);
   EXPECT_NE(json.find("\"callback_threw_nonstd\":0"), std::string::npos);
-  EXPECT_NE(json.find("\"release_called\":1"), std::string::npos);
+  EXPECT_NE(json.find("\"release_called\":2"), std::string::npos);
   EXPECT_TRUE(controller.FinalizeSnapshot(&dispatcher));
 }
 
@@ -531,7 +651,6 @@ TEST_F(CoreMetrics, CoreAndReporterSnapshotSequencesAreContiguous) {
   descriptor.driver = {"iox", 3};
   auto* reporter = registry.RegisterReporterSlot(&descriptor);
   ASSERT_NE(reporter, nullptr);
-  reporter->value.store(7);
 
   const auto json = registry.SnapshotJsonl();
   const auto first = json.find("\"snapshot_seq\":1");
@@ -547,7 +666,56 @@ TEST_F(CoreMetrics, CoreAndReporterSnapshotSequencesAreContiguous) {
   EXPECT_NE(json.find(
                 "\"kind\":\"extension_metric\",\"metric\":\"count\","
                 "\"topic\":\"camera\",\"type\":\"Frame\","
-                "\"driver\":\"iox\",\"value\":7,\"cumulative\":"),
+                "\"driver\":\"iox\",\"value\":0,\"cumulative\":"),
+            std::string::npos);
+}
+
+TEST_F(CoreMetrics, ReporterBatchTokensAreRetiredAcrossResetAndAddressReuse) {
+  Registry registry;
+  ibmw_reporter_slot_descriptor_v1 descriptor{};
+  descriptor.abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.kind = {"token", 5};
+  descriptor.metric = {"count", 5};
+
+  std::array<ibmw_reporter_slot_v1*, 1> slots{};
+  ibmw_reporter_batch_transaction_v1* old_token = nullptr;
+  ASSERT_TRUE(registry.PrepareReporterBatch(&descriptor, 1, slots.data(),
+                                             &old_token));
+  ASSERT_NE(old_token, nullptr);
+  registry.Reset();
+
+  ibmw_reporter_batch_transaction_v1* new_token = nullptr;
+  ASSERT_TRUE(registry.PrepareReporterBatch(&descriptor, 1, slots.data(),
+                                             &new_token));
+  ASSERT_NE(new_token, nullptr);
+  EXPECT_NE(new_token, old_token);
+  EXPECT_FALSE(registry.CommitReporterBatch(old_token));
+  EXPECT_TRUE(registry.CommitReporterBatch(new_token));
+  registry.AbortReporterBatch(old_token);
+}
+
+TEST_F(CoreMetrics, ReporterBatchFailureLeavesOutputsAndRegistryUnpublished) {
+  Registry registry;
+  std::array<ibmw_reporter_slot_descriptor_v1, 2> descriptors{};
+  for (auto& descriptor : descriptors) {
+    descriptor.abi_version = IBMW_REPORTER_ABI_VERSION_V1;
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.kind = {"failure_safe", 12};
+    descriptor.metric = {"count", 5};
+  }
+  descriptors[1].metric = {nullptr, 0};
+
+  std::array<ibmw_reporter_slot_v1*, 2> slots{
+      reinterpret_cast<ibmw_reporter_slot_v1*>(1U),
+      reinterpret_cast<ibmw_reporter_slot_v1*>(2U)};
+  auto* transaction = reinterpret_cast<ibmw_reporter_batch_transaction_v1*>(3U);
+  EXPECT_FALSE(registry.PrepareReporterBatch(
+      descriptors.data(), descriptors.size(), slots.data(), &transaction));
+  EXPECT_EQ(slots, (std::array<ibmw_reporter_slot_v1*, 2>{nullptr, nullptr}));
+  EXPECT_EQ(transaction, nullptr);
+  EXPECT_FALSE(registry.HasPendingReporterBatches());
+  EXPECT_EQ(registry.ReporterSnapshotJsonl().find("failure_safe"),
             std::string::npos);
 }
 #endif

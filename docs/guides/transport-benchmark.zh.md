@@ -6,11 +6,22 @@ DDS 与 TCP 路径。性能数据依赖硬件和运行环境；应用决策应�
 
 ## 构建与运行
 
+`full` preset 不会启用 benchmark；benchmark 还依赖 examples 和 Iceoryx。
+上述命令从仓库根目录运行；`IBMW_BUILD_EXAMPLES=ON` 和
+`IBMW_BUILD_ICEORYX_EXTENSION=ON` 是 benchmark gate 的依赖，DDS 行还需要
+`IBMW_BUILD_DDS_EXTENSION=ON`，topology interop 的 DDS endpoint 还需要
+`IBMW_BUILD_ROS2_TYPES=ON`。
+
 ```bash
-cmake --preset full -DIBMW_BUILD_BENCHMARKS=ON
-cmake --build build -j"$(nproc)"
-cmake --install build --prefix build
-scripts/run_bench_sweep.sh --reset-csv
+cmake -S . -B ./build \
+  -DIBMW_BUILD_EXAMPLES=ON \
+  -DIBMW_BUILD_BENCHMARKS=ON \
+  -DIBMW_BUILD_ICEORYX_EXTENSION=ON \
+  -DIBMW_BUILD_DDS_EXTENSION=ON \
+  -DIBMW_BUILD_ROS2_TYPES=ON
+cmake --build ./build --parallel
+cmake --install ./build --prefix ./build
+bash ./scripts/run_bench_sweep.sh --reset-csv
 ```
 
 可用 `IBMW_BUILD_DIR` 指定构建目录，用 `IBMW_BENCH_CSV` 指定结果文件。
@@ -50,6 +61,11 @@ fallback 计数以及非预期分配或拷贝。
   都可能主导具体工作负载。
 - 热路径修改前，应在受控环境建立应用自己的 baseline 和 acceptance band；
   不要把另一台机器的数据作为回归门槛。
+
+`topology_interop` 的 `ibmw_topology_dds_endpoint` 是 benchmark/direct DDS
+实现：它直接使用 DDS transport driver、内部 typesupport 和扩展特定访问来
+验证互操作拓扑。它不是 managed 应用应采用的架构示例；managed 应用仍应使用
+公共 API，由配置选择动态扩展。
 
 能力边界见[支持矩阵](../reference/support-matrix.md)，sample 说明见
 [benchmark README](../../src/samples/cpp/transport_benchmark/README.md)。

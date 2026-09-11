@@ -1,15 +1,25 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 4 ]; then
-  echo "usage: $0 direct|retained BUILD_DIR METRICS_DIR ROUDI_BIN" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
+  echo "usage: $0 direct|retained BUILD_DIR METRICS_DIR [ROUDI_BIN]" >&2
   exit 2
 fi
 
 MODE=$1
 BUILD_DIR=$2
 METRICS_DIR=$3
-ROUDI_BIN=$4
+ROUDI_BIN=${4:-${IBMW_ROUDI_BIN:-}}
+if [ -z "$ROUDI_BIN" ] && [ -r "$BUILD_DIR/retained_loan_e2e_roudi_path.txt" ]; then
+  IFS= read -r ROUDI_BIN < "$BUILD_DIR/retained_loan_e2e_roudi_path.txt"
+fi
+if [ -z "$ROUDI_BIN" ]; then
+  ROUDI_BIN="$BUILD_DIR/iox-roudi"
+fi
+if [ ! -x "$ROUDI_BIN" ]; then
+  echo "iox-roudi is not executable: $ROUDI_BIN (pass ROUDI_BIN or set IBMW_ROUDI_BIN)" >&2
+  exit 2
+fi
 E2E="$BUILD_DIR/retained_loan_e2e"
 mkdir -p "$METRICS_DIR"
 # Keep the previous inode allocated until this run creates its artifact. This

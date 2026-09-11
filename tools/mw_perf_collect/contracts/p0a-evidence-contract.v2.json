@@ -1,0 +1,120 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v2",
+  "base_contract_version": "mw_perf.p0a_contract.v1",
+  "artifact_schemas": {
+    "mw_perf.dds_comm_trace.meta.v1": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "finalized", "stream_id", "producer_pid", "producer_start_time_ticks", "topology_generation", "topology_sha256", "trace_mode", "sampling_algorithm", "sampling_permyriad"],
+      "properties": {
+        "schema": {"const": "mw_perf.dds_comm_trace.meta.v1"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"type": "string", "minLength": 1},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "finalized": {"const": true},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "topology_generation": {"type": "string", "minLength": 1},
+        "topology_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_mode": {"enum": ["sampled", "full"]},
+        "sampling_algorithm": {"type": "integer", "minimum": 0},
+        "sampling_permyriad": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "mw_perf.dds_comm_trace.seal.v1": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "finalized", "stream_id", "producer_pid", "producer_start_time_ticks", "trace_mode", "sampling_algorithm", "sampling_permyriad", "segment_count", "record_count", "exported", "dropped", "invalid_identity", "unsupported_async", "export_discarded", "io_error", "pending", "active_producers", "sealed"],
+      "properties": {
+        "schema": {"const": "mw_perf.dds_comm_trace.seal.v1"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"type": "string", "minLength": 1},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "finalized": {"const": true},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "trace_mode": {"enum": ["sampled", "full"]},
+        "sampling_algorithm": {"type": "integer", "minimum": 0},
+        "sampling_permyriad": {"type": "integer", "minimum": 0},
+        "segment_count": {"type": "integer", "minimum": 1},
+        "record_count": {"type": "integer", "minimum": 0},
+        "exported": {"type": "integer", "minimum": 0},
+        "dropped": {"type": "integer", "minimum": 0},
+        "invalid_identity": {"type": "integer", "minimum": 0},
+        "unsupported_async": {"type": "integer", "minimum": 0},
+        "export_discarded": {"type": "integer", "minimum": 0},
+        "io_error": {"type": "boolean"},
+        "pending": {"type": "integer", "minimum": 0},
+        "active_producers": {"type": "integer", "minimum": 0},
+        "sealed": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "mw_perf.dds_exact_callback.meta.v1": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "finalized", "stream_id", "producer_pid", "producer_start_time_ticks", "topology_generation", "topology_sha256", "trace_mode", "record_size"],
+      "properties": {
+        "schema": {"const": "mw_perf.dds_exact_callback.meta.v1"}, "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"}, "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"}, "finalized": {"const": true}, "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1}, "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "topology_generation": {"type": "string", "minLength": 1}, "topology_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "trace_mode": {"const": "full"}, "record_size": {"const": 72}
+      }, "additionalProperties": false
+    },
+    "mw_perf.dds_exact_callback.seal.v1": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "finalized", "stream_id", "producer_pid", "producer_start_time_ticks", "trace_mode", "record_count", "dropped", "invalid_identity", "missing_registration", "unsupported_async", "unsupported_multi_handler", "pending", "io_error", "sealed"],
+      "properties": {
+        "schema": {"const": "mw_perf.dds_exact_callback.seal.v1"}, "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"}, "path_id": {"type": "string", "minLength": 1}, "deployment_mode": {"const": "managed"},
+        "finalized": {"type": "boolean"}, "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0}, "trace_mode": {"const": "full"}, "record_count": {"type": "integer", "minimum": 0},
+        "dropped": {"type": "integer", "minimum": 0}, "invalid_identity": {"type": "integer", "minimum": 0}, "missing_registration": {"type": "integer", "minimum": 0},
+        "unsupported_async": {"type": "integer", "minimum": 0}, "unsupported_multi_handler": {"type": "integer", "minimum": 0}, "pending": {"type": "integer", "minimum": 0}, "io_error": {"type": "boolean"}, "sealed": {"type": "boolean"}
+      }, "additionalProperties": false
+    },
+    "mw_perf.comm_trace.finalization.v1": {
+      "type": "object",
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "finalized", "files"],
+      "properties": {
+        "schema": {"const": "mw_perf.comm_trace.finalization.v1"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"type": "string", "minLength": 1},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "finalized": {"const": true},
+        "files": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^raw/comm_trace/[^/]+$"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "artifact_overrides": [
+    {
+      "universe": "collection",
+      "relative_path": "raw/comm_trace/",
+      "format": "pattern_directory",
+      "finalization": "complete",
+      "patterns": [
+        {"pattern": "*.meta.json", "schema_version": "mw_perf.dds_comm_trace.meta.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1},
+        {"pattern": "*.ibct", "schema_version": "mw_perf.dds_comm_trace.binary.v1", "format": "binary", "record_count_rule": "header_plus_fixed_size", "min_record_count": 0},
+        {"pattern": "*.exact.meta.json", "schema_version": "mw_perf.dds_exact_callback.meta.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1},
+        {"pattern": "*.ibce", "schema_version": "mw_perf.dds_exact_callback.binary.v1", "format": "binary", "record_count_rule": "zero", "min_record_count": 0},
+        {"pattern": "*.exact.seal.json", "schema_version": "mw_perf.dds_exact_callback.seal.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1},
+        {"pattern": "*.seal.json", "schema_version": "mw_perf.dds_comm_trace.seal.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1}
+      ]
+    },
+    {
+      "universe": "collection",
+      "relative_path": "raw/comm_trace/directory_finalization.json",
+      "schema_version": "mw_perf.comm_trace.finalization.v1",
+      "format": "json",
+      "record_count_rule": "document",
+      "min_record_count": 1,
+      "finalization": "complete"
+    }
+  ]
+}

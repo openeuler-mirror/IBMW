@@ -37,6 +37,8 @@ extern "C" {
 typedef uint8_t ibmw_loan_mode_t;
 #define IBMW_LOAN_MODE_POD_ONLY              ((ibmw_loan_mode_t)0)
 #define IBMW_LOAN_MODE_CTX_META_THEN_PAYLOAD ((ibmw_loan_mode_t)1)
+/* Driver completion discriminator; callers must not request this mode. */
+#define IBMW_LOAN_MODE_INTERNAL_CTX_META_UNREPORTED ((ibmw_loan_mode_t)2)
 
 /**
  * @brief C-ABI mirror of ibmw::runtime::core::transport::LoanedSampleHandle.

@@ -178,7 +178,7 @@ TEST(IceoryxRegistrationRollback, CallbackCanReenterBusGateWhileRollbackWaits) {
   auto rollback = std::async(std::launch::async, [&] {
     internal::RunIoxRegistrationRollback(
         [&] { callback_gate.Close(); }, [&] { detached.set_value(); },
-        [&] { callback_gate.WaitForQuiescence(); },
+        [&] { return callback_gate.WaitForQuiescence(std::chrono::seconds(1)); },
         [&] {
           std::lock_guard<std::mutex> lock(bus_gate);
         });
@@ -189,6 +189,22 @@ TEST(IceoryxRegistrationRollback, CallbackCanReenterBusGateWhileRollbackWaits) {
   callback.join();
   EXPECT_TRUE(callback_reentered.load());
   EXPECT_FALSE(callback_gate.TryEnter());
+}
+
+TEST(IceoryxRegistrationRollback, TimeoutDoesNotRemoveActiveContext) {
+  IoxNotificationGate callback_gate;
+  ASSERT_TRUE(callback_gate.TryEnter());
+  bool removed = false;
+
+  EXPECT_FALSE(internal::RunIoxRegistrationRollback(
+      [&] { callback_gate.Close(); }, [] {},
+      [&] { return callback_gate.WaitForQuiescence(std::chrono::milliseconds(1)); },
+      [&] { removed = true; }));
+  EXPECT_FALSE(removed);
+  EXPECT_EQ(callback_gate.Active(), 1U);
+
+  callback_gate.Exit();
+  EXPECT_TRUE(callback_gate.WaitForQuiescence(std::chrono::milliseconds(0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +224,70 @@ runtime_id: iox_legacy_runtime
 )yaml");
 
   EXPECT_NO_THROW(driver.Initialize(options));
+}
+
+TEST(IceoryxTransportDriverOptions, AcceptsExactLosslessBenchmarkYaml) {
+  IceoryxBus bus;
+  IceoryxTransportDriver driver(bus);
+  YAML::Node options = YAML::Load(R"yaml(
+benchmark_profile: core_metrics_e2e_lossless_v1
+publisher_too_slow_policy: WAIT_FOR_CONSUMER
+subscriber_queue_full_policy: BLOCK_PRODUCER
+subscriber_queue_capacity: 256
+)yaml");
+  EXPECT_NO_THROW(driver.Initialize(options));
+}
+
+TEST(IceoryxTransportDriverOptions, RejectsOneSidedLosslessBenchmarkYaml) {
+  IceoryxBus bus;
+  IceoryxTransportDriver driver(bus);
+  YAML::Node options = YAML::Load(R"yaml(
+benchmark_profile: core_metrics_e2e_lossless_v1
+publisher_too_slow_policy: WAIT_FOR_CONSUMER
+)yaml");
+  EXPECT_THROW(driver.Initialize(options), std::exception);
+}
+
+TEST(IceoryxTransportDriverLifecycle, FailedInitializeAllowsValidRetry) {
+  IceoryxBus bus;
+  IceoryxTransportDriver driver(bus);
+  const auto invalid = YAML::Load(R"yaml(
+benchmark_profile: core_metrics_e2e_lossless_v1
+publisher_too_slow_policy: WAIT_FOR_CONSUMER
+)yaml");
+
+  EXPECT_THROW(driver.Initialize(invalid), std::exception);
+  EXPECT_NO_THROW(driver.Initialize(YAML::Node{}));
+  EXPECT_NO_THROW(driver.Start());
+}
+
+TEST(IceoryxBusLifecycle, CompletedShutdownReplacesIrreversiblyClosedGate) {
+  auto old_control = std::make_shared<IoxBusControl>();
+  old_control->operation_gate.Close();
+  ASSERT_FALSE(old_control->operation_gate.TryAcquire());
+
+  auto replacement = internal::ReinitializeIoxBusControl(
+      old_control, true, true);
+  EXPECT_NE(replacement, old_control);
+  EXPECT_TRUE(replacement->operation_gate.TryAcquire());
+  EXPECT_FALSE(old_control->operation_gate.TryAcquire());
+
+  EXPECT_EQ(internal::ReinitializeIoxBusControl(replacement, false, true),
+            replacement);
+  EXPECT_EQ(internal::ReinitializeIoxBusControl(replacement, true, false),
+            replacement);
+}
+
+TEST(IceoryxTransportDriverLifecycle, InvalidCallsPreserveStartedState) {
+  IceoryxBus bus;
+  IceoryxTransportDriver driver(bus);
+
+  EXPECT_THROW(driver.Start(), std::exception);
+  EXPECT_NO_THROW(driver.Initialize(YAML::Node{}));
+  EXPECT_NO_THROW(driver.Start());
+  EXPECT_THROW(driver.Initialize(YAML::Node{}), std::exception);
+  EXPECT_THROW(driver.Start(), std::exception);
+  EXPECT_FALSE(driver.RegisterLoanedPodTopic({}, 64U, 8U));
 }
 
 TEST(IceoryxTransportDriverOptions, RejectsExecutorOption) {

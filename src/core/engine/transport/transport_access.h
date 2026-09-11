@@ -48,6 +48,10 @@ static_assert(static_cast<uint8_t>(LoanMode::kPodOnly) == IBMW_LOAN_MODE_POD_ONL
 static_assert(static_cast<uint8_t>(LoanMode::kCtxMetaThenPayload) ==
                   IBMW_LOAN_MODE_CTX_META_THEN_PAYLOAD,
               "LoanMode::kCtxMetaThenPayload value drift");
+static_assert(
+    static_cast<uint8_t>(LoanMode::kCtxMetaThenPayloadUnreported) ==
+        IBMW_LOAN_MODE_INTERNAL_CTX_META_UNREPORTED,
+    "LoanMode::kCtxMetaThenPayloadUnreported value drift");
 
 class SenderAccess {
  public:

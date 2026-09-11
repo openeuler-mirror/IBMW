@@ -1,10 +1,30 @@
 #!/usr/bin/env python3
 """Run one isolated steady-state A, B, or C benchmark lane."""
-import argparse, csv, json, math, os, pathlib, re, shutil, signal, subprocess, sys, time
+import argparse, csv, hashlib, json, math, os, pathlib, re, shutil, signal, subprocess, sys, threading, time
 
 CSV_SCHEMA = ("label", "count", "min_us", "avg_us", "stddev_us", "p50_us", "p90_us", "p99_us", "p999_us", "max_us")
 LANE_LABELS = {"A": "abc_ros2_4KB", "B": "abc_dds_4KB", "C": "iox_send_4KB"}
 ERROR_FIELDS = ("missing", "duplicate", "out_of_order", "invalid_payload", "invalid_timestamp")
+
+def resolve_roudi(build, override=None, environ=None):
+    """Resolve RouDi from CLI, environment, CMake metadata, or source build layout."""
+    env = os.environ if environ is None else environ
+    candidates = []
+    if override: candidates.append(pathlib.Path(override))
+    elif env.get("IBMW_ROUDI_BIN"): candidates.append(pathlib.Path(env["IBMW_ROUDI_BIN"]))
+    else:
+        metadata = pathlib.Path(build) / "ibmw_abc_roudi_path.txt"
+        try:
+            configured = metadata.read_text().splitlines()[0].strip()
+            if configured: candidates.append(pathlib.Path(configured))
+        except (OSError, IndexError):
+            pass
+        candidates.append(pathlib.Path(build) / "iox-roudi")
+    for candidate in candidates:
+        candidate = candidate.expanduser().resolve()
+        if candidate.is_file() and os.access(candidate, os.X_OK): return candidate
+    attempted = ", ".join(str(path) for path in candidates) or "no candidate"
+    raise ValueError(f"iox-roudi executable not found ({attempted}); use --roudi or IBMW_ROUDI_BIN")
 
 def validate_status_schema(status):
     errors = []
@@ -111,11 +131,31 @@ def validate_result_gate(lane,status,csv_result,process_exit_codes,run_started_n
         checks.update({"publisher_status_valid":publisher_schema_ok and publisher_data.get("valid") is True,"publisher_completion":publisher_schema_ok and publisher_data.get("completion") is True,"publisher_attempted_total":publisher_data.get("attempted_total")==3050,"publisher_attempted_measured":publisher_data.get("attempted_measured")==3000})
     errors.extend(k for k,v in checks.items() if not v); return not errors,errors
 
-def write_result(work,result):
-    (work/"result.json").write_text(json.dumps(result,indent=2)+"\n"); print(json.dumps(result))
+def _self_start_ticks():
+    text=pathlib.Path("/proc/self/stat").read_text(); return int(text[text.rfind(")")+2:].split()[19])
+
+def write_result(work,result,collector_managed=False):
+    if collector_managed:
+        csv_path=work/"latency.csv"
+        digest=hashlib.sha256(csv_path.read_bytes()).hexdigest() if csv_path.is_file() else None
+        result["collector_managed"]={"schema":"ibmw.abc.collector-managed.v1",
+            "run_id":os.environ.get("MW_PERF_RUN_ID"),"producer_pid":os.getpid(),
+            "producer_start_time_ticks":_self_start_ticks(),"lane":result.get("lane"),
+            "complete":True,"latency_csv_sha256":digest}
+    target=work/"result.json"; temporary=work/"result.json.tmp"
+    temporary.write_text(json.dumps(result,indent=2)+"\n"); temporary.replace(target); print(json.dumps(result))
+
+def _finish(code, collector_managed, stop_event):
+    if not collector_managed: return code
+    while not stop_event.wait(.25): pass
+    return code
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument("lane",choices="ABC"); p.add_argument("--build",required=True,type=pathlib.Path); p.add_argument("--work",required=True,type=pathlib.Path); p.add_argument("--domain",type=int,default=45); a=p.parse_args(); a.build=a.build.resolve(); a.work=a.work.resolve(); a.work.mkdir(parents=True,exist_ok=True)
+    p=argparse.ArgumentParser(); p.add_argument("lane",choices="ABC"); p.add_argument("--build",required=True,type=pathlib.Path); p.add_argument("--work",required=True,type=pathlib.Path); p.add_argument("--domain",type=int,default=45); p.add_argument("--roudi",type=pathlib.Path,help="RouDi executable for lane C (overrides IBMW_ROUDI_BIN and CMake metadata)"); p.add_argument("--collector-managed",action="store_true"); a=p.parse_args(); a.build=a.build.resolve(); a.work=a.work.resolve(); a.work.mkdir(parents=True,exist_ok=True)
+    stop_event=threading.Event()
+    if a.collector_managed:
+        if not os.environ.get("MW_PERF_RUN_ID"): p.error("--collector-managed requires MW_PERF_RUN_ID")
+        signal.signal(signal.SIGTERM,lambda *_: stop_event.set())
     for x in a.work.iterdir(): shutil.rmtree(x) if x.is_dir() else x.unlink()
     started=time.time_ns(); csv_path=a.work/"latency.csv"; status_path=a.work/"subscriber.status.json"; env=clean_env(); procs={}; logs=[]; warnings=[]; timed_out=None; shutdown_signal=None
     try:
@@ -129,8 +169,9 @@ def main():
                 try: procs[name].wait(timeout=timeout)
                 except subprocess.TimeoutExpired: timed_out=name; procs[name].kill(); procs[name].wait()
         else:
+            roudi=resolve_roudi(a.build,a.roudi)
             template=pathlib.Path(__file__).resolve().parents[1]/"iox_send/config/linux/bin/cfg/iox_send"; sub=a.work/"subscriber.yaml"; pub=a.work/"publisher.yaml"; publisher_status_path=a.work/"publisher.status.json"; common={"topic":"/mw_perf/payload_4kb","payload_bytes":4096,"hz":100,"warmup_messages":50,"message_count":3000,"start_delay_ms":2000}; global_config={"path":str((a.build/"libibmw_iceoryx_transport.so").resolve()),"topic":"/mw_perf/payload_4kb"}; patch_iox_config(template/"subscriber.yaml",sub,global_config,{**common,"label":"iox_send_4KB","csv_path":csv_path,"status_path":status_path}); patch_iox_config(template/"publisher.yaml",pub,global_config,{**common,"label":"iox_send_4KB","publisher_status_path":publisher_status_path})
-            for name,exe,args in (("roudi",a.build/"iox-roudi",[]),("subscriber",a.build/"iox_send_subscriber_app",[str(sub)]),("publisher",a.build/"iox_send_publisher_app",[str(pub)])):
+            for name,exe,args in (("roudi",roudi,[]),("subscriber",a.build/"iox_send_subscriber_app",[str(sub)]),("publisher",a.build/"iox_send_publisher_app",[str(pub)])):
                 f=(a.work/f"{name}.log").open("w"); logs.append(f); procs[name]=subprocess.Popen([str(exe),*args],cwd=a.build,env=env,stdout=f,stderr=subprocess.STDOUT); time.sleep(1 if name!="subscriber" else 2)
             deadline=time.monotonic()+45
             while time.monotonic()<deadline:
@@ -155,11 +196,11 @@ def main():
         valid,errors=validate_result_gate(a.lane,status,csv_result,exits,started,artifacts,timed_out,publisher_status); result={"lane":a.lane,"domain":a.domain,"run_started_ns":started,"valid":valid,"status":status,"csv_validation":csv_result,"process_exit_codes":exits,"validation_errors":errors,"validation_warnings":warnings};
         if a.lane=="C": result["publisher_status"]=publisher_status
         if shutdown_signal: result["shutdown_signal"]=shutdown_signal
-        write_result(a.work,result); return 0 if valid else 1
+        write_result(a.work,result,a.collector_managed); return _finish(0 if valid else 1,a.collector_managed,stop_event)
     except KeyboardInterrupt:
-        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":["runner_keyboard_interrupt"],"validation_warnings":warnings}); return 130
+        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":["runner_keyboard_interrupt"],"validation_warnings":warnings},a.collector_managed); return _finish(130,a.collector_managed,stop_event)
     except (OSError,subprocess.SubprocessError,TypeError,ValueError) as e:
-        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":[f"runner_error: {e}"],"validation_warnings":warnings}); return 1
+        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":[f"runner_error: {e}"],"validation_warnings":warnings},a.collector_managed); return _finish(1,a.collector_managed,stop_event)
     finally:
         for proc in procs.values():
             if proc.poll() is None: proc.terminate()

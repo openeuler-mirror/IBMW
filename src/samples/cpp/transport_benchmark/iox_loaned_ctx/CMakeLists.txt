@@ -45,6 +45,19 @@ target_link_libraries(iox_loaned_ctx_publisher_app PRIVATE
   ibmw::core::engine
   ibmw_samples_cpp_transport_benchmark_iox_loaned_ctx_publisher_module)
 set_target_properties(iox_loaned_ctx_publisher_app PROPERTIES ENABLE_EXPORTS ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+  # CMake has no built-in OHOS platform module, so ENABLE_EXPORTS does not add
+  # the export-dynamic linker option that the Reporter host ABI requires.
+  target_link_options(iox_loaned_ctx_publisher_app PRIVATE
+    "LINKER:--export-dynamic")
+endif()
+if(IBMW_BUILD_TESTS)
+  add_test(
+    NAME core_metrics_signal_shutdown_regression
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/tests/core_metrics_signal_shutdown_regression.py
+            $<TARGET_FILE:iox_loaned_ctx_publisher_app>)
+endif()
 
 add_executable(iox_loaned_ctx_subscriber_app
   standalone/subscriber_app/main.cc)
@@ -57,6 +70,10 @@ if(NOT IBMW_ENABLE_CORE_METRICS OR IBMW_ENABLE_REPORTER_V1)
   target_link_libraries(core_metrics_reporter_hot_bench PRIVATE
     ibmw::core::engine ibmw::core::extension_api ibmw::core::reporter_host_abi)
   set_target_properties(core_metrics_reporter_hot_bench PROPERTIES ENABLE_EXPORTS ON)
+  if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+    target_link_options(core_metrics_reporter_hot_bench PRIVATE
+      "LINKER:--export-dynamic")
+  endif()
 endif()
 
 target_include_directories(iox_loaned_ctx_subscriber_app PRIVATE
@@ -73,13 +90,10 @@ string(REPLACE "::" "_" CUR_SUPERIOR_NAMESPACE_UNDERLINE ${CUR_SUPERIOR_NAMESPAC
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   set(CUR_INSTALL_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/config/linux)
-else()
-  message(FATAL_ERROR "iox_loaned_ctx only supports Linux")
+  add_custom_target(
+    ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CUR_INSTALL_SOURCE_DIR}/bin ${CMAKE_BINARY_DIR}
+    DEPENDS iox_loaned_ctx_publisher_app
+            iox_loaned_ctx_subscriber_app
+            ibmw_extensions_iceoryx_ext)
 endif()
-
-add_custom_target(
-  ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all ALL
-  COMMAND ${CMAKE_COMMAND} -E copy_directory ${CUR_INSTALL_SOURCE_DIR}/bin ${CMAKE_BINARY_DIR}
-  DEPENDS iox_loaned_ctx_publisher_app
-          iox_loaned_ctx_subscriber_app
-          ibmw_extensions_iceoryx_ext)

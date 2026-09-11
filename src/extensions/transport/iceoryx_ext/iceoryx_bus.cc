@@ -2,14 +2,16 @@
 // All rights reserved.
 
 #include "iceoryx_ext/iceoryx_bus.h"
+#include "iceoryx_ext/internal/reporter_bridge.h"
 #include <algorithm>
+#include <utility>
 #ifdef IBMW_ENABLE_REPORTER_V1
 #include "iceoryx_ext/internal/reporter_sidecar.h"
-#include <unordered_map>
 #endif
 #include "iceoryx_ext/global.h"
 #include "iceoryx_posh/mepoo/chunk_header.hpp"
 #include "iceoryx_posh/popo/subscriber_options.hpp"
+#include "iceoryx_posh/popo/publisher_options.hpp"
 #include "iceoryx_versions.hpp"
 
 namespace ibmw::extensions::iceoryx_extension {
@@ -17,21 +19,6 @@ namespace ibmw::extensions::iceoryx_extension {
 namespace {
 thread_local IoxSubscriptionState* current_callback_subscription = nullptr;
 #ifdef IBMW_ENABLE_REPORTER_V1
-thread_local IoxReceiveReporter* pending_receive_reporter = nullptr;
-struct ReceiveReporterBinding {
-  IoxReceiveReporter* reporter;
-  size_t reported_peak = 0;
-};
-std::mutex receive_reporters_mutex;
-std::unordered_map<const IoxSubscriptionState*,
-                   std::unique_ptr<ReceiveReporterBinding>> receive_reporters;
-
-ReceiveReporterBinding* FindReceiveReporter(
-    const IoxSubscriptionState* state) noexcept {
-  std::lock_guard lock(receive_reporters_mutex);
-  const auto it = receive_reporters.find(state);
-  return it == receive_reporters.end() ? nullptr : it->second.get();
-}
 void AddReporter(const IoxReceiveReporter* reporter,
                  ibmw_reporter_slot_v1* slot, uint64_t value) noexcept {
   if (reporter && reporter->api && reporter->api->add && slot)
@@ -53,49 +40,106 @@ constexpr auto kIoxTruncateToCapacity = iox::TruncateToCapacity;
 #endif
 }
 
-#ifdef IBMW_ENABLE_REPORTER_V1
-ScopedPendingIoxReceiveReporter::ScopedPendingIoxReceiveReporter(
-    IoxReceiveReporter* reporter) noexcept
-    : previous_(pending_receive_reporter) {
-  pending_receive_reporter = reporter;
-}
-ScopedPendingIoxReceiveReporter::~ScopedPendingIoxReceiveReporter() {
-  pending_receive_reporter = previous_;
-}
-#endif
-
 bool IsIceoryxListenerCallbackThread() noexcept {
   return current_callback_subscription != nullptr;
 }
 
+IoxOperationLease::~IoxOperationLease() { Reset(); }
+
+IoxOperationLease::IoxOperationLease(IoxOperationLease&& other) noexcept
+    : gate_(std::exchange(other.gate_, nullptr)) {}
+
+IoxOperationLease& IoxOperationLease::operator=(
+    IoxOperationLease&& other) noexcept {
+  if (this != &other) {
+    Reset();
+    gate_ = std::exchange(other.gate_, nullptr);
+  }
+  return *this;
+}
+
+void IoxOperationLease::Reset() noexcept {
+  if (auto* gate = std::exchange(gate_, nullptr)) gate->Release();
+}
+
+IoxOperationLease IoxOperationGate::TryAcquire() noexcept {
+  if (!accepting_.load(std::memory_order_acquire)) return {};
+  active_.fetch_add(1, std::memory_order_acq_rel);
+  if (!accepting_.load(std::memory_order_acquire)) {
+    Release();
+    return {};
+  }
+  return IoxOperationLease(this);
+}
+
+void IoxOperationGate::Release() noexcept {
+  if (active_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    std::lock_guard<std::mutex> lock(wait_mutex_);
+    wait_cv_.notify_all();
+  }
+}
+
+void IoxOperationGate::Close() noexcept {
+  accepting_.store(false, std::memory_order_release);
+}
+
+bool IoxOperationGate::WaitForQuiescence(
+    std::chrono::milliseconds timeout) noexcept {
+  std::unique_lock<std::mutex> lock(wait_mutex_);
+  return wait_cv_.wait_for(lock, std::max(timeout, std::chrono::milliseconds(0)),
+                           [this] { return Active() == 0; });
+}
+
 bool IoxNotificationGate::TryEnter() noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (closed_) return false;
-  ++active_;
-  return true;
+  auto state = state_.load(std::memory_order_acquire);
+  while ((state & kClosed) == 0) {
+    if (state > std::numeric_limits<size_t>::max() - kActiveIncrement) {
+      return false;
+    }
+    if (state_.compare_exchange_weak(state, state + kActiveIncrement,
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void IoxNotificationGate::Exit() noexcept {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (active_ != 0) --active_;
+  auto state = state_.load(std::memory_order_acquire);
+  while (state / kActiveIncrement != 0) {
+    if (state_.compare_exchange_weak(state, state - kActiveIncrement,
+                                     std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+      return;
+    }
   }
-  cv_.notify_all();
 }
 
 void IoxNotificationGate::Close() noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
-  closed_ = true;
+  state_.fetch_or(kClosed, std::memory_order_acq_rel);
 }
 
-void IoxNotificationGate::WaitForQuiescence() noexcept {
-  std::unique_lock<std::mutex> lock(mutex_);
-  cv_.wait(lock, [this] { return active_ == 0; });
+bool IoxNotificationGate::WaitForQuiescence(
+    std::chrono::milliseconds timeout) noexcept {
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::max(timeout, std::chrono::milliseconds(0));
+  const auto poll_interval = std::chrono::duration_cast<
+      std::chrono::steady_clock::duration>(std::chrono::milliseconds(1));
+  while (Active() != 0) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return false;
+    std::this_thread::sleep_for(std::min(deadline - now, poll_interval));
+  }
+  return true;
 }
 
 size_t IoxNotificationGate::Active() const noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return active_;
+  return state_.load(std::memory_order_acquire) / kActiveIncrement;
+}
+
+bool IoxNotificationGate::Closed() const noexcept {
+  return (state_.load(std::memory_order_acquire) & kClosed) != 0;
 }
 
 bool IoxSubscriptionRegistry::Reserve(std::string_view url) {
@@ -174,9 +218,19 @@ iox::capro::ServiceDescription Url2ServiceDescription(std::string_view url) {
       String2IdString(url.substr(third_slash_pos))};
 }
 
-IoxPublisher::IoxPublisher(std::string_view url, size_t shm_size)
+IoxPublisher::IoxPublisher(std::string_view url, size_t shm_size,
+                           IoxDeliveryOptions delivery)
     : shm_size_(NextIoxShmSize(shm_size, shm_size).value()),
-      publisher_(Url2ServiceDescription(url)) {}
+      publisher_(Url2ServiceDescription(url), [delivery] {
+        iox::popo::PublisherOptions options;
+        if (delivery.lossless) {
+          options.subscriberTooSlowPolicy =
+              iox::popo::ConsumerTooSlowPolicy::WAIT_FOR_CONSUMER;
+        }
+        return options;
+      }()) {}
+
+IoxPublisher::~IoxPublisher() { DestroyPublisherReporter(this); }
 
 void IoxLoanTracker::BeginShutdown() noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -313,8 +367,18 @@ void IoxPublisher::ReleaseRaw(void* chunk_ptr) noexcept {
       [this, chunk_ptr] { publisher_.release(chunk_ptr); });
 }
 
-iox::popo::SubscriberOptions MakeSubscriberOptions(bool retained) noexcept {
+iox::popo::SubscriberOptions MakeSubscriberOptions(
+    bool retained, IoxDeliveryOptions delivery) noexcept {
   iox::popo::SubscriberOptions options;
+  options.queueCapacity = 1;
+  options.queueFullPolicy = iox::popo::QueueFullPolicy::DISCARD_OLDEST_DATA;
+  options.historyRequest = 0;
+  if (delivery.lossless) {
+    options.queueCapacity = delivery.queue_capacity;
+    options.queueFullPolicy = iox::popo::QueueFullPolicy::BLOCK_PRODUCER;
+    options.historyRequest = 0;
+    return options;
+  }
   if (retained) {
     // Retained delivery is deliberately bounded: once all leases are held,
     // incoming samples are dropped and are never replayed after a release.
@@ -403,6 +467,14 @@ bool IoxAsyncStop::Complete() const noexcept {
 
 IceoryxBus::IceoryxBus() : control_(std::make_shared<IoxBusControl>()) {}
 
+std::shared_ptr<IoxBusControl> internal::ReinitializeIoxBusControl(
+    std::shared_ptr<IoxBusControl> current, bool shutdown_complete,
+    bool resources_empty) {
+  if (shutdown_complete && resources_empty)
+    return std::make_shared<IoxBusControl>();
+  return current;
+}
+
 bool IoxCallbackContextRegistry::Remove(
     const IoxSubscriptionCallbackContext* expected) noexcept {
   const auto it = std::find_if(
@@ -411,6 +483,15 @@ bool IoxCallbackContextRegistry::Remove(
   if (it == contexts_.end()) return false;
   contexts_.erase(it);
   return true;
+}
+
+void IoxCallbackContextRegistry::CleanupClosedQuiescent() noexcept {
+  contexts_.erase(
+      std::remove_if(contexts_.begin(), contexts_.end(), [](const auto& context) {
+        return context->Closed() &&
+               context->WaitForQuiescence(std::chrono::milliseconds(0));
+      }),
+      contexts_.end());
 }
 
 IceoryxBus::~IceoryxBus() {
@@ -424,8 +505,29 @@ IceoryxBus::~IceoryxBus() {
   Shutdown();
 }
 
+bool IceoryxBus::ReserveSubscriberUrl(std::string_view url) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::mutex> control_lock(control_->mutex);
+  return !control_->shutting_down && control_->listener &&
+         control_->subscriptions.Reserve(url);
+}
+
+void IceoryxBus::RollbackSubscriberUrl(std::string_view url) noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::mutex> control_lock(control_->mutex);
+  control_->subscriptions.Rollback(url);
+}
+
+void IceoryxBus::AbortSubscriber(
+    const std::shared_ptr<IoxSubscriptionState>& state) noexcept {
+  if (state) state->Stop();
+}
+
 void IceoryxBus::Initialize(uint64_t shm_init_size, std::string_view runtime_id) {
   std::lock_guard<std::mutex> lock(mutex_);
+  control_ = internal::ReinitializeIoxBusControl(
+      std::move(control_), prepared_ && !iox_listener_ptr_,
+      iox_pub_catalog_.empty());
   prepared_ = false;
   if (shm_init_size > std::numeric_limits<uint32_t>::max()) {
     throw std::runtime_error("Iceoryx initial shm size exceeds payload limit");
@@ -446,6 +548,11 @@ void IceoryxBus::Initialize(uint64_t shm_init_size, std::string_view runtime_id)
   control_->listener = iox_listener_ptr_;
 }
 
+void IceoryxBus::SetDeliveryOptions(IoxDeliveryOptions options) noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  delivery_options_ = options;
+}
+
 bool IceoryxBus::TryPrepareShutdown(
     std::chrono::milliseconds timeout) noexcept {
   if (IsIceoryxListenerCallbackThread()) {
@@ -464,9 +571,17 @@ bool IceoryxBus::TryPrepareShutdown(
       if (prepared_) return true;
       control = control_;
     }
+    control->operation_gate.Close();
     {
       std::unique_lock<std::mutex> control_lock(control->mutex);
       control->shutting_down = true;
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (auto& entry : iox_pub_catalog_) entry.second->BeginShutdown();
+    }
+    {
+      std::unique_lock<std::mutex> control_lock(control->mutex);
       if (!control->registration_cv.wait_until(
               control_lock, shutdown_deadline, [&control] {
                 return control->registrations_in_flight == 0;
@@ -475,15 +590,13 @@ bool IceoryxBus::TryPrepareShutdown(
                 "finish during shutdown preparation.");
         return false;
       }
+      control->callback_contexts.CleanupClosedQuiescent();
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (prepared_) return true;
       std::lock_guard<std::mutex> control_lock(control->mutex);
-      // Stop intake and block every publisher before any snapshot allocation
-      // can fail. A later retry can rebuild the snapshots and continue waiting.
       for (auto& entry : control->subscriptions.Entries()) entry.second->Stop();
-      for (auto& entry : iox_pub_catalog_) entry.second->BeginShutdown();
 
       states.reserve(control->subscriptions.Size());
       for (auto& entry : control->subscriptions.Entries()) {
@@ -502,6 +615,17 @@ bool IceoryxBus::TryPrepareShutdown(
               std::max(remaining, std::chrono::milliseconds(0)))) {
         MW_WARN("Timed out preparing iceoryx subscription '{}' for shutdown.",
                 url);
+        return false;
+      }
+    }
+    {
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              shutdown_deadline - std::chrono::steady_clock::now());
+      if (!control->operation_gate.WaitForQuiescence(
+              std::max(remaining, std::chrono::milliseconds(0)))) {
+        MW_WARN("Timed out waiting for active iceoryx operations during "
+                "shutdown preparation.");
         return false;
       }
     }
@@ -560,10 +684,17 @@ void IceoryxBus::Shutdown() {
   listener.reset();
   callback_contexts.clear();
   publishers.clear();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    prepared_ = true;
+  }
 }
 
-void IceoryxBus::RegisterPublisher(std::string_view url,
-                                   size_t initial_size_hint) {
+IoxPublisher* IceoryxBus::RegisterPublisher(std::string_view url,
+                                            size_t initial_size_hint,
+                                            bool* created) {
+  auto operation = TryAcquireOperation();
+  if (!operation) throw std::runtime_error("Iceoryx bus is shutting down");
   std::lock_guard<std::mutex> lock(mutex_);
   {
     std::lock_guard<std::mutex> control_lock(control_->mutex);
@@ -571,14 +702,22 @@ void IceoryxBus::RegisterPublisher(std::string_view url,
       throw std::runtime_error("Iceoryx bus is shutting down");
     }
   }
+  if (auto it = iox_pub_catalog_.find(url); it != iox_pub_catalog_.end()) {
+    if (created) *created = false;
+    return it->second.get();
+  }
   const size_t requested_size =
       initial_size_hint == 0 ? shm_init_size_ : initial_size_hint;
   const auto initial_size = NextIoxShmSize(requested_size, requested_size);
   if (!initial_size) {
     throw std::runtime_error("Iceoryx publisher shm size exceeds payload limit");
   }
-  iox_pub_catalog_.emplace(
-      url, std::make_unique<IoxPublisher>(url, *initial_size));
+  auto publisher = std::make_unique<IoxPublisher>(
+      url, *initial_size, delivery_options_);
+  auto* result = publisher.get();
+  iox_pub_catalog_.try_emplace(std::string(url), std::move(publisher));
+  if (created) *created = true;
+  return result;
 }
 
 void OnReceivedCallback(iox::popo::UntypedSubscriber*,
@@ -590,6 +729,8 @@ std::shared_ptr<IoxSubscriptionState> IceoryxBus::RegisterSubscriber(
     std::string_view url,
     MsgHandleFunc&& handle,
     IoxSubscriberRegistrationOptions options) {
+  auto operation = TryAcquireOperation();
+  if (!operation) throw std::runtime_error("Iceoryx bus is shutting down");
   std::shared_ptr<IoxBusControl> control;
   std::shared_ptr<iox::popo::Listener> listener;
   std::optional<IoxRegistrationGuard> registration;
@@ -604,9 +745,11 @@ std::shared_ptr<IoxSubscriptionState> IceoryxBus::RegisterSubscriber(
     if (!control->listener) {
       throw std::runtime_error("Iceoryx bus is not initialized");
     }
-    if (!control->subscriptions.Reserve(url)) {
+    if ((!options.url_reserved && !control->subscriptions.Reserve(url)) ||
+        (options.url_reserved && !control->subscriptions.Contains(url))) {
       throw std::runtime_error("Iceoryx subscriber URL is already registered");
     }
+    options.delivery = delivery_options_;
     registration->StartLocked();
     listener = control->listener;
   }
@@ -616,7 +759,7 @@ std::shared_ptr<IoxSubscriptionState> IceoryxBus::RegisterSubscriber(
   bool attached = false;
   try {
     subscription = std::make_shared<IoxSubscriptionState>(
-        url, std::move(handle), options, control);
+        url, std::move(handle), std::move(options), control);
     callback_context =
         std::make_shared<IoxSubscriptionCallbackContext>(subscription);
     subscription->SetCallbackContext(callback_context);
@@ -642,7 +785,7 @@ std::shared_ptr<IoxSubscriptionState> IceoryxBus::RegisterSubscriber(
       throw std::runtime_error("Iceoryx subscriber URL is already registered");
     }
   } catch (...) {
-    internal::RunIoxRegistrationRollback(
+    const bool quiescent = internal::RunIoxRegistrationRollback(
         [&] {
           if (callback_context) callback_context->Close();
         },
@@ -654,7 +797,8 @@ std::shared_ptr<IoxSubscriptionState> IceoryxBus::RegisterSubscriber(
           }
         },
         [&] {
-          if (callback_context) callback_context->WaitForQuiescence();
+          return !callback_context || callback_context->WaitForQuiescence(
+                                          std::chrono::seconds(1));
         },
         [&] {
           std::lock_guard<std::mutex> control_lock(control->mutex);
@@ -663,12 +807,20 @@ std::shared_ptr<IoxSubscriptionState> IceoryxBus::RegisterSubscriber(
             control->callback_contexts.Remove(callback_context.get());
           }
         });
+    if (!quiescent) {
+      MW_ERROR("Timed out quiescing iceoryx registration callback; callback "
+               "context remains owned for later shutdown cleanup.");
+      std::lock_guard<std::mutex> control_lock(control->mutex);
+      control->subscriptions.Rollback(url);
+    }
     throw;
   }
   return subscription;
 }
 
-IoxPublisher* IceoryxBus::GetPublisher(std::string_view url) {
+IoxPublisher* IceoryxBus::GetPublisher(const IoxOperationLease& lease,
+                                       std::string_view url) {
+  if (!lease) return nullptr;
   std::lock_guard<std::mutex> lock(mutex_);
   {
     std::lock_guard<std::mutex> control_lock(control_->mutex);
@@ -680,6 +832,14 @@ IoxPublisher* IceoryxBus::GetPublisher(std::string_view url) {
   return nullptr;
 }
 
+void IceoryxBus::RollbackPublisher(std::string_view url,
+                                   const IoxPublisher* expected) noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto found = iox_pub_catalog_.find(url);
+  if (found != iox_pub_catalog_.end() && found->second.get() == expected)
+    iox_pub_catalog_.erase(found);
+}
+
 IoxSubscriptionState::IoxSubscriptionState(
     std::string_view url,
     IceoryxBus::MsgHandleFunc callback,
@@ -688,42 +848,46 @@ IoxSubscriptionState::IoxSubscriptionState(
     : control_(std::move(control)),
       url_(url),
       subscriber_(std::make_unique<iox::popo::UntypedSubscriber>(
-          Url2ServiceDescription(url), MakeSubscriberOptions(options.retained))),
+          Url2ServiceDescription(url),
+          MakeSubscriberOptions(options.retained, options.delivery))),
       callback_(std::move(callback)),
       lease_limiter_(options.max_outstanding),
       retained_(options.retained),
+      delivery_options_(options.delivery),
       async_stop_([this] {
-        if (callback_context_) callback_context_->Close();
-        DetachFromListener();
-        if (callback_context_) callback_context_->WaitForQuiescence();
-        WaitForQuiescence();
-        Deregister();
-      }) {
-#ifdef IBMW_ENABLE_REPORTER_V1
-  if (pending_receive_reporter) {
-    std::lock_guard lock(receive_reporters_mutex);
-    receive_reporters.emplace(
-        this, std::make_unique<ReceiveReporterBinding>(
-                  ReceiveReporterBinding{pending_receive_reporter}));
-  }
-#endif
-}
+         internal::RunIoxSubscriptionTeardown(
+             [this] {
+               if (callback_context_) callback_context_->Close();
+             },
+             [this] { DetachFromListener(); },
+             [this] {
+               return !callback_context_ || callback_context_->WaitForQuiescence(
+                                                std::chrono::seconds(1));
+             },
+             [this] {
+               return WaitForQuiescence(std::chrono::seconds(1));
+             },
+             [this] {
+               Deregister();
+               std::lock_guard<std::mutex> lock(mutex_);
+               ResetSubscriptionReporter(this);
+             });
+       }),
+      reporter_state_(std::move(options.reporter_state)) {}
 
 IoxSubscriptionState::~IoxSubscriptionState() {
-#ifdef IBMW_ENABLE_REPORTER_V1
-  std::lock_guard lock(receive_reporters_mutex);
-  receive_reporters.erase(this);
-#endif
+  DestroySubscriptionReporter(this);
 }
 
 bool IoxSubscriptionState::Quiescent() const noexcept {
   return active_callbacks_ == 0 && lease_limiter_.Outstanding() == 0;
 }
 
-bool IoxSubscriptionState::WaitForQuiescence() noexcept {
+bool IoxSubscriptionState::WaitForQuiescence(
+    std::chrono::milliseconds timeout) noexcept {
   std::unique_lock<std::mutex> lock(mutex_);
-  cv_.wait(lock, [this] { return Quiescent(); });
-  return true;
+  return cv_.wait_for(lock, std::max(timeout, std::chrono::milliseconds(0)),
+                      [this] { return Quiescent(); });
 }
 
 void IoxSubscriptionState::Stop() noexcept {
@@ -762,31 +926,37 @@ void IoxSubscriptionState::Deregister() noexcept {
 bool IoxSubscriptionState::Close(std::chrono::milliseconds timeout) noexcept {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
   Stop();
-  std::unique_lock<std::mutex> lock(mutex_);
   if (current_callback_subscription == this) return false;
-  lock.unlock();
-  if (timeout.count() <= 0) {
-    lock.lock();
-    return async_stop_.Complete() && Quiescent();
-  }
   auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
       deadline - std::chrono::steady_clock::now());
-  if (remaining.count() <= 0 || !async_stop_.Close(remaining)) return false;
-  lock.lock();
+  if (!async_stop_.Close(std::max(remaining, std::chrono::milliseconds(0))))
+    return false;
   remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
       deadline - std::chrono::steady_clock::now());
-  if (remaining.count() <= 0) return Quiescent();
-  return cv_.wait_for(lock, remaining, [this] { return Quiescent(); });
+  if (callback_context_ && !callback_context_->WaitForQuiescence(
+                               std::max(remaining, std::chrono::milliseconds(0))))
+    return false;
+  remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      deadline - std::chrono::steady_clock::now());
+  if (!WaitForQuiescence(std::max(remaining, std::chrono::milliseconds(0))))
+    return false;
+  std::call_once(deregister_once_, [this] {
+    Deregister();
+    stop_succeeded_.store(true);
+  });
+  return stop_succeeded_.load();
 }
 
+template <bool Reported>
 void IoxSubscriptionState::Release(const void* payload) noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   if (payload != nullptr) subscriber_->release(payload);
   lease_limiter_.Release();
 #ifdef IBMW_ENABLE_REPORTER_V1
-  if (auto* binding = FindReceiveReporter(this)) {
-    AddReporter(binding->reporter, binding->reporter->released, 1);
-    AddReporterSigned(binding->reporter, binding->reporter->outstanding, -1);
+  if constexpr (Reported) {
+    auto* state = ReporterSidecarAccess::Subscription(this);
+    AddReporter(state->reporter.get(), state->reporter->released, 1);
+    AddReporterSigned(state->reporter.get(), state->reporter->outstanding, -1);
   }
 #endif
   cv_.notify_all();
@@ -798,6 +968,15 @@ void IoxSubscriptionState::SetCallbackContext(
 }
 
 void IoxSubscriptionState::OnData() noexcept {
+#ifdef IBMW_ENABLE_REPORTER_V1
+  if (reporter_state_)
+    return OnDataImpl<true>();
+#endif
+  OnDataImpl<false>();
+}
+
+template <bool Reported>
+void IoxSubscriptionState::OnDataImpl() noexcept {
   while (true) {
     const void* payload = nullptr;
     {
@@ -810,21 +989,26 @@ void IoxSubscriptionState::OnData() noexcept {
 
       if (!lease_limiter_.TryAcquire()) {
 #ifdef IBMW_ENABLE_REPORTER_V1
-        if (auto* binding = FindReceiveReporter(this))
-          AddReporter(binding->reporter, binding->reporter->limit_drop, 1);
+        if constexpr (Reported)
+          AddReporter(ReporterSidecarAccess::Subscription(this)->reporter.get(),
+                      ReporterSidecarAccess::Subscription(this)->reporter->limit_drop, 1);
 #endif
         subscriber_->release(payload);
         continue;
       }
 #ifdef IBMW_ENABLE_REPORTER_V1
-      if (auto* binding = FindReceiveReporter(this)) {
-        AddReporter(binding->reporter, binding->reporter->delivered, 1);
-        AddReporterSigned(binding->reporter, binding->reporter->outstanding, 1);
+      if constexpr (Reported) {
+        auto* reporter_state = ReporterSidecarAccess::Subscription(this);
+        AddReporter(reporter_state->reporter.get(),
+                    reporter_state->reporter->delivered, 1);
+        AddReporterSigned(reporter_state->reporter.get(),
+                          reporter_state->reporter->outstanding, 1);
         const size_t outstanding = lease_limiter_.Outstanding();
-        if (outstanding > binding->reported_peak) {
-          AddReporter(binding->reporter, binding->reporter->outstanding_peak,
-                      outstanding - binding->reported_peak);
-          binding->reported_peak = outstanding;
+        if (outstanding > reporter_state->reported_peak) {
+          AddReporter(reporter_state->reporter.get(),
+                      reporter_state->reporter->outstanding_peak,
+                      outstanding - reporter_state->reported_peak);
+          reporter_state->reported_peak = outstanding;
         }
       }
 #endif
@@ -832,7 +1016,7 @@ void IoxSubscriptionState::OnData() noexcept {
     }
 
     internal::RunIoxAcquiredPayload(
-        [this, payload]() noexcept { Release(payload); },
+        [this, payload]() noexcept { Release<Reported>(payload); },
         [this]() noexcept {
           {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -850,7 +1034,7 @@ void IoxSubscriptionState::OnData() noexcept {
             auto release = std::function<void()>([scope = &scoped_release] {
               if (!scope->released) {
                 scope->released = true;
-                scope->state->Release(scope->payload);
+                scope->state->template Release<Reported>(scope->payload);
               }
             });
             auto chunk_header = iox::mepoo::ChunkHeader::fromUserPayload(payload);
@@ -862,12 +1046,12 @@ void IoxSubscriptionState::OnData() noexcept {
               callback_(payload, payload_size, std::move(release));
             } catch (...) {
               current_callback_subscription = previous_callback_subscription;
-              if (!scoped_release.released) Release(payload);
+              if (!scoped_release.released) Release<Reported>(payload);
               release_on_exit = false;
               throw;
             }
             current_callback_subscription = previous_callback_subscription;
-            if (!scoped_release.released) Release(payload);
+            if (!scoped_release.released) Release<Reported>(payload);
             release_on_exit = false;
             return;
           }
@@ -875,7 +1059,7 @@ void IoxSubscriptionState::OnData() noexcept {
           try {
             auto self = shared_from_this();
             token = std::make_shared<IoxReleaseToken>(
-                [self, payload] { self->Release(payload); });
+                [self, payload] { self->Release<Reported>(payload); });
             release_on_exit = false;
 
             auto chunk_header =
@@ -890,29 +1074,29 @@ void IoxSubscriptionState::OnData() noexcept {
             current_callback_subscription = this;
             try {
 #ifdef IBMW_ENABLE_REPORTER_V1
-              if (auto* binding = FindReceiveReporter(this))
-                AddReporter(binding->reporter,
-                            binding->reporter->callback_entered, 1);
+              if constexpr (Reported)
+                AddReporter(ReporterSidecarAccess::Subscription(this)->reporter.get(),
+                            ReporterSidecarAccess::Subscription(this)->reporter->callback_entered, 1);
 #endif
               callback_(payload, payload_size, std::move(release));
 #ifdef IBMW_ENABLE_REPORTER_V1
-              if (auto* binding = FindReceiveReporter(this))
-                AddReporter(binding->reporter,
-                            binding->reporter->callback_completed, 1);
+              if constexpr (Reported)
+                AddReporter(ReporterSidecarAccess::Subscription(this)->reporter.get(),
+                            ReporterSidecarAccess::Subscription(this)->reporter->callback_completed, 1);
 #endif
             } catch (const std::exception&) {
 #ifdef IBMW_ENABLE_REPORTER_V1
-              if (auto* binding = FindReceiveReporter(this))
-                AddReporter(binding->reporter,
-                            binding->reporter->callback_threw_std, 1);
+              if constexpr (Reported)
+                AddReporter(ReporterSidecarAccess::Subscription(this)->reporter.get(),
+                            ReporterSidecarAccess::Subscription(this)->reporter->callback_threw_std, 1);
 #endif
               current_callback_subscription = previous_callback_subscription;
               throw;
             } catch (...) {
 #ifdef IBMW_ENABLE_REPORTER_V1
-              if (auto* binding = FindReceiveReporter(this))
-                AddReporter(binding->reporter,
-                            binding->reporter->callback_threw_nonstd, 1);
+              if constexpr (Reported)
+                AddReporter(ReporterSidecarAccess::Subscription(this)->reporter.get(),
+                            ReporterSidecarAccess::Subscription(this)->reporter->callback_threw_nonstd, 1);
 #endif
               current_callback_subscription = previous_callback_subscription;
               throw;

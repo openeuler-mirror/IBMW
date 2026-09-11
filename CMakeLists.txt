@@ -15,6 +15,7 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 include(CMakeDependentOption)
 include(CheckCXXSourceCompiles)
+include(GNUInstallDirs)
 
 # ============================================================================
 # Core options
@@ -25,26 +26,30 @@ option(IBMW_BUILD_CLI_TOOLS "IBMW build ibmw command line tools." OFF)
 option(IBMW_BUILD_WITH_ROS2 "IBMW build with ROS2." OFF)
 option(IBMW_BUILD_ROS2_TYPES "IBMW build ROS2 type support (rosidl build-time only, no rcl runtime dependency)." OFF)
 option(IBMW_BUILD_PROTOCOLS "IBMW build protocols." ON)
+option(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
+  "Build the production DDS remote-managed exact-capture candidate." OFF)
+option(IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE
+  "Build and install the OHOS DDS remote-managed runtime-fault candidate." OFF)
 
 # DDS selection is explicit. SYSTEM intentionally uses ordinary CMake package
 # resolution, so a sourced ROS environment may affect package selection; it
 # never adds hard-coded /opt/ros hints or implicitly switches provider classes.
 set(IBMW_DDS_PROVIDER "SYSTEM" CACHE STRING
-    "Fast DDS/Fast CDR provider: SYSTEM, ROS2_MINIMAL_SDK, or SOURCE_FASTDDS3")
-set_property(CACHE IBMW_DDS_PROVIDER PROPERTY STRINGS SYSTEM ROS2_MINIMAL_SDK SOURCE_FASTDDS3)
+    "Fast DDS/Fast CDR provider: SYSTEM, ROS2_MINIMAL_SDK, SOURCE_FASTDDS2, or SOURCE_FASTDDS3")
+set_property(CACHE IBMW_DDS_PROVIDER PROPERTY STRINGS SYSTEM ROS2_MINIMAL_SDK SOURCE_FASTDDS2 SOURCE_FASTDDS3)
 set(IBMW_ROS2_MINIMAL_SDK_PREFIX "" CACHE PATH
     "Prefix containing the ros2_minimal_deps Humble Fast DDS 2.6.12/Fast CDR 1.0.29 SDK")
-set(_IBMW_DDS_PROVIDERS SYSTEM ROS2_MINIMAL_SDK SOURCE_FASTDDS3)
+set(_IBMW_DDS_PROVIDERS SYSTEM ROS2_MINIMAL_SDK SOURCE_FASTDDS2 SOURCE_FASTDDS3)
 if(NOT IBMW_DDS_PROVIDER IN_LIST _IBMW_DDS_PROVIDERS)
-  message(FATAL_ERROR "Invalid IBMW_DDS_PROVIDER='${IBMW_DDS_PROVIDER}'. Allowed values: SYSTEM, ROS2_MINIMAL_SDK, SOURCE_FASTDDS3")
+  message(FATAL_ERROR "Invalid IBMW_DDS_PROVIDER='${IBMW_DDS_PROVIDER}'. Allowed values: SYSTEM, ROS2_MINIMAL_SDK, SOURCE_FASTDDS2, SOURCE_FASTDDS3")
 endif()
 unset(_IBMW_DDS_PROVIDERS)
 
-if(IBMW_DDS_PROVIDER STREQUAL "SOURCE_FASTDDS3")
+if(IBMW_DDS_PROVIDER MATCHES "^SOURCE_FASTDDS[23]$")
   set(IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD ON CACHE BOOL
       "Enable source-build ExternalProject targets for target-side third-party dependencies." FORCE)
 elseif(IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD)
-  message(FATAL_ERROR "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD requires explicit IBMW_DDS_PROVIDER=SOURCE_FASTDDS3")
+  message(FATAL_ERROR "IBMW_ENABLE_THIRD_PARTY_SOURCE_BUILD requires explicit IBMW_DDS_PROVIDER=SOURCE_FASTDDS2 or SOURCE_FASTDDS3")
 endif()
 
 # Auto-enable ROS2 types when full ROS2 support is requested
@@ -99,6 +104,7 @@ cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deli
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
 option(IBMW_ENABLE_CORE_METRICS "Build Core Metrics V1 instrumentation." OFF)
+option(IBMW_ENABLE_COMM_TRACE "Build internal P0a communication trace skeleton." OFF)
 cmake_dependent_option(IBMW_ENABLE_REPORTER_V1
   "Build Reporter V1 ABI runtime (requires Core Metrics)." OFF
   "IBMW_ENABLE_CORE_METRICS" OFF)
@@ -129,6 +135,20 @@ cmake_dependent_option(IBMW_BUILD_DDS_EXTENSION "IBMW build DDS extension (FastD
 cmake_dependent_option(IBMW_BUILD_DDS_XML_VALIDATION
   "Build the standalone DDS XML transport validation pair." OFF
   "IBMW_BUILD_RUNTIME;IBMW_BUILD_DDS_EXTENSION" OFF)
+
+if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE OR IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE)
+  foreach(_ibmw_candidate_requirement
+      IBMW_BUILD_RUNTIME
+      IBMW_ENABLE_COMM_TRACE
+      IBMW_BUILD_DDS_EXTENSION
+      IBMW_BUILD_PROTOCOLS)
+    if(NOT ${_ibmw_candidate_requirement})
+      message(FATAL_ERROR
+        "IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE requires ${_ibmw_candidate_requirement}=ON")
+    endif()
+  endforeach()
+  unset(_ibmw_candidate_requirement)
+endif()
 
 option(IBMW_ZENOH_USE_PACKAGE "IBMW use an existing/prebuilt zenohc CMake package instead of building zenoh-c from source." OFF)
 
@@ -268,6 +288,9 @@ endif()
 if(IBMW_BUILD_TESTS)
   include(GetGTest)
   enable_testing()
+
+  add_test(NAME ibmw_fastdds_source_dependency_lock
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/tests/test_fastdds_source_dependency_lock.sh")
 
   if(IBMW_MASTER_PROJECT AND IBMW_BUILD_RUNTIME AND
      CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING)
@@ -468,6 +491,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # Add subdirectory
 # ============================================================================
 add_subdirectory(src)
+add_subdirectory(tools)
 
 # ============================================================================
 # Installation
@@ -623,9 +647,12 @@ list(
   IBMW_BUILD_GRPC_EXTENSION
   IBMW_BUILD_PROXY_EXTENSION
   IBMW_BUILD_DDS_EXTENSION
+  IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
+  IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE
   IBMW_EXECUTOR_USE_STDEXEC
   IBMW_ENABLE_DLOPEN_DEEPBIND
   IBMW_ENABLE_CORE_METRICS
+  IBMW_ENABLE_COMM_TRACE
   IBMW_ENABLE_REPORTER_V1
   IBMW_BUILD_WITH_WERROR)
 

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.p0a.remote_resolution_declarations.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "registration_contract_version", "run_id", "capability_id", "path_id", "deployment_mode", "declaration_sha256", "declarations", "trust_classification"],
+  "properties": {
+    "schema": {"const": "mw_perf.p0a.remote_resolution_declarations.v1"},
+    "registration_contract_version": {"const": "mw_perf.p0a_ohos_remote_contract.v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+    "path_id": {"type": "string", "minLength": 1},
+    "deployment_mode": {"const": "managed"},
+    "declaration_sha256": {"$ref": "#/$defs/hash"},
+    "declarations": {"type": "array", "minItems": 5, "maxItems": 5, "prefixItems": [{"$ref": "#/$defs/sut"}, {"$ref": "#/$defs/extension"}, {"$ref": "#/$defs/fastdds"}, {"$ref": "#/$defs/fastcdr"}, {"$ref": "#/$defs/cpp"}], "items": false},
+    "trust_classification": {"$ref": "#/$defs/trustClassification"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "path", "sha256"], "properties": {"role": {"enum": ["sut", "extension", "fastdds", "fastcdr", "cpp_runtime"]}, "name": {"type": "string", "minLength": 1}, "source": {"enum": ["exe", "maps"]}, "path": {"type": "string", "pattern": "^/"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "sut": {"allOf": [{"$ref": "#/$defs/identity"}, {"properties": {"role": {"const": "sut"}, "source": {"const": "exe"}}}]},
+    "extension": {"allOf": [{"$ref": "#/$defs/identity"}, {"properties": {"role": {"const": "extension"}, "source": {"const": "maps"}}}]},
+    "fastdds": {"allOf": [{"$ref": "#/$defs/identity"}, {"properties": {"role": {"const": "fastdds"}, "source": {"const": "maps"}}}]},
+    "fastcdr": {"allOf": [{"$ref": "#/$defs/identity"}, {"properties": {"role": {"const": "fastcdr"}, "source": {"const": "maps"}}}]},
+    "cpp": {"allOf": [{"$ref": "#/$defs/identity"}, {"properties": {"role": {"const": "cpp_runtime"}, "source": {"const": "maps"}}}]},
+    "trustClassification": {"type": "object", "additionalProperties": false, "required": ["preregistered_declarations", "runtime_attested_facts", "self_contained_authority", "external_authority"], "properties": {"preregistered_declarations": {"const": ["device.serial", "device.os_name", "device.os_version", "device.build_id", "device.abi", "device.os_image_sha256", "toolchain", "source", "approval_artifact"]}, "runtime_attested_facts": {"const": ["boot_id", "agent_executable_sha256", "five_live_image_identities"]}, "self_contained_authority": {"const": "retained_consistency_only"}, "external_authority": {"const": "requires_separately_supplied_expected_roots"}}}
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "registration_contract_version": "mw_perf.p0a_contract.v7",
+  "base_contract_version": "mw_perf.p0a_contract.v6",
+  "artifact_schemas": {
+    "mw_perf.communication_latency.v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "stream_id", "producer_pid", "producer_start_time_ticks", "producer", "finalized", "inputs", "metric", "sample_set", "quality", "support", "conclusion_scope", "conclusion"],
+      "properties": {
+        "schema": {"const": "mw_perf.communication_latency.v2"},
+        "run_id": {"type": "string", "minLength": 1},
+        "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+        "path_id": {"type": "string", "minLength": 1},
+        "deployment_mode": {"const": "managed"},
+        "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "producer_pid": {"type": "integer", "minimum": 1},
+        "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+        "producer": {"const": "mw_perf_collect"},
+        "finalized": {"const": true},
+        "inputs": {
+          "type": "object", "additionalProperties": false,
+          "required": ["registration_contract_sha256", "raw_source_set_sha256", "resolution_content_sha256", "identity_trace", "hook_callgraph", "latency_samples"],
+          "properties": {
+            "registration_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "raw_source_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolution_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "identity_trace": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "record_count"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"type": "integer", "minimum": 1}}},
+            "hook_callgraph": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "delivery_set_sha256"], "properties": {"content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "delivery_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+            "latency_samples": {"type": "object", "additionalProperties": false, "required": ["relative_path", "schema_version", "content_sha256", "record_count"], "properties": {"relative_path": {"const": "normalized/latency_samples.jsonl"}, "schema_version": {"const": "mw_perf.latency_sample.v2"}, "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"type": "integer", "minimum": 1}}}
+          }
+        },
+        "metric": {"type": "object", "additionalProperties": false, "required": ["measurement", "start_boundary", "end_boundary", "formula", "unit", "clock_domain"], "properties": {"measurement": {"const": "publish_start_to_callback_start"}, "start_boundary": {"const": "publish_write.start"}, "end_boundary": {"const": "final_callback_invocation.start"}, "formula": {"const": "callback_start_ns-publish_start_ns"}, "unit": {"const": "ns"}, "clock_domain": {"const": "producer_monotonic"}}},
+        "sample_set": {"type": "object", "additionalProperties": false, "required": ["coverage", "key_fields", "count", "sha256"], "properties": {"coverage": {"const": "successful_exact_deliveries_only"}, "key_fields": {"const": ["writer_guid", "sequence_high", "sequence_low", "reader_guid", "callback_registration_id"]}, "count": {"type": "integer", "minimum": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "quality": {"type": "object", "additionalProperties": false, "required": ["nonempty", "unique_delivery_keys", "input_bindings_verified", "boundary_arithmetic_verified", "single_clock_domain", "sample_set_equals_identity_delivery_set", "zero_trace_loss_and_exclusion_counters"], "properties": {"nonempty": {"const": true}, "unique_delivery_keys": {"const": true}, "input_bindings_verified": {"const": true}, "boundary_arithmetic_verified": {"const": true}, "single_clock_domain": {"const": true}, "sample_set_equals_identity_delivery_set": {"const": true}, "zero_trace_loss_and_exclusion_counters": {"const": true}}},
+        "support": {"type": "object", "additionalProperties": false, "required": ["level", "aggregation", "delivery_claim", "performance_claim", "metric_availability", "valid_for_comparison"], "properties": {"level": {"const": "candidate_run_only"}, "aggregation": {"const": "none"}, "delivery_claim": {"const": "none"}, "performance_claim": {"const": "none"}, "metric_availability": {"const": "unsupported"}, "valid_for_comparison": {"const": false}}},
+        "conclusion_scope": {"const": "run_scoped_metric_artifact_integrity"},
+        "conclusion": {"const": "pass"}
+      }
+    }
+  },
+  "artifact_overrides": [
+    {"universe": "collection", "relative_path": "capability/communication_latency.json", "schema_version": "mw_perf.communication_latency.v2", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"}
+  ]
+}

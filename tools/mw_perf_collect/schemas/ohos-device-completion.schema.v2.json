@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "https://ibmw.example/schemas/ohos-device-completion.schema.v2.json",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "request_challenge", "campaign_id", "run_id", "capture_role", "boot_id", "child_pid", "child_start_time_ticks", "ready", "released", "complete", "completion_images", "ready_attested", "completion_attested", "evidence_released", "completion_eof_observed", "ready_images_sha256", "completion_images_sha256"],
+  "properties": {
+    "protocol": {"const": "mw_perf.ohos_device_completion.v2"}, "request_challenge": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "campaign_id": {"type": "string", "minLength": 1}, "run_id": {"type": "string", "minLength": 1}, "capture_role": {"enum": ["exact_anchor", "fault_runtime_subject"]},
+    "boot_id": {"type": "string", "minLength": 1}, "child_pid": {"type": "integer", "minimum": 2}, "child_start_time_ticks": {"type": "integer", "minimum": 1},
+    "ready": {"const": true}, "released": {"const": true}, "complete": {"const": true},
+    "completion_images": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/live"}},
+    "ready_attested": {"const": true}, "completion_attested": {"const": true}, "evidence_released": {"const": true}, "completion_eof_observed": {"const": true},
+    "ready_images_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "completion_images_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "nonzeroHash": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"}, "live": {"type": "object", "additionalProperties": false, "required": ["role", "name", "source", "expected_path", "expected_sha256", "observed_sha256", "observed_device_major", "observed_device_minor", "observed_inode", "visible", "matched"], "properties": {"role": {"enum": ["sut", "extension", "fastdds", "fastcdr", "cpp_runtime"]}, "name": {"type": "string", "minLength": 1}, "source": {"enum": ["exe", "maps"]}, "expected_path": {"type": "string", "pattern": "^/"}, "expected_sha256": {"$ref": "#/$defs/nonzeroHash"}, "observed_sha256": {"$ref": "#/$defs/nonzeroHash"}, "observed_device_major": {"type": "integer", "minimum": 0}, "observed_device_minor": {"type": "integer", "minimum": 0}, "observed_inode": {"type": "integer", "minimum": 1}, "visible": {"const": true}, "matched": {"const": true}}}}
+}

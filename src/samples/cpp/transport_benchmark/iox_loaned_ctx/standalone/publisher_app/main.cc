@@ -10,7 +10,10 @@
 // iox_loaned_pod and DDS loaned_message_demo patterns.
 
 #include <csignal>
+#include <chrono>
+#include <cstring>
 #include <iostream>
+#include <thread>
 
 #include "cpp/core.h"
 #include "engine/engine.h"
@@ -23,19 +26,28 @@
 using namespace ibmw::runtime::core;
 namespace iox_ext = ibmw::extensions::iceoryx_extension;
 
-Engine* g_engine_ptr = nullptr;
+volatile sig_atomic_t g_shutdown_requested = 0;
 
 void SignalHandler(int sig) {
-  if (g_engine_ptr && (sig == SIGINT || sig == SIGTERM)) {
-    g_engine_ptr->Shutdown();
-    return;
-  }
-  raise(sig);
+  if (sig == SIGINT || sig == SIGTERM) g_shutdown_requested = 1;
 }
 
 int main(int argc, char** argv) {
   signal(SIGINT, SignalHandler);
   signal(SIGTERM, SignalHandler);
+
+  if (argc == 2 && (std::strcmp(argv[1], "--signal-regression") == 0 ||
+                    std::strcmp(argv[1], "--signal-regression-stuck") == 0)) {
+    std::cout << "SIGNAL_REGRESSION_ACTIVE" << std::endl;
+    while (!g_shutdown_requested) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (std::strcmp(argv[1], "--signal-regression-stuck") == 0) {
+      for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    std::cout << "SIGNAL_REGRESSION_OWNER_MAIN" << std::endl;
+    return 0;
+  }
 
   if (argc <= 1) {
     std::cerr << "Usage: " << argv[0] << " <publisher.yaml>\n";
@@ -44,8 +56,6 @@ int main(int argc, char** argv) {
 
   try {
     Engine engine;
-    g_engine_ptr = &engine;
-
     ibmw::samples::transport_benchmark::iox_loaned_ctx::PublisherModule pub;
     engine.GetModuleBus().RegisterModule(pub.NativeHandle());
 
@@ -56,7 +66,12 @@ int main(int argc, char** argv) {
     iox_ext::IceoryxTransportDriver* driver = nullptr;
     for (auto* td : engine.GetTransportBus().GetUsedTransportDriver()) {
       if (td->Name() == "iceoryx") {
+#if defined(__OHOS__) || defined(__OHOS)
+        // OHOS hides RTTI identity across this plugin boundary.
+        driver = static_cast<iox_ext::IceoryxTransportDriver*>(td);
+#else
         driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+#endif
         break;
       }
     }
@@ -67,9 +82,12 @@ int main(int argc, char** argv) {
     pub.SetIceoryxDriver(driver);
 
     std::cout << "PERF_PUBLISHER_READY" << std::endl;
-    engine.Start();
+    auto stopped = engine.AsyncStart();
+    while (!g_shutdown_requested) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     engine.Shutdown();
-    g_engine_ptr = nullptr;
+    stopped.get();
   } catch (const std::exception& e) {
     std::cerr << "iox_loaned_ctx publisher exception: " << e.what() << "\n";
     return -1;

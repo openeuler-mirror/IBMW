@@ -196,7 +196,8 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
     wrapper.callback =
         [callback = std::move(callback)](
             transport::MessageFrame& frame,
-            std::function<void()>&& release) mutable {
+            std::function<void()>&& release,
+            const transport::internal::CallbackInvocationEnvelopeV1*) mutable {
           ibmw::extension::MessageView view{
               .topic = frame.info.topic_name,
               .msg_type = frame.info.msg_type,

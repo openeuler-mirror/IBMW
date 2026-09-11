@@ -194,7 +194,8 @@ void EchoExtension::RegisterEchoTransport() {
 
     msg_handler.require_cache_serialization_types.emplace(topic_meta.echo_type);
     msg_handler.callback = [echo_type{topic_meta.echo_type}, this](
-                               MessageFrame& msg_wrapper, std::function<void()>&& release_callback) {
+                               MessageFrame& msg_wrapper, std::function<void()>&& release_callback,
+                               const internal::CallbackInvocationEnvelopeV1*) {
       auto buffer_view_ptr = ibmw::runtime::core::transport::TrySerializeMsgWithCache(msg_wrapper, echo_type);
       if (!buffer_view_ptr) [[unlikely]] {
         MW_ERROR("Can not serialize msg type '{}' with echo type '{}'.",

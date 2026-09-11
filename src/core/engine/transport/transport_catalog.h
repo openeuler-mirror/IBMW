@@ -5,29 +5,38 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include "engine/transport/internal/callback_invocation_envelope.h"
 #include "engine/transport/message_frame.h"
 #include "engine/transport/topic_descriptor.h"
+#ifdef IBMW_ENABLE_COMM_TRACE
+#include "engine/transport/internal/comm_trace_send_overlay.h"
+#endif
 #include "base/log_util.h"
 
+namespace ibmw::runtime::core::observability { struct MetricsEntry; struct CachedMetricsGate; }
 namespace ibmw::runtime::core::transport {
 
 // Forward decls for cached pointers in SendTypeWrapper (Phase 7 §7.2 C2).
 class TransportDriver;
 class FrameworkAsyncTransportFilterCollector;
 
-using MessageCallback = std::function<void(MessageFrame&, std::function<void()>&&)>;
+using MessageCallback = std::function<void(
+    MessageFrame&, std::function<void()>&&,
+    const internal::CallbackInvocationEnvelopeV1*)>;
 
 struct MessageHandlerWrapper {
   TransportInfo info;
   QosDescriptor requested_qos;
   std::unordered_set<std::string> require_cache_serialization_types;
   MessageCallback callback;
+  uint64_t callback_registration_id = 0;
 };
 
 // Phase 7 §7.3 §U: receiver-side zero-copy fast lane handler.
@@ -79,8 +88,14 @@ struct SendTypeWrapper {
   // point at addresses inside dispatcher-owned maps that never erase
   // entries after Start().
   std::vector<TransportDriver*> cached_drivers;
+#ifdef IBMW_ENABLE_COMM_TRACE
+  std::vector<internal::CommTraceSendOverlayV1*> cached_send_overlays;
+#endif
   std::atomic<uint32_t>* cached_seq_counter = nullptr;
   const FrameworkAsyncTransportFilterCollector* cached_filter_collector = nullptr;
+  ibmw::runtime::core::observability::MetricsEntry* cached_metrics = nullptr;
+  std::shared_ptr<ibmw::runtime::core::observability::CachedMetricsGate>
+      cached_metrics_gate;
 };
 
 class TransportCatalog {

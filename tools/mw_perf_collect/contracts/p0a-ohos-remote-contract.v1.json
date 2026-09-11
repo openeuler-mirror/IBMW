@@ -1,0 +1,25 @@
+{
+  "registration_contract_version": "mw_perf.p0a_ohos_remote_contract.v1",
+  "contract_family": "ohos_remote_capture_v2",
+  "shared_trace_pipeline": "mw_perf.p0a_contract.v8",
+  "shared_trace_pipeline_sha256": "c8f76997156ecd6e608f0d5d4a0d756d3e5748e8b21c67895936ee004a614575",
+  "artifact_schemas": {
+    "mw_perf.p0a.remote_resolution.v1": {},
+    "mw_perf.p0a.remote_resolution_declarations.v1": {},
+    "mw_perf.p0a.ohos_remote_capture_envelope.v1": {},
+    "mw_perf.trace_quality_ohos_remote.v1": {}
+  },
+  "artifact_overrides": [
+    {"universe": "proof", "relative_path": "validation/fault_injection.json", "schema_version": "mw_perf.p0a.fault_injection.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete", "always_not_applicable": true, "not_applicable_reason": "remote_candidate_run_has_no_formal_fault_injection_claim"},
+    {"universe": "proof", "relative_path": "validation/rollback.json", "schema_version": "mw_perf.p0a.rollback.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete", "always_not_applicable": true, "not_applicable_reason": "remote_candidate_run_has_no_formal_rollback_claim"},
+    {"universe": "proof", "relative_path": "capability/resolution.json", "schema_version": "mw_perf.p0a.remote_resolution.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "registration/resolution_declarations.json", "schema_version": "mw_perf.p0a.remote_resolution_declarations.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "registration/ohos_capture_registration.json", "schema_version": "mw_perf.opaque_bytes.v1", "format": "binary", "record_count_rule": "single_blob", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "registration/operator_approval.json", "schema_version": "mw_perf.opaque_bytes.v1", "format": "binary", "record_count_rule": "single_blob", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "raw/remote_capture/request.json", "schema_version": "mw_perf.opaque_bytes.v1", "format": "binary", "record_count_rule": "single_blob", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "raw/remote_capture/result.json", "schema_version": "mw_perf.opaque_bytes.v1", "format": "binary", "record_count_rule": "single_blob", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "raw/remote_capture/archive.tar", "schema_version": "mw_perf.ohos_capture_archive.v2", "format": "binary", "record_count_rule": "single_blob", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "validation/remote_capture_envelope.json", "schema_version": "mw_perf.p0a.ohos_remote_capture_envelope.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"},
+    {"universe": "collection", "relative_path": "validation/trace_quality.json", "schema_version": "mw_perf.trace_quality_ohos_remote.v1", "format": "json", "record_count_rule": "document", "min_record_count": 1, "finalization": "complete"}
+  ]
+}

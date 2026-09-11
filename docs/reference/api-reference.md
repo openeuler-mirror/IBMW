@@ -211,8 +211,8 @@ LoggerRef& GetSimpleLoggerRef();  // Global simple logger
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `GetSender` | `SenderRef GetSender(std::string_view topic)` | Get publisher for topic |
-| `GetReceiver` | `ReceiverRef GetReceiver(std::string_view topic)` | Get subscriber for topic |
+| `GetPublisher` | `SenderRef GetPublisher(std::string_view topic)` | Get publisher for topic |
+| `GetSubscriber` | `ReceiverRef GetSubscriber(std::string_view topic)` | Get subscriber for topic |
 
 #### Convenience Functions
 
@@ -608,30 +608,30 @@ and nlohmann `to_json`/`from_json` ADL functions. Serialization type: `"json"`.
 
 **Headers:** `src/core/extension_api/`
 
-### EngineExtensionBase
+### ExtensionBase
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `Name` | `virtual std::string_view Name() const noexcept = 0` | Extension name |
-| `Initialize` | `virtual bool Initialize(Engine*) noexcept = 0` | Init with engine |
-| `Shutdown` | `virtual void Shutdown() noexcept = 0` | Clean up |
-| `GenInitializationReport` | `virtual list<pair<string,string>>` | Startup log data |
+| `Name` | `std::string_view Name() const noexcept` | Extension name |
+| `OnInit` | `bool OnInit(runtime::core::Engine* core_ptr)` | Initialize extension with engine |
+| `OnShutdown` | `void OnShutdown()` | Clean up extension resources |
+| `GenInitializationReport` | `std::list<std::pair<std::string, std::string>> GenInitializationReport() const` | Startup log data |
 
 ### Entry Point
 
 ```cpp
-// Must be exported from extension .so
-IBMW_CORE_EXTENSION_EXPORT
-EngineExtensionBase* IbmwDynlibCreateCoreExtensionHandle();
-
-IBMW_CORE_EXTENSION_EXPORT
-void IbmwDynlibDestroyCoreExtensionHandle(const EngineExtensionBase*);
+// At global scope in the extension .so
+IBMW_EXT_ENTRY_V2(MyExtension)
 ```
+
+`ExtensionBase` provides the framework lifecycle methods `Initialize` and
+`Shutdown`; extensions implement `OnInit` and `OnShutdown`.
 
 ### Macros
 
 | Macro | Description |
 |-------|-------------|
+| `IBMW_EXT_ENTRY_V2(ExtensionClass)` | Define the versioned extension entry point |
 | `IBMW_CORE_EXTENSION_EXPORT` | Export visibility attribute |
 | `IBMW_DECLARE_EXTENSION_LOGGER(ns)` | Declare per-extension logger |
 | `IBMW_DEFINE_EXTENSION_LOGGER(ns)` | Define per-extension logger |
@@ -822,7 +822,7 @@ Module::SetDriverSlot(slot_id, driver_ptr)        // override emitted by IBMW_US
 |  ibmw_transport_*_base_t, ibmw_service_*_base_t, etc.              |
 +-------------------------------------------------------------------+
 |  Engine Core + Extensions                                          |
-|  EngineExtensionBase, transport/RPC drivers as dynlibs             |
+|  ExtensionBase, transport/RPC drivers as dynlibs                   |
 +-------------------------------------------------------------------+
 |  Pkg ABI / Type Support Pkg ABI                                    |
 |  IbmwDynlib* entry points for module & type support packages       |

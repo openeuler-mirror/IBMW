@@ -211,8 +211,8 @@ LoggerRef& GetSimpleLoggerRef();  // 全局简易 logger
 
 | 方法 | 签名 | 描述 |
 |--------|-----------|-------------|
-| `GetSender` | `SenderRef GetSender(std::string_view topic)` | 获取该 topic 的 publisher |
-| `GetReceiver` | `ReceiverRef GetReceiver(std::string_view topic)` | 获取该 topic 的 subscriber |
+| `GetPublisher` | `SenderRef GetPublisher(std::string_view topic)` | 获取该 topic 的 publisher |
+| `GetSubscriber` | `ReceiverRef GetSubscriber(std::string_view topic)` | 获取该 topic 的 subscriber |
 
 #### 便捷函数
 
@@ -609,30 +609,30 @@ const ibmw_type_support_base_t* GetJsonMessageTypeSupport();
 
 **头文件**：`src/core/extension_api/`
 
-### EngineExtensionBase
+### ExtensionBase
 
 | 方法 | 签名 | 描述 |
 |--------|-----------|-------------|
-| `Name` | `virtual std::string_view Name() const noexcept = 0` | Extension 名 |
-| `Initialize` | `virtual bool Initialize(Engine*) noexcept = 0` | 用 engine 初始化 |
-| `Shutdown` | `virtual void Shutdown() noexcept = 0` | 清理 |
-| `GenInitializationReport` | `virtual list<pair<string,string>>` | 启动日志数据 |
+| `Name` | `std::string_view Name() const noexcept` | Extension 名 |
+| `OnInit` | `bool OnInit(runtime::core::Engine* core_ptr)` | 使用 engine 初始化 Extension |
+| `OnShutdown` | `void OnShutdown()` | 清理 Extension 资源 |
+| `GenInitializationReport` | `std::list<std::pair<std::string, std::string>> GenInitializationReport() const` | 启动日志数据 |
 
 ### 入口点
 
 ```cpp
-// 必须从 extension .so 中导出
-IBMW_CORE_EXTENSION_EXPORT
-EngineExtensionBase* IbmwDynlibCreateCoreExtensionHandle();
-
-IBMW_CORE_EXTENSION_EXPORT
-void IbmwDynlibDestroyCoreExtensionHandle(const EngineExtensionBase*);
+// 在 extension .so 的全局作用域中使用
+IBMW_EXT_ENTRY_V2(MyExtension)
 ```
+
+`ExtensionBase` 提供框架生命周期方法 `Initialize` 和 `Shutdown`；
+Extension 实现 `OnInit` 和 `OnShutdown`。
 
 ### 宏
 
 | 宏 | 描述 |
 |-------|-------------|
+| `IBMW_EXT_ENTRY_V2(ExtensionClass)` | 定义带版本的 Extension 入口点 |
 | `IBMW_CORE_EXTENSION_EXPORT` | 导出 visibility 属性 |
 | `IBMW_DECLARE_EXTENSION_LOGGER(ns)` | 声明 per-extension logger |
 | `IBMW_DEFINE_EXTENSION_LOGGER(ns)` | 定义 per-extension logger |
@@ -812,7 +812,7 @@ Module::SetDriverSlot(slot_id, driver_ptr)        // IBMW_USE_DRIVER(S) 生成�
 |  ibmw_transport_*_base_t, ibmw_service_*_base_t, etc.              |
 +-------------------------------------------------------------------+
 |  Engine Core + Extension                                           |
-|  EngineExtensionBase、transport/RPC driver 以 dynlib 形式存在        |
+|  ExtensionBase、transport/RPC driver 以 dynlib 形式存在              |
 +-------------------------------------------------------------------+
 |  Pkg ABI / Type Support Pkg ABI                                    |
 |  module 与 type support package 的 IbmwDynlib* 入口点                |

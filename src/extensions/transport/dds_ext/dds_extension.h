@@ -80,6 +80,9 @@ class DdsExtension : public ExtensionBase {
   std::atomic_bool stop_flag_ = false;
 
   std::unique_ptr<DdsBus> dds_bus_;
+#ifdef IBMW_ENABLE_COMM_TRACE
+  bool comm_trace_owner_ = false;
+#endif
 };
 
 }  // namespace ibmw::extensions::dds_extension

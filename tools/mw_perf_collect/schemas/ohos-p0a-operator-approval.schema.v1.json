@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.ohos_p0a_operator_approval.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "approval_identity", "approved_at_utc", "campaign_id", "capability_id", "device_serial", "exact_boot_id", "preregistration_declaration_sha256", "decision", "threat_model"],
+  "properties": {
+    "schema": {"const": "mw_perf.ohos_p0a_operator_approval.v1"},
+    "approval_identity": {"type": "string", "minLength": 1, "maxLength": 256},
+    "approved_at_utc": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "campaign_id": {"$ref": "#/$defs/id"},
+    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+    "device_serial": {"$ref": "#/$defs/id"},
+    "exact_boot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "preregistration_declaration_sha256": {"$ref": "#/$defs/hash"},
+    "decision": {"const": "approved"},
+    "threat_model": {"const": "cooperative_contained_sut_no_active_same_uid"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"}
+  }
+}

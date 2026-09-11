@@ -102,5 +102,6 @@ local.cmake
 !src/core/
 !src/core/**
 !src/api/cpp/core.h
+!tools/mw_perf_collect/core.py
 !src/tools/ibmw_cli/ibmw_cli/templates/install/
 !src/tools/ibmw_cli/ibmw_cli/templates/install/**

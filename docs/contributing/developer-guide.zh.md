@@ -170,7 +170,8 @@ cd build && rm -rf CMakeCache.txt CMakeFiles
 每个 IBMW Module 都是一个继承自 `ibmw::Module` 的 C++ 类，需实现四个公开生命周期方法：
 
 ```cpp
-#include "ibmw_sdk.h"  // 或 "cpp/core.h" + "cpp/module_base.h"
+#include <ibmw/cpp/core.h>
+#include <ibmw/cpp/module_base.h>
 
 class MyModule : public ibmw::Module {
  public:
@@ -220,7 +221,7 @@ class MyModule : public ibmw::Module {
 
 ```cpp
 // pkg_main.cc
-#include "ibmw_pkg_abi.h"
+#include <ibmw/pkg/pkg_macro.h>
 #include "my_module.h"
 
 static const auto kModuleArray = std::array{
@@ -233,41 +234,74 @@ IBMW_PKG_MAIN(kModuleArray)
 
 构建为共享库：
 ```cmake
+find_package(ibmw CONFIG REQUIRED)
+
 add_library(my_module_pkg SHARED
   my_module.cc
   pkg_main.cc
 )
-target_link_libraries(my_module_pkg PRIVATE ibmw_interface)
+target_link_libraries(my_module_pkg PRIVATE ibmw::api::pkg)
 ```
+
+这里的头文件是安装后的 public header，使用 `<ibmw/...>` 形式引用；不要依赖
+源码树中的相对路径或旧的聚合头文件。`ibmw::api::pkg` 是 Pkg 入口所需的
+安装态 CMake target。
 
 ### Module 作为独立 App（App 模式）
 
 ```cpp
 // main.cc
-#include "ibmw_sdk.h"
+#include <chrono>
+#include <csignal>
+#include <iostream>
+#include <thread>
+
+#include <ibmw/engine/engine.h>
 #include "my_module.h"
+
+using ibmw::runtime::core::Engine;
+
+volatile std::sig_atomic_t stop_requested = 0;
+
+void SignalHandler(int sig) {
+  if (sig == SIGINT || sig == SIGTERM) {
+    stop_requested = 1;
+    return;
+  }
+  std::raise(sig);
+}
 
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::cerr << "Usage: " << argv[0] << " <config.yaml>\n";
     return 1;
   }
+  std::signal(SIGINT, SignalHandler);
+  std::signal(SIGTERM, SignalHandler);
 
-  // 创建 engine 与 module
-  ibmw::runtime::core::Engine engine;
-  engine.Initialize(argv[1]);
+  Engine engine;
 
-  // 创建并注册 module
-  auto& module_bus = engine.GetModuleBus();
-  module_bus.CreateModule<MyModule>();
+  // 独立 App 直接注册栈上 Module；Engine 持有其 NativeHandle。
+  MyModule module;
+  engine.GetModuleBus().RegisterModule(module.NativeHandle());
 
-  // 运行（阻塞直至 Ctrl+C）
-  engine.AsyncStart();
-  engine.WaitForShutdownSignal();
+  Engine::Options options;
+  options.cfg_file_path = argv[1];
+  engine.Initialize(options);
+  auto running = engine.AsyncStart();
+  while (!stop_requested) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
   engine.Shutdown();
+  running.wait();
   return 0;
 }
 ```
+
+App 目标应链接 `ibmw::core::engine`。主函数需要为 `SIGINT` 和 `SIGTERM`
+注册 handler，并按 `Initialize`、`AsyncStart`、正常线程中的 `Shutdown` 和
+future wait 管理 Engine 生命周期。不要在 POSIX signal handler 中直接调用
+可能加锁、分配内存或等待线程的 runtime 方法。
 
 ### 访问每个 Module 的配置
 
@@ -294,7 +328,7 @@ bool Setup(ibmw::Runtime runtime) override {
 ```cpp
 bool Setup(ibmw::Runtime runtime) override {
   core_ = runtime;
-  publisher_ = core_.GetTransport().GetSender("my_topic");
+  publisher_ = core_.GetTransport().GetPublisher("my_topic");
   ibmw::transport::RegisterSendType<MyMessageType>(publisher_);
   return true;
 }
@@ -315,7 +349,7 @@ bool Run() override {
 ```cpp
 bool Setup(ibmw::Runtime runtime) override {
   core_ = runtime;
-  auto subscriber = core_.GetTransport().GetReceiver("my_topic");
+  auto subscriber = core_.GetTransport().GetSubscriber("my_topic");
   ibmw::transport::OnMessage<MyMessageType>(subscriber,
     [](const MyMessageType& msg) {
       MW_INFO("Received: {}", msg.data);
@@ -415,29 +449,29 @@ class MyModule : public ibmw::Module {
 
 ## 编写 Extension
 
-Extension 是实现 `EngineExtensionBase` 的共享库。它们在运行时加载，可以
+Extension 是实现 `ExtensionBase` 的共享库。它们在运行时加载，可以
 注册 transport driver、RPC driver、log 后端等。
 
 ### Extension 结构
 
 ```cpp
 // my_extension.h
-#include "ibmw_extension_api.h"
+#include <ibmw/engine/extension/extension_base.h>
 
-class MyExtension : public ibmw::EngineExtensionBase {
+class MyExtension : public ibmw::ExtensionBase {
  public:
   std::string_view Name() const noexcept override {
     return "my_extension";
   }
 
-  bool Initialize(ibmw::runtime::core::Engine* core_ptr) noexcept override {
+  bool OnInit(ibmw::runtime::core::Engine* core_ptr) override {
     // 访问 engine 子系统
     // 注册 transport/RPC driver
     // 从 YAML 读取 extension 选项
     return true;
   }
 
-  void Shutdown() noexcept override {
+  void OnShutdown() override {
     // 清理资源
   }
 
@@ -451,19 +485,10 @@ class MyExtension : public ibmw::EngineExtensionBase {
 ### Extension 入口
 
 ```cpp
-// my_extension_main.cc
+// my_extension.cc，在全局作用域
 #include "my_extension.h"
 
-IBMW_CORE_EXTENSION_EXPORT
-ibmw::EngineExtensionBase* IbmwDynlibCreateCoreExtensionHandle() {
-  return new MyExtension();
-}
-
-IBMW_CORE_EXTENSION_EXPORT
-void IbmwDynlibDestroyCoreExtensionHandle(
-    const ibmw::EngineExtensionBase* ptr) {
-  delete ptr;
-}
+IBMW_EXT_ENTRY_V2(MyExtension)
 ```
 
 ### Extension 日志
@@ -482,12 +507,19 @@ IBMW_DEFINE_EXTENSION_LOGGER(my_ext)
 ### Extension CMake
 
 ```cmake
+find_package(ibmw CONFIG REQUIRED)
+
 add_library(my_extension SHARED
   my_extension.cc
-  my_extension_main.cc
 )
-target_link_libraries(my_extension PRIVATE ibmw_extension_api)
+target_link_libraries(my_extension PRIVATE
+  ibmw::core::extension_api
+  ibmw::core::engine
+)
 ```
+
+Extension 必须与 IBMW runtime 使用相同的目标架构和依赖 provider 构建。其共享库
+由 runtime 加载，不能把 Extension 入口当作普通 managed 业务 API。
 
 ### Extension YAML 配置
 
@@ -548,10 +580,19 @@ ibmw_dds_idl_gen(
 
 ### 手写类型（不走代码生成）
 
+手写 DDS typesupport 仅供 Extension 或 direct DDS 开发使用，属于 transport
+实现边界内的能力，不是普通业务 Module 的公共 API。普通用户应优先使用
+`DdsIdlGenCode.cmake` 生成类型、序列化代码和 TypeSupport；只有确有
+transport-specific 需求时才考虑手写实现。
+
+direct DDS 目标必须链接 `ibmw::extensions::dds_types`；下方安装态头文件路径
+是该 extension-facing target 对应的受支持入口。不要给业务目标手工添加
+`src/extensions/...` 源码树 include 路径。
+
 也可以手动定义类型：
 
 ```cpp
-#include "ibmw/extensions/transport/dds_types/util/dds_type_support.h"
+#include <ibmw/dds_types/util/dds_type_support.h>
 
 struct HelloMsg {
   uint64_t id;
@@ -843,23 +884,33 @@ IBMW 围绕 transport 解耦设立了一组代码质量红线，由
 
 ### `IBMW_USE_DRIVER` vs `IBMW_USE_DRIVERS`
 
-user-region 模块拿到 `*TransportDriver*` 的支持方式只有
-`IBMW_USE_DRIVER`（单 driver）与 `IBMW_USE_DRIVERS`（多 driver）两条。
+`IBMW_USE_DRIVER`（单 driver）与 `IBMW_USE_DRIVERS`（多 driver）是受限的
+escape hatch。它们只允许用于明确命名的 `direct_<transport>_*` 模块，例如
+`direct_dds_publisher`、`direct_iceoryx_zero_copy`，以及 benchmark 或确实
+需要 transport-specific zero-copy 的实现。普通 managed Module 禁止持有
+concrete driver，也不得用这些宏绕过公共 Transport API。
+
+普通业务代码应只依赖安装态 public API（例如 `ibmw::api::cpp` 提供的
+Publisher/Subscriber 等抽象），其 CMake target 使用 `ibmw::api::cpp`；
+只有 direct/Extension 代码才可以依赖具体 transport 的 direct target（例如
+`ibmw::core::engine` 及相应 transport extension 导出的 target）。这些 direct
+target 不属于普通业务公共 API。
+
 两者展开后都生成一个 `Module::SetDriverSlot(slot_id, driver_ptr)` override，
 由 Engine 在 `Start()` 阶段广播 driver-slot id 时回调。
 
-**单 driver 模块：**
+**受限的单 driver 示例（目录名必须体现 direct 边界）：**
 ```cpp
-class MyModule : public ibmw::Module {
+class DirectDdsPublisher : public ibmw::Module {
  private:
   ibmw::extensions::dds_extension::DdsTransportDriver* dds_drv_ = nullptr;
   IBMW_USE_DRIVER(ibmw::extensions::dds_extension::DdsTransportDriver, dds_drv_)
 };
 ```
 
-**多 driver 模块：**
+**受限的多 driver 示例（仅 direct/benchmark/zero-copy）：**
 ```cpp
-class MyModule : public ibmw::Module {
+class DirectTransportBenchmark : public ibmw::Module {
  private:
   ibmw::extensions::dds_extension::DdsTransportDriver* dds_drv_ = nullptr;
   ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* iox_drv_ = nullptr;
@@ -876,6 +927,10 @@ class MyModule : public ibmw::Module {
 > 完整端到端样例见 `src/samples/cpp/multi_driver_demo/`，宏定义见
 > `src/api/cpp/module_base.h`，slot id 入口见 `src/api/c/driver_slot.h`。
 
+`multi_driver_demo` 及其他 `direct_<transport>_*` 样例是边界验证或性能用途，
+不能作为普通 managed Module 的依赖或 API 模板。公共 API 与 direct target
+的边界必须在目录名、目标依赖和代码审阅中保持清晰。
+
 ---
 
 ## 测试
@@ -883,10 +938,18 @@ class MyModule : public ibmw::Module {
 ### 运行测试
 
 ```bash
+# 红线检查：report 用于查看既有问题，baseline 仅阻止新增问题
+bash scripts/check_red_lines.sh --report
+bash scripts/check_red_lines.sh --baseline scripts/baseline_red_lines.txt
+
 cmake -B build -DIBMW_BUILD_TESTS=ON
 cmake --build build -j$(nproc)
 cd build && ctest --output-on-failure
 ```
+
+红线脚本基于静态文本扫描，只是辅助门禁，不是架构合规证明。脚本配置的扫描
+范围可能不覆盖新增 sample 或自定义目录；代码审阅仍需检查依赖方向、公共头文件
+和 direct escape hatch 的命名与边界。
 
 ### 测试示例 demo
 

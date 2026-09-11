@@ -1,0 +1,7 @@
+ibmw:
+  extensions:
+    items: [{name: dds_extension, path: ./libibmw_dds_transport.so, options: {domain_id: 45}}]
+  messaging:
+    drivers: [{type: dds, options: {domain_id: 45, ros2_compatible: true, ros2_topic_prefix: "rt", subscribers: [{topic: "/mw_perf/topology/derived", qos: {history: keep_last, depth: 32, reliability: reliable, durability: volatile}}]}}]
+    subscribers: [{topic: "/mw_perf/topology/derived", enable_drivers: [dds]}]
+  modules: {modules: [{name: TopologyDdsSink, log_level: INFO}]}

@@ -27,7 +27,7 @@
 //      the iceoryx driver's POD publisher map has an entry for the
 //      "/transport_zc_pod/<topic>/<msg_type>" URL the LoanSample()
 //      hot path looks up.
-// Both happen once at Run(); neither is on the per-tick path.
+// Both happen during pre-start preparation; neither is on the per-tick path.
 //
 // Static fan-out by yaml-driven payload_bytes uses the same X-macro
 // (IBMW_BENCH_PLAIN_FOR_EACH) iox_send / iox_loaned_ctx / dds_* / etc.
@@ -60,12 +60,16 @@ class PublisherModule : public ibmw::Module {
     return ibmw::ModuleDescriptor{.module_name = "IoxLoanV2PublisherModule"};
   }
 
-  // The iceoryx driver is needed only for the one-time EnsurePodTopic()
-  // calls in Run(). The publish hot loop never touches it.
+  // Injected after Engine::Initialize() and used only by PreparePodTopics().
+  // The publish hot loop never touches the driver.
   void SetIceoryxDriver(
       ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
     driver_ = d;
   }
+
+  // Registers all POD topics while the engine and PoshRuntime are initialized,
+  // but before Engine::Start() transitions the driver to its hot state.
+  bool PreparePodTopics();
 
   bool Setup(ibmw::Runtime core) override;
   bool Run() override;
@@ -76,6 +80,7 @@ class PublisherModule : public ibmw::Module {
 
   ibmw::Runtime core_;
   ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+  bool pod_topics_prepared_{false};
 
   // One named SenderRef per Plain bench type. Same shape as iox_send so
   // the only per-row difference vs. iox_send is the publish-side call

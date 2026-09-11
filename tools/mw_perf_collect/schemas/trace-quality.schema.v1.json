@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.trace_quality.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "capability_id", "path_id", "deployment_mode", "stream_id", "producer_pid", "producer_start_time_ticks", "producer", "finalized", "registration_contract", "raw_source_set", "topology", "trace_configuration", "upstream_delivery", "reconciliation", "counts", "counters", "key_coverage", "loss_accounting", "support", "conclusion_scope", "conclusion"],
+  "properties": {
+    "schema": {"const": "mw_perf.trace_quality.v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "capability_id": {"const": "dds.ordinary.nonplain.single_driver.sync_callback"},
+    "path_id": {"type": "string", "minLength": 1},
+    "deployment_mode": {"const": "managed"},
+    "stream_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "producer_pid": {"type": "integer", "minimum": 1},
+    "producer_start_time_ticks": {"type": "integer", "minimum": 0},
+    "producer": {"const": "mw_perf_collect"},
+    "finalized": {"const": true},
+    "registration_contract": {"type": "object", "additionalProperties": false, "required": ["version", "sha256"], "properties": {"version": {"const": "mw_perf.p0a_contract.v8"}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "raw_source_set": {"type": "object", "additionalProperties": false, "required": ["sha256", "file_count", "record_count"], "properties": {"sha256": {"$ref": "#/$defs/hash"}, "file_count": {"type": "integer", "minimum": 6}, "record_count": {"type": "integer", "minimum": 4004}}},
+    "topology": {"type": "object", "additionalProperties": false, "required": ["generation", "sha256"], "properties": {"generation": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/hash"}}},
+    "trace_configuration": {"type": "object", "additionalProperties": false, "required": ["mode", "sampling_algorithm", "sampling_permyriad"], "properties": {"mode": {"const": "full"}, "sampling_algorithm": {"const": 0}, "sampling_permyriad": {"const": 10000}}},
+    "upstream_delivery": {"type": "object", "additionalProperties": false, "required": ["content_sha256", "record_count", "schema_version"], "properties": {"content_sha256": {"$ref": "#/$defs/hash"}, "record_count": {"const": 1}, "schema_version": {"const": "mw_perf.communication_delivery.v2"}}},
+    "reconciliation": {"type": "object", "additionalProperties": false, "required": ["stage_accepted", "stage_eligible", "stage_exported", "exact_accepted", "exact_eligible", "exact_exported"], "properties": {"stage_accepted": {"const": 3000}, "stage_eligible": {"const": 3000}, "stage_exported": {"const": 3000}, "exact_accepted": {"const": 1000}, "exact_eligible": {"const": 1000}, "exact_exported": {"const": 1000}}},
+    "counts": {"type": "object", "additionalProperties": false, "required": ["stage_records", "exact_records", "publish", "receive", "dispatch", "callback", "unique_sample_keys", "unique_delivery_keys"], "properties": {"stage_records": {"const": 3000}, "exact_records": {"const": 1000}, "publish": {"const": 1000}, "receive": {"const": 1000}, "dispatch": {"const": 1000}, "callback": {"const": 1000}, "unique_sample_keys": {"const": 1000}, "unique_delivery_keys": {"const": 1000}}},
+    "counters": {"type": "object", "additionalProperties": false, "required": ["stage", "exact", "stage_nonzero_status", "exact_nonzero_status"], "properties": {"stage": {"$ref": "#/$defs/stageCounters"}, "exact": {"$ref": "#/$defs/exactCounters"}, "stage_nonzero_status": {"const": 0}, "exact_nonzero_status": {"const": 0}}},
+    "key_coverage": {"type": "object", "additionalProperties": false, "required": ["sample_key_fields", "delivery_key_fields", "sample_set_sha256", "delivery_set_sha256", "complete_stage_and_exact_set_equality"], "properties": {"sample_key_fields": {"const": ["writer_guid", "sequence_high", "sequence_low"]}, "delivery_key_fields": {"const": ["writer_guid", "sequence_high", "sequence_low", "reader_guid", "callback_registration_id"]}, "sample_set_sha256": {"$ref": "#/$defs/hash"}, "delivery_set_sha256": {"$ref": "#/$defs/hash"}, "complete_stage_and_exact_set_equality": {"const": true}}},
+    "loss_accounting": {"type": "object", "additionalProperties": false, "required": ["sampling_exclusion_count", "trace_loss_count", "sampling_exclusion_distinct_from_trace_loss", "zero_loss_exclusion_status_pending_and_io"], "properties": {"sampling_exclusion_count": {"const": 0}, "trace_loss_count": {"const": 0}, "sampling_exclusion_distinct_from_trace_loss": {"const": true}, "zero_loss_exclusion_status_pending_and_io": {"const": true}}},
+    "support": {"type": "object", "additionalProperties": false, "required": ["level", "formal_p0a_completion", "failure_code"], "properties": {"level": {"const": "candidate_run_only"}, "formal_p0a_completion": {"const": false}, "failure_code": {"const": "P0A_ARTIFACT"}}},
+    "conclusion_scope": {"const": "run_scoped_trace_quality_artifact_integrity"},
+    "conclusion": {"const": "pass"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stageCounters": {"type": "object", "additionalProperties": false, "required": ["dropped_before", "dropped_after", "invalid_identity", "unsupported_async", "export_discarded", "pending", "active_producers", "io_error", "exported"], "properties": {"dropped_before": {"const": 0}, "dropped_after": {"const": 0}, "invalid_identity": {"const": 0}, "unsupported_async": {"const": 0}, "export_discarded": {"const": 0}, "pending": {"const": 0}, "active_producers": {"const": 0}, "io_error": {"const": false}, "exported": {"const": 3000}}},
+    "exactCounters": {"type": "object", "additionalProperties": false, "required": ["record_count", "dropped", "invalid_identity", "missing_registration", "unsupported_async", "unsupported_multi_handler", "pending", "io_error"], "properties": {"record_count": {"const": 1000}, "dropped": {"const": 0}, "invalid_identity": {"const": 0}, "missing_registration": {"const": 0}, "unsupported_async": {"const": 0}, "unsupported_multi_handler": {"const": 0}, "pending": {"const": 0}, "io_error": {"const": false}}}
+  }
+}

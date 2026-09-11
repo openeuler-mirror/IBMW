@@ -2,7 +2,9 @@
 // All rights reserved.
 
 #include <csignal>
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 #include "cpp/core.h"
 #include "engine/engine.h"
@@ -15,14 +17,10 @@
 using namespace ibmw::runtime::core;
 namespace iox_ext = ibmw::extensions::iceoryx_extension;
 
-Engine* g_engine_ptr = nullptr;
+volatile sig_atomic_t g_shutdown_requested = 0;
 
 void SignalHandler(int sig) {
-  if (g_engine_ptr && (sig == SIGINT || sig == SIGTERM)) {
-    g_engine_ptr->Shutdown();
-    return;
-  }
-  raise(sig);
+  if (sig == SIGINT || sig == SIGTERM) g_shutdown_requested = 1;
 }
 
 int main(int argc, char** argv) {
@@ -36,8 +34,6 @@ int main(int argc, char** argv) {
 
   try {
     Engine engine;
-    g_engine_ptr = &engine;
-
     ibmw::samples::transport_benchmark::iox_loaned_ctx::SubscriberModule sub;
     engine.GetModuleBus().RegisterModule(sub.NativeHandle());
 
@@ -48,7 +44,12 @@ int main(int argc, char** argv) {
     iox_ext::IceoryxTransportDriver* driver = nullptr;
     for (auto* td : engine.GetTransportBus().GetUsedTransportDriver()) {
       if (td->Name() == "iceoryx") {
+#if defined(__OHOS__) || defined(__OHOS)
+        // OHOS hides RTTI identity across this plugin boundary.
+        driver = static_cast<iox_ext::IceoryxTransportDriver*>(td);
+#else
         driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+#endif
         break;
       }
     }
@@ -59,9 +60,12 @@ int main(int argc, char** argv) {
     sub.SetIceoryxDriver(driver);
 
     std::cout << "PERF_SUBSCRIBER_READY" << std::endl;
-    engine.Start();
+    auto stopped = engine.AsyncStart();
+    while (!g_shutdown_requested) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     engine.Shutdown();
-    g_engine_ptr = nullptr;
+    stopped.get();
   } catch (const std::exception& e) {
     std::cerr << "iox_loaned_ctx subscriber exception: " << e.what() << "\n";
     return -1;

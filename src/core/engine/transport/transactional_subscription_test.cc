@@ -84,11 +84,13 @@ class ResidualCallbackDriver final : public TransportDriver,
   }
   void Send(MessageFrame&) noexcept override {}
 
-  void TriggerMessage(int& releases) {
+  void TriggerMessage(
+      int& releases,
+      const internal::CallbackInvocationEnvelopeV1* envelope = nullptr) {
     ASSERT_NE(message_handler_, nullptr);
     TransportInfo info;
     MessageFrame frame{.info = info};
-    message_handler_->callback(frame, [&releases] { ++releases; });
+    message_handler_->callback(frame, [&releases] { ++releases; }, envelope);
   }
 
   void TriggerLoaned(int& releases) {
@@ -150,6 +152,81 @@ class TransactionalSubscription : public ::testing::Test {
   std::optional<std::string> saved_mode_;
 };
 
+struct CallbackBoundaryOrder final {
+  int next = 1;
+  int enter_order = 0;
+  int callback_order = 0;
+  int exit_order = 0;
+  uint64_t registration_id = 0;
+  uint32_t status = 99;
+};
+
+void RecordCallbackEnter(void* opaque, uint64_t registration_id) noexcept {
+  auto& order = *static_cast<CallbackBoundaryOrder*>(opaque);
+  order.enter_order = order.next++;
+  order.registration_id = registration_id;
+}
+
+void RecordCallbackExit(void* opaque, uint32_t status) noexcept {
+  auto& order = *static_cast<CallbackBoundaryOrder*>(opaque);
+  order.exit_order = order.next++;
+  order.status = status;
+}
+
+TEST_F(TransactionalSubscription,
+       CallbackEnvelopeEntersAfterFilterAtFinalBusinessBoundary) {
+  TransportCatalog catalog;
+  FrameworkAsyncTransportFilterBus filters;
+  TransportDriverDispatcher dispatcher;
+  ResidualCallbackDriver driver("accepting", true, false);
+  CallbackBoundaryOrder order;
+  FrameworkAsyncTransportFilter filter(
+      [&order](MessageFrame& message, FrameworkAsyncTransportHandle&& next) {
+        EXPECT_EQ(order.next++, 1);
+        next(message);
+      });
+  filters.RegisterFilter("ordering", std::move(filter));
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetSubscribeFrameworkAsyncTransportFilterBus(&filters);
+  dispatcher.SetSubscribeFiltersRules({{".*", {"ordering"}}});
+  dispatcher.SetSubTopicsDriversRules({{".*", {"accepting"}}});
+  dispatcher.RegisterTransportDriver(&driver);
+  dispatcher.Initialize();
+
+  MessageHandlerWrapper handler;
+  handler.info.msg_type = "Frame";
+  handler.info.topic_name = "camera";
+  handler.info.pkg_path = "pkg";
+  handler.info.module_name = "module";
+  handler.callback = [&order](
+                         MessageFrame&, std::function<void()>&& release,
+                         const internal::CallbackInvocationEnvelopeV1*) {
+    order.callback_order = order.next++;
+    release();
+  };
+  ASSERT_TRUE(dispatcher.OnMessage(std::move(handler)));
+  ASSERT_NE(driver.message_handler(), nullptr);
+
+  const internal::CallbackInvocationEnvelopeV1 envelope{
+      .abi_version = internal::kCallbackInvocationEnvelopeAbiV1,
+      .struct_size = sizeof(internal::CallbackInvocationEnvelopeV1),
+      .flags = internal::kCallbackInvocationEnvelopeValid,
+      .reserved = 0,
+      .context = &order,
+      .enter = &RecordCallbackEnter,
+      .exit = &RecordCallbackExit};
+  int releases = 0;
+  driver.TriggerMessage(releases, &envelope);
+
+  EXPECT_EQ(order.enter_order, 2);
+  EXPECT_EQ(order.callback_order, 3);
+  EXPECT_EQ(order.exit_order, 4);
+  EXPECT_EQ(order.registration_id,
+            driver.message_handler()->callback_registration_id);
+  EXPECT_EQ(order.status, 0U);
+  EXPECT_EQ(releases, 1);
+}
+
 TEST_F(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   TransportCatalog catalog;
   FrameworkAsyncTransportFilterBus filters;
@@ -171,7 +248,8 @@ TEST_F(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   handler.info.pkg_path = "pkg";
   handler.info.module_name = "module";
   handler.callback = [&callback_calls](MessageFrame&,
-                                       std::function<void()>&& release) {
+                                       std::function<void()>&& release,
+                                       const internal::CallbackInvocationEnvelopeV1*) {
     ++callback_calls;
     release();
   };
@@ -185,6 +263,12 @@ TEST_F(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   ASSERT_NE(accepting.message_handler(), nullptr);
   EXPECT_EQ(accepting.message_handler()->info.msg_type, "Frame");
   EXPECT_EQ(accepting.message_handler()->info.topic_name, "camera");
+  const uint64_t failed_registration_id =
+      accepting.message_handler()->callback_registration_id;
+  EXPECT_NE(failed_registration_id, 0U);
+  ASSERT_NE(rejecting.message_handler(), nullptr);
+  EXPECT_EQ(rejecting.message_handler()->callback_registration_id,
+            failed_registration_id);
 
   int releases = 0;
   accepting.TriggerMessage(releases);
@@ -199,7 +283,8 @@ TEST_F(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   retry_handler.info.module_name = "module";
   retry_handler.callback = [&callback_calls](
                                MessageFrame&,
-                               std::function<void()>&& release) {
+                               std::function<void()>&& release,
+                               const internal::CallbackInvocationEnvelopeV1*) {
     ++callback_calls;
     release();
   };
@@ -209,6 +294,10 @@ TEST_F(TransactionalSubscription, AllDriverFailuresAllowSameKeyRetry) {
   EXPECT_EQ(catalog.GetMessageHandlerWrapperPtr(
                 "Frame", "camera", "pkg", "module"),
             accepting.message_handler());
+  EXPECT_GT(accepting.message_handler()->callback_registration_id,
+            failed_registration_id);
+  EXPECT_EQ(rejecting.message_handler()->callback_registration_id,
+            accepting.message_handler()->callback_registration_id);
   accepting.TriggerMessage(releases);
   EXPECT_EQ(callback_calls, 1);
   EXPECT_EQ(releases, 2);
@@ -244,6 +333,12 @@ TEST_F(TransactionalSubscription, AccessOnMessageFailureDisablesResidualCallback
             nullptr);
   ASSERT_NE(accepting.message_handler(), nullptr);
   EXPECT_EQ(accepting.message_handler()->info.msg_type, "Frame");
+  const uint64_t failed_registration_id =
+      accepting.message_handler()->callback_registration_id;
+  EXPECT_NE(failed_registration_id, 0U);
+  ASSERT_NE(rejecting.message_handler(), nullptr);
+  EXPECT_EQ(rejecting.message_handler()->callback_registration_id,
+            failed_registration_id);
 
   int releases = 0;
   accepting.TriggerMessage(releases);
@@ -259,6 +354,10 @@ TEST_F(TransactionalSubscription, AccessOnMessageFailureDisablesResidualCallback
       .callback = callback.NativeHandle()}));
   EXPECT_EQ(accepting.on_message_calls(), 2);
   EXPECT_EQ(rejecting.on_message_calls(), 2);
+  EXPECT_GT(accepting.message_handler()->callback_registration_id,
+            failed_registration_id);
+  EXPECT_EQ(rejecting.message_handler()->callback_registration_id,
+            accepting.message_handler()->callback_registration_id);
 }
 
 TEST_F(TransactionalSubscription, AnySuccessfulOrdinaryDriverKeepsCallbackEnabled) {
@@ -281,13 +380,24 @@ TEST_F(TransactionalSubscription, AnySuccessfulOrdinaryDriverKeepsCallbackEnable
   handler.info.topic_name = "camera";
   handler.info.pkg_path = "pkg";
   handler.info.module_name = "module";
+  constexpr uint64_t caller_supplied_registration_id = 741;
+  handler.callback_registration_id = caller_supplied_registration_id;
   handler.callback = [&callback_calls](MessageFrame&,
-                                       std::function<void()>&& release) {
+                                       std::function<void()>&& release,
+                                       const internal::CallbackInvocationEnvelopeV1*) {
     ++callback_calls;
     release();
   };
 
   EXPECT_TRUE(dispatcher.OnMessage(std::move(handler)));
+  ASSERT_NE(rejecting.message_handler(), nullptr);
+  ASSERT_NE(accepting.message_handler(), nullptr);
+  const uint64_t dispatcher_registration_id =
+      accepting.message_handler()->callback_registration_id;
+  EXPECT_NE(dispatcher_registration_id, 0U);
+  EXPECT_NE(dispatcher_registration_id, caller_supplied_registration_id);
+  EXPECT_EQ(rejecting.message_handler()->callback_registration_id,
+            dispatcher_registration_id);
   EXPECT_NE(rejecting.message_handler(), accepting.message_handler());
   EXPECT_EQ(catalog.GetMessageHandlerWrapperPtr(
                 "Frame", "camera", "pkg", "module"),
@@ -297,7 +407,8 @@ TEST_F(TransactionalSubscription, AnySuccessfulOrdinaryDriverKeepsCallbackEnable
   duplicate.info.topic_name = "camera";
   duplicate.info.pkg_path = "pkg";
   duplicate.info.module_name = "module";
-  duplicate.callback = [](MessageFrame&, std::function<void()>&& release) {
+  duplicate.callback = [](MessageFrame&, std::function<void()>&& release,
+                          const internal::CallbackInvocationEnvelopeV1*) {
     release();
   };
   EXPECT_FALSE(dispatcher.OnMessage(std::move(duplicate)));
@@ -328,7 +439,8 @@ TEST_F(TransactionalSubscription, OrdinaryRegistrationWithoutDriversErasesCatalo
   handler.info.topic_name = "camera";
   handler.info.pkg_path = "pkg";
   handler.info.module_name = "module";
-  handler.callback = [](MessageFrame&, std::function<void()>&& release) {
+  handler.callback = [](MessageFrame&, std::function<void()>&& release,
+                        const internal::CallbackInvocationEnvelopeV1*) {
     release();
   };
 
@@ -399,6 +511,38 @@ TEST_F(TransactionalSubscription, LoanedFirstSuccessDisablesOnlyFailedDriverGate
   second.TriggerLoaned(releases);
   EXPECT_EQ(callback_calls, 1);
   EXPECT_EQ(releases, 2);
+}
+
+TEST_F(TransactionalSubscription,
+       MetricsOffLoanedCallbackCanConsumeReleaseExactlyOnce) {
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  ResidualCallbackDriver driver("driver", false, true);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetSubTopicsDriversRules({{".*", {"driver"}}});
+  dispatcher.RegisterTransportDriver(&driver);
+  dispatcher.Initialize();
+
+  auto type_support = MakeTypeSupport();
+  int callback_calls = 0;
+  ibmw::transport::LoanedMessageCallback callback(
+      [&callback_calls](const ibmw_transport_context_base_t*, const void*,
+                        size_t, ibmw_function_base_t* release_handle) {
+        ++callback_calls;
+        ibmw::transport::SubscriberReleaseCallback release(release_handle);
+        release();
+      });
+  ASSERT_TRUE(dispatcher.AttachLoaned(MessageHandlerAccessInfoWrapper{
+      .pkg_path = "pkg",
+      .module_name = "module",
+      .topic_name = "camera",
+      .msg_type_support = &type_support,
+      .callback = callback.NativeHandle()}));
+
+  int releases = 0;
+  driver.TriggerLoaned(releases);
+  EXPECT_EQ(callback_calls, 1);
+  EXPECT_EQ(releases, 1);
 }
 
 #ifdef IBMW_ENABLE_CORE_METRICS
@@ -570,10 +714,12 @@ TEST_F(TransactionalSubscription, RetainedStopReturnsWhileCallbackIsBlocked) {
   std::condition_variable state;
   bool entered = false;
   bool release_callback = false;
+  int callback_calls = 0;
   auto type_support = MakeTypeSupport();
   ibmw::transport::LoanedMessageCallback callback(
       [&](const ibmw_transport_context_base_t*, const void*, size_t,
           ibmw_function_base_t*) {
+        ++callback_calls;
         std::unique_lock lock(mutex);
         entered = true;
         state.notify_all();
@@ -593,16 +739,20 @@ TEST_F(TransactionalSubscription, RetainedStopReturnsWhileCallbackIsBlocked) {
     state.wait(lock, [&] { return entered; });
   }
   auto stopped = std::async(std::launch::async, [&] { handle->Stop(); });
-  EXPECT_EQ(stopped.wait_for(200ms), std::future_status::ready);
+  EXPECT_EQ(stopped.wait_for(200ms), std::future_status::timeout);
   {
     std::lock_guard lock(mutex);
     release_callback = true;
   }
   state.notify_all();
+  EXPECT_EQ(stopped.wait_for(200ms), std::future_status::ready);
   stopped.get();
   invoking.join();
   EXPECT_EQ(driver.subscription()->stop_calls, 1);
-  EXPECT_EQ(releases, 1);
+  EXPECT_EQ(callback_calls, 1);
+  driver.TriggerLoaned(releases);
+  EXPECT_EQ(callback_calls, 1);
+  EXPECT_EQ(releases, 2);
 }
 
 TEST_F(TransactionalSubscription, RetainedCloseUsesInnerTimeoutBudget) {

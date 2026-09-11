@@ -1,0 +1,1 @@
+add_subdirectory(mw_perf_collect)

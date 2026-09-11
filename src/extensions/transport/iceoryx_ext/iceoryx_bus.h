@@ -27,23 +27,88 @@
 
 namespace ibmw::extensions::iceoryx_extension {
 
+namespace internal {
+struct IoxNotificationGateTestAccess;
+}
+
 class IoxSubscriptionState;
 class IoxSubscriptionCallbackContext;
+class ReporterSidecarAccess;
+struct DirectPublisherOps;
+
+class IoxOperationGate;
+
+class IoxOperationLease {
+ public:
+  IoxOperationLease() noexcept = default;
+  ~IoxOperationLease();
+  IoxOperationLease(const IoxOperationLease&) = delete;
+  IoxOperationLease& operator=(const IoxOperationLease&) = delete;
+  IoxOperationLease(IoxOperationLease&& other) noexcept;
+  IoxOperationLease& operator=(IoxOperationLease&& other) noexcept;
+
+  explicit operator bool() const noexcept { return gate_ != nullptr; }
+
+ private:
+  friend class IoxOperationGate;
+  explicit IoxOperationLease(IoxOperationGate* gate) noexcept : gate_(gate) {}
+  void Reset() noexcept;
+  IoxOperationGate* gate_ = nullptr;
+};
+
+class IoxOperationGate {
+ public:
+  static_assert(std::atomic_bool::is_always_lock_free);
+  static_assert(std::atomic_size_t::is_always_lock_free);
+
+  IoxOperationLease TryAcquire() noexcept;
+  void Close() noexcept;
+  bool WaitForQuiescence(std::chrono::milliseconds timeout) noexcept;
+  size_t Active() const noexcept {
+    return active_.load(std::memory_order_acquire);
+  }
+  bool Accepting() const noexcept {
+    return accepting_.load(std::memory_order_acquire);
+  }
+
+ private:
+  friend class IoxOperationLease;
+  void Release() noexcept;
+  std::atomic_bool accepting_{true};
+  std::atomic_size_t active_{0};
+  std::mutex wait_mutex_;
+  std::condition_variable wait_cv_;
+};
 
 class IoxNotificationGate {
  public:
+  static_assert(std::atomic_size_t::is_always_lock_free);
+
   bool TryEnter() noexcept;
   void Exit() noexcept;
   void Close() noexcept;
-  void WaitForQuiescence() noexcept;
+  bool WaitForQuiescence(std::chrono::milliseconds timeout) noexcept;
   size_t Active() const noexcept;
+  bool Closed() const noexcept;
 
  private:
-  mutable std::mutex mutex_;
-  std::condition_variable cv_;
-  size_t active_ = 0;
-  bool closed_ = false;
+  friend struct internal::IoxNotificationGateTestAccess;
+  static constexpr size_t kClosed = 1;
+  static constexpr size_t kActiveIncrement = 2;
+
+  std::atomic_size_t state_{0};
 };
+
+namespace internal {
+struct IoxNotificationGateTestAccess {
+  static void SetPackedState(IoxNotificationGate& gate, size_t state) noexcept {
+    gate.state_.store(state, std::memory_order_release);
+  }
+  static size_t PackedState(const IoxNotificationGate& gate) noexcept {
+    return gate.state_.load(std::memory_order_acquire);
+  }
+};
+}  // namespace internal
 
 // This is an in-process URL ownership registry, not backend fan-out. A URL is
 // reserved before the iceoryx endpoint is built and committed only after the
@@ -83,6 +148,7 @@ class IoxCallbackContextRegistry {
     contexts_.emplace_back(std::move(context));
   }
   bool Remove(const IoxSubscriptionCallbackContext* expected) noexcept;
+  void CleanupClosedQuiescent() noexcept;
   size_t Size() const noexcept { return contexts_.size(); }
   auto ExtractAll() noexcept {
     decltype(contexts_) extracted;
@@ -102,9 +168,16 @@ struct IoxBusControl {
   size_t registrations_in_flight = 0;
   std::shared_ptr<iox::popo::Listener> listener;
   bool shutting_down = false;
+  IoxOperationGate operation_gate;
   IoxSubscriptionRegistry subscriptions;
   IoxCallbackContextRegistry callback_contexts;
 };
+
+namespace internal {
+std::shared_ptr<IoxBusControl> ReinitializeIoxBusControl(
+    std::shared_ptr<IoxBusControl> current, bool shutdown_complete,
+    bool resources_empty);
+}
 
 // Keeps registration completion accounting alive independently of the bus
 // owner. StartLocked must be called while holding IoxBusControl::mutex after a
@@ -140,7 +213,13 @@ class IoxRegistrationGuard {
   bool active_ = false;
 };
 
-iox::popo::SubscriberOptions MakeSubscriberOptions(bool retained) noexcept;
+struct IoxDeliveryOptions {
+  bool lossless = false;
+  uint64_t queue_capacity = 1;
+};
+
+iox::popo::SubscriberOptions MakeSubscriberOptions(
+    bool retained, IoxDeliveryOptions delivery = {}) noexcept;
 
 class IoxReleaseToken {
  public:
@@ -205,21 +284,41 @@ void RunIoxAcquiredPayload(Release&& release,
 // Keep the sequencing in a helper whose contract deliberately has no access
 // to IceoryxBus::mutex_.
 template <typename CloseGate, typename Detach, typename Wait, typename Remove>
-void RunIoxRegistrationRollback(CloseGate&& close_gate,
+bool RunIoxRegistrationRollback(CloseGate&& close_gate,
                                 Detach&& detach,
                                 Wait&& wait,
                                 Remove&& remove) noexcept {
   close_gate();
   detach();
-  wait();
+  if (!wait()) return false;
   remove();
+  return true;
+}
+
+template <typename CloseGate, typename Detach, typename WaitCallbacks,
+          typename WaitSubscription, typename Cleanup>
+void RunIoxSubscriptionTeardown(CloseGate&& close_gate,
+                                Detach&& detach,
+                                WaitCallbacks&& wait_callbacks,
+                                WaitSubscription&& wait_subscription,
+                                Cleanup&& cleanup) noexcept {
+  close_gate();
+  detach();
+  while (!wait_callbacks()) {
+  }
+  while (!wait_subscription()) {
+  }
+  cleanup();
 }
 
 }  // namespace internal
 
 struct IoxSubscriberRegistrationOptions {
   bool retained = false;
+  bool url_reserved = false;
   size_t max_outstanding = std::numeric_limits<size_t>::max();
+  IoxDeliveryOptions delivery;
+  std::shared_ptr<void> reporter_state;
 };
 
 struct IoxRawLoanRequest {
@@ -287,6 +386,7 @@ class IoxLoanTracker {
  public:
   template <typename Loan>
   bool TryTrackLoan(Loan&& loan) {
+    std::lock_guard<std::mutex> operation_lock(operation_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     if (closing_ || !loan()) return false;
     ++outstanding_;
@@ -296,8 +396,11 @@ class IoxLoanTracker {
   template <typename Complete>
   void CompleteTrackedLoan(Complete&& complete) noexcept {
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::lock_guard<std::mutex> operation_lock(operation_mutex_);
       complete();
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
       if (outstanding_ != 0) --outstanding_;
     }
     cv_.notify_all();
@@ -308,6 +411,7 @@ class IoxLoanTracker {
   // Either outcome leaves exactly one tracked loan for the RAII owner.
   template <typename Replace>
   bool ReplaceTrackedLoan(Replace&& replace) {
+    std::lock_guard<std::mutex> operation_lock(operation_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     if (outstanding_ == 0) return false;
     return replace();
@@ -319,6 +423,7 @@ class IoxLoanTracker {
   size_t Outstanding() const noexcept;
 
  private:
+  std::mutex operation_mutex_;
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   bool closing_ = false;
@@ -327,10 +432,14 @@ class IoxLoanTracker {
 
 class IoxPublisher {
   friend class IoxLoanedShm;
+  friend class IceoryxTransportDriver;
+  friend class ReporterSidecarAccess;
+  friend struct DirectPublisherOps;
 
  public:
-  IoxPublisher(std::string_view url, size_t shm_size);
-  ~IoxPublisher() = default;
+  IoxPublisher(std::string_view url, size_t shm_size,
+                IoxDeliveryOptions delivery = {});
+  ~IoxPublisher();
 
   IoxPublisher(const IoxPublisher&) = delete;
   IoxPublisher& operator=(const IoxPublisher&) = delete;
@@ -360,6 +469,7 @@ class IoxPublisher {
   IoxLoanTracker loan_tracker_;
   size_t shm_size_;
   iox::popo::UntypedPublisher publisher_;
+  void* reporter_state_ = nullptr;
 };
 
 inline IoxLoanedShm::~IoxLoanedShm() {
@@ -379,20 +489,33 @@ class IBMW_ICEORYX_EXPORT IceoryxBus {
   IceoryxBus& operator=(const IceoryxBus&) = delete;
 
   void Initialize(uint64_t shm_init_size, std::string_view runtime_id);
+  void SetDeliveryOptions(IoxDeliveryOptions options) noexcept;
   // Must be called by the runtime lifecycle owner, never from a listener
   // callback. Callback-thread calls are rejected promptly without teardown.
   bool TryPrepareShutdown(std::chrono::milliseconds timeout) noexcept;
   void Shutdown();
 
-  void RegisterPublisher(std::string_view url, size_t initial_size_hint = 0);
+  IoxOperationLease TryAcquireOperation() noexcept {
+    return control_->operation_gate.TryAcquire();
+  }
+
+  IoxPublisher* RegisterPublisher(std::string_view url,
+                                  size_t initial_size_hint = 0,
+                                  bool* created = nullptr);
   std::shared_ptr<IoxSubscriptionState> RegisterSubscriber(
       std::string_view url,
       MsgHandleFunc&& handle,
       IoxSubscriberRegistrationOptions options = {});
+  bool ReserveSubscriberUrl(std::string_view url);
+  void RollbackSubscriberUrl(std::string_view url) noexcept;
+  void AbortSubscriber(const std::shared_ptr<IoxSubscriptionState>& state) noexcept;
   // Current phase intentionally permits only one in-process subscriber per
   // exact URL. Registering the same URL again fails; fan-out is phase-two work.
 
-  IoxPublisher* GetPublisher(std::string_view url);
+  IoxPublisher* GetPublisher(const IoxOperationLease& lease,
+                             std::string_view url);
+  void RollbackPublisher(std::string_view url,
+                         const IoxPublisher* expected) noexcept;
 
  private:
   uint64_t shm_init_size_;
@@ -400,6 +523,7 @@ class IBMW_ICEORYX_EXPORT IceoryxBus {
   std::mutex mutex_;
   std::shared_ptr<IoxBusControl> control_;
   bool prepared_ = false;
+  IoxDeliveryOptions delivery_options_;
 
   std::shared_ptr<iox::popo::Listener> iox_listener_ptr_;
   std::unordered_map<
@@ -411,6 +535,7 @@ class IBMW_ICEORYX_EXPORT IceoryxBus {
 class IoxSubscriptionState
     : public std::enable_shared_from_this<IoxSubscriptionState> {
  public:
+  friend class ReporterSidecarAccess;
   IoxSubscriptionState(std::string_view url,
                        IceoryxBus::MsgHandleFunc callback,
                        IoxSubscriberRegistrationOptions options,
@@ -428,11 +553,14 @@ class IoxSubscriptionState
   bool Close(std::chrono::milliseconds timeout) noexcept;
 
  private:
+  template <bool Reported>
+  void OnDataImpl() noexcept;
+  template <bool Reported>
+  void Release(const void* payload) noexcept;
   void DetachFromListener() noexcept;
   void Deregister() noexcept;
-  void Release(const void* payload) noexcept;
   bool Quiescent() const noexcept;
-  bool WaitForQuiescence() noexcept;
+  bool WaitForQuiescence(std::chrono::milliseconds timeout) noexcept;
 
   std::shared_ptr<IoxBusControl> control_;
   std::string url_;
@@ -443,12 +571,16 @@ class IoxSubscriptionState
   IceoryxBus::MsgHandleFunc callback_;
   IoxLeaseLimiter lease_limiter_;
   bool retained_ = false;
+  IoxDeliveryOptions delivery_options_;
   std::shared_ptr<IoxSubscriptionCallbackContext> callback_context_;
   // Declared after every owner resource used by its action so its destructor
   // stops and joins the worker before those resources are destroyed.
   IoxAsyncStop async_stop_;
   size_t active_callbacks_ = 0;
   bool stopping_ = false;
+  std::once_flag deregister_once_;
+  std::atomic_bool stop_succeeded_{false};
+  std::shared_ptr<void> reporter_state_;
 };
 
 // Listener notification data points here rather than at the subscription.
@@ -463,7 +595,10 @@ class IoxSubscriptionCallbackContext {
 
   void Invoke() noexcept;
   void Close() noexcept { gate_.Close(); }
-  void WaitForQuiescence() noexcept { gate_.WaitForQuiescence(); }
+  bool WaitForQuiescence(std::chrono::milliseconds timeout) noexcept {
+    return gate_.WaitForQuiescence(timeout);
+  }
+  bool Closed() const noexcept { return gate_.Closed(); }
 
  private:
   IoxNotificationGate gate_;

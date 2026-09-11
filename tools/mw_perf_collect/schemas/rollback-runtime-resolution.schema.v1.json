@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.rollback_runtime_resolution.v1",
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "matches": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/hash"}}
+  },
+  "type": "object",
+  "required": ["returncode", "observations_sha256", "observations_count", "executable_matches", "extension_matches", "provider_matches", "executable_sha256", "extension_sha256", "dds_provider_sha256", "cdr_provider_sha256", "stdout_sha256", "stderr_sha256"],
+  "additionalProperties": false,
+  "properties": {
+    "returncode": {"const": 0},
+    "observations_sha256": {"$ref": "#/$defs/hash"},
+    "observations_count": {"type": "integer", "minimum": 1},
+    "executable_matches": {"$ref": "#/$defs/matches"},
+    "extension_matches": {"$ref": "#/$defs/matches"},
+    "provider_matches": {
+      "type": "object",
+      "required": ["dds", "cdr"],
+      "additionalProperties": false,
+      "properties": {
+        "dds": {"$ref": "#/$defs/matches"},
+        "cdr": {"$ref": "#/$defs/matches"}
+      }
+    },
+    "executable_sha256": {"$ref": "#/$defs/hash"},
+    "extension_sha256": {"$ref": "#/$defs/hash"},
+    "dds_provider_sha256": {"$ref": "#/$defs/hash"},
+    "cdr_provider_sha256": {"$ref": "#/$defs/hash"},
+    "stdout_sha256": {"$ref": "#/$defs/hash"},
+    "stderr_sha256": {"$ref": "#/$defs/hash"}
+  }
+}

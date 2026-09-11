@@ -7,8 +7,8 @@
 // (see start_iox_loan_v2.sh).
 //
 // The iceoryx driver is looked up through GetTransportBus() and
-// injected into the module so PublisherModule can call EnsurePodTopic()
-// once at Run(). The publish hot loop itself stays on the public
+// injected into the module so PublisherModule can register POD topics before
+// Engine::Start(). The publish hot loop itself stays on the public
 // SenderRef::Loan / PublishLoaned API -- no driver-pointer access in
 // the per-tick path.
 
@@ -68,6 +68,10 @@ int main(int argc, char** argv) {
       return -1;
     }
     pub.SetIceoryxDriver(driver);
+    if (!pub.PreparePodTopics()) {
+      std::cerr << "failed to prepare iceoryx POD topics\n";
+      return -1;
+    }
 
     engine.Start();
     engine.Shutdown();

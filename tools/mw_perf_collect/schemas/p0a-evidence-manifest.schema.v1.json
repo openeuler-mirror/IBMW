@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mw_perf.p0a_evidence_manifest.v1",
+  "type": "object",
+  "required": ["schema", "validation_profile", "run_id", "capability_id", "path_id", "deployment_mode", "registration_contract_sha256", "registration_contract_version", "registration_contract_ref", "run_type", "observer", "measurement_kind", "entries", "required", "conditional"],
+  "properties": {
+    "schema": {"const": "mw_perf.p0a_evidence_manifest.v1"},
+    "validation_profile": {"const": "p0a"},
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+    "capability_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+    "path_id": {"type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$"},
+    "deployment_mode": {"type": "string", "minLength": 1},
+    "registration_contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registration_contract_version": {"type": "string", "minLength": 1},
+    "registration_contract_ref": {"const": "registration/contract.json"},
+    "run_type": {"type": "string", "minLength": 1},
+    "observer": {"type": "boolean"},
+    "measurement_kind": {"type": "string", "minLength": 1},
+    "entries": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/entry"}},
+    "required": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+    "conditional": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+    "runtime_changed": {"type": "boolean"},
+    "business_unchanged": {"type": "boolean"}
+  },
+  "additionalProperties": false,
+  "$defs": {"entry": {"type": "object", "required": ["relative_path", "sha256", "record_count", "schema_version", "finalization", "status"], "properties": {
+    "relative_path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
+    "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "record_count": {"type": "integer", "minimum": 0},
+    "schema_version": {"type": "string", "minLength": 1}, "finalization": {"type": "string", "minLength": 1},
+    "status": {"enum": ["required", "optional", "not_applicable"]}, "reason": {"type": "string", "minLength": 1}
+  }, "additionalProperties": false}}
+}

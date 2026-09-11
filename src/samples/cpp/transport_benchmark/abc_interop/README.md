@@ -25,9 +25,11 @@ CSV uses `LatencyStats` and monotonic clock timestamps.
 For producer-owned managed collection, use `--jsonl PATH`. The subscriber then
 reads collector-injected run identity, buffers measured unique valid records,
 stays alive after the target count, and writes the strict completion trailer on
-collector SIGTERM. `a_lane_managed.json` and `run_a_managed.sh` provide a real
-managed layout where the shell starts the publisher as a descendant and execs
-the subscriber as collector leader; replace the endpoint build path before use.
+collector SIGTERM. From the repository root, `a_lane_managed.json` and
+`run_a_managed.sh` provide this benchmark's managed layout: the shell starts the
+publisher as a descendant and execs the subscriber as collector leader. The
+JSON is a repository-root example with a sample build path, not a generally
+relocatable collector configuration; replace the endpoint build path before use.
 
 ## B: IBMW DDS ROS 2-compatible
 
@@ -75,6 +77,9 @@ not be described as DDS reliable delivery.
 
 ## Gates and smoke
 
+The manually assembled OHOS test bundle must include executable
+`validate_ohos_artifact.sh` beside `run_ohos_lane.sh` at the bundle root.
+
 The Python runner requires exactly one `LatencyStats` CSV row with the fixed
 schema, lane label, finite numeric values, and `count=3000`. Every status must
 be a complete JSON object with boolean `valid`, integer attempted/sent,
@@ -87,7 +92,8 @@ Every artifact used by a gate (CSV and subscriber or publisher status) must have
 exit zero. C processes may exit zero or from the runner's intentional SIGINT;
 any timeout/kill remains invalid. Results record
 `process_exit_codes`, `validation_errors`, and `validation_warnings`. A/B's
-fixed readiness sleep is retained and reported as a warning. C requires a fresh
+fixed readiness sleep is retained; the current runner does not generate a
+dedicated warning for it. C requires a fresh
 structured publisher status with `valid=true`, `completion=true`, and exactly
 3000 attempted measured messages. A missing, stale, malformed, incomplete, or
 wrong-count publisher artifact fails the run; publisher logs are never a
@@ -102,3 +108,42 @@ requires `WITH_ROS2` (`IBMW_BUILD_WITH_ROS2`), B requires `IBMW_BUILD_ROS2_TYPES
 and `IBMW_BUILD_DDS_EXTENSION`, and C requires `IBMW_BUILD_ICEORYX_EXTENSION`.
 `cmake --build <build> --target ibmw_abc_smoke` checks target wiring without
 starting middleware. `extension_v2_fixture.cc` is untouched.
+
+For lane C, CMake writes the resolved source-built or package-provided RouDi
+target location to `<build>/ibmw_abc_roudi_path.txt`. `run_block.py` and
+`run_matrix.py` use it automatically. Use `--roudi /path/to/iox-roudi` (or set
+`IBMW_ROUDI_BIN`) to override that location explicitly.
+
+`run_matrix.py --comparison-plan PLAN.json` also emits a formal
+`mw_perf.comparison-plan.v1` and a bridge `manifest.json`/`validation.json` in
+each lane directory. Supply comparison declarations with `--contract`,
+`--profile`, `--workload`, and `--resource-scope`; JSON values are accepted.
+The fixed lane sequence is accompanied by `--order-policy` and `--order-seed`.
+This bridge does not run a collector lifecycle or claim resource/provenance
+evidence: those capabilities and omitted declarations are marked unsupported,
+and its validation is intentionally invalid for comparison. Formal compare
+therefore accepts the plan shape but fails closed until each lane directory is
+replaced by a genuinely collected and validated run carrying matching metadata.
+
+Each OHOS lane also records CPU evidence: `cpu-uptime-start.txt`,
+`cpu-uptime-end.txt`, `pub-proc-stat-start.txt`, `sub-proc-stat-start.txt`,
+`pub-proc-stat-end.txt`, `sub-proc-stat-end.txt`, `top-mid.txt`, `top-end.txt`,
+and `cpu-summary.json`. The summary uses `/proc/<pid>/stat` fields 14 and 15
+(user and system CPU ticks), `/proc/uptime`, and `CLK_TCK=100`:
+`cpu_pct = ((end_utime + end_stime) - (start_utime + start_stime)) /
+(CLK_TCK * elapsed_seconds) * 100`. `pair_cpu_pct` is the sum of publisher and
+subscriber CPU percentages, so overlapping CPU use is intentionally retained.
+After the subscriber starts and initial proc setup, both endpoint processes must
+remain alive for a fixed five-second startup settle; this settle is excluded from
+CPU measurement. The CPU interval then uses
+`floor((warmup_messages + message_count) / hz) - 5 - 5` seconds, with a minimum
+of one second. The final five-second margin is reserved for publisher-first
+discovery and startup; for the 100 Hz, 50-warmup, 3000-measured contract the
+post-settle CPU window is 20 seconds. Its start uptime and proc-stat snapshots
+are captured after the settle, and its end snapshots are captured together
+before publisher shutdown.
+An endpoint exiting before that boundary invalidates the CPU summary and run;
+later cleanup never replaces the boundary files. The midpoint and end `top`
+snapshots remain supporting evidence and are validity-gated: each must be
+nonempty and contain both endpoint PIDs. `cpu-summary.json` uses the same
+uptime/proc-stat start and end boundaries as this fixed window.

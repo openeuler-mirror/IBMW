@@ -1,0 +1,30 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"mw_perf.trusted_external_roots.v1",
+  "type":"object","additionalProperties":false,
+  "required":["schema","entries"],
+  "properties":{
+    "schema":{"const":"mw_perf.trusted_external_roots.v1"},
+    "entries":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/entry"}}
+  },
+  "$defs":{
+    "hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "entry":{"type":"object","additionalProperties":false,
+      "required":["provider","campaign_id","external_root_sha256","operator_approval"],
+      "properties":{
+        "provider":{"type":"string","minLength":1},
+        "campaign_id":{"type":"string","minLength":1},
+        "external_root_sha256":{"$ref":"#/$defs/hash"},
+        "operator_approval":{"type":"object","additionalProperties":false,
+          "required":["approved","approved_by","approved_at","approval_reference"],
+          "properties":{
+            "approved":{"const":true},
+            "approved_by":{"type":"string","minLength":1},
+            "approved_at":{"type":"string","minLength":1},
+            "approval_reference":{"type":"string","minLength":1}
+          }
+        }
+      }
+    }
+  }
+}

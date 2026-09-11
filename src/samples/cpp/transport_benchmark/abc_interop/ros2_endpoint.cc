@@ -4,11 +4,11 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
-#include <unistd.h>
 
 #include "base/benchmark_util.h"
 #include "ros2_latency_artifact.h"
@@ -39,6 +39,21 @@ bool Uint(const char* text, uint32_t* value) {
     *value = static_cast<uint32_t>(parsed);
     return true;
   } catch (...) { return false; }
+}
+
+bool PositiveUint64(const char* text, uint64_t* value) {
+  if (text == nullptr || *text == '\0') return false;
+  uint64_t parsed = 0;
+  for (const char* p = text; *p != '\0'; ++p) {
+    if (*p < '0' || *p > '9') return false;
+    const uint64_t digit = static_cast<uint64_t>(*p - '0');
+    if (parsed > (std::numeric_limits<uint64_t>::max() - digit) / 10)
+      return false;
+    parsed = parsed * 10 + digit;
+  }
+  if (parsed == 0) return false;
+  *value = parsed;
+  return true;
 }
 
 bool Parse(int argc, char** argv, Options* o) {
@@ -87,15 +102,21 @@ int Run(const Options& o, int argc, char** argv) {
   std::vector<ibmw::abc::LatencyRecord> latency_records(o.count);
   std::ofstream jsonl;
   std::string run_id;
-  uint64_t start_ticks = 0;
+  uint64_t producer_pid = 0;
+  uint64_t producer_start_ticks = 0;
   bool artifact_ready = true;
   bool artifact_ok = true;
   if (o.role == "sub" && !o.jsonl.empty()) {
     const char* run = std::getenv("MW_PERF_RUN_ID");
     const char* schema = std::getenv("MW_PERF_ARTIFACT_SCHEMA_VERSION");
+    const char* producer_pid_env = std::getenv("MW_PERF_PRODUCER_PID");
+    const char* producer_start_ticks_env =
+        std::getenv("MW_PERF_PRODUCER_START_TIME_TICKS");
     run_id = run ? run : "";
     artifact_ready = !run_id.empty() && schema && std::string(schema) == ibmw::abc::kLatencySchema &&
-                     ibmw::abc::ReadSelfStartTimeTicks(&start_ticks);
+                     PositiveUint64(producer_pid_env, &producer_pid) &&
+                     PositiveUint64(producer_start_ticks_env,
+                                    &producer_start_ticks);
     jsonl.open(o.jsonl, std::ios::out | std::ios::trunc);
     artifact_ready = artifact_ready && static_cast<bool>(jsonl);
     if (!artifact_ready) { std::cerr << "Failed to initialize strict latency artifact\n"; rclcpp::shutdown(); }
@@ -156,7 +177,7 @@ int Run(const Options& o, int argc, char** argv) {
       records.reserve(unique);
       for (size_t i = 0; i < seen.size(); ++i) if (seen[i]) records.push_back(latency_records[i]);
       artifact_ok = ibmw::abc::WriteLatencyArtifact(jsonl, records, run_id,
-          static_cast<uint64_t>(getpid()), start_ticks, o.topic,
+          producer_pid, producer_start_ticks, o.topic,
           valid && records.size() == o.count);
       if (!artifact_ok) std::cerr << "Failed to finalize strict latency artifact\n";
     }

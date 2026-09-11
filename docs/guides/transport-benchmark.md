@@ -7,11 +7,22 @@ making an application decision.
 
 ## Build and run
 
+The `full` preset does not enable benchmarks; benchmarks also depend on examples
+and Iceoryx. Run the commands below from the repository root. The benchmark gate
+requires `IBMW_BUILD_EXAMPLES=ON` and `IBMW_BUILD_ICEORYX_EXTENSION=ON`; DDS
+benchmarks additionally require `IBMW_BUILD_DDS_EXTENSION=ON`, and the DDS
+endpoint for topology interop additionally requires `IBMW_BUILD_ROS2_TYPES=ON`.
+
 ```bash
-cmake --preset full -DIBMW_BUILD_BENCHMARKS=ON
-cmake --build build -j"$(nproc)"
-cmake --install build --prefix build
-scripts/run_bench_sweep.sh --reset-csv
+cmake -S . -B ./build \
+  -DIBMW_BUILD_EXAMPLES=ON \
+  -DIBMW_BUILD_BENCHMARKS=ON \
+  -DIBMW_BUILD_ICEORYX_EXTENSION=ON \
+  -DIBMW_BUILD_DDS_EXTENSION=ON \
+  -DIBMW_BUILD_ROS2_TYPES=ON
+cmake --build ./build --parallel
+cmake --install ./build --prefix ./build
+bash ./scripts/run_bench_sweep.sh --reset-csv
 ```
 
 The default sweep covers the maintained payload sizes and transport samples under
@@ -58,6 +69,13 @@ markers before interpreting latency.
 - Establish an application baseline from a controlled environment and define an
   acceptance band before changing hot-path code. Do not use results from another
   machine as a regression threshold.
+
+`topology_interop`'s `ibmw_topology_dds_endpoint` is a benchmark/direct DDS
+implementation. It directly uses the DDS transport driver, internal typesupport,
+and extension-specific access to validate interop topologies. It is not an
+architectural example for managed applications; managed applications should
+continue to use the public API, with dynamic extensions selected through
+configuration.
 
 Capability boundaries are summarized in the
 [Support Matrix](../reference/support-matrix.md). Source-level sample details are

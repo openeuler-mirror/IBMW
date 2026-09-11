@@ -13,18 +13,41 @@
 #   dds_send_tcp    - DDS:     standard Send() over TCP-only transport
 #   net_send_tcp    - net_ext: standard Send() over native net_extension (raw TCP)
 #
-# Gated by IBMW_BUILD_BENCHMARKS (declared in top-level CMakeLists). The
-# samples are added in stages 6.2.2..6.2.7.
+# Gated by IBMW_BUILD_BENCHMARKS (declared in top-level CMakeLists), except
+# for the OHOS ROS2-types/DDS endpoint-B-only path. The samples are added in
+# stages 6.2.2..6.2.7.
 
-if(NOT IBMW_BUILD_BENCHMARKS)
+set(_IBMW_BUILD_OHOS_ABC_DDS_ENDPOINT OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "OHOS" AND
+   IBMW_BUILD_ROS2_TYPES AND IBMW_BUILD_DDS_EXTENSION)
+  set(_IBMW_BUILD_OHOS_ABC_DDS_ENDPOINT ON)
+endif()
+
+if(NOT IBMW_BUILD_BENCHMARKS AND
+   NOT _IBMW_BUILD_OHOS_ABC_DDS_ENDPOINT)
   message(STATUS "Skip transport_benchmark because IBMW_BUILD_BENCHMARKS is OFF")
   return()
 endif()
 
 set_namespace()
 
+if(_IBMW_BUILD_OHOS_ABC_DDS_ENDPOINT)
+  add_subdirectory(abc_interop)
+  if(NOT TARGET ibmw_topology_dds_endpoint)
+    add_subdirectory(topology_interop)
+  endif()
+  if(NOT IBMW_BUILD_BENCHMARKS)
+    return()
+  endif()
+endif()
+
 add_subdirectory(bench_payload)
 add_subdirectory(bench_common)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+  add_subdirectory(iox_loaned_ctx)
+  return()
+endif()
 
 # In-process microbenchmark for the dispatcher publish-tap hot path.  This is
 # deliberately a benchmark executable rather than a CTest: results are
@@ -49,6 +72,9 @@ add_subdirectory(iox_loan_v2)
 # separate from the historical matrix so existing targets and ABI remain
 # unchanged.
 add_subdirectory(abc_interop)
+if(IBMW_BUILD_ROS2_TYPES AND IBMW_BUILD_DDS_EXTENSION)
+  add_subdirectory(topology_interop)
+endif()
 
 add_custom_target(
   ibmw_samples_cpp_transport_benchmark_strict_matrix_scripts ALL
