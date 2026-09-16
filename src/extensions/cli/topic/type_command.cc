@@ -9,50 +9,47 @@
 #include <utility>
 #include <vector>
 
+#include "discovery_options.h"
 #include "discovery_query.h"
 
 namespace ibmw::cli::topic {
 namespace {
 
 using ibmw::cli::Invocation;
-using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
-using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
-using ibmw::runtime::core::runtime_graph::TopicGraph;
+using ibmw::discovery::DiscoveredEndpoint;
+using ibmw::discovery::DiscoverySnapshot;
+using ibmw::discovery::DiscoveryStatus;
+using ibmw::discovery::EndpointRole;
 
 int RunTopicTypeCommandImpl(const Invocation& invocation) {
   const std::string topic_name = invocation.positional_args.front();
   const auto graph = DiscoverTopics(invocation);
-  const auto advertisements = VisibleAdvertisements(
+  const auto advertisements = VisibleEndpoints(
       graph, topic_name,
       invocation.HasOption("--include-hidden-topics"));
   if (advertisements.empty()) {
-    std::cerr << "ibmw: error: Unknown topic '" << topic_name << "'.\n";
+    if (graph.Succeeded()) {
+      std::cerr << "ibmw: error: Unknown topic '" << topic_name << "'.\n";
+    }
     return 1;
   }
 
   for (const auto& type : TopicTypes(advertisements)) {
     std::cout << type << '\n';
   }
-  return 0;
+  return graph.Succeeded() ? 0 : 1;
 }
 
 }  // namespace
 
 void AddTypeCommand(Command& topic) {
-  const std::string registry_description =
-      "Runtime registration directory (default: " +
-      ibmw::runtime::core::runtime_graph::RuntimeRegistry().RegistryPath().string() + ")";
-
   auto& type = topic.AddSubcommand("type", "Print a topic's type");
   type.SetHandler(RunTopicTypeCommandImpl);
   type.AddArgument("<topic>", "Topic name");
   type.AddOption(
       "--include-hidden-topics", {}, {},
       "Consider hidden topics as well");
-  type.AddOption(
-      "--registry-path", {}, "path",
-      registry_description,
-      ibmw::cli::OptionValueMode::kRequired);
+  AddDiscoveryOptions(type);
 }
 
 }  // namespace ibmw::cli::topic

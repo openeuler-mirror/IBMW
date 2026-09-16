@@ -9,21 +9,22 @@
 #include <vector>
 
 #include "cli/command.h"
-#include "engine/runtime_graph/runtime_registry.h"
-#include "engine/runtime_graph/topic_graph.h"
+#include "engine/discovery/discovery_provider.h"
 
 namespace ibmw::cli::topic {
 
-ibmw::runtime::core::runtime_graph::TopicGraph DiscoverTopics(const Invocation& invocation);
+ibmw::discovery::DiscoverySnapshot DiscoverTopics(const Invocation& invocation);
 bool IsVisible(
-    const ibmw::runtime::core::runtime_graph::TopicAdvertisement& advertisement, bool include_hidden_topics);
+    const ibmw::discovery::DiscoveredEndpoint& endpoint, bool include_hidden_topics);
+std::string_view TopicName(const ibmw::discovery::DiscoveredEndpoint& endpoint);
+std::string_view TypeName(const ibmw::discovery::DiscoveredEndpoint& endpoint);
 std::vector<std::string> VisibleTopicNames(
-    const ibmw::runtime::core::runtime_graph::TopicGraph& graph, bool include_hidden_topics);
-std::vector<ibmw::runtime::core::runtime_graph::TopicAdvertisement> VisibleAdvertisements(
-    const ibmw::runtime::core::runtime_graph::TopicGraph& graph,
+    const ibmw::discovery::DiscoverySnapshot& snapshot, bool include_hidden_topics);
+std::vector<ibmw::discovery::DiscoveredEndpoint> VisibleEndpoints(
+    const ibmw::discovery::DiscoverySnapshot& snapshot,
     std::string_view topic_name,
     bool include_hidden_topics);
 std::set<std::string> TopicTypes(
-    const std::vector<ibmw::runtime::core::runtime_graph::TopicAdvertisement>& advertisements);
+    const std::vector<ibmw::discovery::DiscoveredEndpoint>& endpoints);
 
 }  // namespace ibmw::cli::topic

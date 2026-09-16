@@ -1141,6 +1141,45 @@ Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
 `ibmw.runtime_graph.type_support_pkgs` 下；Record/Playback 扩展本身不再
 单独维护这份配置。
 
+#### 话题发现 CLI
+
+`ibmw topic list`、`info`、`type`、`find` 共用以下发现参数：
+
+| 参数 | 含义 |
+|------|------|
+| `--registry` | 读取本机运行时登记，覆盖各种传输驱动；未选择来源时默认使用 |
+| `-d`、`--dds` | 选择 DDS 发现 |
+| `-r`、`--ros2` | 选择 ROS 2 发现 |
+| `-z`、`--zenoh` | 选择 Zenoh 发现 |
+| `-a`、`--all` | 选择全部四种来源，范围限于各自配置的域 |
+| `--domain <id>` | 为选中的 DDS、ROS 2 设置共同 domain |
+| `--dds-domain <id>` | 覆盖 DDS domain；否则使用 `--domain` 或 0 |
+| `--ros-domain <id>` | 覆盖 ROS 2 domain；否则依次使用 `--domain`、`ROS_DOMAIN_ID`、0 |
+| `--zenoh-domain <name>` | Zenoh 业务域（`limit_domain`），默认空域 |
+| `--zenoh-config <path>` | Zenoh 原生连接配置 |
+| `--registry-path <path>` | 本机注册根目录，默认 `$XDG_RUNTIME_DIR/ibmw`，否则 `/tmp/ibmw-<euid>`。协议数据位于 `v2/`；自定义根目录需为当前用户私有（0700）。 |
+
+本机登记来源在详细输出中标为 `source: registry`，实际传输驱动另列于 `drivers`。
+
+`info <topic>` 与 ROS 2 一样允许直接查询隐藏话题；`list`、`find`、`type`
+默认过滤隐藏话题，使用 `--include-hidden-topics` 后包含它们。该开关可放在
+子命令前或后，例如 `ibmw topic --include-hidden-topics type /_hidden`。
+
+`info -v` 为每个端点显示类型及可获取的归属信息，本机登记还显示模块名。
+多驱动端点的 QoS 按驱动分别展示；有值的策略直接输出，未报告的策略标为
+`unknown`，完全没有 QoS 数据时显示 `unavailable (not reported by this source)`。
+本机登记使用当前结构的 `module_name` 和 `driver_qos` 字段，不读取旧结构。
+组合来源的计数包含各来源的观察结果，不表示跨来源去重后的端点数量。
+
+来源参数可以组合，例如 `list --registry --dds`、`list -d -r --domain 10`。
+域与配置参数要求同时选中对应来源。数字域接受 32 位无符号十进制数值，
+具体网络实现的取值限制将在对应网络适配器中校验。
+
+当前第一阶段只实现统一模型与**本机适配器**。选择网络来源会明确报告后端
+尚未实现，退出码为 1；组合查询仍输出成功来源的结果，非零退出码表示结果
+不完整。当前不会启动网络发现服务。本机来源包含所有已注册的本机端点，
+与端点实际使用 local、DDS、ROS 2 或 Zenoh 通信无关。
+
 ---
 
 ### 完整示例

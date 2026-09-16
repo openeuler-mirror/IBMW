@@ -17,9 +17,13 @@ file(GLOB_RECURSE head_files ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
 file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM src ${test_files})
+set(discovery_test_src ${CMAKE_CURRENT_SOURCE_DIR}/discovery/discovery_provider_test.cc)
+list(REMOVE_ITEM test_files ${discovery_test_src})
 
 # Shared discovery and serialized payload code has no Engine dependency.
 set(shared_runtime_src
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/discovery_provider.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/registry_discovery_provider.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_agent.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_client.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registration.cc
@@ -149,6 +153,15 @@ if(IBMW_INSTALL)
 endif()
 
 # Set test of target
+if(IBMW_BUILD_TESTS)
+  add_executable(ibmw_discovery_test ${discovery_test_src})
+  target_link_libraries(ibmw_discovery_test
+                       PRIVATE ibmw::core::extension_support GTest::gtest_main)
+  add_werror(ibmw_discovery_test)
+  add_test(NAME ibmw_discovery_test COMMAND ibmw_discovery_test)
+  set_tests_properties(ibmw_discovery_test PROPERTIES TIMEOUT 30)
+endif()
+
 if(IBMW_BUILD_TESTS AND test_files)
   add_library(legacy_transport_driver_v1 MODULE
               ${LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC})

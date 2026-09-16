@@ -9,15 +9,17 @@
 #include <utility>
 #include <vector>
 
+#include "discovery_options.h"
 #include "discovery_query.h"
 
 namespace ibmw::cli::topic {
 namespace {
 
 using ibmw::cli::Invocation;
-using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
-using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
-using ibmw::runtime::core::runtime_graph::TopicGraph;
+using ibmw::discovery::DiscoveredEndpoint;
+using ibmw::discovery::DiscoverySnapshot;
+using ibmw::discovery::DiscoveryStatus;
+using ibmw::discovery::EndpointRole;
 
 void PrintQos(const ibmw::transport::QosDescriptor& qos, std::string_view indent) {
   if (qos.Empty()) {
@@ -38,35 +40,45 @@ void PrintQos(const ibmw::transport::QosDescriptor& qos, std::string_view indent
   }
 }
 
-void PrintAdvertisement(
-    const TopicAdvertisement& advertisement, std::string_view role) {
+void PrintEndpoint(
+    const DiscoveredEndpoint& endpoint, std::string_view role) {
   std::cout << "  " << role << ":\n";
-  std::cout << "    runtime: " << advertisement.runtime_id << '\n';
-  if (!advertisement.module_name.empty()) {
-    std::cout << "    module: " << advertisement.module_name << '\n';
+  std::cout << "    source: " << ibmw::discovery::BackendName(endpoint.source.backend) << '\n';
+  if (!endpoint.source.domain.empty()) {
+    std::cout << "    domain: " << endpoint.source.domain << '\n';
   }
-  std::cout << "    endpoint: " << advertisement.publisher_id << '\n';
-  std::cout << "    type: " << advertisement.topic.msg_type << '\n';
+  if (!endpoint.participant_id.empty()) {
+    const auto backend = endpoint.source.backend;
+    const auto label = backend == ibmw::discovery::DiscoveryBackend::kRegistry ? "runtime"
+                     : backend == ibmw::discovery::DiscoveryBackend::kDds ? "participant"
+                     : "instance";
+    std::cout << "    " << label << ": " << endpoint.participant_id << '\n';
+  }
+  if (!endpoint.module_name.empty()) {
+    std::cout << "    module: " << endpoint.module_name << '\n';
+  }
+  std::cout << "    endpoint: " << endpoint.endpoint_id << '\n';
+  std::cout << "    type: " << TypeName(endpoint) << '\n';
   std::cout << "    serialization: "
-            << advertisement.topic.serialization_type << '\n';
-  if (!advertisement.topic.available_drivers.empty()) {
+            << endpoint.serialization_type << '\n';
+  if (!endpoint.available_drivers.empty()) {
     std::cout << "    drivers: ";
     for (size_t index = 0;
-         index < advertisement.topic.available_drivers.size(); ++index) {
+         index < endpoint.available_drivers.size(); ++index) {
       if (index != 0) {
         std::cout << ", ";
       }
-      std::cout << advertisement.topic.available_drivers[index];
+      std::cout << endpoint.available_drivers[index];
     }
     std::cout << '\n';
   }
-  if (!advertisement.driver_qos.empty()) {
-    for (const auto& [driver, qos] : advertisement.driver_qos) {
+  if (!endpoint.driver_qos.empty()) {
+    for (const auto& [driver, qos] : endpoint.driver_qos) {
       std::cout << "    driver: " << driver << '\n';
       PrintQos(qos, "      ");
     }
   } else {
-    PrintQos({}, "    ");
+    PrintQos(endpoint.qos, "    ");
   }
 }
 
@@ -74,9 +86,11 @@ int RunTopicInfoCommandImpl(const Invocation& invocation) {
   const std::string topic_name = invocation.positional_args.front();
   const auto graph = DiscoverTopics(invocation);
   // Like ROS 2, an explicit info query also resolves hidden topics.
-  const auto advertisements = VisibleAdvertisements(graph, topic_name, true);
+  const auto advertisements = VisibleEndpoints(graph, topic_name, true);
   if (advertisements.empty()) {
-    std::cerr << "ibmw: error: Unknown topic '" << topic_name << "'.\n";
+    if (graph.Succeeded()) {
+      std::cerr << "ibmw: error: Unknown topic '" << topic_name << "'.\n";
+    }
     return 1;
   }
 
@@ -95,7 +109,7 @@ int RunTopicInfoCommandImpl(const Invocation& invocation) {
   size_t publisher_count = 0;
   size_t subscriber_count = 0;
   for (const auto& advertisement : advertisements) {
-    if (advertisement.published) {
+    if (advertisement.role == EndpointRole::kPublisher) {
       ++publisher_count;
     } else {
       ++subscriber_count;
@@ -107,27 +121,23 @@ int RunTopicInfoCommandImpl(const Invocation& invocation) {
   if (invocation.HasOption("--verbose")) {
     std::cout << "\nPublishers:\n";
     for (const auto& advertisement : advertisements) {
-      if (advertisement.published) {
-        PrintAdvertisement(advertisement, "publisher");
+      if (advertisement.role == EndpointRole::kPublisher) {
+        PrintEndpoint(advertisement, "publisher");
       }
     }
     std::cout << "\nSubscribers:\n";
     for (const auto& advertisement : advertisements) {
-      if (!advertisement.published) {
-        PrintAdvertisement(advertisement, "subscriber");
+      if (advertisement.role == EndpointRole::kSubscriber) {
+        PrintEndpoint(advertisement, "subscriber");
       }
     }
   }
-  return 0;
+  return graph.Succeeded() ? 0 : 1;
 }
 
 }  // namespace
 
 void AddInfoCommand(Command& topic) {
-  const std::string registry_description =
-      "Runtime registration directory (default: " +
-      ibmw::runtime::core::runtime_graph::RuntimeRegistry().RegistryPath().string() + ")";
-
   auto& info = topic.AddSubcommand("info", "Show information about a topic");
   info.SetHandler(RunTopicInfoCommandImpl);
   info.AddArgument("<topic>", "Topic name");
@@ -136,10 +146,7 @@ void AddInfoCommand(Command& topic) {
   info.AddOption(
       "--include-hidden-topics", {}, {},
       "Consider hidden topics as well");
-  info.AddOption(
-      "--registry-path", {}, "path",
-      registry_description,
-      ibmw::cli::OptionValueMode::kRequired);
+  AddDiscoveryOptions(info);
 }
 
 }  // namespace ibmw::cli::topic

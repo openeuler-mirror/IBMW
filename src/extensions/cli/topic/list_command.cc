@@ -9,15 +9,17 @@
 #include <utility>
 #include <vector>
 
+#include "discovery_options.h"
 #include "discovery_query.h"
 
 namespace ibmw::cli::topic {
 namespace {
 
 using ibmw::cli::Invocation;
-using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
-using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
-using ibmw::runtime::core::runtime_graph::TopicGraph;
+using ibmw::discovery::DiscoveredEndpoint;
+using ibmw::discovery::DiscoverySnapshot;
+using ibmw::discovery::DiscoveryStatus;
+using ibmw::discovery::EndpointRole;
 
 int RunTopicListCommandImpl(const Invocation& invocation) {
   const bool include_hidden_topics =
@@ -28,14 +30,14 @@ int RunTopicListCommandImpl(const Invocation& invocation) {
 
   if (invocation.HasOption("--count-topics")) {
     std::cout << topic_names.size() << '\n';
-    return 0;
+    return graph.Succeeded() ? 0 : 1;
   }
 
   const bool show_types = invocation.HasOption("--show-types");
   const bool verbose = invocation.HasOption("--verbose");
   for (const auto& topic_name : topic_names) {
     const auto advertisements =
-        VisibleAdvertisements(graph, topic_name, include_hidden_topics);
+        VisibleEndpoints(graph, topic_name, include_hidden_topics);
     std::cout << topic_name;
     if (show_types || verbose) {
       std::cout << " [";
@@ -55,7 +57,7 @@ int RunTopicListCommandImpl(const Invocation& invocation) {
       size_t publisher_count = 0;
       size_t subscriber_count = 0;
       for (const auto& advertisement : advertisements) {
-        if (advertisement.published) {
+        if (advertisement.role == EndpointRole::kPublisher) {
           ++publisher_count;
         } else {
           ++subscriber_count;
@@ -65,16 +67,12 @@ int RunTopicListCommandImpl(const Invocation& invocation) {
       std::cout << "  subscribers: " << subscriber_count << '\n';
     }
   }
-  return 0;
+  return graph.Succeeded() ? 0 : 1;
 }
 
 }  // namespace
 
 void AddListCommand(Command& topic) {
-  const std::string registry_description =
-      "Runtime registration directory (default: " +
-      ibmw::runtime::core::runtime_graph::RuntimeRegistry().RegistryPath().string() + ")";
-
   auto& list = topic.AddSubcommand("list", "List discovered topics");
   list.SetHandler(RunTopicListCommandImpl);
   list.AddOption(
@@ -86,10 +84,7 @@ void AddListCommand(Command& topic) {
   list.AddOption(
       "--include-hidden-topics", {}, {},
       "Consider hidden topics as well");
-  list.AddOption(
-      "--registry-path", {}, "path",
-      registry_description,
-      ibmw::cli::OptionValueMode::kRequired);
+  AddDiscoveryOptions(list);
 }
 
 }  // namespace ibmw::cli::topic

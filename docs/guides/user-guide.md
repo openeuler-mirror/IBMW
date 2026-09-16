@@ -1170,6 +1170,49 @@ and the control socket. Configure TypeSupport packages used for topic schemas,
 recording, or playback under `ibmw.runtime_graph.type_support_pkgs`; the
 Record/Playback extension does not maintain a separate copy.
 
+#### Topic discovery CLI
+
+`ibmw topic list`, `info`, `type`, and `find` share these discovery options:
+
+| Option | Meaning |
+|--------|---------|
+| `--registry` | Read local runtime registrations across all transport drivers; default source |
+| `-d`, `--dds` | Select DDS discovery |
+| `-r`, `--ros2` | Select ROS 2 discovery |
+| `-z`, `--zenoh` | Select Zenoh discovery |
+| `-a`, `--all` | Select all four sources, within their configured domains |
+| `--domain <id>` | Set the domain for selected DDS and ROS 2 sources |
+| `--dds-domain <id>` | Override the DDS domain; otherwise `--domain` or 0 |
+| `--ros-domain <id>` | Override the ROS 2 domain; otherwise `--domain`, `ROS_DOMAIN_ID`, or 0 |
+| `--zenoh-domain <name>` | Zenoh business namespace (`limit_domain`); default empty |
+| `--zenoh-config <path>` | Zenoh native connection configuration |
+| `--registry-path <path>` | Local registry root; default `$XDG_RUNTIME_DIR/ibmw` or `/tmp/ibmw-<euid>`. Protocol data lives in `v2/`; custom roots must be private (0700). |
+
+Verbose output labels this source as `source: registry`; `drivers` lists the actual transports.
+
+Like ROS 2, `info <topic>` directly resolves hidden topics. `list`, `find`, and
+`type` exclude them unless `--include-hidden-topics` is set. The switch works
+before or after the subcommand, e.g. `ibmw topic --include-hidden-topics type /_hidden`.
+
+`info -v` shows each endpoint's type and available ownership information, including
+module names from runtime registrations. QoS is displayed separately for each
+driver. Reported policies retain their values; missing policies show `unknown`,
+and an empty profile shows `unavailable (not reported by this source)`. Runtime
+registrations require the current `module_name` and `driver_qos` fields.
+Combined-source counts include observations from each source, without cross-source deduplication.
+
+Source flags can be combined: `list --registry --dds`, `list -d -r --domain 10`.
+Domain/configuration options require their corresponding source to be selected.
+Numeric domains accept unsigned 32-bit decimal values; backend-specific network
+limits will be checked by the respective network adapters.
+
+This first stage implements the unified model and the **local adapter only**.
+Network selections currently report an unavailable backend and exit with status
+1. Combined queries still print results from successful sources; these results
+are partial when the exit status is nonzero. No network discovery service is
+started yet. Registry discovery includes every registered local endpoint, regardless
+of whether its data transport is local, DDS, ROS 2, or Zenoh.
+
 ---
 
 ### Complete Example

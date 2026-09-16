@@ -4,6 +4,7 @@
 set(topic_cli_sources
     topic_command.cc
     topic_cli_provider.cc
+    discovery_options.cc
     discovery_query.cc
     list_command.cc
     type_command.cc
@@ -21,7 +22,8 @@ if(IBMW_INSTALL)
 endif()
 
 if(IBMW_BUILD_TESTS)
-  add_executable(ibmw_topic_cli_test topic_command_test.cc ${topic_cli_sources})
+  add_executable(ibmw_topic_cli_test topic_command_test.cc discovery_options_test.cc
+                 ${topic_cli_sources})
   target_link_libraries(ibmw_topic_cli_test
     PRIVATE ibmw::cli::command ibmw::core::extension_support GTest::gtest_main)
   add_werror(ibmw_topic_cli_test)
