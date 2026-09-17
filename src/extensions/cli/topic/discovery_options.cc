@@ -48,7 +48,7 @@ void AddDiscoveryOptions(ibmw::cli::Command& command) {
   using ibmw::cli::OptionValueMode;
   command.AddOption("--registry", {}, {},
                     "Query local runtime registrations across all drivers (default source)");
-  command.AddOption("--dds", "-d", {}, "Query DDS (discovery adapter not yet available)");
+  command.AddOption("--dds", "-d", {}, "Query DDS endpoints in the selected domain");
   command.AddOption("--ros2", "-r", {}, "Query ROS 2 (discovery adapter not yet available)");
   command.AddOption("--zenoh", "-z", {}, "Query Zenoh (discovery adapter not yet available)");
   command.AddOption("--all", "-a", {}, "Query all four sources, not all domains");

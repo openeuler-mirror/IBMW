@@ -9,6 +9,8 @@ if(NOT IBMW_FASTCDR_PROVIDER_TARGET OR NOT IBMW_FASTDDS_PROVIDER_TARGET)
   message(FATAL_ERROR "dds_ext requires the explicitly resolved IBMW DDS provider targets")
 endif()
 
+add_subdirectory(discovery)
+
 # Extension library
 set(DDS_EXTENSION_SOURCES
   global.cc
@@ -19,6 +21,7 @@ set(DDS_EXTENSION_SOURCES
 )
 
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
+list(FILTER test_files EXCLUDE REGEX "/discovery/")
 list(FILTER test_files EXCLUDE REGEX "/dds_comm_trace_test\\.cc$")
 list(FILTER test_files EXCLUDE REGEX "/dds_native_identity_roundtrip_test\\.cc$")
 list(FILTER test_files EXCLUDE REGEX "/dds_managed_exact_candidate\\.cc$")

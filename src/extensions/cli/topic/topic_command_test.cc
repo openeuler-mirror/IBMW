@@ -13,6 +13,20 @@
 
 namespace {
 
+class ScopedPluginDirectory {
+ public:
+  explicit ScopedPluginDirectory(const char* value) {
+    if (const char* old = std::getenv("IBMW_DISCOVERY_PLUGIN_DIR")) previous_ = old;
+    ::setenv("IBMW_DISCOVERY_PLUGIN_DIR", value, 1);
+  }
+  ~ScopedPluginDirectory() {
+    if (previous_) ::setenv("IBMW_DISCOVERY_PLUGIN_DIR", previous_->c_str(), 1);
+    else ::unsetenv("IBMW_DISCOVERY_PLUGIN_DIR");
+  }
+ private:
+  std::optional<std::string> previous_;
+};
+
 struct CommandResult {
   int code;
   std::string output;
@@ -107,6 +121,7 @@ TEST_F(RegistryTopicCommandTest, TypeFindAndInfoUseUnifiedRegistryEndpoints) {
 }
 
 TEST_F(RegistryTopicCommandTest, CombinedQueriesKeepRegistryResultsAndReturnFailure) {
+  ScopedPluginDirectory no_plugins("/dev/null");
   for (const std::string command : {"list", "type", "find", "info"}) {
     SCOPED_TRACE(command);
     std::vector<std::string> arguments{command};
@@ -128,6 +143,7 @@ TEST_F(RegistryTopicCommandTest, CombinedQueriesKeepRegistryResultsAndReturnFail
 }
 
 TEST(TopicCommandTest, UnavailableBackendIsNotReportedAsUnknownTopic) {
+  ScopedPluginDirectory no_plugins("/dev/null");
   for (const std::string flag : {"-d", "--dds", "-r", "--ros2", "-z", "--zenoh"}) {
     SCOPED_TRACE(flag);
     std::vector<std::string> arguments{"info", "/missing", flag};
@@ -137,7 +153,7 @@ TEST(TopicCommandTest, UnavailableBackendIsNotReportedAsUnknownTopic) {
     const auto result = InvokeTopic(arguments);
     EXPECT_EQ(result.code, 1);
     EXPECT_TRUE(result.output.empty());
-    EXPECT_NE(result.error.find("not implemented"), std::string::npos);
+    EXPECT_NE(result.error.find("not available"), std::string::npos);
     EXPECT_EQ(result.error.find("Unknown topic"), std::string::npos);
   }
 }

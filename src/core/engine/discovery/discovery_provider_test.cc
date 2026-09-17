@@ -4,6 +4,8 @@
 #include "engine/discovery/discovery_provider.h"
 
 #include <cstdlib>
+#include <dlfcn.h>
+#include <unistd.h>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -15,6 +17,20 @@
 
 namespace ibmw::discovery {
 namespace {
+
+class ScopedPluginDirectory {
+ public:
+  explicit ScopedPluginDirectory(const char* value) {
+    if (const char* old = std::getenv("IBMW_DISCOVERY_PLUGIN_DIR")) previous_ = old;
+    ::setenv("IBMW_DISCOVERY_PLUGIN_DIR", value, 1);
+  }
+  ~ScopedPluginDirectory() {
+    if (previous_) ::setenv("IBMW_DISCOVERY_PLUGIN_DIR", previous_->c_str(), 1);
+    else ::unsetenv("IBMW_DISCOVERY_PLUGIN_DIR");
+  }
+ private:
+  std::optional<std::string> previous_;
+};
 
 using ibmw::runtime::core::runtime_graph::RuntimeGraphAgent;
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
@@ -96,6 +112,7 @@ TEST_F(DiscoveryProviderTest, ReusedProviderDropsExitedRuntimesAndCanRestart) {
 }
 
 TEST_F(DiscoveryProviderTest, PreservesSuccessfulSourcesWhenOtherBackendsAreUnavailable) {
+  ScopedPluginDirectory no_plugins("/dev/null");
   Register("runtime", true);
   const auto snapshot = Discover({
       {.backend = DiscoveryBackend::kDds, .domain_id = 10}, options_,
@@ -135,6 +152,46 @@ TEST_F(DiscoveryProviderTest, KeepsDomainsAndObserverConfigurationsDistinct) {
   EXPECT_NE(DescribeSource({.backend = DiscoveryBackend::kZenoh, .zenoh_config = "a.json5"}),
             DescribeSource({.backend = DiscoveryBackend::kZenoh, .zenoh_config = "b.json5"}));
 }
+
+// The enclosing constructor fails before its handler runs, destroying the
+// provider member and unloading the plugin while the propagated error survives.
+struct FailingOwner {
+  std::unique_ptr<DiscoveryProvider> provider = CreateDiscoveryProvider(DiscoveryBackend::kDds);
+  FailingOwner() {
+    provider->Start({.backend = DiscoveryBackend::kDds});
+    provider->Query(std::chrono::steady_clock::now());
+  }
+};
+
+class DiscoveryPluginFailureTest : public testing::TestWithParam<const char*> {};
+
+TEST_P(DiscoveryPluginFailureTest, ErrorSurvivesConstructorUnwindAndPluginUnload) {
+  // A child also keeps each fixture environment and loader state independent.
+  ASSERT_EXIT({
+    ::setenv("IBMW_DISCOVERY_PLUGIN_DIR", DISCOVERY_FAILURE_PLUGIN_DIR, 1);
+    ::setenv("IBMW_DISCOVERY_TEST_FAILURE", GetParam(), 1);
+    bool diagnosed = false;
+    try {
+      FailingOwner owner;
+    } catch (const std::runtime_error& error) {
+      const std::string message = error.what();
+      diagnosed = !message.empty();
+      const std::string failure = GetParam();
+      if (failure.ends_with("custom")) diagnosed = message == "plugin-owned diagnostic";
+    } catch (...) {
+      ::_exit(2);
+    }
+    void* still_loaded = ::dlopen(DISCOVERY_FAILURE_PLUGIN_PATH, RTLD_NOW | RTLD_NOLOAD);
+    if (still_loaded) { ::dlclose(still_loaded); ::_exit(3); }
+    ::_exit(diagnosed ? 0 : 4);
+  }, testing::ExitedWithCode(0), "");
+}
+
+INSTANTIATE_TEST_SUITE_P(PluginBoundaries, DiscoveryPluginFailureTest,
+    testing::Values("entry-custom", "entry-empty", "entry-nonstd",
+                    "create-custom", "create-empty", "create-nonstd",
+                    "start-custom", "start-empty", "start-nonstd",
+                    "query-custom", "query-empty", "query-nonstd"));
 
 }  // namespace
 }  // namespace ibmw::discovery

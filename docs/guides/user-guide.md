@@ -1206,12 +1206,19 @@ Domain/configuration options require their corresponding source to be selected.
 Numeric domains accept unsigned 32-bit decimal values; backend-specific network
 limits will be checked by the respective network adapters.
 
-This first stage implements the unified model and the **local adapter only**.
-Network selections currently report an unavailable backend and exit with status
-1. Combined queries still print results from successful sources; these results
-are partial when the exit status is nonzero. No network discovery service is
-started yet. Registry discovery includes every registered local endpoint, regardless
-of whether its data transport is local, DDS, ROS 2, or Zenoh.
+The DDS source is implemented when `IBMW_BUILD_DDS_EXTENSION` is enabled. The
+separate `libibmw_discovery_dds.so` plugin is loaded only when DDS is selected;
+source-only local queries do not load it. `IBMW_DISCOVERY_PLUGIN_DIR` can be
+used to override the plugin lookup directory.
+
+DDS joins the selected domain and collects native writer and reader discovery
+callbacks without subscribing to business data. The result keeps the native DDS
+topic and type names, endpoint and participant GUIDs, CDR serialization and
+the reported QoS. A query is a bounded snapshot; domain, discovery settings,
+security and network reachability still determine what can be observed. ROS 2
+and Zenoh sources remain unavailable in this stage. Failed sources return exit
+status 1 while successful sources still print their results. These adapters do
+not yet add remote discovery to `bag record`.
 
 ---
 

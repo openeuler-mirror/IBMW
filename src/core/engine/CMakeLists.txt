@@ -154,7 +154,21 @@ endif()
 
 # Set test of target
 if(IBMW_BUILD_TESTS)
+  add_library(ibmw_discovery_failure_fixture MODULE discovery/test/failure_plugin.cpp)
+  target_link_libraries(ibmw_discovery_failure_fixture PRIVATE ibmw::core::extension_api)
+  set_target_properties(ibmw_discovery_failure_fixture PROPERTIES
+    OUTPUT_NAME ibmw_discovery_dds
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/discovery-failure"
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  # GNU unique symbols can pin the DSO, masking exception lifetime failures.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(ibmw_discovery_failure_fixture PRIVATE -fno-gnu-unique)
+  endif()
   add_executable(ibmw_discovery_test ${discovery_test_src})
+  add_dependencies(ibmw_discovery_test ibmw_discovery_failure_fixture)
+  target_compile_definitions(ibmw_discovery_test PRIVATE
+    DISCOVERY_FAILURE_PLUGIN_DIR="$<TARGET_FILE_DIR:ibmw_discovery_failure_fixture>"
+    DISCOVERY_FAILURE_PLUGIN_PATH="$<TARGET_FILE:ibmw_discovery_failure_fixture>")
   target_link_libraries(ibmw_discovery_test
                        PRIVATE ibmw::core::extension_support GTest::gtest_main)
   add_werror(ibmw_discovery_test)
