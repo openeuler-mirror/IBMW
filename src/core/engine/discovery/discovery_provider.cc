@@ -106,8 +106,9 @@ std::unique_ptr<DiscoveryProvider> CreateDiscoveryProvider(DiscoveryBackend back
   if (backend == DiscoveryBackend::kRegistry) {
     return std::make_unique<RegistryDiscoveryProvider>();
   }
-  if (backend == DiscoveryBackend::kDds) {
-    const auto path = PluginDirectory() / "libibmw_discovery_dds.so";
+  if (backend == DiscoveryBackend::kDds || backend == DiscoveryBackend::kRos2) {
+    const auto path = PluginDirectory() / (backend == DiscoveryBackend::kDds
+        ? "libibmw_discovery_dds.so" : "libibmw_discovery_ros2.so");
     if (std::filesystem::exists(path)) return std::make_unique<PluginProvider>(path, backend);
   }
   return nullptr;

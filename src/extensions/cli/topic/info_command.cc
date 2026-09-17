@@ -59,6 +59,10 @@ void PrintEndpoint(
   }
   std::cout << "    endpoint: " << endpoint.endpoint_id << '\n';
   std::cout << "    type: " << TypeName(endpoint) << '\n';
+  if (!endpoint.node_name.empty()) {
+    std::cout << "    node: " << endpoint.node_name << '\n';
+    std::cout << "    namespace: " << endpoint.node_namespace << '\n';
+  }
   std::cout << "    serialization: "
             << endpoint.serialization_type << '\n';
   if (!endpoint.available_drivers.empty()) {

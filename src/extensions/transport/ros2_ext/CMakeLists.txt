@@ -1,6 +1,8 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
 
+add_subdirectory(discovery)
+
 # Get the current folder name
 string(REGEX REPLACE ".*/\(.*\)" "\\1" CUR_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -15,6 +17,8 @@ set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 # Set file collection
 file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
+list(FILTER src EXCLUDE REGEX "/discovery/")
+list(FILTER test_files EXCLUDE REGEX "/discovery/")
 list(REMOVE_ITEM src ${test_files})
 
 # Add target

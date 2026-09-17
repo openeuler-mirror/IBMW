@@ -1181,10 +1181,32 @@ DDS 来源已实现（需开启 `IBMW_BUILD_DDS_EXTENSION`）。独立的
 
 DDS 加入指定 domain，通过原生 writer/reader 发现回调收集信息，不订阅业务
 数据。结果保留原生 DDS topic/type 名称、端点和 participant GUID、CDR 序列化
-格式及已报告的 QoS。查询是有时间上限的快照；实际可见范围仍由 domain、发现
-配置、安全配置和网络可达性决定。此阶段 ROS 2、Zenoh 来源仍不可用。来源失败
-时退出码为 1，但组合查询仍输出成功来源的结果；这些适配器尚未让 `bag record`
-接入远端发现。
+格式及已报告的 QoS。
+
+ROS 2 来源需开启 `IBMW_BUILD_WITH_ROS2` 和 `IBMW_BUILD_ROS2_EXTENSION`。
+选择 `-r` 时加载独立的 `libibmw_discovery_ros2.so`，通过私有 rclcpp context
+和查询节点读取 ROS graph，不初始化 IBMW ROS 2 业务传输扩展，也不订阅业务
+数据。该插件需要 ROS 2/rclcpp 运行时，遵循 `RMW_IMPLEMENTATION` 等原生
+ROS 环境配置。返回 ROS 逻辑话题名、类型名、端点 GID 和 graph 报告的 QoS；
+`topic info -v` 还显示节点名与命名空间。未提供的 DDS participant GUID 和
+底层名称保持为空，不根据 RMW GID 或 ROS 名称推测。查询节点关闭 rosout、
+参数事件和参数等服务。
+
+```bash
+ibmw topic list -r --ros-domain 10
+ibmw topic info /chatter -r --ros-domain 10 -v
+ibmw topic list -d -r --dds-domain 10 --ros-domain 20
+```
+
+网络查询默认收集 2 秒后返回快照；每次调用独立发现，不使用常驻发现服务。
+实际可见范围由 domain、发现配置、安全配置和网络可达性决定。DDS 与 ROS 2
+是独立来源，组合查询保留各自端点，不跨来源合并身份。Zenoh 来源仍不可用。
+来源失败时退出码为 1，但组合查询仍输出成功来源的结果；这些适配器尚未让
+`bag record` 接入远端发现。
+
+ROS 2 原生库可能在加载阶段直接退出进程，例如 Humble 中指定了未安装的
+`RMW_IMPLEMENTATION`。这种退出发生在适配器运行前，无法作为普通来源错误
+捕获，也无法保留其他来源结果；使用 ROS 2 发现前需确保所选 RMW 可用。
 
 ---
 

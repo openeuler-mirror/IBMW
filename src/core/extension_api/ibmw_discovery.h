@@ -45,6 +45,9 @@ struct DiscoveredEndpoint {
   std::string participant_id;
   std::string endpoint_id;
   EndpointRole role = EndpointRole::kPublisher;
+  // ROS graph node identity; it is not a DDS participant identity.
+  std::string node_name;
+  std::string node_namespace;
   // Unknown logical or wire names remain empty; adapters must not guess them.
   std::string topic_name;
   std::string type_name;

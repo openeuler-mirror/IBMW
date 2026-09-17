@@ -1214,11 +1214,38 @@ used to override the plugin lookup directory.
 DDS joins the selected domain and collects native writer and reader discovery
 callbacks without subscribing to business data. The result keeps the native DDS
 topic and type names, endpoint and participant GUIDs, CDR serialization and
-the reported QoS. A query is a bounded snapshot; domain, discovery settings,
-security and network reachability still determine what can be observed. ROS 2
-and Zenoh sources remain unavailable in this stage. Failed sources return exit
-status 1 while successful sources still print their results. These adapters do
-not yet add remote discovery to `bag record`.
+the reported QoS.
+
+The ROS 2 source requires `IBMW_BUILD_WITH_ROS2` and `IBMW_BUILD_ROS2_EXTENSION`.
+Selecting `-r` loads the separate `libibmw_discovery_ros2.so` plugin. It queries
+the ROS graph through a private rclcpp context and observer node, without
+initializing the IBMW ROS 2 business transport extension or subscribing to
+business data. The plugin requires the ROS 2/rclcpp runtime and follows native
+ROS environment settings such as `RMW_IMPLEMENTATION`. Results contain logical
+ROS topic/type names, endpoint GIDs and graph-reported QoS; `topic info -v` also
+shows node names and namespaces. Unavailable DDS participant GUIDs and wire
+names remain empty rather than being inferred from RMW GIDs or ROS names.
+The observer disables rosout, parameter events and services such as parameter
+services.
+
+```bash
+ibmw topic list -r --ros-domain 10
+ibmw topic info /chatter -r --ros-domain 10 -v
+ibmw topic list -d -r --dds-domain 10 --ros-domain 20
+```
+
+Network queries collect a snapshot over a default two-second window. Each
+invocation discovers independently, without a persistent discovery service.
+Domain, discovery settings, security and network reachability determine what
+can be observed. DDS and ROS 2 remain separate sources: combined queries keep
+their endpoints without merging identities across sources. Zenoh remains
+unavailable. Failed sources return exit status 1 while successful sources still
+print their results. These adapters do not yet add remote discovery to `bag record`.
+
+Native ROS 2 libraries can exit the process during loading, for example when
+Humble is given an uninstalled `RMW_IMPLEMENTATION`. This happens before the
+adapter runs, so it cannot be caught as a source error or preserve other sources'
+results. The selected RMW must be available before using ROS 2 discovery.
 
 ---
 
