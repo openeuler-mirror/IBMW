@@ -112,7 +112,7 @@ ibmw:
     std::ofstream(path) << config;
     ibmw::extension::TypeSupportPackageLoader loader;
     loader.Load(TYPE_SUPPORT_V1_FIXTURE_PATH);
-    transport::SerializedTransportCapabilityV1 capability{
+    transport::SerializedTransportCapabilityV2 capability{
         .capture_mode = transport::SerializedCaptureMode::kCachedSerialized,
         .capture_priority = 17,
         .provider_name = "extension-v2-fixture",
@@ -147,7 +147,7 @@ TEST_F(RuntimeGraphIntegrationTest, PreservesDriverCapabilityContract) {
   const auto& topic = registration.topics.front();
   ASSERT_FALSE(topic.topic.schema.schema_hash.empty());
   const auto& capability = topic.capture_capabilities.at("custom-capture");
-  EXPECT_EQ(capability.abi_version, 1u);
+  EXPECT_EQ(capability.abi_version, transport::SerializedTransportCapabilityV2::kAbiVersion);
   EXPECT_EQ(capability.priority, 17u);
   EXPECT_EQ(capability.mode, "cached_serialized");
   EXPECT_EQ(capability.extension_name, "extension-v2-fixture");

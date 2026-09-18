@@ -5,41 +5,86 @@
 
 #include <algorithm>
 #include <exception>
-#include <set>
-#include <tuple>
-#include <utility>
 
 #include "base/exception.h"
-#include "engine/transport/serialized_transport_driver.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
-namespace {
-
-constexpr int kRuntimeTapCapturePriority = 5;
-
-bool SameEndpoint(
-    const TopicAdvertisement& lhs,
-    const TopicAdvertisement& rhs) {
-  return lhs.runtime_id == rhs.runtime_id &&
-         lhs.publisher_id == rhs.publisher_id &&
-         lhs.control_socket == rhs.control_socket &&
-         lhs.topic.msg_type == rhs.topic.msg_type &&
-         lhs.topic.serialization_type == rhs.topic.serialization_type &&
-         lhs.topic.schema.schema_hash == rhs.topic.schema.schema_hash;
+bool CaptureEndpoint::SameSubscription(const CaptureEndpoint& other) const {
+  return driver == other.driver && wire_topic_name == other.wire_topic_name &&
+         wire_type_name == other.wire_type_name &&
+         topic.msg_type == other.topic.msg_type &&
+         topic.serialization_type == other.topic.serialization_type &&
+         topic.schema.schema_hash == other.topic.schema.schema_hash &&
+         topic.qos.policies == other.topic.qos.policies &&
+         registry_advertisement.has_value() == other.registry_advertisement.has_value() &&
+         (!registry_advertisement || ibmw::runtime::core::topic_io::RegistrySubscriptionKey({*registry_advertisement, driver}) ==
+                        ibmw::runtime::core::topic_io::RegistrySubscriptionKey({*other.registry_advertisement, other.driver}));
 }
 
-}  // namespace
+void CaptureGraph::Add(CaptureEndpoint endpoint) {
+  topics_[endpoint.topic.topic].push_back(std::move(endpoint));
+}
 
-TopicGraph BuildCaptureGraph(
-    std::vector<ibmw::runtime::core::runtime_graph::RuntimeRegistration> runtimes) {
-  TopicGraph graph;
-  for (auto& runtime : runtimes) {
-    // Discovery also serves topic queries, while bag requires a schema.
-    std::erase_if(runtime.topics, [](const auto& advertisement) {
-      return advertisement.topic.schema.schema_hash.empty();
-    });
-    graph.MergeRuntime(runtime);
+const std::vector<CaptureEndpoint>& CaptureGraph::Find(std::string_view topic) const {
+  static const std::vector<CaptureEndpoint> empty;
+  const auto found = topics_.find(std::string(topic));
+  return found == topics_.end() ? empty : found->second;
+}
+
+std::vector<std::string> CaptureGraph::Topics() const {
+  std::vector<std::string> result;
+  for (const auto& [name, endpoints] : topics_) result.push_back(name);
+  return result;
+}
+
+std::vector<CaptureEndpoint> CaptureGraph::Subscriptions(
+    std::string_view topic, const RegistrySubscriptionFilter& available) const {
+  std::vector<CaptureEndpoint> result;
+  std::vector<TopicAdvertisement> registry_advertisements;
+  for (const auto& endpoint : Find(topic)) {
+    if (endpoint.registry_advertisement) registry_advertisements.push_back(*endpoint.registry_advertisement);
+  }
+  if (!registry_advertisements.empty()) {
+    for (auto& selected : ibmw::runtime::core::topic_io::SelectRegistrySubscriptions(registry_advertisements, available)) {
+      result.push_back({.topic = selected.publisher.topic, .driver = selected.driver,
+                        .registry_advertisement = selected.publisher, .published = selected.publisher.published,
+                        .hidden = selected.publisher.hidden});
+    }
+    return result;
+  }
+  for (const auto& endpoint : Find(topic)) {
+    if (!endpoint.published) continue;
+    if (!result.empty()) {
+      const auto& selected = result.front().topic;
+      MW_ASSERT(selected.msg_type == endpoint.topic.msg_type &&
+                    selected.serialization_type == endpoint.topic.serialization_type &&
+                    selected.schema.schema_hash == endpoint.topic.schema.schema_hash,
+                "Topic '{}' has conflicting publisher types or schemas.", topic);
+    }
+    if (result.empty() || endpoint.registry_advertisement) {
+      result.push_back(endpoint);
+    } else {
+      MW_ASSERT(result.front().SameSubscription(endpoint),
+                "Topic '{}' has conflicting publisher types, schemas or subscription settings.", topic);
+    }
+  }
+  return result;
+}
+
+CaptureGraph BuildCaptureGraph(
+    const std::vector<ibmw::runtime::core::runtime_graph::RuntimeRegistration>& runtimes) {
+  CaptureGraph graph;
+  for (const auto& runtime : runtimes) {
+    for (auto advertisement : runtime.topics) {
+      if (advertisement.topic.schema.schema_hash.empty()) continue;
+      advertisement.runtime_id = runtime.runtime_id;
+      advertisement.control_socket = runtime.control_socket;
+      graph.Add({.topic = advertisement.topic,
+                 .registry_advertisement = advertisement,
+                 .published = advertisement.published,
+                 .hidden = advertisement.hidden});
+    }
   }
   return graph;
 }
@@ -91,163 +136,17 @@ void CapturePlan::StopAll() {
   }
 }
 
-void BagCapturePlanner::RegisterTransportSourceFactory(
-    std::string driver_name,
-    TransportSourceFactory factory) {
-  MW_ASSERT(!driver_name.empty(), "Driver name cannot be empty.");
-  MW_ASSERT(factory, "Transport source factory cannot be empty.");
-  transport_factories_[std::move(driver_name)] = std::move(factory);
-}
-
-void BagCapturePlanner::SetRuntimeTapSourceFactory(
-    RuntimeTapSourceFactory factory) {
-  MW_ASSERT(factory, "Runtime tap source factory cannot be empty.");
-  runtime_tap_factory_ = std::move(factory);
-}
-
-CapturePlan BagCapturePlanner::BuildPlan(
-    const std::vector<std::string>& topics) const {
-  MW_ASSERT(!topics.empty(), "At least one topic is required.");
+CapturePlan BagCapturePlanner::BuildPlan(std::string_view topic) const {
   CapturePlan plan;
-  std::set<std::string> unique_topics;
-
-  for (const auto& topic_name : topics) {
-    MW_ASSERT(!topic_name.empty(), "Topic name cannot be empty.");
-    if (!unique_topics.emplace(topic_name).second) {
-      continue;
-    }
-    auto candidates = CandidatesFor(topic_name);
-    MW_ASSERT(
-        !candidates.empty(), "No capture source is available for topic '{}'.",
-        topic_name);
-    std::sort(candidates.begin(), candidates.end(), [](const auto& lhs, const auto& rhs) {
-      return std::tie(
-                 lhs.priority, lhs.source_name, lhs.advertisement.runtime_id,
-                 lhs.advertisement.publisher_id) <
-             std::tie(
-                 rhs.priority, rhs.source_name, rhs.advertisement.runtime_id,
-                 rhs.advertisement.publisher_id);
-    });
-
-    const auto advertisements = graph_.Find(topic_name);
-    const size_t published_endpoint_count = static_cast<size_t>(std::count_if(
-        advertisements.begin(), advertisements.end(),
-        [](const auto& advertisement) { return advertisement.published; }));
-    const auto route_covers_publishers = [&](const Candidate& selected) {
-      // A cached typed subscription receives every publisher on the Topic,
-      // but its callback cannot recover a stable native publisher identity.
-      // Use it only when the graph contains one published endpoint; otherwise
-      // use native serialized capture or one Runtime Tap per publisher.
-      if (selected.capture_mode == "cached_serialized" &&
-          published_endpoint_count != 1) {
-        return false;
-      }
-      return std::all_of(
-          advertisements.begin(), advertisements.end(),
-          [&](const auto& advertisement) {
-            if (!advertisement.published) {
-              return true;
-            }
-            return std::any_of(
-                candidates.begin(), candidates.end(), [&](const auto& candidate) {
-                  return candidate.source_name == selected.source_name &&
-                         SameEndpoint(candidate.advertisement, advertisement);
-                });
-          });
-    };
-    const auto selected = std::find_if(
-        candidates.begin(), candidates.end(), route_covers_publishers);
-    MW_ASSERT(
-        selected != candidates.end(),
-        "No capture route covers every publisher for topic '{}'.", topic_name);
-
-    const auto add_candidate = [&](const Candidate& candidate) {
-      auto source = candidate.create();
-      MW_ASSERT(
-          source != nullptr, "Capture source factory returned null for '{}'.",
-          topic_name);
-      const std::string description = source->Description();
-      plan.Add(CapturePlanEntry{
-          .advertisement = candidate.advertisement,
-          .source_name = candidate.source_name,
-          .capture_mode = candidate.capture_mode,
-          .description = description,
-          .source = std::move(source)});
-    };
-    if (selected->source_name == "runtime-tap") {
-      for (const auto& candidate : candidates) {
-        if (candidate.source_name == selected->source_name) {
-          add_candidate(candidate);
-        }
-      }
-    } else {
-      add_candidate(*selected);
-    }
+  const auto endpoints = graph_.Subscriptions(topic, available_);
+  MW_ASSERT(!endpoints.empty(), "No publisher is available for topic '{}'.", topic);
+  for (const auto& endpoint : endpoints) {
+    auto source = factory_(endpoint);
+    MW_ASSERT(source, "Cannot create capture source for '{}'.", topic);
+    const auto description = source->Description();
+    plan.Add({.endpoint = endpoint, .description = description, .source = std::move(source)});
   }
   return plan;
-}
-
-std::vector<BagCapturePlanner::Candidate> BagCapturePlanner::CandidatesFor(
-    std::string_view topic_name) const {
-  std::vector<Candidate> result;
-  const auto advertisements = graph_.Find(topic_name);
-  MW_ASSERT(!advertisements.empty(), "Topic '{}' was not discovered.", topic_name);
-
-  std::set<std::tuple<std::string, std::string, std::string>> descriptors;
-  for (const auto& advertisement : advertisements) {
-    descriptors.emplace(
-        advertisement.topic.msg_type,
-        advertisement.topic.serialization_type,
-        advertisement.topic.schema.schema_hash);
-  }
-  MW_ASSERT(
-      descriptors.size() == 1,
-      "Topic '{}' has conflicting type or serialization advertisements.",
-      topic_name);
-
-  for (const auto& advertisement : advertisements) {
-    for (const auto& driver : advertisement.topic.available_drivers) {
-      const auto capability =
-          advertisement.capture_capabilities.find(driver);
-      if (capability == advertisement.capture_capabilities.end() ||
-          capability->second.abi_version !=
-              ibmw::runtime::core::transport::
-                  SerializedTransportCapabilityV1::kAbiVersion ||
-          (capability->second.mode != "native_serialized" &&
-           capability->second.mode != "cached_serialized")) {
-        continue;
-      }
-      const auto factory = transport_factories_.find(driver);
-      if (factory == transport_factories_.end()) {
-        continue;
-      }
-      const auto factory_copy = factory->second;
-      result.emplace_back(Candidate{
-          .priority = static_cast<int>(capability->second.priority),
-          .source_name = driver,
-          .capture_mode = capability->second.mode,
-          .advertisement = advertisement,
-          .create = [factory_copy, advertisement, driver] {
-            return factory_copy(advertisement, driver);
-          }});
-    }
-    const auto runtime_tap = advertisement.capture_capabilities.find(
-        "runtime-tap");
-    if (advertisement.published && runtime_tap !=
-                                       advertisement.capture_capabilities.end() &&
-        runtime_tap->second.mode == "runtime_tap" && runtime_tap_factory_) {
-      const auto factory_copy = runtime_tap_factory_;
-      result.emplace_back(Candidate{
-          .priority = kRuntimeTapCapturePriority,
-          .source_name = "runtime-tap",
-          .capture_mode = "runtime_tap",
-          .advertisement = advertisement,
-          .create = [factory_copy, advertisement] {
-            return factory_copy(advertisement);
-          }});
-    }
-  }
-  return result;
 }
 
 }  // namespace ibmw::extensions::record_playback_extension

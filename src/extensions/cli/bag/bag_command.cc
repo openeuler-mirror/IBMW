@@ -39,15 +39,15 @@
 #include "engine/transport/serialized_transport_driver.h"
 #include "engine/runtime_graph/type_support_registry.h"
 #include "nlohmann/json.hpp"
-#include "engine/topic_io/cached_transport_subscription_source.h"
 #include "engine/topic_io/runtime_tap_source.h"
+#include "engine/topic_io/registry_subscription.h"
 #include "engine/topic_io/transport_subscription_source.h"
 #include "record_playback_ext/coordinator/bag_capture_planner.h"
 #include "record_playback_ext/coordinator/dynamic_capture_controller.h"
 #include "record_playback_ext/coordinator/recorder_coordinator.h"
 #include "record_playback_ext/coordinator/record_topic_selector.h"
+#include "record_playback_ext/coordinator/record_discovery.h"
 #include "record_playback_ext/converter/bag_converter.h"
-#include "engine/runtime_graph/runtime_registry.h"
 #include "engine/runtime_graph/topic_graph.h"
 #include "record_playback_ext/player/player.h"
 #include "engine/topic_io/runtime_tap_stream.h"
@@ -59,12 +59,7 @@
 
 namespace ibmw::extensions::record_playback_extension {
 
-using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
 using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
-using ibmw::runtime::core::runtime_graph::TopicGraph;
-using ibmw::runtime::core::runtime_graph::TransportCaptureCapability;
-using ibmw::runtime::core::topic_io::CachedTransportSubscriptionRegistry;
-using ibmw::runtime::core::topic_io::CachedTransportSubscriptionSource;
 using ibmw::runtime::core::topic_io::RuntimeTapSource;
 using ibmw::runtime::core::topic_io::TransportSubscriptionSource;
 using ibmw::runtime::core::topic_io::UnixRuntimeTapClient;
@@ -120,6 +115,7 @@ struct RecordCliOptions {
   bool include_hidden_topics = false;
   bool ignore_leaf_topics = false;
   bool no_discovery = false;
+  RecordDiscoveryOptions discovery;
   uint32_t polling_interval_ms = 100;
   std::string storage_id = "mcap";
   std::string serialization_format = "auto";
@@ -154,6 +150,13 @@ void PrintBagUsage() {
          "  --include-unpublished-topics      Include subscriber-only topics\n"
          "  --ignore-leaf-topics              Ignore topics without publishers\n"
          "  --no-discovery                    Use only the initial graph snapshot\n"
+         "  --registry                        Query local runtime registrations (default)\n"
+         "  --dds / --ros2 / --zenoh           Record topics from the selected network source\n"
+         "  --zenoh-domain <name>             Zenoh business domain\n"
+         "  --zenoh-config <path>             Optional separate discovery session config\n"
+         "  --domain <id>                     DDS/ROS2 domain (config or environment)\n"
+         "  --registry-path <path>            Local registration directory\n"
+         "  --config-file <path>              Recorder transport and TypeSupport\n"
          "  -p, --polling-interval <ms>       Discovery polling period\n"
          "  -o, --output <bag_directory>      Output directory\n"
          "  -s, --storage <id>                mcap or sqlite3\n"
@@ -295,6 +298,7 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
   RecordCliOptions options;
   for (int index = 2; index < argc; ++index) {
     const std::string argument = argv[index];
+    if (options.discovery.ParseArgument(index, argc, argv)) continue;
     if (argument == "-o" || argument == "--output") {
       MW_ASSERT(index + 1 < argc, "{} requires a path.", argument);
       options.output = argv[++index];
@@ -421,6 +425,9 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
   MW_ASSERT(
       !options.topics.empty() || options.all || !options.regex.empty(),
       "bag record requires topics, --all, or --regex.");
+  options.discovery.Validate();
+  MW_ASSERT(options.discovery.source.backend != ibmw::discovery::DiscoveryBackend::kDds || !options.use_sim_time,
+            "--use-sim-time requires logical /clock names; raw DDS recording does not remap topics.");
   MW_ASSERT(
       options.polling_interval_ms > 0,
       "Polling interval must be greater than zero.");
@@ -862,213 +869,22 @@ std::optional<uint64_t> ExtractSimTime(
   return std::nullopt;
 }
 
-struct RecorderRuntimeSpec {
-  std::map<std::string, TransportCaptureCapability> direct_drivers;
-  std::set<std::string> type_support_packages;
-};
-
-nlohmann::json CanonicalYamlValue(const YAML::Node& node) {
-  if (!node || node.IsNull()) {
-    return nullptr;
-  }
-  if (node.IsScalar()) {
-    return node.as<std::string>();
-  }
-  if (node.IsSequence()) {
-    auto result = nlohmann::json::array();
-    for (const auto& item : node) {
-      result.push_back(CanonicalYamlValue(item));
-    }
-    return result;
-  }
-  MW_ASSERT(node.IsMap(), "Unsupported YAML node in Recorder options.");
-  auto result = nlohmann::json::object();
-  for (const auto& item : node) {
-    result[item.first.as<std::string>()] = CanonicalYamlValue(item.second);
-  }
-  return result;
-}
-
-YAML::Node ParseOptionsYaml(std::string_view yaml) {
-  if (yaml.empty()) {
-    return YAML::Node(YAML::NodeType::Map);
-  }
-  auto result = YAML::Load(std::string(yaml));
-  if (!result || result.IsNull()) {
-    return YAML::Node(YAML::NodeType::Map);
-  }
-  MW_ASSERT(result.IsMap(), "Recorder connection options must be a YAML map.");
-  return result;
-}
-
-std::string CanonicalDriverOptions(std::string_view yaml) {
-  return CanonicalYamlValue(ParseOptionsYaml(yaml)).dump();
-}
-
-std::string CanonicalExtensionOptions(
-    std::string_view extension_name,
-    std::string_view yaml) {
-  auto options = ParseOptionsYaml(yaml);
-  if (extension_name == "dds_extension") {
-    options.remove("participant_name");
-  } else if (extension_name == "mqtt_extension") {
-    options.remove("client_id");
-    options.remove("callback_executor_name");
-  } else if (extension_name == "iceoryx_extension") {
-    options.remove("runtime_id");
-  } else if (extension_name == "ros2_extension") {
-    options.remove("node_name");
-  }
-  return CanonicalYamlValue(options).dump();
-}
-
-bool CompatibleRecorderConnection(
-    const TransportCaptureCapability& lhs,
-    const TransportCaptureCapability& rhs) {
-  return lhs.extension_name == rhs.extension_name &&
-         lhs.extension_path == rhs.extension_path &&
-         CanonicalExtensionOptions(
-             lhs.extension_name, lhs.extension_options_yaml) ==
-             CanonicalExtensionOptions(
-                 rhs.extension_name, rhs.extension_options_yaml) &&
-         CanonicalDriverOptions(lhs.driver_options_yaml) ==
-             CanonicalDriverOptions(rhs.driver_options_yaml);
-}
-
-RecorderRuntimeSpec BuildRecorderRuntimeSpec(
-    const TopicGraph& graph,
-    const std::vector<std::string>& topics,
-    bool include_cached_serialized = true) {
-  RecorderRuntimeSpec spec;
-  std::set<std::string> incompatible_direct_drivers;
-  for (const auto& topic : topics) {
-    for (const auto& advertisement : graph.Find(topic)) {
-      for (const auto& [driver, capability] :
-           advertisement.capture_capabilities) {
-        if (capability.mode != "native_serialized" &&
-            (!include_cached_serialized ||
-             capability.mode != "cached_serialized")) {
-          continue;
-        }
-        if (incompatible_direct_drivers.contains(driver)) {
-          continue;
-        }
-        const auto [found, inserted] =
-            spec.direct_drivers.emplace(driver, capability);
-        if (!inserted &&
-            !CompatibleRecorderConnection(found->second, capability)) {
-          spec.direct_drivers.erase(found);
-          incompatible_direct_drivers.emplace(driver);
-          std::cerr
-              << "Recorder direct connection configuration conflicts for "
-              << "driver '" << driver
-              << "'; falling back to Runtime playback/tap routes.\n";
-          continue;
-        }
-        if (capability.mode == "cached_serialized") {
-          MW_ASSERT(
-              !advertisement.type_support_package.empty(),
-              "Driver '{}' requires an advertised TypeSupport package for '{}'.",
-              driver, advertisement.topic.msg_type);
-          spec.type_support_packages.emplace(
-              advertisement.type_support_package);
-        }
-      }
-    }
-  }
-  return spec;
-}
-
-std::filesystem::path WriteRecorderConfig(
-    const RecorderRuntimeSpec& spec,
-    std::string_view role = "recorder",
-    std::string log_level = "info") {
-  YAML::Node root;
-  YAML::Node ibmw = root["ibmw"];
-  // This Engine is an internal direct-capture helper.  It needs the transport
-  // drivers, but must not publish a separate Runtime Graph registration.
-  ibmw["runtime_graph"]["enabled"] = false;
-  std::map<std::string, TransportCaptureCapability> extensions;
-  for (const auto& [driver, capability] : spec.direct_drivers) {
-    static_cast<void>(driver);
-    MW_ASSERT(
-        !capability.extension_name.empty() &&
-            !capability.extension_path.empty(),
-        "Direct Recorder driver is missing extension configuration.");
-    const auto [found, inserted] =
-        extensions.emplace(capability.extension_name, capability);
-    if (!inserted) {
-      MW_ASSERT(
-          found->second.extension_path == capability.extension_path &&
-              CanonicalExtensionOptions(
-                  found->second.extension_name,
-                  found->second.extension_options_yaml) ==
-                  CanonicalExtensionOptions(
-                      capability.extension_name,
-                      capability.extension_options_yaml),
-          "Conflicting Recorder extension configuration for '{}'.",
-          capability.extension_name);
-    }
-  }
-  for (const auto& [extension_name, capability] : extensions) {
-    YAML::Node options = capability.extension_options_yaml.empty()
-                             ? YAML::Node(YAML::NodeType::Map)
-                             : YAML::Load(capability.extension_options_yaml);
-    if (!options || options.IsNull()) {
-      options = YAML::Node(YAML::NodeType::Map);
-    }
-    const std::string unique = std::to_string(::getpid());
-    if (extension_name == "dds_extension") {
-      options["participant_name"] =
-          "ibmw_bag_" + std::string(role) + "_" + unique;
-    } else if (extension_name == "mqtt_extension") {
-      options["client_id"] =
-          "ibmw_bag_" + std::string(role) + "_" + unique;
-      options["callback_executor_name"] = "";
-    } else if (extension_name == "iceoryx_extension") {
-      options["runtime_id"] =
-          "ibmw_bag_" + std::string(role) + "_" + unique;
-    } else if (extension_name == "zenoh_extension" &&
-               options["limit_domain"]) {
-      std::string domain = options["limit_domain"].as<std::string>();
-      while (!domain.empty() && domain.front() == '/') {
-        domain.erase(domain.begin());
-      }
-      options["limit_domain"] = domain;
-    } else if (extension_name == "ros2_extension") {
-      options["node_name"] =
-          "ibmw_bag_" + std::string(role) + "_" + unique;
-    }
-    YAML::Node extension;
-    extension["name"] = extension_name;
-    extension["path"] = capability.extension_path;
-    extension["options"] = options;
-    ibmw["extensions"]["items"].push_back(extension);
-  }
-  std::transform(
-      log_level.begin(), log_level.end(), log_level.begin(),
-      [](unsigned char value) { return static_cast<char>(std::toupper(value)); });
-  ibmw["logging"]["core_level"] = log_level;
+std::filesystem::path WriteRecorderConfig(const RecordConnection& connection, std::string log_level) {
+  auto root = YAML::Clone(connection.runtime_config);
+  std::transform(log_level.begin(), log_level.end(), log_level.begin(),
+                 [](unsigned char value) { return static_cast<char>(std::toupper(value)); });
+  root["ibmw"]["logging"]["core_level"] = log_level;
   YAML::Node backend;
   backend["type"] = "console";
-  ibmw["logging"]["backends"].push_back(backend);
-  for (const auto& [driver_name, capability] : spec.direct_drivers) {
-    YAML::Node driver;
-    driver["type"] = driver_name;
-    if (!capability.driver_options_yaml.empty()) {
-      driver["options"] = YAML::Load(capability.driver_options_yaml);
-    }
-    ibmw["messaging"]["drivers"].push_back(driver);
-  }
-  const auto config_path = std::filesystem::temp_directory_path() /
-                           ("ibmw-bag-" + std::string(role) + "-" +
-                            std::to_string(::getpid()) + ".yaml");
-  std::ofstream output(config_path, std::ios::trunc);
+  root["ibmw"]["logging"]["backends"].push_back(backend);
+  const auto path = std::filesystem::temp_directory_path() /
+                    ("ibmw-bag-recorder-" + std::to_string(::getpid()) + ".yaml");
+  std::ofstream output(path, std::ios::trunc);
   MW_ASSERT(output.is_open(), "Cannot write temporary Recorder config.");
   output << root;
   output.close();
   MW_ASSERT(output.good(), "Failed to write temporary Recorder config.");
-  return config_path;
+  return path;
 }
 
 using PlaybackDriverSet = std::set<std::string>;
@@ -1626,7 +1442,7 @@ class PlayerOwnedPublisherRegistry {
           channel.topic.msg_type, channel.topic.serialization_type,
           channel.topic.topic);
       auto* serialized_driver = dynamic_cast<
-          runtime::core::transport::SerializedTransportDriver*>(
+          runtime::core::transport::SerializedTransportDriverV2*>(
           drivers_.at("dds"));
       MW_ASSERT(
           serialized_driver != nullptr,
@@ -1727,7 +1543,7 @@ class PlayerOwnedPublisherRegistry {
   }
 
   bool WaitForAcknowledgments(std::chrono::milliseconds timeout) const {
-    std::set<runtime::core::transport::SerializedTransportDriver*> drivers;
+    std::set<runtime::core::transport::SerializedTransportDriverV2*> drivers;
     for (const auto& [key, entry] : entries_) {
       static_cast<void>(key);
       for (const auto& publisher : entry.direct_publishers) {
@@ -1751,7 +1567,7 @@ class PlayerOwnedPublisherRegistry {
 
  private:
   struct DirectPublisher {
-    runtime::core::transport::SerializedTransportDriver* driver = nullptr;
+    runtime::core::transport::SerializedTransportDriverV2* driver = nullptr;
     runtime::core::transport::SerializedPublisherHandle handle;
   };
 
@@ -2197,8 +2013,10 @@ int RunRecord(int argc, const char* const* argv) {
     return 0;
   }
   SimpleLoggerLevelGuard logger_level(options.log_level);
-  RuntimeRegistry registry;
-  TopicGraph graph = BuildCaptureGraph(registry.DiscoverLocalRuntimes());
+  runtime::core::runtime_graph::TypeSupportRegistry type_support_registry;
+  const auto connection = LoadRecordConnection(options.discovery, type_support_registry);
+  RecordDiscovery discovery(options.discovery, type_support_registry);
+  CaptureGraph graph = discovery.Query(std::chrono::seconds(2));
   RecordTopicSelector selector({
       .explicit_topics = options.topics,
       .all = options.all,
@@ -2208,6 +2026,7 @@ int RunRecord(int argc, const char* const* argv) {
       .include_unpublished_topics = options.include_unpublished_topics,
       .ignore_leaf_topics = options.ignore_leaf_topics});
   auto selected_topics = selector.Select(graph);
+  ValidateCaptureSchemas(graph, selected_topics);
   const auto topic_has_publisher = [&graph](std::string_view topic) {
     const auto advertisements = graph.Find(topic);
     return std::any_of(
@@ -2228,137 +2047,75 @@ int RunRecord(int argc, const char* const* argv) {
   if (options.use_sim_time && topic_has_publisher("/clock")) {
     capture_topics.emplace("/clock");
   }
-  const auto runtime_spec = BuildRecorderRuntimeSpec(
-      graph,
-      std::vector<std::string>(
-          capture_topics.begin(), capture_topics.end()));
-
-  std::optional<TemporaryFileGuard> config_guard;
-  runtime::core::runtime_graph::TypeSupportRegistry type_support_registry;
-  for (const auto& path : runtime_spec.type_support_packages) {
-    type_support_registry.Load(path);
-  }
-  const auto load_topic_type_support =
-      [&](const std::set<std::string>& topics) {
-        for (const auto& topic : topics) {
-          for (const auto& advertisement : graph.Find(topic)) {
-            if (!advertisement.type_support_package.empty()) {
-              type_support_registry.Load(
-                  advertisement.type_support_package);
-            }
-          }
+  const auto load_topic_type_support = [&](const std::set<std::string>& topics) {
+    // Native capture still needs schemas for the actual envelope format.
+    // Only transcoding depends on serialization functions in the package.
+    for (const auto& topic : topics) {
+      for (const auto& endpoint : graph.Find(topic)) {
+        if (endpoint.registry_advertisement && !endpoint.registry_advertisement->type_support_package.empty()) {
+          type_support_registry.Load(endpoint.registry_advertisement->type_support_package);
         }
-      };
+      }
+    }
+  };
+  ValidateCaptureSchemas(graph, capture_topics);
   load_topic_type_support(capture_topics);
+  std::optional<TemporaryFileGuard> config_guard;
   ibmw::common::util::LoggerWrapper fallback_logger;
-  // Subscription callbacks must outlive Engine shutdown, including unwinding.
-  std::unique_ptr<CachedTransportSubscriptionRegistry> cached_subscription_registry;
   std::unique_ptr<EngineGuard> engine_guard;
-  std::unordered_map<std::string, runtime::core::transport::TransportDriver*>
-      recorder_drivers;
-  if (!runtime_spec.direct_drivers.empty()) {
-    const auto config_path = WriteRecorderConfig(
-        runtime_spec, "recorder", options.log_level);
+  runtime::core::transport::SerializedTransportOperationsV2 operations;
+  if (options.discovery.Network()) {
+    const auto config_path = WriteRecorderConfig(connection, options.log_level);
     config_guard.emplace(config_path);
     auto engine = std::make_unique<runtime::core::Engine>();
     engine->Initialize({.cfg_file_path = config_path.string()});
     engine_guard = std::make_unique<EngineGuard>(std::move(engine));
-    for (auto* driver : engine_guard->Get()
-                            .GetTransportBus()
-                            .GetUsedTransportDriver()) {
-      recorder_drivers.emplace(std::string(driver->Name()), driver);
+    auto& bus = engine_guard->Get().GetTransportBus();
+    for (const auto* driver : bus.GetUsedTransportDriver()) {
+      if (driver->Name() != connection.driver) continue;
+      const auto* capability = bus.GetSerializedTransportCapability(*driver);
+      MW_ASSERT(capability && capability->HasValidContract() &&
+                    capability->capture_mode == runtime::core::transport::SerializedCaptureMode::kNativeSerialized,
+                "Recorder driver '{}' does not provide native serialized capture.", connection.driver);
+      operations = capability->operations;
     }
+    MW_ASSERT(operations.context, "Recorder driver '{}' is unavailable.", connection.driver);
   }
-
-  // Topic subscriptions use the recorder Engine logger when a direct
-  // transport Engine exists.  Otherwise they use the simple logger fallback.
-  const auto& capture_logger =
-      engine_guard ? engine_guard->Get().GetLogger() : fallback_logger;
-  cached_subscription_registry =
-      std::make_unique<CachedTransportSubscriptionRegistry>(capture_logger);
-
-  BagCapturePlanner initial_planner(graph);
-  BagCapturePlanner dynamic_planner(graph);
+  const auto& capture_logger = engine_guard ? engine_guard->Get().GetLogger() : fallback_logger;
   RecorderCoordinator* runtime_tap_coordinator = nullptr;
   std::mutex runtime_tap_error_mutex;
   std::optional<std::string> runtime_tap_error;
-  const auto configure_planner =
-      [&](BagCapturePlanner& planner, bool allow_cached_subscription) {
-        for (const auto& [driver_name, driver] : recorder_drivers) {
-          if (auto* serialized_driver = dynamic_cast<
-                  runtime::core::transport::SerializedTransportDriver*>(
-                  driver)) {
-            planner.RegisterTransportSourceFactory(
-                driver_name,
-                [serialized_driver, &capture_logger](
-                    const TopicAdvertisement& advertisement,
-                    std::string_view source_name) {
-                  return std::make_unique<TransportSubscriptionSource>(
-                      std::string(source_name), *serialized_driver,
-                      advertisement, advertisement.topic.qos, capture_logger);
-                });
-            continue;
-          }
-          if (!allow_cached_subscription) {
-            continue;
-          }
-          planner.RegisterTransportSourceFactory(
-              driver_name,
-              [driver, &type_support_registry,
-               &cached_subscription_registry](
-                  const TopicAdvertisement& advertisement,
-                  std::string_view source_name) {
-                const auto capability =
-                    advertisement.capture_capabilities.find(
-                        std::string(source_name));
-                MW_ASSERT(
-                    capability !=
-                            advertisement.capture_capabilities.end() &&
-                        capability->second.mode == "cached_serialized",
-                    "Driver '{}' does not advertise cached serialized "
-                    "capture.",
-                    source_name);
-                auto type_support =
-                    type_support_registry.Find(advertisement.topic.msg_type);
-                MW_ASSERT(
-                    type_support,
-                    "TypeSupport '{}' was not loaded from '{}'.",
-                    advertisement.topic.msg_type,
-                    advertisement.type_support_package);
-                return std::make_unique<CachedTransportSubscriptionSource>(
-                    std::string(source_name), "ibmw-bag-recorder", *driver,
-                    advertisement,
-                    type_support, *cached_subscription_registry,
-                    advertisement.topic.qos);
-              });
-        }
-        planner.SetRuntimeTapSourceFactory(
-            [&runtime_tap_coordinator, &runtime_tap_error_mutex,
-             &runtime_tap_error, &capture_logger](
-                const TopicAdvertisement& advertisement) {
-              return std::make_unique<RuntimeTapSource>(
-                  advertisement,
-                  std::make_unique<UnixRuntimeTapClient>(
-                      advertisement.control_socket,
-                      [&runtime_tap_coordinator](uint64_t dropped) {
-                        if (runtime_tap_coordinator != nullptr) {
-                          runtime_tap_coordinator->AddDroppedMessages(dropped);
-                        }
-                      },
-                      [&runtime_tap_error_mutex, &runtime_tap_error](
-                          const std::string& error) {
-                        {
-                          std::lock_guard lock(runtime_tap_error_mutex);
-                          if (!runtime_tap_error) {
-                            runtime_tap_error = error;
-                          }
-                        }
-                        g_stop_requested = true;
-                      }, capture_logger));
-            });
-      };
-  configure_planner(initial_planner, true);
-  configure_planner(dynamic_planner, false);
+  runtime::core::topic_io::RegistrySubscriptionRuntime registry_subscriptions;
+  const RegistrySubscriptionFilter registry_available = [&](const auto& subscription) {
+    return registry_subscriptions.Available(subscription);
+  };
+  BagCapturePlanner planner(graph, [&](const CaptureEndpoint& endpoint) -> std::unique_ptr<SerializedMessageSource> {
+    if (!endpoint.registry_advertisement) {
+      MW_ASSERT(operations.supports_topic(operations.context, endpoint.topic),
+                "Driver '{}' does not support type '{}'.", endpoint.driver, endpoint.topic.msg_type);
+      return std::make_unique<TransportSubscriptionSource>(endpoint.driver, operations,
+          runtime::core::transport::SerializedSubscriberOptionsV2{
+              .topic = endpoint.topic, .requested_qos = endpoint.topic.qos,
+              .wire_topic_name = endpoint.wire_topic_name, .wire_type_name = endpoint.wire_type_name},
+          capture_logger);
+    }
+    if (endpoint.driver != "runtime-tap")
+      return registry_subscriptions.Create({*endpoint.registry_advertisement, endpoint.driver});
+    const auto& advertisement = *endpoint.registry_advertisement;
+    MW_ASSERT(!advertisement.control_socket.empty(), "Registry topic '{}' has no Runtime Tap socket.", endpoint.topic.topic);
+    return std::make_unique<RuntimeTapSource>(advertisement,
+        std::make_unique<UnixRuntimeTapClient>(advertisement.control_socket,
+            [&runtime_tap_coordinator](uint64_t dropped) {
+              if (runtime_tap_coordinator) runtime_tap_coordinator->AddDroppedMessages(dropped);
+            },
+            [&runtime_tap_error_mutex, &runtime_tap_error](const std::string& error) {
+              {
+                std::lock_guard lock(runtime_tap_error_mutex);
+                if (!runtime_tap_error) runtime_tap_error = error;
+              }
+              g_stop_requested = true;
+            }, capture_logger));
+  }, registry_available);
 
   RecorderCoordinator coordinator(
       RecorderCoordinator::Options{
@@ -2391,8 +2148,9 @@ int RunRecord(int argc, const char* const* argv) {
   const auto register_unpublished_channels =
       [&](const std::set<std::string>& topics) {
         for (const auto& topic : topics) {
+          if (topic_has_publisher(topic)) continue;
           for (const auto& advertisement : graph.Find(topic)) {
-            if (advertisement.published) {
+            if (advertisement.published || advertisement.topic.serialization_type.empty()) {
               continue;
             }
             coordinator.RegisterChannel(StorageChannelDescriptor{
@@ -2441,6 +2199,17 @@ int RunRecord(int argc, const char* const* argv) {
       [&](ibmw::transport::SerializedMessage&& message) {
         if (recording_paused.load()) {
           return;
+        }
+        if (message.topic.schema.schema_hash.empty()) {
+          const auto schema = type_support_registry.FindSchema(message.topic.msg_type, message.topic.serialization_type);
+          if (!schema) {
+            std::lock_guard lock(conversion_error_mutex);
+            if (!conversion_error) conversion_error = "No schema for received topic '" + message.topic.topic +
+                "' type '" + message.topic.msg_type + "' format '" + message.topic.serialization_type + "'.";
+            g_stop_requested = true;
+            return;
+          }
+          message.topic.schema = *schema;
         }
         if (options.serialization_format != "auto" &&
             message.topic.serialization_type !=
@@ -2509,17 +2278,9 @@ int RunRecord(int argc, const char* const* argv) {
         std::cout << "  " << (started ? "started " : "stopped ") << topic
                   << " -> " << description << '\n';
       });
-  const auto build_initial_plan =
-      [&initial_planner](std::string_view topic)
-      -> CapturePlan {
-    return initial_planner.BuildPlan({std::string(topic)});
-  };
-  const auto build_dynamic_plan =
-      [&dynamic_planner](std::string_view topic)
-      -> CapturePlan {
-    return dynamic_planner.BuildPlan({std::string(topic)});
-  };
-  controller->Reconcile(capture_topics, graph, build_initial_plan);
+  const auto build_plan = [&planner](std::string_view topic) { return planner.BuildPlan(topic); };
+  controller->Reconcile(capture_topics, graph, build_plan, registry_available);
+  registry_subscriptions.StartPending();
   if (engine_guard) {
     engine_guard->SetFuture(engine_guard->Get().AsyncStart());
   }
@@ -2542,16 +2303,19 @@ int RunRecord(int argc, const char* const* argv) {
     if (options.no_discovery) {
       continue;
     }
-    graph = BuildCaptureGraph(registry.DiscoverLocalRuntimes());
+    graph = discovery.Query();
     selected_topics = selector.Select(graph);
+    ValidateCaptureSchemas(graph, selected_topics);
     register_unpublished_channels(selected_topics);
     record_clock = selected_topics.contains("/clock");
     capture_topics = topics_with_publishers(selected_topics);
     if (options.use_sim_time && topic_has_publisher("/clock")) {
       capture_topics.emplace("/clock");
     }
+    ValidateCaptureSchemas(graph, capture_topics);
     load_topic_type_support(capture_topics);
-    controller->Reconcile(capture_topics, graph, build_dynamic_plan);
+    controller->Reconcile(capture_topics, graph, build_plan, registry_available);
+    registry_subscriptions.StartPending();
   }
   std::exception_ptr source_stop_error;
   try {
@@ -2561,6 +2325,9 @@ int RunRecord(int argc, const char* const* argv) {
   }
   runtime_tap_coordinator = nullptr;
   controller.reset();
+  try { registry_subscriptions.Stop(); } catch (...) {
+    if (!source_stop_error) source_stop_error = std::current_exception();
+  }
   std::exception_ptr coordinator_close_error;
   try {
     coordinator.Close();

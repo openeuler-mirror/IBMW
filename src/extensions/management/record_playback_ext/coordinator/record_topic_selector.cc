@@ -25,7 +25,7 @@ RecordTopicSelector::RecordTopicSelector(Options options)
 }
 
 std::set<std::string> RecordTopicSelector::Select(
-    const TopicGraph& graph) const {
+    const CaptureGraph& graph) const {
   std::set<std::string> result(
       options_.explicit_topics.begin(), options_.explicit_topics.end());
   const std::regex include_pattern(

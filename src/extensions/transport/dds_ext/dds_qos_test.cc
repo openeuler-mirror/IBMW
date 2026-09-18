@@ -26,6 +26,34 @@ class DdsQosTest : public ::testing::Test {
   DdsTransportDriver driver_;
 };
 
+TEST_F(DdsQosTest, SerializedDiscoverySubscriptionUsesNativeNamesWithoutRemapping) {
+  Configure("{}");
+  const auto handle = driver_.AttachSerializedSubscriber(
+      {.topic = {.topic = "/logical", .msg_type = "dds:Example", .serialization_type = "cdr"},
+       .wire_topic_name = "/native_discovery", .wire_type_name = "Example"},
+      [](auto&&) {});
+  ASSERT_TRUE(handle);
+  auto* topic = bus_.GetParticipant()->lookup_topicdescription("/native_discovery");
+  ASSERT_NE(topic, nullptr);
+  EXPECT_EQ(topic->get_type_name(), "Example");
+  EXPECT_EQ(bus_.GetParticipant()->lookup_topicdescription("/logical_native_dds_Example"), nullptr);
+  EXPECT_TRUE(driver_.DetachSerializedSubscriber(handle));
+
+  const auto legacy = driver_.AttachSerializedSubscriber(
+      {.topic = {.topic = "/logical", .msg_type = "dds:Example", .serialization_type = "cdr"}},
+      [](auto&&) {});
+  ASSERT_TRUE(legacy);
+  EXPECT_NE(bus_.GetParticipant()->lookup_topicdescription("/logical_native_dds_Example"), nullptr);
+  EXPECT_TRUE(driver_.DetachSerializedSubscriber(legacy));
+}
+
+TEST_F(DdsQosTest, SerializedDiscoverySubscriptionRejectsIncompleteNativeNames) {
+  Configure("{}");
+  EXPECT_FALSE(driver_.AttachSerializedSubscriber(
+      {.topic = {.topic = "/logical", .msg_type = "dds:Example", .serialization_type = "cdr"},
+       .wire_topic_name = "/native_discovery"}, [](auto&&) {}));
+}
+
 class ScopedExtraSamplesEnv {
  public:
   explicit ScopedExtraSamplesEnv(const char* value) {

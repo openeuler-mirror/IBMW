@@ -87,6 +87,20 @@ bool ZenohBus::RegisterPublisher(const std::string &keyexpr, bool shm_enabled) {
   return true;
 }
 
+bool ZenohBus::CreateSubscriber(const std::string& keyexpr, MsgHandleFunc handle,
+                                z_owned_subscriber_t& subscriber) {
+  std::lock_guard lock(z_catalog_mutex_);
+  if (!initialized_) return false;
+  z_view_keyexpr_t key;
+  if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
+  z_owned_closure_sample_t closure;
+  z_closure(&closure,
+            [](z_loaned_sample_t* sample, void* context) { (*static_cast<MsgHandleFunc*>(context))(sample); },
+            [](void* context) { delete static_cast<MsgHandleFunc*>(context); },
+            new MsgHandleFunc(std::move(handle)));
+  return z_declare_subscriber(z_loan(z_session_), &subscriber, z_loan(key), z_move(closure), nullptr) >= 0;
+}
+
 bool ZenohBus::RegisterSubscriber(const std::string &keyexpr, MsgHandleFunc handle) {
   if (!initialized_) return false;
   std::lock_guard<std::mutex> lock(z_catalog_mutex_);

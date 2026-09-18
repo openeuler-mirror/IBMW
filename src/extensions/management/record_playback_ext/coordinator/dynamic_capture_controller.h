@@ -32,8 +32,9 @@ class DynamicCaptureController {
 
   void Reconcile(
       const std::set<std::string>& selected_topics,
-      const TopicGraph& graph,
-      const PlanBuilder& build_plan);
+      const CaptureGraph& graph,
+      const PlanBuilder& build_plan,
+      const RegistrySubscriptionFilter& available = {});
   void StopAll();
 
   size_t ActiveCount() const noexcept;
@@ -46,7 +47,8 @@ class DynamicCaptureController {
 
   static bool SourceStillAvailable(
       const CapturePlan& plan,
-      const TopicGraph& graph);
+      const CaptureGraph& graph,
+      const RegistrySubscriptionFilter& available);
   void Start(std::string_view topic, Entry& entry);
   void Stop(std::string_view topic, Entry& entry);
 

@@ -13,16 +13,87 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <endian.h>
 
 #include "gtest/gtest.h"
 #include "engine/transport/transport_bus.h"
 #include "engine/transport/transport_driver_tools.h"
+#include "engine/runtime_graph/runtime_protocol.h"
+#include "engine/runtime_graph/runtime_directory.h"
 #include "yaml-cpp/yaml.h"
 
 namespace ibmw::runtime::core::topic_io {
 namespace {
 
 using namespace std::chrono_literals;
+
+class DirectPublishTap final : public PublishTapCapability {
+ public:
+  uint64_t Register(Callback value) override { callback = std::move(value); return 1; }
+  bool Unregister(uint64_t) override { callback = {}; return true; }
+  Callback callback;
+};
+
+TEST(RuntimeTapStreamTest, SharesOwnedFormatsAndRemovesPublisherIndexEntries) {
+  std::string directory = "/tmp/ibmw-tap-formats-XXXXXX";
+  ASSERT_NE(::mkdtemp(directory.data()), nullptr);
+  DirectPublishTap tap;
+  RuntimeTapServer server(tap, "runtime", directory);
+  server.Start();
+  TopicAdvertisement advertisement;
+  advertisement.runtime_id = "runtime";
+  advertisement.publisher_id = "module-7";
+  advertisement.topic = {.topic = "/bytes", .msg_type = "test:Bytes", .serialization_type = "cdr"};
+  std::vector<TapSessionDescriptor> sessions;
+  for (int i = 0; i < 3; ++i) sessions.push_back(server.StartSession(advertisement));
+  advertisement.topic.serialization_type = "json";
+  sessions.push_back(server.StartSession(advertisement));
+  const auto stopped = server.StartSession(advertisement);
+  ASSERT_TRUE(server.StopSession(stopped.session_id));
+  advertisement.publisher_id = "module-8";
+  advertisement.topic.serialization_type = "unrelated";
+  const auto unrelated = server.StartSession(advertisement);
+  std::string cdr = "cdr-owned", json = "json-owned";
+  std::map<std::string, unsigned> acquired;
+  ibmw::transport::Context context;
+  ibmw::extension::MessageView view{
+      .topic = "/bytes", .msg_type = "test:Bytes", .module_name = "module", .endpoint_index = 7,
+      .context = ibmw::transport::ContextRef(context), .available_serialization_types = {"cdr", "json"},
+      .acquire_serialized = [&](std::string_view format) {
+        ++acquired[std::string(format)];
+        auto& bytes = format == "cdr" ? cdr : json;
+        return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
+      }};
+  tap.callback(view);
+  EXPECT_EQ(acquired, (std::map<std::string, unsigned>{{"cdr", 1}, {"json", 1}}));
+  cdr.assign(cdr.size(), 'x');
+  json.assign(json.size(), 'x');
+  // Readers connect after the borrowed storage has changed.
+  for (size_t i = 0; i < sessions.size(); ++i) {
+    runtime_graph::RuntimeFileDescriptor fd(::socket(AF_UNIX, SOCK_STREAM, 0));
+    ASSERT_GE(fd.Get(), 0);
+    runtime_graph::ConfigureRuntimeSocket(fd.Get());
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    ASSERT_LT(sessions[i].stream_socket.size(), sizeof(address.sun_path));
+    std::strcpy(address.sun_path, sessions[i].stream_socket.c_str());
+    ASSERT_EQ(::connect(fd.Get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+    runtime_graph::RuntimeStreamHeader header{};
+    ASSERT_EQ(::recv(fd.Get(), &header, sizeof(header), MSG_WAITALL), sizeof(header));
+    const size_t metadata_size = ntohl(header.json_size);
+    const size_t payload_size = be64toh(header.payload_size);
+    ASSERT_LT(metadata_size + payload_size, 65536u);
+    std::string bytes(metadata_size + payload_size, '\0');
+    ASSERT_EQ(::recv(fd.Get(), bytes.data(), bytes.size(), MSG_WAITALL), static_cast<ssize_t>(bytes.size()));
+    EXPECT_EQ(bytes.substr(metadata_size), i < 3 ? "cdr-owned" : "json-owned");
+  }
+  for (const auto& session : sessions) EXPECT_TRUE(server.StopSession(session.session_id));
+  EXPECT_TRUE(server.StopSession(unrelated.session_id));
+  EXPECT_FALSE(tap.callback);
+  server.Shutdown();
+  std::filesystem::remove_all(directory);
+}
 
 class TestPublishTap final : public PublishTapCapability {
  public:

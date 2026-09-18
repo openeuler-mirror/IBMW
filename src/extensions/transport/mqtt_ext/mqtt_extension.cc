@@ -144,7 +144,7 @@ void MqttExtension::RegisterMqttTransportDriver() {
       });
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(mqtt_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
+      runtime::core::transport::SerializedTransportCapabilityV2{
           .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
           .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,

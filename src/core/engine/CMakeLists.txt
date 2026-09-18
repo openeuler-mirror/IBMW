@@ -31,6 +31,7 @@ set(shared_runtime_src
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_advertisement.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_graph.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/type_support_registry.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/registry_subscription.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/runtime_tap_source.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/runtime_tap_stream.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/serialized_payload.cc)

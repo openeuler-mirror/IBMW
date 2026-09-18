@@ -23,6 +23,10 @@ case-specific verification.
   compiler, and standard library. Extensions requesting another nonzero Runtime
   ABI are rejected before initialization; ABI 0 explicitly selects the existing
   Engine initialization interface. Runtime ABI 1 interoperability is unsupported.
+- Serialized transport ABI 2 includes native wire topic/type subscription names.
+  Core validates the capability version and size before accepting its operation
+  table. ABI 1 drivers must be rebuilt; descriptor size alone does not establish
+  compatibility of the C++ objects passed to an operation.
 - Runtime graph protocol 2 uses `<registry_path>/v2/` for registrations and
   sockets, including when a custom registry root is configured. Old protocol
   data is not converted. Unknown or malformed registrations are skipped without

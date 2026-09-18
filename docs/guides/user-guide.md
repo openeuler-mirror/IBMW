@@ -1261,9 +1261,9 @@ subscriber count as one endpoint. RPC internals are excluded. Each endpoint has
 its session ZID, instance-local ID, logical topic/type and actual wire key.
 Serialization and QoS remain empty when registration does not establish them.
 The observer retries metadata queries during the collection window and replaces
-each instance's snapshot by revision. This is a bounded observation, not a
-continuous liveness view; an instance seen earlier in the window may exit before
-the result is printed.
+each instance's snapshot by revision, removing instances that have not replied
+for two seconds. A snapshot remains a bounded observation: an instance may exit
+just before the result is printed.
 
 Network queries collect a snapshot over a default two-second window. Each
 invocation discovers independently, without a persistent discovery service.
@@ -1271,12 +1271,118 @@ Domain, discovery settings, security and network reachability determine what
 can be observed. DDS, ROS 2 and Zenoh remain separate sources: combined queries keep
 their endpoints without merging identities across sources. Failed sources return
 exit status 1 while successful sources still
-print their results. These adapters do not yet add remote discovery to `bag record`.
+print their results.
 
 Native ROS 2 libraries can exit the process during loading, for example when
 Humble is given an uninstalled `RMW_IMPLEMENTATION`. This happens before the
 adapter runs, so it cannot be caught as a source error or preserve other sources'
 results. The selected RMW must be available before using ROS 2 discovery.
+
+`bag record` defaults to local registry discovery and selects subscriptions by
+transport capability; network recording supports DDS, ROS 2 and Zenoh:
+
+```bash
+ibmw bag record --registry /chatter -o ./registry_bag
+ibmw bag record --dds --domain 87 --config-file ./dds-recorder.yaml /native_topic -o ./dds_bag
+ibmw bag record --ros2 --domain 87 --config-file ./ros2-recorder.yaml /chatter -o ./ros2_bag
+ibmw bag record --zenoh --zenoh-domain robot --config-file ./zenoh-recorder.yaml /chatter -o ./zenoh_bag
+```
+
+Registry discovery does not prescribe the capture transport. Registry recording uses
+advertised capabilities and connection settings to create an independent observer
+runtime, choosing iceoryx, DDS, Zenoh, MQTT, ROS 2, then Runtime Tap in priority
+order. DDS, ROS 2 and Zenoh use native serialized subscriptions; iceoryx and MQTT
+use TypeSupport-backed cached typed subscriptions. Observer runtimes use distinct
+instance names and do not load business modules. One direct route must cover all
+publishers of a topic, preventing duplicate recording through multiple drivers.
+
+Cached typed subscriptions require one publisher and registration before driver
+startup; existing typed subscriptions can be reused afterward. Multiple publishers,
+conflicting connections or unsupported dynamic registration select another eligible
+direct route, then one Tap per publisher. UDP, TCP, HTTP and local usually use Tap.
+Tap must be advertised by the publisher and does not capture explicit
+Loan/PublishLoaned publications that bypass ordinary Send.
+
+Network recording obtains subscription addresses from the selected discovery
+plugin and receives serialized messages through the recorder's transport extension,
+without publisher registration files. One network subscription receives all
+publishers of a topic. Network mode uses recorder-owned configuration and never
+loads extensions or TypeSupport paths supplied by network metadata.
+
+Network recording requires recorder-owned configuration and local TypeSupport
+packages containing schemas:
+
+```yaml
+ibmw:
+  runtime_graph:
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options: {domain_id: 87}
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          subscribers:
+            - topic: ".*"
+              qos: {history: keep_last, depth: 100}
+```
+
+For ROS 2, use `ros2_extension`, `libibmw_ros2_transport.so`, `type: ros2`, and
+TypeSupport packages for the selected ROS message types. The recorder assigns
+its own node name and owns an independent ROS context. For Zenoh, use
+`zenoh_extension`, `libibmw_zenoh_transport.so`, `type: zenoh`, with extension
+options such as:
+
+```yaml
+options:
+  limit_domain: robot
+  native_cfg_path: ./zenoh-client.json5
+```
+
+Relative package, extension, DDS `xml_profile_file` and Zenoh `native_cfg_path`
+paths resolve from the recorder configuration directory. Missing schemas for
+selected topics cause an explicit error. Network metadata never supplies paths
+for loading executable code.
+
+| Source | Subscription address | Bag type / serialization |
+|--------|----------------------|--------------------------|
+| DDS | Discovered native DDS topic/type, without another name conversion | `dds:<native type>` / `cdr` |
+| ROS 2 | ROS graph topic and `pkg/msg/Type` | `ros2:pkg/msg/Type` / `ros2` |
+| Zenoh | Actual wire key from metadata | Original logical type / actual envelope format |
+
+Zenoh learns the serialization format from each received sample and validates
+its schema before recording it. With `--serialization-format auto`, a package
+providing only matching schemas is sufficient; format conversion also requires
+TypeSupport serialization functions. Missing schemas stop recording with an
+error when the corresponding sample arrives. Topics without received samples
+do not create channels with an unknown format. DDS and ROS 2 adapt
+reliability/durability to all observed publishers, ignoring subscriber QoS when
+computing offered policies. All three backends share dynamic capture planning.
+
+`--domain` selects the DDS or ROS 2 domain. It defaults to configured `domain_id`,
+then `ROS_DOMAIN_ID` for ROS 2, otherwise 0. Explicit CLI and configuration values
+must agree. Zenoh `--zenoh-domain` must likewise agree with `limit_domain`.
+Zenoh discovery and capture own separate sessions using the same native config
+by default; use a client config or automatically assigned listen ports. If the
+capture config specifies a fixed listen port or session ID, pass a separate
+observer config with `--zenoh-config <path>`.
+
+Recording collects an initial two-second snapshot and keeps the observer alive
+for late publishers. Zenoh removes instances after two seconds without a
+metadata reply. `--no-discovery` disables subsequent graph updates; existing
+network subscriptions can still receive new publishers on their topic. Each
+invocation selects one source. `-a` selects all topics in that source, and `-d`
+remains the split duration. `--use-sim-time` supports local, ROS 2 and Zenoh
+sources exposing logical `/clock` topics.
+
+The DDS observer uses default discovery settings for the selected domain;
+custom transport settings apply to the capture driver. Generic keyed DDS types
+remain unsupported. Bags retain native DDS names; playback mapping back to
+these names is outside this recording change. Raw DDS mode does not map `/clock`.
 
 ---
 

@@ -31,9 +31,11 @@ class Provider final : public DiscoveryProvider {
     if (!worker_.joinable()) throw std::logic_error("Zenoh discovery is not started.");
     std::this_thread::sleep_until(deadline);
     std::lock_guard lock(mutex_);
+    const auto now = std::chrono::steady_clock::now();
+    std::erase_if(snapshots_, [&](const auto& item) { return now - item.second.last_seen > 2s; });
     DiscoverySnapshot result;
     for (const auto& [instance, snapshot] : snapshots_) {
-      result.endpoints.insert(result.endpoints.end(), snapshot.endpoints.begin(), snapshot.endpoints.end());
+      result.endpoints.insert(result.endpoints.end(), snapshot.snapshot.endpoints.begin(), snapshot.snapshot.endpoints.end());
     }
     result.sources.push_back({.source = source_,
         .status = error_.empty() ? DiscoveryStatus::kReady : DiscoveryStatus::kError,
@@ -70,10 +72,10 @@ class Provider final : public DiscoveryProvider {
         {z_string_data(z_loan(key)), z_string_len(z_loan(key))}, source_);
     std::lock_guard lock(mutex_);
     const auto previous = snapshots_.find(snapshot.instance);
-    if (previous == snapshots_.end() || previous->second.revision <= snapshot.revision) {
+    if (previous == snapshots_.end() || previous->second.snapshot.revision <= snapshot.revision) {
       // Replace whole instance snapshots so removed entries cannot accumulate.
       const auto instance = snapshot.instance;
-      snapshots_.insert_or_assign(instance, std::move(snapshot));
+      snapshots_.insert_or_assign(instance, Observed{std::move(snapshot), std::chrono::steady_clock::now()});
     }
   }
 
@@ -119,7 +121,11 @@ class Provider final : public DiscoveryProvider {
   Owned<z_owned_session_t> session_;
   std::jthread worker_;
   std::mutex mutex_;
-  std::map<std::string, zenoh_protocol::Snapshot> snapshots_;
+  struct Observed {
+    zenoh_protocol::Snapshot snapshot;
+    std::chrono::steady_clock::time_point last_seen;
+  };
+  std::map<std::string, Observed> snapshots_;
   std::string error_;
 };
 }  // namespace

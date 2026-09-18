@@ -99,7 +99,7 @@ void IceoryxExtension::RegisterIceoryxTransportDriver() {
           .retained_loan_v1 = static_cast<
               runtime::core::transport::RetainedLoanCapabilityV1*>(
               concrete_ptr)},
-      runtime::core::transport::SerializedTransportCapabilityV1{
+      runtime::core::transport::SerializedTransportCapabilityV2{
           .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
           .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,

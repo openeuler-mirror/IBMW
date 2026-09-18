@@ -442,7 +442,7 @@ void TransportBus::RegisterTransportDriver(
 void TransportBus::RegisterTransportDriver(
     std::unique_ptr<TransportDriver>&& transport_driver_ptr,
     TransportDriverCapabilitiesV1 capabilities,
-    const SerializedTransportCapabilityV1& serialized_capability) {
+    const SerializedTransportCapabilityV2& serialized_capability) {
   MW_REQUIRE(
       state_.load() == State::kPreInit,
       "Method can only be called when state is 'PreInit'.");
@@ -560,7 +560,7 @@ const std::vector<TransportDriver*>& TransportBus::GetUsedTransportDriver() cons
   return used_transport_driver_vec_;
 }
 
-const SerializedTransportCapabilityV1*
+const SerializedTransportCapabilityV2*
 TransportBus::GetSerializedTransportCapability(
     const TransportDriver& driver) const noexcept {
   const auto found = serialized_transport_capabilities_map_.find(&driver);

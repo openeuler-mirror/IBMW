@@ -23,7 +23,8 @@ DiscoverySnapshot RegistryDiscoveryProvider::Query(
   static_cast<void>(deadline);
   if (!registry_) throw std::logic_error("Registry discovery has not been started.");
   ibmw::runtime::core::runtime_graph::TopicGraph graph;
-  graph.ReplaceRuntimes(registry_->DiscoverLocalRuntimes());
+  runtimes_ = registry_->DiscoverLocalRuntimes();
+  graph.ReplaceRuntimes(runtimes_);
 
   DiscoverySnapshot result;
   for (const auto& name : graph.Topics()) {
@@ -50,6 +51,7 @@ DiscoverySnapshot RegistryDiscoveryProvider::Query(
 }
 
 void RegistryDiscoveryProvider::Stop() noexcept {
+  runtimes_.clear();
   registry_.reset();
 }
 

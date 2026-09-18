@@ -31,5 +31,38 @@ TEST(BagCommandRecordRegression, RejectsSynchronousRecording) {
       std::string::npos);
 }
 
+TEST(BagCommandRecordRegression, NetworkCaptureRequiresRecorderConfiguration) {
+  for (const char* backend : {"--dds", "--ros2", "--zenoh"}) {
+    const char* argv[] = {"ibmw", "record", "/topic", backend};
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(IbmwRunBagCommand(4, argv), 1);
+    EXPECT_NE(testing::internal::GetCapturedStderr().find("requires --config-file"), std::string::npos);
+  }
+}
+
+TEST(BagCommandRecordRegression, RejectsMixedSourcesAndInvalidDomainsBeforeRecording) {
+  for (const char* value : {"-1", "4294967296", "2junk", ""}) {
+    const char* argv[] = {"ibmw", "record", "/topic", "--dds", "--domain", value};
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(IbmwRunBagCommand(6, argv), 1);
+    EXPECT_NE(testing::internal::GetCapturedStderr().find("--domain"), std::string::npos);
+  }
+  for (const char* backend : {"--dds", "--ros2", "--zenoh"}) {
+    const char* argv[] = {"ibmw", "record", "/topic", backend, "--registry"};
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(IbmwRunBagCommand(5, argv), 1);
+    EXPECT_NE(testing::internal::GetCapturedStderr().find("one discovery source"), std::string::npos);
+  }
+}
+
+TEST(BagCommandRecordRegression, RegistryPathRequiresRegistryDiscovery) {
+  for (const char* backend : {"--dds", "--ros2", "--zenoh"}) {
+    const char* argv[] = {"ibmw", "record", "/topic", backend, "--registry-path", "/tmp/record-registry"};
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(IbmwRunBagCommand(6, argv), 1);
+    EXPECT_NE(testing::internal::GetCapturedStderr().find("--registry-path requires --registry"), std::string::npos);
+  }
+}
+
 }  // namespace
 }  // namespace ibmw::extensions::record_playback_extension

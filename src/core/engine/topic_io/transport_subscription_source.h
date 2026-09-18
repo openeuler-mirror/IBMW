@@ -4,21 +4,17 @@
 #pragma once
 
 #include "base/log_util.h"
-#include "engine/transport/serialized_transport_driver.h"
 #include "engine/topic_io/serialized_message_source.h"
-#include "engine/runtime_graph/topic_advertisement.h"
+#include "engine/transport/serialized_transport_driver.h"
 
 namespace ibmw::runtime::core::topic_io {
-
-using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
 class TransportSubscriptionSource final : public SerializedMessageSource {
  public:
   TransportSubscriptionSource(
       std::string driver_name,
-      ibmw::runtime::core::transport::SerializedTransportDriver& driver,
-      TopicAdvertisement advertisement,
-      ibmw::transport::QosDescriptor requested_qos,
+      ibmw::runtime::core::transport::SerializedTransportOperationsV2 operations,
+      ibmw::runtime::core::transport::SerializedSubscriberOptionsV2 options,
       const ibmw::common::util::LoggerWrapper& logger);
   ~TransportSubscriptionSource() override;
 
@@ -30,9 +26,8 @@ class TransportSubscriptionSource final : public SerializedMessageSource {
 
  private:
   std::string driver_name_;
-  ibmw::runtime::core::transport::SerializedTransportDriver& driver_;
-  TopicAdvertisement advertisement_;
-  ibmw::transport::QosDescriptor requested_qos_;
+  ibmw::runtime::core::transport::SerializedTransportOperationsV2 operations_;
+  ibmw::runtime::core::transport::SerializedSubscriberOptionsV2 options_;
   const ibmw::common::util::LoggerWrapper& logger_;
   ibmw::runtime::core::transport::SerializedSubscriberHandle handle_;
 };

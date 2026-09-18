@@ -9,6 +9,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "engine/transport/serialized_callback.h"
+#include "engine/transport/serialized_transport_driver.h"
 #include "engine/transport/transport_driver.h"
 #include "engine/transport/transport_driver_tools.h"
 
@@ -74,6 +76,12 @@ class Ros2TransportDriver : public runtime::core::transport::TransportDriver {
   bool OnMessage(const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept override;
   void Send(runtime::core::transport::MessageFrame& msg_wrapper) noexcept override;
 
+  runtime::core::transport::SerializedTransportOperationsV2 SerializedOperations() noexcept;
+  runtime::core::transport::SerializedSubscriberHandle AttachSerializedSubscriber(
+      const runtime::core::transport::SerializedSubscriberOptionsV2& options,
+      runtime::core::transport::SerializedMessageCallback callback) noexcept;
+  bool DetachSerializedSubscriber(runtime::core::transport::SerializedSubscriberHandle handle) noexcept;
+
   void SetNodePtr(const std::shared_ptr<rclcpp::Node>& ros2_node_ptr) {
     ros2_node_ptr_ = ros2_node_ptr;
   }
@@ -91,6 +99,14 @@ class Ros2TransportDriver : public runtime::core::transport::TransportDriver {
     kStart,
     kShutdown,
   };
+
+  struct NativeSubscriber {
+    std::shared_ptr<runtime::core::transport::SerializedCallback> callback;
+    std::shared_ptr<rclcpp::GenericSubscription> subscription;
+  };
+  std::mutex native_mutex_;
+  uint64_t next_native_handle_ = 1;
+  std::unordered_map<uint64_t, NativeSubscriber> native_subscribers_;
 
   Options options_;
   std::atomic<State> state_ = State::kPreInit;

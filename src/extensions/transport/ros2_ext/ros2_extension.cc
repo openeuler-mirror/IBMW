@@ -27,6 +27,7 @@ struct convert<ibmw::extensions::ros2_extension::Ros2Extension::Options> {
     Node node;
 
     node["node_name"] = rhs.node_name;
+    if (rhs.domain_id) node["domain_id"] = *rhs.domain_id;
     node["executor_type"] = rhs.executor_type;
     if (rhs.executor_type == "MultiThreaded") {
       node["executor_thread_num"] = rhs.executor_thread_num;
@@ -43,6 +44,7 @@ struct convert<ibmw::extensions::ros2_extension::Ros2Extension::Options> {
     if (!node.IsMap()) return false;
 
     rhs.node_name = node["node_name"].as<std::string>();
+    if (node["domain_id"]) rhs.domain_id = node["domain_id"].as<uint32_t>();
 
     if (node["executor_type"])
       rhs.executor_type = node["executor_type"].as<std::string>();
@@ -86,33 +88,35 @@ bool Ros2Extension::OnInit(runtime::core::Engine* core_ptr) {
   op.auto_initialize_logging(options_.auto_initialize_logging);
   op.shutdown_on_signal = false;
 
-  if (!rclcpp::ok()) {
-    rclcpp::init(0, nullptr, op);
-  }
-
-  ros2_node_ptr_ = std::make_shared<rclcpp::Node>(options_.node_name);
+  if (options_.domain_id) op.set_domain_id(*options_.domain_id);
+  ros2_context_ = std::make_shared<rclcpp::Context>();
+  ros2_context_->init(0, nullptr, op);
+  ros2_node_ptr_ = std::make_shared<rclcpp::Node>(
+      options_.node_name, rclcpp::NodeOptions().context(ros2_context_));
+  rclcpp::ExecutorOptions executor_options;
+  executor_options.context = ros2_context_;
 
   if (options_.executor_type == "SingleThreaded") {
     ros2_node_executor_ptr_ =
-        std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+        std::make_shared<rclcpp::executors::SingleThreadedExecutor>(executor_options);
   } else if (options_.executor_type == "StaticSingleThreaded") {
     ros2_node_executor_ptr_ =
-        std::make_shared<rclcpp::executors::StaticSingleThreadedExecutor>();
+        std::make_shared<rclcpp::executors::StaticSingleThreadedExecutor>(executor_options);
   } else if (options_.executor_type == "MultiThreaded") {
     ros2_node_executor_ptr_ =
         std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
-            rclcpp::ExecutorOptions(), options_.executor_thread_num);
+            executor_options, options_.executor_thread_num);
   } else if (options_.executor_type == "EventsExecutor") {
 #if RCLCPP_VERSION_MAJOR == 16
     // Humble: use irobot events_executor
     ros2_node_executor_ptr_ =
         std::make_shared<rclcpp::executors::EventsExecutor>(
-            std::make_unique<LockFreeEventsQueue>());
+            std::make_unique<LockFreeEventsQueue>(), false, executor_options);
 #elif RCLCPP_VERSION_MAJOR == 28
     // Jazzy: use system events_executor in experimental namespace
     ros2_node_executor_ptr_ =
         std::make_shared<rclcpp::experimental::executors::EventsExecutor>(
-            std::make_unique<LockFreeEventsQueue>());
+            std::make_unique<LockFreeEventsQueue>(), false, executor_options);
 #endif
   } else {
     MW_THROW("Invalid ros2 executor_type '{}'.",
@@ -147,11 +151,9 @@ void Ros2Extension::OnShutdown() {
   if (ros2_node_executor_ptr_) {
     ros2_node_executor_ptr_->cancel();
   }
-  auto default_context = rclcpp::contexts::get_global_default_context();
-  if (default_context && default_context->is_valid()) {
-    default_context->shutdown("user called rclcpp::shutdown()");
+  if (ros2_context_ && ros2_context_->is_valid()) {
+    ros2_context_->shutdown("ROS2 extension shutdown");
   }
-  rclcpp::uninstall_signal_handlers();
 
   if (ros2_thread_ptr_ && ros2_thread_ptr_->joinable()) {
     ros2_thread_ptr_->join();
@@ -159,6 +161,7 @@ void Ros2Extension::OnShutdown() {
   ros2_thread_ptr_.reset();
   ros2_node_executor_ptr_.reset();
   ros2_node_ptr_.reset();
+  ros2_context_.reset();
 }
 
 void Ros2Extension::SetExecutorThreadSchedOption() {
@@ -196,18 +199,20 @@ void Ros2Extension::RegisterRos2TransportDriver() {
   static_cast<Ros2TransportDriver*>(ros2_transport_driver_ptr.get())
       ->SetNodePtr(ros2_node_ptr_);
 
+  const auto operations = static_cast<Ros2TransportDriver*>(ros2_transport_driver_ptr.get())->SerializedOperations();
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(ros2_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
-          .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
+      runtime::core::transport::SerializedTransportCapabilityV2{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kNativeSerialized,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
-          .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kNative,
           .schema = runtime::core::transport::SerializedSchemaSupport::kTypeSupportPackage,
           .loan = runtime::core::transport::SerializedLoanSupport::kSharedPayload,
           .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
           .capture_priority = 4,
           .provider_name = Name(),
-          .provider_instance_option = "node_name"});
+          .provider_instance_option = "node_name",
+          .operations = operations});
 }
 
 }  // namespace ibmw::extensions::ros2_extension

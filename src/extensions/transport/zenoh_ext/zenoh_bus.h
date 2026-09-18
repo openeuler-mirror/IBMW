@@ -27,6 +27,10 @@ class ZenohBus {
   void Initialize(const std::string& native_cfg_path, size_t shm_pool_size);
   void Shutdown();
 
+  // Caller owns the native handle. Its closure owns the callback until Zenoh
+  // releases all in-flight references, including after undeclaration.
+  bool CreateSubscriber(const std::string& keyexpr, MsgHandleFunc handle,
+                        z_owned_subscriber_t& subscriber);
   bool RegisterSubscriber(const std::string& keyexpr, MsgHandleFunc handle);
   bool RegisterPublisher(const std::string& keyexpr, bool shm_enabled);
 

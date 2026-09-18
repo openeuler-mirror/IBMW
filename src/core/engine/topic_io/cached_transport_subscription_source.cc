@@ -25,12 +25,14 @@ uint64_t ParseUint64(std::string_view value) {
 std::string SubscriptionKey(
     const ibmw::runtime::core::transport::TransportDriver& driver,
     const TopicAdvertisement& advertisement,
-    std::string_view module_name) {
+    std::string_view module_name,
+    const ibmw::transport::QosDescriptor& qos) {
   return std::to_string(reinterpret_cast<uintptr_t>(&driver)) + '\0' +
          std::string(module_name) + '\0' +
          advertisement.topic.topic + '\0' + advertisement.topic.msg_type +
          '\0' + advertisement.topic.serialization_type + '\0' +
-         advertisement.topic.schema.schema_hash;
+         advertisement.topic.schema.schema_hash + '\0' + advertisement.type_support_package + '\0' +
+         nlohmann::json(qos.policies).dump();
 }
 
 using SubscriptionState =
@@ -180,7 +182,7 @@ CachedTransportSubscriptionRegistry::Attach(
       type_support.TypeName(), advertisement.topic.msg_type);
 
   const std::string subscription_key =
-      SubscriptionKey(driver, advertisement, module_name);
+      SubscriptionKey(driver, advertisement, module_name, requested_qos);
   {
     std::lock_guard registry_lock(mutex_);
     const auto existing = states_.find(subscription_key);

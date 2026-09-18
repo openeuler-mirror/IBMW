@@ -85,7 +85,7 @@ struct ZeroCopyStats {
  */
 class __attribute__((visibility("default"))) DdsTransportDriver
     : public runtime::core::transport::TransportDriver,
-      public runtime::core::transport::SerializedTransportDriver
+      public runtime::core::transport::SerializedTransportDriverV2
 #ifdef IBMW_ENABLE_COMM_TRACE
     , public runtime::core::transport::internal::CommTraceSendOverlayV1
 #endif
@@ -158,7 +158,7 @@ class __attribute__((visibility("default"))) DdsTransportDriver
 
   runtime::core::transport::SerializedSubscriberHandle
   AttachSerializedSubscriber(
-      const runtime::core::transport::SerializedSubscriberOptions& options,
+      const runtime::core::transport::SerializedSubscriberOptionsV2& options,
       runtime::core::transport::SerializedMessageCallback callback)
       noexcept;
   bool DetachSerializedSubscriber(

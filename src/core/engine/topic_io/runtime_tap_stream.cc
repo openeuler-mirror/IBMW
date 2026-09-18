@@ -5,6 +5,7 @@
 #include "engine/runtime_graph/runtime_directory.h"
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <charconv>
 #include <cstring>
@@ -431,6 +432,7 @@ TapSessionDescriptor RuntimeTapServer::StartSession(
   {
     std::lock_guard lock(sessions_mutex_);
     sessions_.emplace(id, session);
+    sessions_by_publisher_.emplace(advertisement.publisher_id, session);
     if (publish_tap_handle_ == 0) {
       publish_tap_handle_ = publish_tap_.Register(
           [this](ibmw::extension::MessageView& frame) { OnPublish(frame); });
@@ -452,6 +454,13 @@ bool RuntimeTapServer::StopSession(std::string_view session_id) {
     }
     session = std::move(found->second);
     sessions_.erase(found);
+    const auto [first, last] = sessions_by_publisher_.equal_range(session->advertisement.publisher_id);
+    for (auto item = first; item != last; ++item) {
+      if (item->second == session) {
+        sessions_by_publisher_.erase(item);
+        break;
+      }
+    }
     if (sessions_.empty()) {
       tap_handle = publish_tap_handle_;
       publish_tap_handle_ = 0;
@@ -476,6 +485,7 @@ void RuntimeTapServer::Shutdown() {
   {
     std::lock_guard lock(sessions_mutex_);
     sessions.swap(sessions_);
+    sessions_by_publisher_.clear();
     tap_handle = publish_tap_handle_;
     publish_tap_handle_ = 0;
   }
@@ -499,8 +509,9 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
   std::vector<std::shared_ptr<Session>> matching;
   {
     std::lock_guard lock(sessions_mutex_);
-    for (const auto& [id, session] : sessions_) {
-      static_cast<void>(id);
+    const auto [first, last] = sessions_by_publisher_.equal_range(publisher_id);
+    for (auto item = first; item != last; ++item) {
+      const auto& session = item->second;
       if (session->advertisement.topic.topic == frame.topic &&
           session->advertisement.topic.msg_type == frame.msg_type &&
           session->advertisement.publisher_id == publisher_id) {
@@ -512,13 +523,22 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
     return;
   }
 
+  // Copy each format before returning to the publisher, then share the owned
+  // immutable bytes across recorders. Borrowed views cannot outlive this call.
+  std::sort(matching.begin(), matching.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs->advertisement.topic.serialization_type < rhs->advertisement.topic.serialization_type;
+  });
+  std::string_view cached_format;
+  std::shared_ptr<ibmw::util::BufferArrayView> payload;
   for (const auto& session : matching) {
     try {
-      auto payload = ibmw::runtime::core::topic_io::AcquireSerializedPayload(
-          frame, session->advertisement.topic.serialization_type);
-      MW_ASSERT(
-          payload != nullptr,
-          "Runtime tap serialization returned an empty payload.");
+      const auto& format = session->advertisement.topic.serialization_type;
+      if (!payload || cached_format != format) {
+        const auto borrowed = AcquireSerializedPayload(frame, format);
+        MW_ASSERT(borrowed != nullptr, "Runtime tap serialization returned an empty payload.");
+        payload = ibmw::transport::CopySerializedPayload(*borrowed);
+        cached_format = format;
+      }
       const auto sequence = ParseUint64(
           frame.context.GetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ));
       const auto publish_timestamp = ParseUint64(
@@ -533,8 +553,7 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
           .publish_timestamp = publish_timestamp,
           .receive_timestamp = ibmw::common::util::GetCurTimestampNs(),
           .source_driver = "runtime-tap",
-          .payload = ibmw::transport::CopySerializedPayload(
-              *payload)});
+          .payload = payload});
     } catch (const std::exception& error) {
       session->Fail(
           "Runtime tap '" + session->id + "' failed to capture topic '" +

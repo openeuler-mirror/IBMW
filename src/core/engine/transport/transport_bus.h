@@ -67,7 +67,7 @@ class TransportBus : public ISubsystem {
   void RegisterTransportDriver(
       std::unique_ptr<TransportDriver>&& transport_driver_ptr,
       TransportDriverCapabilitiesV1 capabilities,
-      const SerializedTransportCapabilityV1& serialized_capability);
+      const SerializedTransportCapabilityV2& serialized_capability);
 
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);
@@ -107,7 +107,7 @@ class TransportBus : public ISubsystem {
 
   const TransportCatalog* GetTransportCatalog() const;
   const std::vector<TransportDriver*>& GetUsedTransportDriver() const;
-  const SerializedTransportCapabilityV1* GetSerializedTransportCapability(
+  const SerializedTransportCapabilityV2* GetSerializedTransportCapability(
       const TransportDriver& driver) const noexcept;
   const TransportDriverDispatcher& GetTransportDriverDispatcher() const;
 
@@ -136,7 +136,7 @@ class TransportBus : public ISubsystem {
   std::vector<TransportDriver*> used_transport_driver_vec_;
   std::unordered_map<const TransportDriver*, TransportDriverCapabilitiesV1>
       transport_driver_capabilities_map_;
-  std::unordered_map<const TransportDriver*, SerializedTransportCapabilityV1>
+  std::unordered_map<const TransportDriver*, SerializedTransportCapabilityV2>
       serialized_transport_capabilities_map_;
 
   TransportDriverDispatcher transport_driver_dispatcher_;

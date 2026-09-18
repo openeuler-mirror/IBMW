@@ -10,12 +10,11 @@
 namespace ibmw::extensions::record_playback_extension {
 namespace {
 
-TopicAdvertisement MakeAdvertisement(
+CaptureEndpoint MakeAdvertisement(
     std::string topic,
     bool published = true,
     bool hidden = false) {
-  TopicAdvertisement advertisement;
-  advertisement.publisher_id = topic;
+  CaptureEndpoint advertisement;
   advertisement.topic.topic = std::move(topic);
   advertisement.topic.msg_type = "example/Message";
   advertisement.topic.serialization_type = "cdr";
@@ -24,16 +23,12 @@ TopicAdvertisement MakeAdvertisement(
   return advertisement;
 }
 
-TopicGraph MakeGraph() {
-  RuntimeRegistration runtime;
-  runtime.runtime_id = "runtime";
-  runtime.topics = {
-      MakeAdvertisement("/camera/raw"),
-      MakeAdvertisement("/camera/debug"),
-      MakeAdvertisement("/hidden", true, true),
-      MakeAdvertisement("/leaf", false)};
-  TopicGraph graph;
-  graph.MergeRuntime(runtime);
+CaptureGraph MakeGraph() {
+  CaptureGraph graph;
+  graph.Add(MakeAdvertisement("/camera/raw"));
+  graph.Add(MakeAdvertisement("/camera/debug"));
+  graph.Add(MakeAdvertisement("/hidden", true, true));
+  graph.Add(MakeAdvertisement("/leaf", false));
   return graph;
 }
 

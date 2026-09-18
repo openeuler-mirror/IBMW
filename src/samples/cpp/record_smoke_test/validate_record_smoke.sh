@@ -411,7 +411,7 @@ run_transport_case() {
   echo "record smoke: transport $driver ($mode)"
   start_runtime "record_smoke_$driver.yaml" "record-smoke-$driver" \
     "$driver" "$topic" "$mode"
-  start_record "$topic" --polling-interval 20 \
+  start_record --registry "$topic" --polling-interval 20 \
     --storage mcap --serialization-format "$serialization"
   sleep 1.0
   stop_record
@@ -491,15 +491,15 @@ start_services
 run_case transport_local run_transport_case local runtime_tap \
   "runtime tap (runtime record-smoke-local)" auto
 run_case transport_dds run_transport_case dds native_serialized \
-  "dds subscriber (runtime record-smoke-dds)" cdr
+  "dds subscriber (/ibmw_record_smoke/transport/dds)" cdr
 run_case transport_iceoryx run_transport_case iceoryx cached_serialized \
   "iceoryx cached serialized subscriber (runtime record-smoke-iceoryx)" cdr
 run_case transport_mqtt run_transport_case mqtt cached_serialized \
   "mqtt cached serialized subscriber (runtime record-smoke-mqtt)" cdr
-run_case transport_zenoh run_transport_case zenoh cached_serialized \
-  "zenoh cached serialized subscriber (runtime record-smoke-zenoh)" cdr
-run_case transport_ros2 run_transport_case ros2 cached_serialized \
-  "ros2 cached serialized subscriber (runtime record-smoke-ros2)" ros2
+run_case transport_zenoh run_transport_case zenoh native_serialized \
+  "zenoh subscriber (/ibmw_record_smoke/transport/zenoh)" cdr
+run_case transport_ros2 run_transport_case ros2 native_serialized \
+  "ros2 subscriber (/ibmw_record_smoke/transport/ros2)" ros2
 run_case transport_tcp run_transport_case tcp runtime_tap \
   "runtime tap (runtime record-smoke-tcp)" cdr
 run_case transport_udp run_transport_case udp runtime_tap \
@@ -771,16 +771,33 @@ run_feature_test() {
       forbid_topic /ibmw_record_smoke/features/late
       ;;
     log_level)
-      local dds_topic=/ibmw_record_smoke/transport/dds
+      local dds_topic=/ibmw_record_smoke/transport/dds_native_dds_ibmw__protocols__common__Header
+      local recorder_config="$RUN_DIR/dds-recorder.yaml"
+      local transport_library="$BUILD_DIR/libibmw_dds_transport.so"
+      local type_library="$BUILD_DIR/libcommon_dds_ts.so"
+      [[ -f "$transport_library" ]] || transport_library="$BUILD_DIR/lib/libibmw_dds_transport.so"
+      [[ -f "$type_library" ]] || type_library="$BUILD_DIR/lib/libcommon_dds_ts.so"
+      cat >"$recorder_config" <<EOF
+ibmw:
+  runtime_graph:
+    type_support_pkgs: ["$type_library"]
+  extensions:
+    items:
+      - name: dds_extension
+        path: "$transport_library"
+        options: {domain_id: 87}
+  messaging:
+    drivers: [{type: dds}]
+EOF
       run_feature_case log_level_info record_smoke_dds.yaml \
-        record-smoke-dds 1.0 none "$dds_topic" --log-level info
+        record-smoke-dds 1.0 none "$dds_topic" --dds --config-file "$recorder_config" --log-level info
       require_common_bag_health
       require_topic "$dds_topic"
       require_positive_topic "$dds_topic"
       require_record_log "DDS transport driver initialized."
 
       run_feature_case log_level_error record_smoke_dds.yaml \
-        record-smoke-dds 1.0 none "$dds_topic" --log-level error
+        record-smoke-dds 1.0 none "$dds_topic" --dds --config-file "$recorder_config" --log-level error
       require_common_bag_health
       require_topic "$dds_topic"
       require_positive_topic "$dds_topic"

@@ -4,6 +4,8 @@
 #include "zenoh_discovery_protocol.h"
 #include "extension_api/ibmw_discovery_provider.h"
 #include "zenoh_ext/zenoh_transport_driver.h"
+#include "zenoh_ext/zenoh_serialized_message.h"
+#include <future>
 
 #include <algorithm>
 #include <filesystem>
@@ -239,6 +241,127 @@ TEST_F(ZenohDiscoveryTest, HandlesEmptyDomainRestartAndFailedInitialization) {
   const auto empty = provider->Query(Clock::now() + 500ms);
   EXPECT_TRUE(empty.Succeeded());
   EXPECT_TRUE(empty.endpoints.empty());
+}
+
+TEST_F(ZenohDiscoveryTest, WithdrawsExpiredInstancesWithoutRestartingObserver) {
+  Business business(server_, "robot");
+  ASSERT_TRUE(business.Add("/gone", EndpointRole::kPublisher));
+  business.driver.Start();
+  auto provider = MakeProvider();
+  provider->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_domain = "robot", .zenoh_config = client_});
+  ASSERT_EQ(WaitFor(*provider, 1).endpoints.size(), 1u);
+  business.driver.Shutdown();
+  EXPECT_TRUE(WaitFor(*provider, 0).endpoints.empty());
+}
+
+std::string Envelope(std::string_view format, std::string_view payload) {
+  std::string bytes(4 + 1 + format.size() + 1 + payload.size(), '\0');
+  ibmw::common::util::BufferOperator buffer(bytes.data(), bytes.size());
+  buffer.SetUint32(bytes.size() - 4);
+  buffer.SetString(format, ibmw::common::util::BufferLenType::kUInt8);
+  buffer.SetUint8(0);
+  buffer.SetBuffer(payload.data(), payload.size());
+  return bytes;
+}
+
+TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding) {
+  using ibmw::extensions::zenoh_extension::DecodeZenohPayload;
+  EXPECT_ANY_THROW(DecodeZenohPayload("abc"));
+  auto bytes = Envelope("json", "{}");
+  EXPECT_ANY_THROW(DecodeZenohPayload(std::string_view(bytes).substr(0, bytes.size() - 1)));
+  bytes.append(100, 'x');
+  const auto decoded = DecodeZenohPayload(bytes);
+  EXPECT_EQ(decoded.serialization, "json");
+  EXPECT_EQ(decoded.payload, "{}");
+  EXPECT_ANY_THROW(DecodeZenohPayload(Envelope("", "{}")));
+}
+
+TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBeforeDetach) {
+  Business sender(server_, "robot");
+  ASSERT_TRUE(sender.Add("/capture", EndpointRole::kPublisher));
+  sender.driver.Start();
+  Business receiver(client_, "robot");
+  receiver.driver.Start();
+  transport::SerializedSubscriberOptionsV2 options{
+      .topic = {.topic = "/capture", .msg_type = "test:Opaque", .serialization_type = "cdr"},
+      .wire_topic_name = "transport/%2Fcapture/test%3AOpaque/robot", .wire_type_name = "test:Opaque"};
+  // The discovered address is authoritative; capture must not reconstruct it
+  // from the logical topic/type or append a second domain suffix.
+  options.wire_topic_name = "custom/capture/address";
+  ASSERT_TRUE(sender.bus->RegisterPublisher(options.wire_topic_name, false));
+  std::promise<void> entered, release;
+  auto ready = entered.get_future();
+  auto released = release.get_future().share();
+  std::atomic<unsigned> count = 0;
+  std::shared_ptr<ibmw::util::BufferArrayView> retained;
+  const auto handle = receiver.driver.AttachSerializedSubscriber(options, [&](auto&& message) {
+    if (++count == 1) {
+      retained = message.payload;
+      EXPECT_EQ(message.topic.serialization_type, "json");
+      EXPECT_FALSE(message.identity.IsValid());
+      entered.set_value();
+      released.wait();
+    }
+  });
+  ASSERT_TRUE(handle);
+  auto bytes = Envelope("json", R"({"sequence":1})");
+  const auto deadline = Clock::now() + 4s;
+  while (ready.wait_for(30ms) != std::future_status::ready && Clock::now() < deadline) {
+    sender.bus->Send(options.wire_topic_name, bytes.data(), bytes.size());
+  }
+  if (ready.wait_for(0ms) != std::future_status::ready) {
+    release.set_value();
+    FAIL() << "Native subscriber received no samples";
+  }
+  auto detached = std::async(std::launch::async, [&] { return receiver.driver.DetachSerializedSubscriber(handle); });
+  EXPECT_EQ(detached.wait_for(50ms), std::future_status::timeout);
+  release.set_value();
+  EXPECT_TRUE(detached.get());
+  const auto stopped_count = count.load();
+  sender.bus->Send(options.wire_topic_name, bytes.data(), bytes.size());
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(count.load(), stopped_count);
+  ASSERT_TRUE(retained);
+  EXPECT_EQ(retained->JoinToString(), R"({"sequence":1})");
+}
+
+TEST_F(ZenohDiscoveryTest, NativeCaptureRejectsBroadKeysAndDoesNotMixTopics) {
+  Business sender(server_, "robot");
+  sender.driver.Start();
+  Business receiver(client_, "robot");
+  receiver.driver.Start();
+  transport::SerializedSubscriberOptionsV2 options{
+      .topic = {.topic = "/capture", .msg_type = "test:Opaque", .serialization_type = "json"},
+      .wire_topic_name = "transport/exact", .wire_type_name = "test:Opaque"};
+  for (const auto& key : std::vector<std::string>{"transport/**", "transport/*",
+           "transport/$*", std::string("transport/exact\0/other", 22), "transport//exact"}) {
+    options.wire_topic_name = key;
+    const auto invalid = receiver.driver.AttachSerializedSubscriber(options, [](auto&&) {});
+    EXPECT_FALSE(invalid);
+    if (invalid) receiver.driver.DetachSerializedSubscriber(invalid);
+  }
+  options.wire_topic_name = "transport/exact";
+  ASSERT_TRUE(sender.bus->RegisterPublisher(options.wire_topic_name, false));
+  ASSERT_TRUE(sender.bus->RegisterPublisher("transport/other", false));
+  ASSERT_TRUE(sender.bus->RegisterPublisher("transport/exact/child", false));
+  std::atomic<unsigned> received = 0, polluted = 0;
+  const auto handle = receiver.driver.AttachSerializedSubscriber(options, [&](auto&& message) {
+    if (message.payload->JoinToString() != "selected") ++polluted;
+    ++received;
+  });
+  ASSERT_TRUE(handle);
+  auto selected = Envelope("json", "selected");
+  auto unrelated = Envelope("json", "unrelated");
+  const auto deadline = Clock::now() + 1s;
+  do {
+    sender.bus->Send("transport/other", unrelated.data(), unrelated.size());
+    sender.bus->Send("transport/exact/child", unrelated.data(), unrelated.size());
+    sender.bus->Send(options.wire_topic_name, selected.data(), selected.size());
+    std::this_thread::sleep_for(20ms);
+  } while (Clock::now() < deadline);
+  ASSERT_TRUE(receiver.driver.DetachSerializedSubscriber(handle));
+  EXPECT_GT(received.load(), 0u);
+  EXPECT_EQ(polluted.load(), 0u);
 }
 
 TEST_F(ZenohDiscoveryTest, FailedNativeRegistrationIsNotAdvertised) {

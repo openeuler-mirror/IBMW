@@ -7,14 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "engine/runtime_graph/topic_graph.h"
-#include "engine/runtime_graph/runtime_registration.h"
+#include "record_playback_ext/coordinator/bag_capture_planner.h"
 
 namespace ibmw::extensions::record_playback_extension {
-
-using ibmw::runtime::core::runtime_graph::TopicGraph;
-using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
-using ibmw::runtime::core::runtime_graph::RuntimeRegistration;
 
 class RecordTopicSelector {
  public:
@@ -30,7 +25,7 @@ class RecordTopicSelector {
 
   explicit RecordTopicSelector(Options options);
 
-  std::set<std::string> Select(const TopicGraph& graph) const;
+  std::set<std::string> Select(const CaptureGraph& graph) const;
 
  private:
   Options options_;

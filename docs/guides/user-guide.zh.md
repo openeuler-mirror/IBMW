@@ -1220,18 +1220,108 @@ ibmw topic type /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
 只有订阅者的话题。多个模块回调共用一个原生 subscriber 时只计一个端点，
 RPC 内部端点不纳入话题发现。结果提供 session ZID、实例内端点 ID、逻辑
 topic/type 和实际 wire key；注册时无法确定的序列化格式和 QoS 保持为空。
-查询端在收集窗口内重试，按 revision 替换各实例快照。这是有限时间内的观察，
-不是持续在线状态：窗口内曾回复的实例可能在结果输出前退出。
+查询端在收集窗口内重试，按 revision 替换各实例快照，并移除连续 2 秒未回复的
+实例。快照仍是有限时间内的观察，输出时实例可能刚刚退出。
 
 网络查询默认收集 2 秒后返回快照；每次调用独立发现，不使用常驻发现服务。
 实际可见范围由 domain、发现配置、安全配置和网络可达性决定。DDS、ROS 2 与
 Zenoh 是独立来源，组合查询保留各自端点，不跨来源合并身份。
-来源失败时退出码为 1，但组合查询仍输出成功来源的结果；这些适配器尚未让
-`bag record` 接入远端发现。
+来源失败时退出码为 1，但组合查询仍输出成功来源的结果。
 
 ROS 2 原生库可能在加载阶段直接退出进程，例如 Humble 中指定了未安装的
 `RMW_IMPLEMENTATION`。这种退出发生在适配器运行前，无法作为普通来源错误
 捕获，也无法保留其他来源结果；使用 ROS 2 发现前需确保所选 RMW 可用。
+
+`bag record` 默认通过本机 registry 发现话题，按驱动采集能力选择订阅；网络模式
+支持 DDS、ROS 2 和 Zenoh：
+
+```bash
+ibmw bag record --registry /chatter -o ./registry_bag
+ibmw bag record --dds --domain 87 --config-file ./dds-recorder.yaml /native_topic -o ./dds_bag
+ibmw bag record --ros2 --domain 87 --config-file ./ros2-recorder.yaml /chatter -o ./ros2_bag
+ibmw bag record --zenoh --zenoh-domain robot --config-file ./zenoh-recorder.yaml /chatter -o ./zenoh_bag
+```
+
+Registry 发现与采集方式相互独立。Registry 模式根据注册信息中的采集能力和连接配置，
+在独立录制运行时建立订阅：按优先级选择 iceoryx、DDS、Zenoh、MQTT、ROS 2，
+最后才使用 Runtime Tap。DDS、ROS 2、Zenoh 使用原生序列化订阅；iceoryx、MQTT
+使用 TypeSupport 和缓存类型订阅。录制运行时使用独立实例名，不加载业务模块。
+同一话题只选择一条覆盖全部发布者的传输路径，避免多驱动重复录制。
+
+缓存类型订阅仅用于单发布者话题，并在驱动启动前注册；运行中可复用已注册的
+类型订阅。多发布者、连接配置冲突或无法动态注册时，选择其他可用的直连路径，
+否则为每个发布者建立 Tap。UDP、TCP、HTTP、local 通常使用 Tap。Tap 必须由发布端
+声明支持，且无法采集绕过普通 Send 的显式 Loan/PublishLoaned 发布。
+
+网络模式不需要发布端的本机注册文件，通过对应发现插件取得订阅地址，再由
+录制进程的传输扩展接收序列化消息。同一话题的多个网络发布者共用一个订阅。
+网络模式使用录制端自己的配置，不从网络元信息加载扩展或 TypeSupport。
+
+网络录制必须提供录制端自己的配置和包含 schema 的本机 TypeSupport 包：
+
+```yaml
+ibmw:
+  runtime_graph:
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options: {domain_id: 87}
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          subscribers:
+            - topic: ".*"
+              qos: {history: keep_last, depth: 100}
+```
+
+ROS 2 配置使用 `ros2_extension`、`libibmw_ros2_transport.so`、`type: ros2`，
+并加载对应 ROS 消息类型的 TypeSupport 包。录制端自动设置独立节点名，使用
+独立 ROS context。Zenoh 配置使用 `zenoh_extension`、`libibmw_zenoh_transport.so`、
+`type: zenoh`，其扩展 options 示例为：
+
+```yaml
+options:
+  limit_domain: robot
+  native_cfg_path: ./zenoh-client.json5
+```
+
+包、扩展、DDS `xml_profile_file` 和 Zenoh `native_cfg_path` 的相对路径以
+录制配置文件目录为基准。所选话题缺少 schema 会明确报错。网络元信息中的
+路径不会用于加载代码。
+
+| 来源 | 使用的订阅地址 | bag 中的类型／格式 |
+|------|----------------|--------------------|
+| DDS | 发现的原始 DDS topic/type，不再次转换名称 | `dds:<原始类型名>`／`cdr` |
+| ROS 2 | ROS graph 的 topic 和 `pkg/msg/Type` | `ros2:pkg/msg/Type`／`ros2` |
+| Zenoh | 元信息中的实际 wire key | 原有逻辑类型／消息封装携带的实际格式 |
+
+Zenoh 从每条收到的消息中取得实际格式，并在写入前匹配 schema。
+使用 `--serialization-format auto` 时，只提供对应 schema 的类型包即可；
+转换格式还需要 TypeSupport 的序列化函数。收到没有本机 schema 的格式时停止并报错。
+尚未收到消息、格式未知的话题不会预先创建存储通道。
+DDS、ROS 2 的 reliability/durability 按所有已发现发布者适配，订阅端的 QoS
+不会被当作发布能力。发现发布者、类型或 QoS 变化时共用同一套动态采集流程。
+
+`--domain` 用于 DDS／ROS 2：默认取配置中的 `domain_id`，ROS 2 未配置时使用
+`ROS_DOMAIN_ID`，否则为 0；命令行与配置同时设置时必须一致。Zenoh 的
+`--zenoh-domain` 与配置中的 `limit_domain` 也必须一致。Zenoh 发现和订阅各自
+持有会话，默认读取相同 native 配置；使用客户端配置或自动分配的监听端口。
+如订阅配置包含固定监听端口或固定会话 ID，用 `--zenoh-config <path>` 明确
+指定单独的发现会话配置。
+
+首次收集 2 秒后开始录制，随后复用观察者发现晚加入的发布端。
+Zenoh 实例连续 2 秒没有回复元信息查询时从快照移除。
+`--no-discovery` 关闭后续发现更新；现有网络订阅仍可接收该话题后加入的发布者。
+每次 record 选择一个来源，`-a` 表示该来源的所有话题，`-d` 仍为分包时长。
+`--use-sim-time` 适用于本机、ROS 2 和有逻辑 `/clock` 的 Zenoh 来源。
+
+DDS 观察者仍使用所选 domain 的默认发现配置，采集驱动使用录制端传输配置。
+原生 DDS 采集仍不支持通用 keyed 类型；bag 保留原始话题名，回放到相同原始
+名称的适配不在本次录制改造内。原始 DDS 模式不支持 `/clock` 名称映射。
 
 ---
 

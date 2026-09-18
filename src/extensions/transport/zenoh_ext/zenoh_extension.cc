@@ -80,18 +80,20 @@ void ZenohExtension::RegisterZenohTransportDriver() {
   std::unique_ptr<runtime::core::transport::TransportDriver> zenoh_transport_driver_ptr =
       std::make_unique<ZenohTransportDriver>(zenoh_bus_ptr_, options_.limit_domain, options_.shm_init_loan_size);
 
+  const auto operations = static_cast<ZenohTransportDriver*>(zenoh_transport_driver_ptr.get())->SerializedOperations();
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(zenoh_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
-          .capture_mode = runtime::core::transport::SerializedCaptureMode::kCachedSerialized,
+      runtime::core::transport::SerializedTransportCapabilityV2{
+          .capture_mode = runtime::core::transport::SerializedCaptureMode::kNativeSerialized,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
-          .serialization = runtime::core::transport::SerializedFormatSupport::kTypeSupport,
+          .serialization = runtime::core::transport::SerializedFormatSupport::kNative,
           .schema = runtime::core::transport::SerializedSchemaSupport::kTypeSupportPackage,
           .loan = runtime::core::transport::SerializedLoanSupport::kSharedPayload,
           .callback_thread = runtime::core::transport::SerializedCallbackThread::kTransportManaged,
           .capture_priority = 2,
           .provider_name = Name(),
-          .provider_strip_leading_slash_option = "limit_domain"});
+          .provider_strip_leading_slash_option = "limit_domain",
+          .operations = operations});
 }
 
 void ZenohExtension::RegisterZenohRpcDriver() {

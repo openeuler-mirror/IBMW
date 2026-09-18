@@ -66,6 +66,7 @@ class RuntimeTapServer {
   uint64_t publish_tap_handle_ = 0;
   std::mutex sessions_mutex_;
   std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
+  std::unordered_multimap<std::string, std::shared_ptr<Session>> sessions_by_publisher_;
   uint64_t next_session_id_ = 1;
 };
 

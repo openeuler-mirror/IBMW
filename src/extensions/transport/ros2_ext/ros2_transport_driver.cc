@@ -253,6 +253,13 @@ void Ros2TransportDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
+  std::vector<uint64_t> handles;
+  {
+    std::lock_guard lock(native_mutex_);
+    for (const auto& [handle, subscriber] : native_subscribers_) handles.push_back(handle);
+  }
+  for (const auto handle : handles) DetachSerializedSubscriber({handle});
+
   for (auto& itr : ros2_send_type_wrapper_map_) {
     rcl_publisher_t& publisher = *(itr.second.publisher_ptr);
     rcl_ret_t ret = rcl_publisher_fini(
@@ -271,6 +278,84 @@ void Ros2TransportDriver::Shutdown() {
   }
 
   ros2_node_ptr_.reset();
+}
+
+runtime::core::transport::SerializedTransportOperationsV2
+Ros2TransportDriver::SerializedOperations() noexcept {
+  using namespace runtime::core::transport;
+  return {.context = this,
+          .supports_topic = [](void*, const TopicDescriptor& topic) noexcept {
+            return topic.msg_type.starts_with("ros2:") && topic.serialization_type == "ros2";
+          },
+          .attach_subscriber = [](void* driver, const SerializedSubscriberOptionsV2& options,
+                                  SerializedMessageCallback callback) noexcept {
+            return static_cast<Ros2TransportDriver*>(driver)->AttachSerializedSubscriber(options, std::move(callback));
+          },
+          .detach_subscriber = [](void* driver, SerializedSubscriberHandle handle) noexcept {
+            return static_cast<Ros2TransportDriver*>(driver)->DetachSerializedSubscriber(handle);
+          }};
+}
+
+runtime::core::transport::SerializedSubscriberHandle
+Ros2TransportDriver::AttachSerializedSubscriber(
+    const runtime::core::transport::SerializedSubscriberOptionsV2& options,
+    runtime::core::transport::SerializedMessageCallback callback) noexcept {
+  try {
+    std::lock_guard lock(native_mutex_);
+    MW_ASSERT(state_ == State::kInit || state_ == State::kStart, "ROS2 driver is not running.");
+    MW_ASSERT(callback && !options.wire_topic_name.empty() && !options.wire_type_name.empty() &&
+                  options.topic.msg_type == "ros2:" + options.wire_type_name &&
+                  options.topic.serialization_type == "ros2",
+              "Invalid native ROS2 subscription.");
+    Options::QosOptions settings;
+    for (const auto& configured : options_.sub_topics_options) {
+      if (std::regex_match(options.topic.topic, std::regex(configured.topic_name))) {
+        settings = configured.qos;
+        break;
+      }
+    }
+    ApplyQosDescriptor(options.requested_qos, settings);
+    auto qos = GetQos(settings);
+    ApplyQosProfileDescriptor(options.requested_qos, qos);
+    auto state = std::make_shared<runtime::core::transport::SerializedCallback>(std::move(callback));
+    auto subscription = ros2_node_ptr_->create_generic_subscription(
+        options.wire_topic_name, options.wire_type_name, qos,
+        [state, topic = options.topic](std::shared_ptr<rclcpp::SerializedMessage> data) {
+          try {
+            const auto& bytes = data->get_rcl_serialized_message();
+            auto payload = std::shared_ptr<ibmw::util::BufferArrayView>(
+                new ibmw::util::BufferArrayView(bytes.buffer, bytes.buffer_length),
+                [data](auto* view) { delete view; });
+            state->Invoke({.topic = topic,
+                           .receive_timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count()),
+                           .source_driver = "ros2", .payload = std::move(payload)});
+          } catch (const std::exception& error) {
+            MW_ERROR("Native ROS2 receive failed: {}", error.what());
+          }
+        });
+    const uint64_t handle = next_native_handle_++;
+    native_subscribers_.emplace(handle, NativeSubscriber{std::move(state), std::move(subscription)});
+    return {handle};
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot attach native ROS2 subscriber: {}", error.what());
+    return {};
+  }
+}
+
+bool Ros2TransportDriver::DetachSerializedSubscriber(
+    runtime::core::transport::SerializedSubscriberHandle handle) noexcept {
+  NativeSubscriber subscriber;
+  {
+    std::lock_guard lock(native_mutex_);
+    const auto found = native_subscribers_.find(handle.value);
+    if (found == native_subscribers_.end()) return false;
+    subscriber = std::move(found->second);
+    native_subscribers_.erase(found);
+  }
+  subscriber.callback->Stop();
+  subscriber.subscription.reset();
+  return true;
 }
 
 bool Ros2TransportDriver::RegisterSendType(
