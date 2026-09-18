@@ -1198,9 +1198,34 @@ ibmw topic info /chatter -r --ros-domain 10 -v
 ibmw topic list -d -r --dds-domain 10 --ros-domain 20
 ```
 
+Zenoh 来源需开启 `IBMW_BUILD_ZENOH_EXTENSION`。选择 `-z` 时加载独立的
+`libibmw_discovery_zenoh.so` 并创建查询 session，CLI 不加载业务传输扩展。
+运行中的业务程序需要使用更新后的 `libibmw_zenoh_transport.so`，由它在已有
+session 上通过 queryable 提供端点元信息。普通 Zenoh 程序和旧版 IBMW 扩展
+不会自动提供这些元信息。
+
+`--zenoh-domain` 必须精确匹配业务 YAML 中的 `limit_domain` 原值；省略时只查
+空域，并非全部域。`--zenoh-config` 接受查询端的 Zenoh 原生配置，例如连接
+peer/router 的地址；查询 session 必须能到达业务 session。省略配置文件时
+使用 Zenoh 默认配置，包括原生 scouting 设置。UDP scouting 用于建立 session
+连接，随后通过 IBMW 元信息查询获取逻辑话题名和类型名。
+
+```bash
+ibmw topic list -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic info /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5 -v
+ibmw topic type /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+```
+
+统计对象是成功创建的 Zenoh publisher/subscriber，包括未发送消息的端点和
+只有订阅者的话题。多个模块回调共用一个原生 subscriber 时只计一个端点，
+RPC 内部端点不纳入话题发现。结果提供 session ZID、实例内端点 ID、逻辑
+topic/type 和实际 wire key；注册时无法确定的序列化格式和 QoS 保持为空。
+查询端在收集窗口内重试，按 revision 替换各实例快照。这是有限时间内的观察，
+不是持续在线状态：窗口内曾回复的实例可能在结果输出前退出。
+
 网络查询默认收集 2 秒后返回快照；每次调用独立发现，不使用常驻发现服务。
-实际可见范围由 domain、发现配置、安全配置和网络可达性决定。DDS 与 ROS 2
-是独立来源，组合查询保留各自端点，不跨来源合并身份。Zenoh 来源仍不可用。
+实际可见范围由 domain、发现配置、安全配置和网络可达性决定。DDS、ROS 2 与
+Zenoh 是独立来源，组合查询保留各自端点，不跨来源合并身份。
 来源失败时退出码为 1，但组合查询仍输出成功来源的结果；这些适配器尚未让
 `bag record` 接入远端发现。
 

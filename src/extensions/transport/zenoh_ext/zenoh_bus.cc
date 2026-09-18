@@ -4,14 +4,23 @@
 #include "zenoh_ext/zenoh_bus.h"
 
 #include <utility>
+#include <stdexcept>
 
 namespace ibmw::extensions::zenoh_extension {
 
+ZenohBus::ZenohBus() {
+  z_internal_null(&z_session_);
+  z_internal_null(&z_config_);
+  z_internal_null(&shm_provider_);
+  z_internal_null(&shm_layout_);
+}
+
 void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_size) {
+  if (initialized_) throw std::logic_error("Zenoh bus is already initialized.");
   if (!native_cfg_path.empty() && native_cfg_path.c_str() != nullptr) {
     if (zc_config_from_file(&z_config_, native_cfg_path.c_str()) != Z_OK) {
       MW_ERROR("Unable to load configuration file: {}", native_cfg_path);
-      return;
+      throw std::runtime_error("Unable to load Zenoh configuration: " + native_cfg_path);
     }
     PrintZenohCgf(z_config_);
   } else {
@@ -20,44 +29,51 @@ void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_si
 
   if (z_open(&z_session_, z_move(z_config_), NULL) < 0) {
     MW_ERROR("Unable to open zenoh session!");
-    return;
+    throw std::runtime_error("Unable to open Zenoh session.");
   }
 
   shm_pool_size_ = shm_pool_size;
+  initialized_ = true;
 }
 
 void ZenohBus::Shutdown() {
-  for (const auto &ptr : z_pub_catalog_) {
-    auto z_pub = ptr.second->z_pub;
-    z_drop(z_move(z_pub));
+  StopDiscovery();
+  for (auto &ptr : z_pub_catalog_) {
+    z_drop(z_move(ptr.second->z_pub));
   }
 
-  for (auto ptr : z_sub_catalog_) {
+  for (auto &ptr : z_sub_catalog_) {
     z_drop(z_move(ptr.second));
   }
 
+  if (initialized_) z_close(z_loan_mut(z_session_), nullptr);
   msg_handle_vec_.clear();
   z_pub_catalog_.clear();
   z_sub_catalog_.clear();
 
   z_drop(z_move(z_session_));
+  z_drop(z_move(z_config_));
   z_drop(z_move(shm_provider_));
   z_drop(z_move(shm_layout_));
+  shm_initialized_ = false;
+  initialized_ = false;
+  discovery_.Clear();
 }
 
-void ZenohBus::RegisterPublisher(const std::string &keyexpr, bool shm_enabled) {
+bool ZenohBus::RegisterPublisher(const std::string &keyexpr, bool shm_enabled) {
+  if (!initialized_) return false;
+  std::lock_guard<std::mutex> lock(z_catalog_mutex_);
+  if (z_pub_catalog_.contains(keyexpr)) return true;
   z_view_keyexpr_t key;
-  z_view_keyexpr_from_str(&key, keyexpr.c_str());
+  if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
 
   z_owned_publisher_t z_pub;
   z_publisher_put_options_default(&z_pub_options_);
 
   if (z_declare_publisher(z_loan(z_session_), &z_pub, z_loan(key), nullptr) < 0) {
     MW_ERROR("Unable to declare Publisher!");
-    return;
+    return false;
   }
-
-  std::lock_guard<std::mutex> lock(z_catalog_mutex_);
 
   z_pub_catalog_.emplace(keyexpr, std::make_shared<ZenohPubCtx>(ZenohPubCtx{z_pub, shm_enabled}));
   MW_TRACE("Publisher with keyexpr: {} registered successfully.", keyexpr.c_str());
@@ -68,11 +84,15 @@ void ZenohBus::RegisterPublisher(const std::string &keyexpr, bool shm_enabled) {
     z_posix_shm_provider_new(&shm_provider_, z_loan(shm_layout_));
     shm_initialized_.store(true);
   }
+  return true;
 }
 
-void ZenohBus::RegisterSubscriber(const std::string &keyexpr, MsgHandleFunc handle) {
+bool ZenohBus::RegisterSubscriber(const std::string &keyexpr, MsgHandleFunc handle) {
+  if (!initialized_) return false;
+  std::lock_guard<std::mutex> lock(z_catalog_mutex_);
+  if (z_sub_catalog_.contains(keyexpr)) return false;
   z_view_keyexpr_t key;
-  z_view_keyexpr_from_str(&key, keyexpr.c_str());
+  if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
   z_owned_closure_sample_t z_callback;
   auto function_ptr = std::make_shared<MsgHandleFunc>(std::move(handle));
   z_closure(
@@ -87,16 +107,28 @@ void ZenohBus::RegisterSubscriber(const std::string &keyexpr, MsgHandleFunc hand
 
   if (z_declare_subscriber(z_loan(z_session_), &z_sub, z_loan(key), z_move(z_callback), nullptr) < 0) {
     MW_ERROR("Unable to declare Subscriber!");
-    return;
+    return false;
   }
-
-  std::lock_guard<std::mutex> lock(z_catalog_mutex_);
 
   z_sub_catalog_.emplace(keyexpr, z_sub);
   msg_handle_vec_.emplace_back(std::move(function_ptr));
 
   MW_TRACE("Subscriber with keyexpr: {} registered successfully.", keyexpr.c_str());
+  return true;
 }
+
+void ZenohBus::RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole role,
+    std::string topic, std::string type, std::string key) {
+  discovery_.Record(role, std::move(topic), std::move(type), std::move(key));
+}
+
+void ZenohBus::StartDiscovery(const std::string& limit_domain) {
+  if (!initialized_) throw std::logic_error("Zenoh bus is not initialized.");
+  // Extension options carry the slash added by YAML decoding for wire keys.
+  discovery_.Start(z_loan(z_session_), limit_domain.starts_with('/') ? limit_domain.substr(1) : limit_domain);
+}
+
+void ZenohBus::StopDiscovery() noexcept { discovery_.Stop(); }
 
 void ZenohBus::RegisterRpcNode(const std::string &keyexpr, MsgHandleFunc handle, const std::string &role, bool shm_enabled) {
   std::string pub_keyexpr;

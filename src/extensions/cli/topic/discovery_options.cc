@@ -50,7 +50,7 @@ void AddDiscoveryOptions(ibmw::cli::Command& command) {
                     "Query local runtime registrations across all drivers (default source)");
   command.AddOption("--dds", "-d", {}, "Query DDS endpoints in the selected domain");
   command.AddOption("--ros2", "-r", {}, "Query the ROS 2 graph in the selected domain");
-  command.AddOption("--zenoh", "-z", {}, "Query Zenoh (discovery adapter not yet available)");
+  command.AddOption("--zenoh", "-z", {}, "Query IBMW Zenoh endpoint metadata");
   command.AddOption("--all", "-a", {}, "Query all four sources, not all domains");
   command.AddOption("--domain", {}, "id", "Domain for selected DDS and ROS 2 sources",
                     OptionValueMode::kRequired);

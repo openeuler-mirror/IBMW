@@ -106,9 +106,15 @@ std::unique_ptr<DiscoveryProvider> CreateDiscoveryProvider(DiscoveryBackend back
   if (backend == DiscoveryBackend::kRegistry) {
     return std::make_unique<RegistryDiscoveryProvider>();
   }
-  if (backend == DiscoveryBackend::kDds || backend == DiscoveryBackend::kRos2) {
-    const auto path = PluginDirectory() / (backend == DiscoveryBackend::kDds
-        ? "libibmw_discovery_dds.so" : "libibmw_discovery_ros2.so");
+  const char* library = nullptr;
+  switch (backend) {
+    case DiscoveryBackend::kDds: library = "libibmw_discovery_dds.so"; break;
+    case DiscoveryBackend::kRos2: library = "libibmw_discovery_ros2.so"; break;
+    case DiscoveryBackend::kZenoh: library = "libibmw_discovery_zenoh.so"; break;
+    default: break;
+  }
+  if (library) {
+    const auto path = PluginDirectory() / library;
     if (std::filesystem::exists(path)) return std::make_unique<PluginProvider>(path, backend);
   }
   return nullptr;

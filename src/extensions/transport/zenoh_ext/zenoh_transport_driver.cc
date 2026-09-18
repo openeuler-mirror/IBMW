@@ -56,11 +56,13 @@ void ZenohTransportDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->StartDiscovery(limit_domain_);
 }
 
 void ZenohTransportDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
+  zenoh_bus_ptr_->StopDiscovery();
 }
 
 bool ZenohTransportDriver::RegisterSendType(
@@ -95,7 +97,9 @@ bool ZenohTransportDriver::RegisterSendType(
                           util::UrlEncode(info.msg_type) +
                           limit_domain_;
 
-    zenoh_bus_ptr_->RegisterPublisher(pattern, shm_enabled);
+    if (!zenoh_bus_ptr_->RegisterPublisher(pattern, shm_enabled)) return false;
+    zenoh_bus_ptr_->RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole::kPublisher,
+                                          info.topic_name, info.msg_type, pattern);
 
     z_pub_shm_size_map_[pattern] = shm_init_loan_size_;
 
@@ -132,8 +136,6 @@ bool ZenohTransportDriver::OnMessage(
     msg_handler_tool_unique_ptr->AddMessageHandlerWrapper(&message_handler);
 
     auto* msg_handler_tool_ptr = msg_handler_tool_unique_ptr.get();
-
-    message_handler_map_.emplace(pattern, std::move(msg_handler_tool_unique_ptr));
 
     auto handle =
         [this, topic_name = info.topic_name, msg_handler_tool_ptr](const z_loaned_sample_t* message) {
@@ -179,7 +181,10 @@ bool ZenohTransportDriver::OnMessage(
           }
         };
 
-    zenoh_bus_ptr_->RegisterSubscriber(pattern, std::move(handle));
+    if (!zenoh_bus_ptr_->RegisterSubscriber(pattern, std::move(handle))) return false;
+    message_handler_map_.emplace(pattern, std::move(msg_handler_tool_unique_ptr));
+    zenoh_bus_ptr_->RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole::kSubscriber,
+                                          info.topic_name, info.msg_type, pattern);
     MW_INFO("Register subscribe type to zenoh transport, url: {}", pattern);
     return true;
   } catch (const std::exception& e) {

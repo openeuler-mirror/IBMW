@@ -6,6 +6,7 @@
 #include "json/json.h"
 #include "zenoh.h"
 #include "zenoh_ext/global.h"
+#include "discovery/zenoh_discovery_responder.h"
 
 namespace ibmw::extensions::zenoh_extension {
 class ZenohBus {
@@ -17,8 +18,8 @@ class ZenohBus {
 
  public:
   using MsgHandleFunc = std::function<void(const z_loaned_sample_t* message)>;
-  ZenohBus() = default;
-  ~ZenohBus() = default;
+  ZenohBus();
+  ~ZenohBus() { Shutdown(); }
 
   ZenohBus(const ZenohBus&) = delete;
   ZenohBus& operator=(const ZenohBus&) = delete;
@@ -26,8 +27,13 @@ class ZenohBus {
   void Initialize(const std::string& native_cfg_path, size_t shm_pool_size);
   void Shutdown();
 
-  void RegisterSubscriber(const std::string& keyexpr, MsgHandleFunc handle);
-  void RegisterPublisher(const std::string& keyexpr, bool shm_enabled);
+  bool RegisterSubscriber(const std::string& keyexpr, MsgHandleFunc handle);
+  bool RegisterPublisher(const std::string& keyexpr, bool shm_enabled);
+
+  void RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole role,
+                              std::string topic, std::string type, std::string key);
+  void StartDiscovery(const std::string& limit_domain);
+  void StopDiscovery() noexcept;
 
   void RegisterRpcNode(const std::string& keyexpr, MsgHandleFunc handle, const std::string& role, bool shm_enabled);
 
@@ -68,9 +74,11 @@ class ZenohBus {
 
   z_owned_session_t z_session_;
   z_owned_config_t z_config_;
+  ibmw::discovery::ZenohDiscoveryResponder discovery_;
+  bool initialized_ = false;
 
   // shm related
-  size_t shm_pool_size_;
+  size_t shm_pool_size_ = 0;
   z_owned_memory_layout_t shm_layout_;
 
   std::atomic_bool shm_initialized_ = false;

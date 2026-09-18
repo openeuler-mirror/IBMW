@@ -1234,12 +1234,43 @@ ibmw topic info /chatter -r --ros-domain 10 -v
 ibmw topic list -d -r --dds-domain 10 --ros-domain 20
 ```
 
+The Zenoh source requires `IBMW_BUILD_ZENOH_EXTENSION`. Selecting `-z` loads
+`libibmw_discovery_zenoh.so` and opens its own Zenoh session, without loading the
+business transport extension into the CLI. The running business application
+must use the updated `libibmw_zenoh_transport.so`: it serves endpoint metadata
+through a queryable on its existing session. Arbitrary Zenoh applications and
+older IBMW extensions do not expose this metadata automatically.
+
+`--zenoh-domain` must exactly match the business YAML `limit_domain` value;
+omitting it selects the empty domain, not every domain. `--zenoh-config` accepts
+a native Zenoh configuration for the observer (for example, peer/router
+connections); the observer must be able to reach the business sessions. With no
+configuration file it uses Zenoh defaults, including native scouting settings.
+UDP scouting establishes session connectivity; IBMW metadata queries then
+provide the logical topic and type names.
+
+```bash
+ibmw topic list -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic info /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5 -v
+ibmw topic type /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+```
+
+Results count successfully declared Zenoh publishers/subscribers, including
+silent and subscriber-only topics. Multiple module callbacks sharing one native
+subscriber count as one endpoint. RPC internals are excluded. Each endpoint has
+its session ZID, instance-local ID, logical topic/type and actual wire key.
+Serialization and QoS remain empty when registration does not establish them.
+The observer retries metadata queries during the collection window and replaces
+each instance's snapshot by revision. This is a bounded observation, not a
+continuous liveness view; an instance seen earlier in the window may exit before
+the result is printed.
+
 Network queries collect a snapshot over a default two-second window. Each
 invocation discovers independently, without a persistent discovery service.
 Domain, discovery settings, security and network reachability determine what
-can be observed. DDS and ROS 2 remain separate sources: combined queries keep
-their endpoints without merging identities across sources. Zenoh remains
-unavailable. Failed sources return exit status 1 while successful sources still
+can be observed. DDS, ROS 2 and Zenoh remain separate sources: combined queries keep
+their endpoints without merging identities across sources. Failed sources return
+exit status 1 while successful sources still
 print their results. These adapters do not yet add remote discovery to `bag record`.
 
 Native ROS 2 libraries can exit the process during loading, for example when
