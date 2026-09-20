@@ -4,7 +4,7 @@
 # Smoke-test staging helper. Idempotent: removes the stage first.
 #
 # Inputs : $REPO_ROOT (auto-resolved), $BUILD ($REPO_ROOT/build), $STAGE (default /tmp/ibmw_regress/stage)
-# Output : staged binaries+libs+cfg+run_all_tests.sh under $STAGE
+# Output : staged binaries+libs+cfg+cli.yaml+run_all_tests.sh under $STAGE
 # Run    : after a successful `cmake --build build`. Then:
 #            cd $STAGE && LD_LIBRARY_PATH=$PWD/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH ./run_all_tests.sh
 set -e
@@ -93,6 +93,9 @@ done
 for so in "$STAGE/lib/"*.so*; do
   [ -e "$so" ] && ln -sf "lib/$(basename "$so")" "$STAGE/$(basename "$so")" 2>/dev/null || true
 done
+
+# Use the manifest generated for this layout, with paths relative to $STAGE.
+copy_required "$BUILD/cli-stage.yaml" "$STAGE/cli.yaml"
 
 # 5) run_all_tests.sh
 cp "$REPO_ROOT/src/samples/cpp/extension_smoke_test/run_all_tests.sh" "$STAGE/"

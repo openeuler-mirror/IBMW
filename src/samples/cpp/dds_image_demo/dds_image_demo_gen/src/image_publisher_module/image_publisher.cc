@@ -35,14 +35,16 @@ bool ImagePublisher::Setup(ibmw::Runtime core) {
 
 bool ImagePublisher::Run() {
   running_ = true;
-  std::thread([this]() { PublishLoop(); }).detach();
+  publish_thread_ = std::thread([this]() { PublishLoop(); });
   MW_INFO("ImagePublisher::Run succeeded.");
   return true;
 }
 
 void ImagePublisher::Stop() {
   running_ = false;
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (publish_thread_.joinable()) {
+    publish_thread_.join();
+  }
   MW_INFO("ImagePublisher::Stop succeeded.");
 }
 
