@@ -1170,7 +1170,46 @@ and the control socket. Configure TypeSupport packages used for topic schemas,
 recording, or playback under `ibmw.runtime_graph.type_support_pkgs`; the
 Record/Playback extension does not maintain a separate copy.
 
-#### Topic discovery CLI
+#### Topic CLI
+
+`ibmw topic hz <topic>` measures the rate received by an observer. Once per second
+it prints average Hz, minimum/maximum interarrival time, population standard
+deviation, and the number of messages in the window. It uses a steady clock and
+the latest 10000 messages by default. ROS simulation time and message field
+filters are not currently supported.
+
+```bash
+ibmw topic hz /sensor_data                     # Registry discovery, capability-based subscription
+ibmw topic hz /chatter -r --ros-domain 10       # Independent ROS 2 subscriber
+ibmw topic hz rt/chatter -d --dds-domain 10     # Native DDS wire topic name
+ibmw topic hz /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic hz /chatter -r -w 100 --duration 10
+```
+
+`hz` accepts one discovery source per invocation and does not support `--all`.
+Use `--type <type>` with a name reported by `topic type` to select among multiple
+published types. Explicit queries include hidden topics. `--window/-w` must be
+at least 2. `--timeout` bounds the wait to discover a publisher (default: 10
+seconds); `--duration` limits observation after subscription, otherwise Ctrl+C
+stops the command. Silent publishers produce a no-new-messages notice. The
+measured rate depends on observer scheduling and transport loss and does not
+represent a business subscriber's received rate.
+
+Network observation loads the selected transport library from the installation
+directory. ROS 2 generic subscriptions still require the corresponding message
+type package to be installed. Optional `--config-file <yaml>` loads only the
+selected `ibmw.extensions.items`, `ibmw.messaging.drivers`, and scheduling
+configuration. Relative paths are resolved against that file; discovery options
+and their defaults always determine the domain. `--zenoh-config` takes precedence
+over the file's `native_cfg_path`. DDS/ROS 2 request `best_effort` and `volatile`
+by default, with `--qos-reliability` and `--qos-durability` overrides. For DDS
+publishers with exclusive ownership, unspecified reliability defaults to `reliable`;
+explicit `--qos-reliability best_effort` is rejected as incompatible. Registry
+observation follows publisher additions/removals and shares capture route selection
+with `bag record --registry`: independent subscriptions first, Runtime Tap as fallback.
+DDS/ROS 2 QoS from registry discovery adapts to publishers; cached typed subscriptions retain the
+single-publisher and pre-start registration restrictions. Tap drops are reported
+when detected.
 
 `ibmw topic list`, `info`, `type`, and `find` share these discovery options:
 

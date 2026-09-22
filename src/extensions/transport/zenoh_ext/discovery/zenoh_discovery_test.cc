@@ -5,6 +5,7 @@
 #include "extension_api/ibmw_discovery_provider.h"
 #include "zenoh_ext/zenoh_transport_driver.h"
 #include "zenoh_ext/zenoh_serialized_message.h"
+#include "engine/topic_io/topic_subscription.h"
 #include <future>
 
 #include <algorithm>
@@ -262,6 +263,44 @@ std::string Envelope(std::string_view format, std::string_view payload) {
   buffer.SetUint8(0);
   buffer.SetBuffer(payload.data(), payload.size());
   return bytes;
+}
+
+TEST_F(ZenohDiscoveryTest, TopicObserverReceivesOncePerWireSampleAndStops) {
+  Business sender(server_, "hz_test");
+  ASSERT_TRUE(sender.Add("/rate", EndpointRole::kPublisher));
+  ASSERT_TRUE(sender.Add("/rate", EndpointRole::kPublisher));
+  sender.driver.Start();
+  ibmw::runtime::core::topic_io::TopicSubscription observer({
+      .source = {.backend = DiscoveryBackend::kZenoh, .zenoh_domain = "hz_test", .zenoh_config = client_},
+      .topic = "/rate"});
+  std::atomic<unsigned> count{0};
+  observer.Start([&](auto&& message) {
+    EXPECT_EQ(message.payload->JoinToString(), "sample");
+    ++count;
+  });
+  const auto discovery_deadline = Clock::now() + 5s;
+  bool subscribed = false;
+  while (!(subscribed = observer.Refresh()) && Clock::now() < discovery_deadline) {
+    std::this_thread::sleep_for(50ms);
+  }
+  ASSERT_TRUE(subscribed);
+  auto bytes = Envelope("json", "sample");
+  const auto key = "transport/%2Frate/test%3AOpaque/hz_test";
+  const auto deadline = Clock::now() + 3s;
+  unsigned sent = 0;
+  while (count.load() < 5 && Clock::now() < deadline) {
+    ASSERT_TRUE(observer.Refresh());
+    sender.bus->Send(key, bytes.data(), bytes.size());
+    ++sent;
+    std::this_thread::sleep_for(50ms);
+  }
+  observer.Stop();
+  const auto stopped = count.load();
+  EXPECT_GE(stopped, 5u);
+  EXPECT_LE(stopped, sent);
+  sender.bus->Send(key, bytes.data(), bytes.size());
+  std::this_thread::sleep_for(50ms);
+  EXPECT_EQ(count.load(), stopped);
 }
 
 TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding) {

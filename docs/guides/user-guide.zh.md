@@ -1141,7 +1141,37 @@ Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
 `ibmw.runtime_graph.type_support_pkgs` 下；Record/Playback 扩展本身不再
 单独维护这份配置。
 
-#### 话题发现 CLI
+#### 话题 CLI
+
+`ibmw topic hz <topic>` 订阅一个话题，统计观察端实际接收到的频率，每秒输出
+平均 Hz、接收间隔的最小值/最大值、总体标准差和窗口消息数。默认使用单调时钟，
+窗口为最近 10000 条消息；当前不支持 ROS 仿真时间或消息字段过滤。
+
+```bash
+ibmw topic hz /sensor_data                     # 默认：Registry 发现，按能力选择订阅
+ibmw topic hz /chatter -r --ros-domain 10       # 独立 ROS 2 订阅端
+ibmw topic hz rt/chatter -d --dds-domain 10     # 原生 DDS wire topic 名称
+ibmw topic hz /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic hz /chatter -r -w 100 --duration 10
+```
+
+`hz` 每次只接受一个发现来源，不支持 `--all`。话题存在多个发布类型时使用
+`--type <type>` 指定 `topic type` 显示的类型名。隐藏话题可直接指定。
+`--window/-w` 至少为 2；`--timeout` 设置等待发现发布者的时限（默认 10 秒）；
+`--duration` 设置订阅建立后的观察时长，默认持续到 Ctrl+C。发布者不发送数据时
+输出无新消息提示；输出频率受观察端调度和传输丢包影响，不等于业务订阅者的接收频率。
+
+网络模式自动加载安装目录中的对应 transport 库；ROS 2 通用订阅仍要求本机安装
+相应消息类型包。需要额外传输配置时传入 `--config-file <yaml>`，只加载其中选定的
+`ibmw.extensions.items`、`ibmw.messaging.drivers` 和调度配置。相对路径基于该文件，
+domain 始终由上述发现参数及其默认值决定；Zenoh 原生配置优先使用 `--zenoh-config`，
+否则使用配置中的 `native_cfg_path`。DDS/ROS 2 默认请求 `best_effort`、`volatile`，
+可用 `--qos-reliability`、`--qos-durability` 覆盖。对于 exclusive ownership 的 DDS
+发布者，未指定可靠性时自动使用 `reliable`；显式指定 `--qos-reliability best_effort`
+会报 QoS 不兼容错误。Registry 模式跟踪发布端增减，并与
+`bag record --registry` 共用采集路径选择：优先独立订阅，必要时使用 Runtime Tap。
+Registry 发现的 DDS/ROS 2 QoS 按发布端适配；缓存类型订阅保留单发布者和启动前注册限制。
+发现 Tap 丢包时报告累计丢包数。
 
 `ibmw topic list`、`info`、`type`、`find` 共用以下发现参数：
 

@@ -10,7 +10,7 @@
 
 namespace ibmw::cli::topic {
 
-void AddDiscoveryOptions(ibmw::cli::Command& command);
+void AddDiscoveryOptions(ibmw::cli::Command& command, bool allow_all = true);
 std::vector<ibmw::discovery::DiscoveryOptions> ParseDiscoveryOptions(
     const ibmw::cli::Invocation& invocation);
 

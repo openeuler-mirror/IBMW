@@ -26,6 +26,7 @@ if(IBMW_BUILD_TESTS)
     ibmw_zenoh_discovery_protocol ibmw::core::engine
     zenohc::lib jsoncpp::jsoncpp GTest::gtest_main)
   add_werror(ibmw_discovery_zenoh_test)
+  add_dependencies(ibmw_discovery_zenoh_test ibmw_extensions_zenoh_ext)
   add_test(NAME ibmw_discovery_zenoh_test COMMAND ibmw_discovery_zenoh_test)
   set_tests_properties(ibmw_discovery_zenoh_test PROPERTIES TIMEOUT 45 LABELS "integration;discovery;zenoh")
 endif()
