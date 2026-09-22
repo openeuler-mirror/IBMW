@@ -5,12 +5,14 @@ set(topic_cli_sources
     topic_command.cc
     topic_cli_provider.cc
     discovery_options.cc
+    observation_command.cc
     discovery_query.cc
     list_command.cc
     type_command.cc
     find_command.cc
     info_command.cc
-    hz_command.cc)
+    hz_command.cc
+    bw_command.cc)
 # Active topic commands own a temporary Engine; discovery-only commands do not
 # initialize it or load any transport plugins.
 add_library(ibmw_topic_cli_provider SHARED ${topic_cli_sources})
@@ -25,7 +27,8 @@ if(IBMW_INSTALL)
 endif()
 
 if(IBMW_BUILD_TESTS)
-  add_executable(ibmw_topic_cli_test topic_command_test.cc discovery_options_test.cc hz_command_test.cc
+  add_executable(ibmw_topic_cli_test topic_command_test.cc discovery_options_test.cc
+                 hz_command_test.cc bw_command_test.cc
                  ${topic_cli_sources})
   target_link_libraries(ibmw_topic_cli_test
     PRIVATE ibmw::cli::command ibmw::core::engine GTest::gtest_main)

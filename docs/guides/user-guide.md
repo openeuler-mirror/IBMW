@@ -1186,13 +1186,28 @@ ibmw topic hz /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
 ibmw topic hz /chatter -r -w 100 --duration 10
 ```
 
-`hz` accepts one discovery source per invocation and does not support `--all`.
+`ibmw topic bw <topic>` measures received serialized payload bandwidth. It uses
+the same subscriptions as `hz`, with a default window of 100 messages. Once per
+second it prints bandwidth and the window's mean/minimum/maximum message sizes,
+using decimal B/KB/MB units (1 KB = 1000 bytes). Bandwidth is the window's total
+bytes divided by the time from its first message to the current steady-clock
+time; silence after the last message therefore lowers the reported bandwidth.
+At least two messages are required. Sizes exclude transport headers, framing,
+retransmissions and other protocol overhead. Cached typed subscriptions measure
+their generated serialized payload, not the in-memory object size.
+
+```bash
+ibmw topic bw /sensor_data
+ibmw topic bw /chatter -r --ros-domain 10 -w 100 --duration 10
+```
+
+`hz` and `bw` accept one discovery source per invocation and do not support `--all`.
 Use `--type <type>` with a name reported by `topic type` to select among multiple
 published types. Explicit queries include hidden topics. `--window/-w` must be
 at least 2. `--timeout` bounds the wait to discover a publisher (default: 10
 seconds); `--duration` limits observation after subscription, otherwise Ctrl+C
-stops the command. Silent publishers produce a no-new-messages notice. The
-measured rate depends on observer scheduling and transport loss and does not
+stops the command. An observer that has received no messages prints a notice.
+The measured rate and bandwidth depend on observer scheduling and transport loss and do not
 represent a business subscriber's received rate.
 
 Network observation loads the selected transport library from the installation

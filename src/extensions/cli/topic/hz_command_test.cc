@@ -2,7 +2,7 @@
 // All rights reserved.
 
 #include "rate_statistics.h"
-#include "topic_command.h"
+#include "observation_test_support.h"
 
 #include <atomic>
 #include <fstream>
@@ -57,16 +57,8 @@ TEST(RateStatisticsTest, HandlesEmptyEqualAndRegressingTimestamps) {
   EXPECT_NEAR(statistics.Snapshot().rate, 100.0, 1e-10);
 }
 
-struct CommandResult { int code; std::string output; std::string error; };
-CommandResult Invoke(std::vector<std::string> arguments) {
-  arguments.insert(arguments.begin(), "topic");
-  std::vector<const char*> argv;
-  for (const auto& argument : arguments) argv.push_back(argument.c_str());
-  testing::internal::CaptureStdout();
-  testing::internal::CaptureStderr();
-  const int code = RunTopicCommand(static_cast<int>(argv.size()), argv.data());
-  return {code, testing::internal::GetCapturedStdout(), testing::internal::GetCapturedStderr()};
-}
+using test::Invoke;
+using LocalHzTest = test::RegistryObservationTest;
 
 TEST(HzCommandTest, ExposesHelpAndRejectsInvalidOptionsBeforeStarting) {
   const auto help = Invoke({"hz", "--help"});
@@ -92,71 +84,6 @@ TEST(HzCommandTest, ExposesHelpAndRejectsInvalidOptionsBeforeStarting) {
     EXPECT_FALSE(result.error.empty());
   }
 }
-
-class TestTap final : public io::PublishTapCapability {
- public:
-  uint64_t Register(Callback callback) override {
-    std::lock_guard lock(mutex_);
-    callback_ = std::move(callback);
-    return 1;
-  }
-  bool Unregister(uint64_t) override {
-    std::lock_guard lock(mutex_);
-    callback_ = {};
-    return true;
-  }
-  void Emit() {
-    std::lock_guard lock(mutex_);
-    if (!callback_) return;
-    const std::string bytes = "payload";
-    ibmw::transport::Context context;
-    ibmw::extension::MessageView view{
-        .topic = "/rate", .msg_type = "test:Bytes", .module_name = "publisher", .endpoint_index = 0,
-        .context = ibmw::transport::ContextRef(context),
-        .available_serialization_types = {"cdr"},
-        .acquire_serialized = [&](std::string_view) {
-          return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
-        }};
-    callback_(view);
-  }
- private:
-  std::mutex mutex_;
-  Callback callback_;
-};
-
-class LocalHzTest : public testing::Test {
- protected:
-  void SetUp() override {
-    std::string pattern = "/tmp/ibmw-hz-test-XXXXXX";
-    ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
-    directory = pattern;
-    server = std::make_unique<io::RuntimeTapServer>(tap, "hz-test", directory);
-    server->Start();
-    graph::RuntimeRegistration registration{.runtime_id = "hz-test"};
-    registration.topics.push_back({.publisher_id = "publisher-0",
-        .topic = {.topic = "/rate", .msg_type = "test:Bytes", .serialization_type = "cdr"},
-        .capture_capabilities = {{"runtime-tap", {.mode = "runtime_tap"}}}});
-    RestartAgent(registration);
-  }
-  void RestartAgent(const graph::RuntimeRegistration& registration) {
-    agent.reset();
-    agent = std::make_unique<graph::RuntimeGraphAgent>(graph::RuntimeGraphAgent::Options{
-        .registration = registration, .registry_path = directory});
-    agent->SetStartTapHandler([&](const auto& advertisement) { return server->StartSession(advertisement); });
-    agent->SetStopTapHandler([&](auto id) { return server->StopSession(id); });
-    agent->Initialize();
-    agent->Start();
-  }
-  void TearDown() override {
-    agent.reset();
-    server.reset();
-    std::filesystem::remove_all(directory);
-  }
-  std::filesystem::path directory;
-  TestTap tap;
-  std::unique_ptr<io::RuntimeTapServer> server;
-  std::unique_ptr<graph::RuntimeGraphAgent> agent;
-};
 
 TEST_F(LocalHzTest, MeasuresRealTapStreamAndDetachesOnDuration) {
   std::jthread publisher([&](std::stop_token stop) {
