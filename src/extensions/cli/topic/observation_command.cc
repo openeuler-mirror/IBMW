@@ -54,8 +54,10 @@ class LoggerLevelGuard {
   uint32_t previous_;
 };
 
-std::string Value(const Invocation& invocation, const std::string& name,
-                  std::string fallback = {}) {
+}  // namespace
+
+std::string ObservationValue(const Invocation& invocation, const std::string& name,
+                             std::string fallback) {
   const auto it = invocation.options.find(name);
   if (it == invocation.options.end()) return fallback;
   if (it->second.size() != 1 || it->second.front().empty()) {
@@ -64,8 +66,9 @@ std::string Value(const Invocation& invocation, const std::string& name,
   return it->second.front();
 }
 
+namespace {
 double Seconds(const Invocation& invocation, const std::string& name, const char* fallback) {
-  const auto value = Value(invocation, name, fallback);
+  const auto value = ObservationValue(invocation, name, fallback);
   double number = 0;
   const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
   if (error != std::errc{} || end != value.data() + value.size() ||
@@ -78,14 +81,16 @@ double Seconds(const Invocation& invocation, const std::string& name, const char
 }  // namespace
 
 ObservationOptions ParseObservationOptions(
-    const Invocation& invocation, std::string_view command, size_t default_window) {
+    const Invocation& invocation, std::string_view command, std::optional<size_t> default_window) {
   auto sources = ParseDiscoveryOptions(invocation);
   if (sources.size() != 1) throw std::invalid_argument("topic " + std::string(command) + " accepts exactly one discovery source.");
-  const auto window_text = Value(invocation, "--window", std::to_string(default_window));
   size_t window = 0;
-  const auto [end, error] = std::from_chars(window_text.data(), window_text.data() + window_text.size(), window);
-  if (error != std::errc{} || end != window_text.data() + window_text.size() || window < 2) {
-    throw std::invalid_argument("--window requires an integer of at least 2 messages.");
+  if (default_window) {
+    const auto window_text = ObservationValue(invocation, "--window", std::to_string(*default_window));
+    const auto [end, error] = std::from_chars(window_text.data(), window_text.data() + window_text.size(), window);
+    if (error != std::errc{} || end != window_text.data() + window_text.size() || window < 2) {
+      throw std::invalid_argument("--window requires an integer of at least 2 messages.");
+    }
   }
   const auto timeout = std::chrono::duration<double>(Seconds(invocation, "--timeout", "10"));
   const auto duration = invocation.HasOption("--duration")
@@ -93,12 +98,12 @@ ObservationOptions ParseObservationOptions(
       : std::chrono::duration<double>::max();
   TopicSubscription::Options options{
       .source = sources.front(), .topic = invocation.positional_args.front(),
-      .type = Value(invocation, "--type"), .config_file = Value(invocation, "--config-file")};
+      .type = ObservationValue(invocation, "--type"), .config_file = ObservationValue(invocation, "--config-file")};
   if (options.topic.empty()) throw std::invalid_argument("Topic name must not be empty.");
   for (const auto& policy : {std::string("reliability"), std::string("durability")}) {
     const auto option = "--qos-" + policy;
     if (!invocation.HasOption(option)) continue;
-    const auto value = Value(invocation, option);
+    const auto value = ObservationValue(invocation, option);
     const bool valid = policy == "reliability"
         ? value == "reliable" || value == "best_effort"
         : value == "volatile" || value == "transient_local";
@@ -119,7 +124,8 @@ ObservationOptions ParseObservationOptions(
 
 int RunObservation(ObservationOptions options,
                    ibmw::transport::SerializedMessageCallback observe,
-                   const std::function<void(bool final)>& print) {
+                   const std::function<void(bool final)>& print,
+                   const std::function<bool()>& poll) {
   SignalGuard signals;
   LoggerLevelGuard logger_level;
   const auto topic = options.subscription.topic;
@@ -135,7 +141,8 @@ int RunObservation(ObservationOptions options,
     if (now >= next_refresh) {
       if (subscription.Refresh() && !measurement_start) {
         measurement_start = Clock::now();
-        std::cerr << "Subscribed to " << topic << "; using a steady clock.\n";
+        std::cerr << "Subscribed to " << topic
+                  << (options.window ? "; using a steady clock.\n" : ".\n");
       }
       next_refresh = Clock::now() + std::chrono::milliseconds(250);
       const auto dropped = subscription.DroppedMessages();
@@ -146,28 +153,32 @@ int RunObservation(ObservationOptions options,
       }
       now = Clock::now();
     }
+    if (poll && poll()) break;
     if (!measurement_start && now - discovery_start >= options.timeout) {
       throw std::runtime_error("Timed out waiting for a publisher of '" + topic + "'.");
     }
     if (measurement_start && now - *measurement_start >= options.duration) break;
     if (now >= next_print) {
-      print(false);
+      if (print) print(false);
       std::cout.flush();
       next_print = now + std::chrono::seconds(1);
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
   }
   subscription.Stop();
-  print(true);
+  if (poll) poll();
+  if (print) print(true);
   std::cout.flush();
   return 0;
 }
 
-void AddObservationOptions(ibmw::cli::Command& command, size_t default_window) {
+void AddObservationOptions(ibmw::cli::Command& command, std::optional<size_t> default_window) {
   command.AddArgument("<topic>", "Topic to observe (including hidden topics)");
   AddDiscoveryOptions(command, false);
   using Mode = ibmw::cli::OptionValueMode;
-  command.AddOption("--window", "-w", "messages", "Window size in messages, at least 2 (default: " + std::to_string(default_window) + ")", Mode::kRequired);
+  if (default_window) {
+    command.AddOption("--window", "-w", "messages", "Window size in messages, at least 2 (default: " + std::to_string(*default_window) + ")", Mode::kRequired);
+  }
   command.AddOption("--type", {}, "type", "Select a message type when the topic has multiple types", Mode::kRequired);
   command.AddOption("--timeout", {}, "seconds", "Wait for a publisher (default: 10 seconds)", Mode::kRequired);
   command.AddOption("--duration", {}, "seconds", "Stop after this observation duration (default: until Ctrl+C)", Mode::kRequired);

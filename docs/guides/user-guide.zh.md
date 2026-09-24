@@ -1143,6 +1143,48 @@ Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
 
 #### 话题 CLI
 
+`ibmw topic echo <topic>` 将收到的消息输出为 YAML，以 `---` 分隔。
+`--format json` 改为每行一个 JSON 值；`--once` 输出一条后退出；
+`--field header.stamp` 选择嵌套字段，数字路径段表示数组下标，例如
+`--field poses.0.position`。发现和订阅路径与 `hz`、`bw` 共用，支持相同的
+发现来源、类型、连接配置、QoS、超时和观察时长参数，不提供统计窗口参数。
+`--queue-size <条数>` 设置待打印队列上限，必须为正整数，默认 100 条。
+队列满时会报错退出；增大上限可以缓冲短时积压，但会增加内存占用，
+无法解决接收速度持续超过输出速度的问题。
+
+```bash
+ibmw topic echo /sensor_data --once
+ibmw topic echo /status --format json --field state
+ibmw topic echo /chatter --ros2 --type-support ./libtext_ts.so --once
+ibmw topic echo /binary_topic --raw --duration 10
+ibmw topic echo /sensor_data --queue-size 1000
+```
+
+JSON/YAML 负载可直接显示。二进制负载需要匹配的 IBMW TypeSupport 包，同时支持
+接收格式的反序列化及 JSON 或 YAML 序列化。Registry 模式可使用所选发布者登记的
+类型包；显式传入的 `--type-support <path>` 优先，且该选项可重复。网络模式只加载
+此选项或 `--config-file` 中 `ibmw.runtime_graph.type_support_pkgs` 指定的本机包，
+配置中的相对路径以配置文件目录为基准，不从网络发现信息加载类型包。
+当前通用 DDS/ROS 2 TypeSupport 适配器只提供二进制格式，单独加载这些包仍不足以
+显示字段。解码能力不足时明确报错；`--raw` 可直接输出十六进制负载，无需解码，
+不能与 `--field` 或 `--format` 同用。
+
+DDS 模式查看 ROS 消息时，先查找与 `dds:<wire 类型>` 完全匹配的 TypeSupport。
+若不存在，才按 ROS 生成的 DDS 命名约定匹配已加载的 ROS 类型包，例如
+`dds:std_msgs::msg::dds_::String_` 对应 `ros2:std_msgs/msg/String`，并使用该包的
+`ros2` 反序列化入口读取 CDR。支持 `msg`、`srv` 和 `action` 类型命名；类型包仍需
+提供 JSON/YAML 转换。完全匹配的原生 DDS 解码器优先，其格式或解码错误不会触发
+回退。话题名称及发现输出仍保留 DDS wire 名称，例如：
+
+```bash
+ibmw topic echo rt/chatter --dds --type-support ./libtext_ts.so --once
+```
+
+解码和打印在命令线程执行，接收队列最多保留 100 条消息；输出跟不上导致队列满时
+明确失败。`--timeout` 只限制发现发布者的等待时间；发布者已发现但不发消息时，
+`--once` 仍会等待，可用 `--duration` 限制观察时长。没有收到消息时向 stderr 提示。
+当前未实现任意表达式过滤、ROS 仿真时间或任意二进制类型的自动反射。
+
 `ibmw topic hz <topic>` 订阅一个话题，统计观察端实际接收到的频率，每秒输出
 平均 Hz、接收间隔的最小值/最大值、总体标准差和窗口消息数。默认使用单调时钟，
 窗口为最近 10000 条消息；当前不支持 ROS 仿真时间或消息字段过滤。

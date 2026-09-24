@@ -43,14 +43,14 @@ class TestTap final : public io::PublishTapCapability {
     callback_ = {};
     return true;
   }
-  bool Emit(std::string_view bytes = "payload") {
+  bool Emit(std::string_view bytes = "payload", std::string_view serialization = "cdr") {
     std::lock_guard lock(mutex_);
     if (!callback_) return false;
     ibmw::transport::Context context;
     ibmw::extension::MessageView view{
         .topic = "/rate", .msg_type = "test:Bytes", .module_name = "publisher", .endpoint_index = 0,
         .context = ibmw::transport::ContextRef(context),
-        .available_serialization_types = {"cdr"},
+        .available_serialization_types = {std::string(serialization)},
         .acquire_serialized = [&](std::string_view) {
           return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
         }};

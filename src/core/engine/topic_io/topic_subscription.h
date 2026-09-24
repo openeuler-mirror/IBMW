@@ -3,10 +3,12 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
 #include "engine/discovery/discovery_provider.h"
+#include "engine/runtime_graph/topic_advertisement.h"
 #include "engine/transport/serialized_subscriber.h"
 #include "yaml-cpp/yaml.h"
 
@@ -28,6 +30,9 @@ class TopicSubscription final {
     std::string type;
     std::filesystem::path config_file;
     ibmw::transport::QosDescriptor qos;
+    // Runs on the lifecycle thread before attaching a registry subscription.
+    // Consumers can retain local type metadata without exposing it to network discovery.
+    std::function<void(const runtime_graph::TopicAdvertisement&)> prepare_registry;
   };
 
   explicit TopicSubscription(Options options);

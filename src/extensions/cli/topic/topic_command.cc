@@ -10,6 +10,7 @@
 
 #include "cli/command.h"
 #include "bw_command.h"
+#include "echo_command.h"
 #include "find_command.h"
 #include "hz_command.h"
 #include "info_command.h"
@@ -27,6 +28,7 @@ int RunTopicCommand(int argc, const char* const* argv) {
     ibmw::cli::topic::AddInfoCommand(topic);
     ibmw::cli::topic::AddHzCommand(topic);
     ibmw::cli::topic::AddBwCommand(topic);
+    ibmw::cli::topic::AddEchoCommand(topic);
 
     std::vector<std::string> arguments;
     for (int index = 0; index < argc; ++index) {

@@ -1172,6 +1172,57 @@ Record/Playback extension does not maintain a separate copy.
 
 #### Topic CLI
 
+`ibmw topic echo <topic>` prints received messages as YAML documents separated
+by `---`. Use `--format json` for one JSON value per line, `--once` to stop after
+one message, or `--field header.stamp` to select a nested field. Numeric path
+segments index arrays, for example `--field poses.0.position`. It uses the same
+discovery and subscription routes as `hz` and `bw` and accepts their discovery,
+type, connection, QoS, timeout and duration options; it has no statistics window.
+Use `--queue-size <messages>` to set the maximum number of messages waiting for
+output (positive integer, default: 100). Echo exits with an error if the queue
+fills. A larger queue buffers bursts at the cost of memory; it cannot compensate
+for reception that continuously outpaces output.
+
+```bash
+ibmw topic echo /sensor_data --once
+ibmw topic echo /status --format json --field state
+ibmw topic echo /chatter --ros2 --type-support ./libtext_ts.so --once
+ibmw topic echo /binary_topic --raw --duration 10
+ibmw topic echo /sensor_data --queue-size 1000
+```
+
+JSON/YAML payloads can be displayed directly. Binary payloads require a matching
+IBMW TypeSupport package that can deserialize the received format and serialize
+JSON or YAML. Registry observation can use the selected publisher's registered
+package; explicit `--type-support <path>` packages take precedence and the option
+is repeatable. Network observation loads packages supplied locally via this option
+or `ibmw.runtime_graph.type_support_pkgs` in `--config-file` (relative paths resolve
+from that file). It does not load packages advertised by network endpoints.
+The standard DDS/ROS 2 TypeSupport adapters currently expose binary formats only;
+installing those packages alone does not enable structured echo. Unsupported
+decoding fails with an explanation; `--raw` prints hexadecimal payload bytes
+without decoding and cannot be combined with `--field` or `--format`.
+
+When observing ROS messages over DDS, echo first looks for an exact
+`dds:<wire type>` TypeSupport. Only if absent, it matches the ROS-generated DDS
+naming convention to a loaded ROS package, for example
+`dds:std_msgs::msg::dds_::String_` to `ros2:std_msgs/msg/String`, and reads the CDR
+using that package's `ros2` deserializer. This covers `msg`, `srv`, and `action`
+type names; the package must also support JSON/YAML conversion. An exact native
+DDS decoder takes precedence; its format or decoding errors do not trigger a
+fallback. Topic names and discovery output retain their DDS wire names:
+
+```bash
+ibmw topic echo rt/chatter --dds --type-support ./libtext_ts.so --once
+```
+
+Output and decoding run on the command thread. The receive queue holds up to 100
+messages; if output cannot keep up and the queue fills, echo fails explicitly.
+`--timeout` limits discovery of a publisher; a discovered silent publisher may
+still make `--once` wait, so use `--duration` to bound that wait. A run that receives
+no messages reports this on stderr. Arbitrary expression filters, ROS simulation
+time and automatic reflection of arbitrary binary types are not implemented.
+
 `ibmw topic hz <topic>` measures the rate received by an observer. Once per second
 it prints average Hz, minimum/maximum interarrival time, population standard
 deviation, and the number of messages in the window. It uses a steady clock and

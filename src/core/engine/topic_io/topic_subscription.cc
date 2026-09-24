@@ -229,6 +229,7 @@ class TopicSubscription::Impl {
       for (const auto& subscription : subscriptions) {
         const auto key = RegistrySubscriptionKey(subscription);
         if (sources.contains(key)) continue;
+        if (options.prepare_registry) options.prepare_registry(subscription.publisher);
         if (subscription.driver != "runtime-tap") {
           Add(key, registry_runtime.Create(subscription));
           continue;
