@@ -116,12 +116,19 @@ void ExtensionBus::Initialize(YAML::Node options_node) {
 
     // Initialize the extension
     bool ret = false;
-    if (extension_ptr->RequiredRuntimeAbi() ==
-        ibmw::extension::kRuntimeAbiVersionV1) {
-      if (!runtime_v1_) {
-        runtime_v1_ = MakeExtensionRuntimeV1(*core_ptr_);
+    const auto required_runtime_abi = extension_ptr->RequiredRuntimeAbi();
+    MW_REQUIRE(
+        required_runtime_abi == 0 ||
+            required_runtime_abi == ibmw::extension::kRuntimeAbiVersionV2,
+        "Extension '{}' requires Runtime ABI {}, but this Core supports {}. "
+        "Rebuild the extension with the matching Core headers.",
+        extension_options.name, required_runtime_abi,
+        ibmw::extension::kRuntimeAbiVersionV2);
+    if (required_runtime_abi != 0) {
+      if (!runtime_v2_) {
+        runtime_v2_ = MakeExtensionRuntimeV2(*core_ptr_);
       }
-      ret = extension_ptr->InitializeRuntime(runtime_v1_.get());
+      ret = extension_ptr->InitializeRuntime(runtime_v2_.get());
     } else {
       ret = extension_ptr->Initialize(core_ptr_);
     }

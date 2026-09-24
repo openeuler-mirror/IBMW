@@ -94,6 +94,7 @@ if(IBMW_BUILD_PROXY_EXTENSION)
 endif()
 
 # CLI providers are built after their runtime dependencies.
+add_subdirectory(cli/topic)
 if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
   add_subdirectory(cli/bag)
 endif()

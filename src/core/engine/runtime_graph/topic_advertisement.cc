@@ -26,6 +26,10 @@ nlohmann::json TopicAdvertisementToJson(
         {"provider_strip_leading_slash_option",
          capability.provider_strip_leading_slash_option}};
   }
+  nlohmann::json driver_qos = nlohmann::json::object();
+  for (const auto& [driver, qos] : advertisement.driver_qos) {
+    driver_qos[driver] = qos.policies;
+  }
   return nlohmann::json{
       {"runtime_id", advertisement.runtime_id},
       {"control_socket", advertisement.control_socket},
@@ -41,6 +45,8 @@ nlohmann::json TopicAdvertisementToJson(
         {"data", topic.schema.schema_data},
         {"hash", topic.schema.schema_hash}}},
       {"qos", topic.qos.policies},
+      {"module_name", advertisement.module_name},
+      {"driver_qos", std::move(driver_qos)},
       {"available_drivers", topic.available_drivers},
       {"type_support_package", advertisement.type_support_package},
       {"capture_capabilities", std::move(capture_capabilities)},
@@ -137,6 +143,13 @@ TopicAdvertisement TopicAdvertisementFromJson(const nlohmann::json& value) {
   }
   advertisement.published = value.value("published", true);
   advertisement.hidden = value.value("hidden", false);
+  advertisement.module_name = value.at("module_name").get<std::string>();
+  const auto& driver_qos = value.at("driver_qos");
+  MW_ASSERT(driver_qos.is_object(), "driver_qos must be an object.");
+  for (const auto& [driver, policies] : driver_qos.items()) {
+    advertisement.driver_qos[driver].policies =
+        policies.get<std::map<std::string, std::string>>();
+  }
 
   MW_ASSERT(
       !advertisement.runtime_id.empty() &&

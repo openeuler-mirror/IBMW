@@ -193,6 +193,12 @@ class TransportDriverDispatcher {
   TopicDriverInfoMap GetPubTopicDriverInfo() const;
   TopicDriverInfoMap GetSubTopicDriverInfo() const;
 
+  struct LoanedPodTopicInfo {
+    TransportInfo info;
+    std::string driver;
+  };
+  std::vector<LoanedPodTopicInfo> GetLoanedPodTopics() const;
+
  private:
   std::vector<TransportDriver*> GetDriversByRules(
       std::string_view topic_name,

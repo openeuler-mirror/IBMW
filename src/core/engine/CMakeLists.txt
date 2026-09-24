@@ -176,7 +176,9 @@ if(IBMW_BUILD_TESTS AND test_files)
                            extension_v2_fixture
                            extension_v2_bad_version_fixture
                            extension_v2_bad_size_fixture
-                           extension_v2_destroy_throws_fixture)
+                           extension_v2_destroy_throws_fixture
+                           extension_runtime_v1_fixture
+                           extension_runtime_v2_fixture)
     add_library(${fixture} MODULE ${EXTENSION_V2_FIXTURE_SRC})
     target_link_libraries(${fixture} PRIVATE ibmw::core::extension_api)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
@@ -215,6 +217,13 @@ if(IBMW_BUILD_TESTS AND test_files)
                              PRIVATE IBMW_EXT_FIXTURE_BAD_SIZE)
   target_compile_definitions(extension_v2_destroy_throws_fixture
                              PRIVATE IBMW_EXT_FIXTURE_DESTROY_THROWS)
+  target_compile_definitions(extension_runtime_v1_fixture
+                             PRIVATE IBMW_EXT_FIXTURE_RUNTIME_ABI=1)
+  target_compile_definitions(extension_runtime_v2_fixture
+                             PRIVATE IBMW_EXT_FIXTURE_RUNTIME_ABI=2)
+  foreach(fixture IN ITEMS extension_runtime_v1_fixture extension_runtime_v2_fixture)
+    target_link_libraries(${fixture} PRIVATE ibmw::api::cpp yaml-cpp::yaml-cpp)
+  endforeach()
 
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
   set_tests_properties(${CUR_TARGET_NAME}_test PROPERTIES TIMEOUT 120)
@@ -225,6 +234,8 @@ if(IBMW_BUILD_TESTS AND test_files)
                    extension_v2_bad_version_fixture
                    extension_v2_bad_size_fixture
                    extension_v2_destroy_throws_fixture
+                   extension_runtime_v1_fixture
+                   extension_runtime_v2_fixture
                    type_support_v1_fixture
                    type_support_bad_v1_fixture
                    type_support_bad_size_v1_fixture
@@ -242,6 +253,8 @@ if(IBMW_BUILD_TESTS AND test_files)
       "EXTENSION_V2_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_version_fixture>\""
       "EXTENSION_V2_BAD_SIZE_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_size_fixture>\""
       "EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_destroy_throws_fixture>\""
+      "EXTENSION_RUNTIME_V1_FIXTURE_PATH=\"$<TARGET_FILE:extension_runtime_v1_fixture>\""
+      "EXTENSION_RUNTIME_V2_FIXTURE_PATH=\"$<TARGET_FILE:extension_runtime_v2_fixture>\""
       "TYPE_SUPPORT_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_v1_fixture>\""
       "TYPE_SUPPORT_BAD_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_v1_fixture>\""
       "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""

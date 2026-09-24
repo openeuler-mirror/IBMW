@@ -52,7 +52,7 @@ namespace {
 
 class RuntimePublishTapCapability final : public topic_io::PublishTapCapability {
  public:
-  explicit RuntimePublishTapCapability(ibmw::extension::RuntimeV1& runtime)
+  explicit RuntimePublishTapCapability(ibmw::extension::RuntimeV2& runtime)
       : runtime_(runtime) {}
 
   uint64_t Register(Callback callback) override {
@@ -64,7 +64,7 @@ class RuntimePublishTapCapability final : public topic_io::PublishTapCapability 
   }
 
  private:
-  ibmw::extension::RuntimeV1& runtime_;
+  ibmw::extension::RuntimeV2& runtime_;
 };
 
 bool IsHiddenTopic(std::string_view topic) {
@@ -203,20 +203,13 @@ RuntimeRegistration RuntimeGraphSubsystem::BuildRegistration() const {
       .runtime_id = GenerateRuntimeId(options_.runtime_id, executable_name)};
 
   MW_REQUIRE(engine_, "Runtime Graph Engine is not configured.");
-  auto runtime = extension::MakeExtensionRuntimeV1(*engine_);
+  auto runtime = extension::MakeExtensionRuntimeV2(*engine_);
   for (const auto& endpoint : runtime->GetTransportEndpoints()) {
     if (endpoint.published && hidden_module_publishers_.contains(endpoint.module_name)) {
       continue;
     }
     const std::string serialization_type(
         endpoint.type_support.DefaultSerializationType());
-    if (serialization_type.empty()) {
-      MW_WARN(
-          "Runtime Agent skips topic '{}' type '{}' because its TypeSupport "
-          "does not advertise a serialization format.",
-          endpoint.topic, endpoint.msg_type);
-      continue;
-    }
     const auto schema =
         FindSchema(endpoint.msg_type, serialization_type);
     const auto type_support_package =
@@ -275,7 +268,9 @@ RuntimeRegistration RuntimeGraphSubsystem::BuildRegistration() const {
         .type_support_package = type_support_package,
         .capture_capabilities = std::move(capabilities),
         .published = endpoint.published,
-        .hidden = IsHiddenTopic(endpoint.topic)});
+        .hidden = IsHiddenTopic(endpoint.topic),
+        .module_name = endpoint.module_name,
+        .driver_qos = endpoint.driver_qos});
   }
   return registration;
 }
@@ -296,7 +291,7 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
   DiscoverTypeSupportPackagesFromCatalog();
   registration_ = BuildRegistration();
   if (!options_.enabled) return;
-  tap_runtime_ = extension::MakeExtensionRuntimeV1(*engine_);
+  tap_runtime_ = extension::MakeExtensionRuntimeV2(*engine_);
   publish_tap_ = std::make_unique<RuntimePublishTapCapability>(*tap_runtime_);
   tap_server_ = std::make_unique<topic_io::RuntimeTapServer>(
       *publish_tap_, registration_.runtime_id, options_.registry_path, GetLogger());
@@ -323,7 +318,7 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
 
 void RuntimeGraphSubsystem::DiscoverTypeSupportPackagesFromCatalog() {
   MW_REQUIRE(engine_, "Runtime Graph Engine is not configured.");
-  auto runtime = extension::MakeExtensionRuntimeV1(*engine_);
+  auto runtime = extension::MakeExtensionRuntimeV2(*engine_);
   std::set<std::string> package_paths;
   for (const auto& endpoint : runtime->GetTransportEndpoints()) {
     if (!endpoint.package_path.empty() && endpoint.package_path != "core") {

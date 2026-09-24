@@ -44,9 +44,9 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
   }
   bool Initialize(runtime::core::Engine*) noexcept override { return false; }
   uint32_t RequiredRuntimeAbi() const noexcept override {
-    return ibmw::extension::kRuntimeAbiVersionV1;
+    return ibmw::extension::kRuntimeAbiVersionV2;
   }
-  bool InitializeRuntime(ibmw::extension::RuntimeV1* runtime) noexcept override;
+  bool InitializeRuntime(ibmw::extension::RuntimeV2* runtime) noexcept override;
   void Shutdown() noexcept override;
 
  private:
@@ -62,7 +62,7 @@ class RecordPlaybackExtension : public ibmw::EngineExtensionBase {
 
   Options options_;
   ibmw::extension::RuntimeGraphV1* graph_ = nullptr;
-  ibmw::extension::RuntimeV1* runtime_ = nullptr;
+  ibmw::extension::RuntimeV2* runtime_ = nullptr;
   bool initialized_ = false;
   std::unique_ptr<RecordPlaybackServiceImpl> service_ptr_;
   ibmw::executor::ExecutorHandle timer_executor_ref_;
@@ -184,7 +184,7 @@ std::string PlaybackPublisherKey(
   return std::string(topic) + '\0' + std::string(msg_type);
 }
 
-void EnsureRuntimePlaybackPublisherRules(ibmw::extension::RuntimeV1& runtime) {
+void EnsureRuntimePlaybackPublisherRules(ibmw::extension::RuntimeV2& runtime) {
   auto messaging = runtime.GetRuntimeOptions("messaging");
   if (!messaging || !messaging["subscribers"] ||
       !messaging["subscribers"].IsSequence()) {
@@ -225,11 +225,11 @@ void EnsureRuntimePlaybackPublisherRules(ibmw::extension::RuntimeV1& runtime) {
 RecordPlaybackExtension::RecordPlaybackExtension() = default;
 
 bool RecordPlaybackExtension::InitializeRuntime(
-    ibmw::extension::RuntimeV1* runtime) noexcept {
+    ibmw::extension::RuntimeV2* runtime) noexcept {
   try {
     MW_REQUIRE(
         runtime != nullptr &&
-            runtime->AbiVersion() == ibmw::extension::kRuntimeAbiVersionV1,
+            runtime->AbiVersion() == ibmw::extension::kRuntimeAbiVersionV2,
         "Record/playback requires Runtime capability V1.");
     runtime_ = runtime;
     auto* graph_access = dynamic_cast<ibmw::extension::RuntimeGraphAccessV1*>(runtime_);
@@ -556,7 +556,7 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
         .type_support = type_support_ref,
         .required_serialization_types =
             wrapper.require_cache_serialization_types};
-    ibmw::extension::RuntimeV1::MessageCallback callback;
+    ibmw::extension::RuntimeV2::MessageCallback callback;
     if (record_func_vec.size() == 1) {
       callback =
           [record_func{std::move(record_func_vec[0])}](

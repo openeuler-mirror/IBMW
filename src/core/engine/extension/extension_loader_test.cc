@@ -9,6 +9,8 @@
 #include <gtest/gtest.h>
 
 #include "base/exception.h"
+#include "engine/engine.h"
+#include "engine/extension/extension_bus.h"
 #include "engine/extension/extension_loader.h"
 
 namespace ibmw::runtime::core::extension {
@@ -31,6 +33,47 @@ uint32_t CreateCount(void* library) {
   EXPECT_NE(symbol, nullptr) << dlerror();
   return symbol == nullptr ? UINT32_MAX
                            : reinterpret_cast<uint32_t (*)()>(symbol)();
+}
+
+uint32_t InitializationCount(void* library, const char* name) {
+  auto* symbol = dlsym(library, name);
+  EXPECT_NE(symbol, nullptr) << dlerror();
+  return symbol ? reinterpret_cast<uint32_t (*)()>(symbol)() : UINT32_MAX;
+}
+
+TEST(ExtensionLoaderAbi, RejectsRuntimeV1WithoutCallingEitherInitializer) {
+  auto library = OpenFixture(EXTENSION_RUNTIME_V1_FIXTURE_PATH);
+  ASSERT_NE(library, nullptr) << dlerror();
+  Engine engine;
+  ExtensionBus bus;
+  bus.RegisterCorePtr(&engine);
+  YAML::Node options;
+  options["items"][0]["name"] = "extension-v2-fixture";
+  options["items"][0]["path"] = EXTENSION_RUNTIME_V1_FIXTURE_PATH;
+  try {
+    bus.Initialize(options);
+    FAIL() << "An incompatible Runtime ABI was accepted";
+  } catch (const ibmw::common::util::IbmwException& error) {
+    EXPECT_NE(std::string(error.what()).find("requires Runtime ABI 1"),
+              std::string::npos);
+  }
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount"), 0u);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), 0u);
+}
+
+TEST(ExtensionLoaderAbi, InitializesMatchingRuntimeV2AcrossDso) {
+  auto library = OpenFixture(EXTENSION_RUNTIME_V2_FIXTURE_PATH);
+  ASSERT_NE(library, nullptr) << dlerror();
+  Engine engine;
+  ExtensionBus bus;
+  bus.RegisterCorePtr(&engine);
+  YAML::Node options;
+  options["items"][0]["name"] = "extension-v2-fixture";
+  options["items"][0]["path"] = EXTENSION_RUNTIME_V2_FIXTURE_PATH;
+  EXPECT_NO_THROW(bus.Initialize(options));
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount"), 0u);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), 1u);
+  bus.Shutdown();
 }
 
 TEST(ExtensionLoaderAbi, V2OnlyFixtureFailsClosedForLegacyLoader) {

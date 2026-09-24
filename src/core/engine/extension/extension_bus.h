@@ -55,7 +55,7 @@ class ExtensionBus : public ISubsystem {
   Options options_;
 
   Engine* core_ptr_ = nullptr;
-  std::unique_ptr<ibmw::extension::RuntimeV1> runtime_v1_;
+  std::unique_ptr<ibmw::extension::RuntimeV2> runtime_v2_;
 
   // Register extension directly
   std::vector<EngineExtensionBase*> registered_extension_vec_;

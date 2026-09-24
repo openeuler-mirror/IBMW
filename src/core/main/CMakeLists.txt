@@ -17,7 +17,14 @@ file(GLOB_RECURSE src CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 set(CLI_PROVIDER_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/test/cli_provider_fixture.cc)
-list(REMOVE_ITEM src ${test_files} ${CLI_PROVIDER_FIXTURE_SRC})
+list(REMOVE_ITEM src ${test_files} ${CLI_PROVIDER_FIXTURE_SRC}
+     ${CMAKE_CURRENT_SOURCE_DIR}/cli/command.cc)
+
+# The host and CLI providers share the parser, without sharing command definitions.
+add_library(ibmw_cli_command STATIC cli/command.cc)
+add_library(ibmw::cli::command ALIAS ibmw_cli_command)
+target_include_directories(ibmw_cli_command
+  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
 
 # Add target
 add_executable(${CUR_TARGET_NAME})
@@ -38,7 +45,7 @@ target_include_directories(
 # Set link libraries of target
 target_link_libraries(
   ${CUR_TARGET_NAME}
-  PRIVATE ibmw::core::reporter_host_abi ibmw::core::engine)
+  PRIVATE ibmw::core::reporter_host_abi ibmw::core::engine ibmw::cli::command)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -48,6 +55,7 @@ endif()
 
 # Add -Werror option
 include(AddWerror)
+add_werror(ibmw_cli_command)
 add_werror(${CUR_TARGET_NAME})
 
 # Set installation of target
@@ -69,7 +77,8 @@ if(IBMW_BUILD_TESTS AND test_files)
   target_compile_definitions(ibmw_cli_test PRIVATE IBMW_CLI_TEST
     IBMW_TEST_CLI_PROVIDER="$<TARGET_FILE:ibmw_cli_provider_fixture>")
   target_include_directories(ibmw_cli_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(ibmw_cli_test PRIVATE ibmw::core::engine GTest::gtest_main)
+  target_link_libraries(ibmw_cli_test PRIVATE ibmw::core::engine
+                        ibmw::cli::command GTest::gtest_main)
   add_dependencies(ibmw_cli_test ibmw_cli_provider_fixture)
   add_werror(ibmw_cli_test)
   add_test(NAME ibmw_cli_test COMMAND ibmw_cli_test)

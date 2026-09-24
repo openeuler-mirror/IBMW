@@ -49,6 +49,8 @@ struct TopicAdvertisement {
   std::map<std::string, TransportCaptureCapability> capture_capabilities;
   bool published = true;
   bool hidden = false;
+  std::string module_name;
+  std::map<std::string, ibmw::transport::QosDescriptor> driver_qos;
 };
 
 struct RuntimeRegistration {
@@ -100,7 +102,7 @@ class RuntimeGraphV1 {
   virtual const std::filesystem::path& RegistryPath() const noexcept = 0;
 };
 
-// Optional capability queried independently of the existing RuntimeV1 vtable.
+// Optional capability queried independently of the existing RuntimeV2 vtable.
 class RuntimeGraphAccessV1 {
  public:
   virtual ~RuntimeGraphAccessV1() = default;

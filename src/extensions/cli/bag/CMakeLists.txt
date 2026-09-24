@@ -43,22 +43,9 @@ add_werror(ibmw_bag_cli_provider)
 set_target_properties(ibmw_bag_cli_provider
                       PROPERTIES OUTPUT_NAME "ibmw_bag_cli")
 
-# The CLI host discovers providers from a generic deployment manifest.  Keep a
-# build-tree manifest next to the ibmw executable for smoke tests and install a
-# prefix-relative manifest for normal deployments.  The manifest contains no
-# record/playback-specific symbol or environment variable; it only selects the
-# provider DSO.
-file(GENERATE
-  OUTPUT ${CMAKE_BINARY_DIR}/cli.yaml
-  CONTENT "providers:\n  - library: $<TARGET_FILE:ibmw_bag_cli_provider>\n")
-file(GENERATE
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cli-install.yaml
-  CONTENT "providers:\n  - library: ../../bin/$<TARGET_FILE_NAME:ibmw_bag_cli_provider>\n")
+set_property(GLOBAL APPEND PROPERTY IBMW_CLI_PROVIDER_TARGETS ibmw_bag_cli_provider)
 if(IBMW_INSTALL)
   install(TARGETS ibmw_bag_cli_provider LIBRARY DESTINATION bin)
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cli-install.yaml
-          DESTINATION share/ibmw
-          RENAME cli.yaml)
 endif()
 
 if(IBMW_BUILD_TESTS)

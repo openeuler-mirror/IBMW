@@ -45,7 +45,8 @@ class CliTest : public testing::Test {
 
 TEST_F(CliTest, ProviderReceivesArgumentsThroughCliEntry) {
   const auto config = WriteProviderConfig();
-  for (const auto& command : {std::string("inspect"), std::string("bag")}) {
+  for (const auto& command : {std::string("inspect"), std::string("bag"),
+                              std::string("topic")}) {
     EXPECT_EQ(Run({"ibmw", "--cli-config", config.string(), command, "--help"}), 17);
     std::vector<std::string> args{"ibmw", "--cli-config", config.string(), command};
     if (command == "bag") args.push_back("record");
@@ -65,6 +66,7 @@ TEST_F(CliTest, BuiltinHelpAndVersionDoNotRequireProviders) {
     EXPECT_EQ(result, 0);
     EXPECT_FALSE(output.empty());
     EXPECT_EQ(output.find("bag"), std::string::npos);
+    EXPECT_EQ(output.find("topic"), std::string::npos);
   }
 }
 

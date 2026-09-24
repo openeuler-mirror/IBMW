@@ -18,6 +18,11 @@ case-specific verification.
 
 ## Package ABI and headers
 
+- Core, CLI, application modules, and extensions are built and deployed together.
+  Runtime ABI 2 includes per-driver endpoint QoS and requires matching headers,
+  compiler, and standard library. Extensions requesting another nonzero Runtime
+  ABI are rejected before initialization; ABI 0 explicitly selects the existing
+  Engine initialization interface. Runtime ABI 1 interoperability is unsupported.
 - Runtime graph protocol 2 uses `<registry_path>/v2/` for registrations and
   sockets, including when a custom registry root is configured. Old protocol
   data is not converted. Unknown or malformed registrations are skipped without

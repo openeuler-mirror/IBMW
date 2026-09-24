@@ -89,7 +89,7 @@ class RuntimeGraphSubsystem final : public ISubsystem,
   RuntimeGraphAgent::StopTapHandler stop_tap_handler_;
   RuntimeGraphAgent::StartPlaybackHandler start_playback_handler_;
   RuntimeGraphAgent::StopPlaybackHandler stop_playback_handler_;
-  std::unique_ptr<ibmw::extension::RuntimeV1> tap_runtime_;
+  std::unique_ptr<ibmw::extension::RuntimeV2> tap_runtime_;
   std::unique_ptr<topic_io::PublishTapCapability> publish_tap_;
   std::unique_ptr<topic_io::RuntimeTapServer> tap_server_;
   std::unique_ptr<RuntimeGraphAgent> agent_;

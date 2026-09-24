@@ -13,7 +13,7 @@ class Engine;
 
 namespace ibmw::runtime::core::extension {
 
-std::unique_ptr<ibmw::extension::RuntimeV1> MakeExtensionRuntimeV1(
+std::unique_ptr<ibmw::extension::RuntimeV2> MakeExtensionRuntimeV2(
     Engine& engine);
 
 }  // namespace ibmw::runtime::core::extension
