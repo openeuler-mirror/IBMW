@@ -57,6 +57,9 @@ endif()
 # Core dependencies (always required)
 # --------------------------------------------------------------------------
 
+# Public TypeSupport headers expose JSON and its compile-time configuration.
+find_dependency(nlohmann_json CONFIG)
+
 # fmt (header-only) — required by ibmw::base
 find_dependency(fmt)
 
@@ -356,6 +359,7 @@ endif()
 # ROS2 type support dependencies (rosidl build-time only, no rcl runtime)
 # --------------------------------------------------------------------------
 if(@IBMW_BUILD_ROS2_TYPES@)
+  find_dependency(rosidl_typesupport_introspection_cpp)
   find_dependency(std_msgs)
   find_package(geometry_msgs QUIET)
   find_package(sensor_msgs QUIET)

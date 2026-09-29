@@ -1162,14 +1162,10 @@ Requirements for `GetJsonMessageTypeSupport<T>()`:
 3. Copy-assignable and move-assignable
 4. ADL-discoverable `to_json(json&, const T&)` and `from_json(const json&, T&)`
 
-**Step 2: Get nlohmann_json** (IBMW does not install it):
+**Step 2: Use the JSON dependency supplied by the IBMW SDK:**
 
 ```cmake
-include(FetchContent)
-FetchContent_Declare(nlohmann_json
-  URL https://github.com/nlohmann/json/archive/v3.11.3.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(nlohmann_json)
+find_package(ibmw REQUIRED)
 
 target_link_libraries(my_module
   ibmw::api::cpp

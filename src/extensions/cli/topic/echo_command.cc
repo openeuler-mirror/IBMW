@@ -20,7 +20,7 @@ namespace {
 
 int RunTopicEchoCommandImpl(const Invocation& invocation) {
   auto options = ParseObservationOptions(invocation, "echo");
-  const auto queue_size_text = ObservationValue(invocation, "--queue-size", "100");
+  const auto queue_size_text = OptionValue(invocation, "--queue-size", "100");
   size_t queue_size = 0;
   const auto [end, parse_error] = std::from_chars(
       queue_size_text.data(), queue_size_text.data() + queue_size_text.size(), queue_size);
@@ -30,12 +30,12 @@ int RunTopicEchoCommandImpl(const Invocation& invocation) {
   }
   const bool raw = invocation.HasOption("--raw");
   const bool once = invocation.HasOption("--once");
-  const auto format = ObservationValue(invocation, "--format", "yaml");
+  const auto format = OptionValue(invocation, "--format", "yaml");
   if (raw && (invocation.HasOption("--field") || invocation.HasOption("--format"))) {
     throw std::invalid_argument("--raw cannot be combined with --field or --format.");
   }
   EchoFormatter formatter(
-      format, ObservationValue(invocation, "--field"), raw);
+      format, OptionValue(invocation, "--field"), raw);
   const auto packages = invocation.options.find("--type-support");
   if (packages != invocation.options.end()) {
     for (const auto& path : packages->second) formatter.LoadPackage(path);

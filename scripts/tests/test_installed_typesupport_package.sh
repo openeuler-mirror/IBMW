@@ -29,7 +29,6 @@ GENERATED="$SCRATCH/generated"
 GENERATED_BUILD="$SCRATCH/generated-build"
 GENERATED_PREFIX="$SCRATCH/generated-prefix"
 LOADER_BUILD="$SCRATCH/loader-build"
-NLOHMANN_SOURCE="${IBMW_INSTALLED_TYPESUPPORT_NLOHMANN_SOURCE:-}"
 LOADER_LINK_COVERAGE="${IBMW_INSTALLED_TYPESUPPORT_LOADER_LINK_COVERAGE:-0}"
 
 if [[ -n "$PREBUILT_IBMW" ]]; then
@@ -54,18 +53,10 @@ cmake --install "$IBMW_BUILD" --prefix "$IBMW_PREFIX" >/dev/null
 note "generating and installing sidecar"
 python3 "$REPO_ROOT/src/tools/ibmw_gen/ibmw_gen.py" \
   "$FIXTURE/installed_typesupport.ibmw.yaml" -o "$GENERATED" >/dev/null
-GENERATED_CMAKE_ARGS=()
-if [[ -n "$NLOHMANN_SOURCE" ]]; then
-  [[ -d "$NLOHMANN_SOURCE" ]] ||
-    fail "nlohmann_json source directory does not exist: $NLOHMANN_SOURCE"
-  GENERATED_CMAKE_ARGS+=(
-    "-DFETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON=$NLOHMANN_SOURCE")
-fi
 cmake -S "$GENERATED" -B "$GENERATED_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$IBMW_PREFIX" \
-  -DCMAKE_INSTALL_PREFIX="$GENERATED_PREFIX" \
-  "${GENERATED_CMAKE_ARGS[@]}" >/dev/null
+  -DCMAKE_INSTALL_PREFIX="$GENERATED_PREFIX" >/dev/null
 cmake --build "$GENERATED_BUILD" --parallel "${IBMW_TEST_JOBS:-2}" >/dev/null
 cmake --install "$GENERATED_BUILD" >/dev/null
 

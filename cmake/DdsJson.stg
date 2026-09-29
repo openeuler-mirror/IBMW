@@ -1,0 +1,70 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+group DdsJson;
+
+main(ctx, definitions) ::= <<
+// Generated DDS JSON conversion. Include this header before instantiating TypeSupport.
+#pragma once
+#include "$ctx.filename$.hpp"
+#include "type_support/text_serialization.h"
+$ctx.directIncludeDependencies : {include | #include "$include$Json.hpp"}; separator="\n"$
+$definitions; separator="\n"$
+>>
+module(ctx, parent, module, definition_list) ::= <<
+$definition_list$
+>>
+definition_list(definitions) ::= <<
+$definitions; separator="\n"$
+>>
+struct_type(ctx, parent, struct, extensions, member_list) ::= <<
+$if(struct.hasScope)$namespace $struct.scope$ {$endif$
+inline void IbmwFromJson(const ibmw::util::text::Json& value, ::$if(struct.hasScope)$$struct.scope$::$endif$$struct.name$& output) {
+  ibmw::util::text::Object(value, {$struct.allMembers:{ m | "$m.name$"}; separator=", "$});
+  $struct.allMembers:{ m | ibmw::util::text::Field(value, "$m.name$", output.$m.name$()$field_bound(m.typecode)$);}; separator="\n"$
+}
+inline ibmw::util::text::Json IbmwToJson(const ::$if(struct.hasScope)$$struct.scope$::$endif$$struct.name$& value) {
+  auto result = ibmw::util::text::Json::object();
+  $struct.allMembers:{ m | result["$m.name$"] = ibmw::util::text::Write(value.$m.name$());}; separator="\n"$
+  return result;
+}
+$if(struct.hasScope)$}$endif$
+>>
+enum_type(ctx, parent, enum) ::= <<
+$if(enum.hasScope)$namespace $enum.scope$ {$endif$
+inline void IbmwFromJson(const ibmw::util::text::Json& value, ::$if(enum.hasScope)$$enum.scope$::$endif$$enum.name$& output) {
+  $enum.members:{ m | if (value == "$m.name$" || value == static_cast<int64_t>(::$if(enum.hasScope)$$enum.scope$::$endif$$enum.name$::$m.name$)) { output = ::$if(enum.hasScope)$$enum.scope$::$endif$$enum.name$::$m.name$; return; \}}; separator="\n"$
+  throw std::invalid_argument("Invalid enum value for $enum.name$.");
+}
+inline ibmw::util::text::Json IbmwToJson(const ::$if(enum.hasScope)$$enum.scope$::$endif$$enum.name$& value) {
+  $enum.members:{ m | if (value == ::$if(enum.hasScope)$$enum.scope$::$endif$$enum.name$::$m.name$) return "$m.name$";}; separator="\n"$
+  throw std::invalid_argument("Invalid enum value for $enum.name$.");
+}
+$if(enum.hasScope)$}$endif$
+>>
+// Preserve bounds at every container level; zero denotes an unbounded level.
+field_bound(type) ::= <<
+$if(type.isSequenceType || type.isArrayType)$, {$container_bounds(type)$}$elseif(type.isStringType)$$if(type.isBounded)$, {$type.evaluatedMaxsize$}$endif$$endif$
+>>
+container_bounds(type) ::= <<
+$if(type.isAliasType)$$container_bounds(type.typedefContentTypeCode)$$elseif(type.isSequenceType)$$if(type.unbound)$0$else$$type.evaluatedMaxsize$$endif$, $container_bounds(type.contentTypeCode)$$elseif(type.isArrayType)$$type.evaluatedDimensions:{dimension | $dimension$, }$$container_bounds(type.contentTypeCode)$$elseif(type.isStringType)$$if(type.isBounded)$$type.evaluatedMaxsize$$else$0$endif$$endif$
+>>
+annotation(ctx, annotation) ::= <<>>
+const_decl(ctx, parent, const, const_type) ::= <<>>
+typedef_decl(ctx, parent, typedefs, typedefs_type, declarator_type) ::= <<>>
+fwd_decl(ctx, parent, type) ::= <<>>
+member_type(ctx, member, type_member, declarators) ::= <<>>
+union_type(ctx, parent, union, extensions, switch_type) ::= <<>>
+element_type(ctx, element, type_element, declarator) ::= <<>>
+bitset_type(ctx, parent, bitset, extensions) ::= <<>>
+bitmask_type(ctx, parent, bitmask) ::= <<>>
+sequence_type(ctx, sequence, type_sequence) ::= <<>>
+map_type(ctx, map, key_type, value_type) ::= <<>>
+string_type(ctx, string) ::= <<>>
+wide_string_type(ctx, wstring) ::= <<>>
+array_declarator(ctx, array) ::= <<>>
+interface(ctx, parent, interface, export_list) ::= <<>>
+export_list(exports) ::= <<>>
+exception(ctx, parent, exception) ::= <<>>
+operation(ctx, parent, operation, param_list, operation_type) ::= <<>>
+param_list(parameters) ::= <<>>
+param(parameter, parameter_type) ::= <<>>

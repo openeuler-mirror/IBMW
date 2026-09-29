@@ -67,10 +67,11 @@ endfunction()
 #   [GENERATOR_CPP_TARGET <target>]
 #   [FASTRTPS_CPP_TARGET <target>]
 #   [FASTRTPS_C_TARGET <target>]
+#   [INTROSPECTION_CPP_TARGET <target>]
 # )
 #
 # Creates an INTERFACE target that forwards the canonical rosidl-generated C++
-# message target and FastRTPS C/C++ typesupport targets from a ROS2 interface
+# message target, FastRTPS C/C++ and C++ introspection targets from a ROS2 interface
 # package generated or referenced by ibmw-gen import. This is intentionally a
 # CMake/link glue helper only: it does not generate runtime modules and does
 # not replace ROS2's rosidl_typesupport_fastrtps_* compatibility contract.
@@ -83,9 +84,10 @@ endfunction()
 #   my_msgs::my_msgs__rosidl_generator_cpp
 #   my_msgs::my_msgs__rosidl_typesupport_fastrtps_cpp
 #   my_msgs::my_msgs__rosidl_typesupport_fastrtps_c
+#   my_msgs::my_msgs__rosidl_typesupport_introspection_cpp
 # --------------------------------------------------------------------------
 function(ibmw_add_rosidl_interface_target TARGET_NAME)
-  cmake_parse_arguments(ARG "" "PACKAGE_NAME;GENERATOR_CPP_TARGET;FASTRTPS_CPP_TARGET;FASTRTPS_C_TARGET" "DEPS" ${ARGN})
+  cmake_parse_arguments(ARG "" "PACKAGE_NAME;GENERATOR_CPP_TARGET;FASTRTPS_CPP_TARGET;FASTRTPS_C_TARGET;INTROSPECTION_CPP_TARGET" "DEPS" ${ARGN})
 
   if(NOT ARG_PACKAGE_NAME)
     message(FATAL_ERROR "ibmw_add_rosidl_interface_target(${TARGET_NAME}): PACKAGE_NAME is required")
@@ -103,10 +105,15 @@ function(ibmw_add_rosidl_interface_target TARGET_NAME)
     set(ARG_FASTRTPS_C_TARGET "${ARG_PACKAGE_NAME}::${ARG_PACKAGE_NAME}__rosidl_typesupport_fastrtps_c")
   endif()
 
+  if(NOT ARG_INTROSPECTION_CPP_TARGET)
+    set(ARG_INTROSPECTION_CPP_TARGET "${ARG_PACKAGE_NAME}::${ARG_PACKAGE_NAME}__rosidl_typesupport_introspection_cpp")
+  endif()
+
   foreach(_ibmw_rosidl_target IN ITEMS
       "${ARG_GENERATOR_CPP_TARGET}"
       "${ARG_FASTRTPS_CPP_TARGET}"
-      "${ARG_FASTRTPS_C_TARGET}")
+      "${ARG_FASTRTPS_C_TARGET}"
+      "${ARG_INTROSPECTION_CPP_TARGET}")
     if(NOT TARGET "${_ibmw_rosidl_target}")
       message(FATAL_ERROR
         "ibmw_add_rosidl_interface_target(${TARGET_NAME}): missing rosidl target ${_ibmw_rosidl_target}")
@@ -124,6 +131,7 @@ function(ibmw_add_rosidl_interface_target TARGET_NAME)
       ${ARG_GENERATOR_CPP_TARGET}
       ${ARG_FASTRTPS_CPP_TARGET}
       ${ARG_FASTRTPS_C_TARGET}
+      ${ARG_INTROSPECTION_CPP_TARGET}
       ${ARG_DEPS})
 endfunction()
 

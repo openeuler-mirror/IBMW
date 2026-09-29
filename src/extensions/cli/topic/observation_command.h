@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "cli/command.h"
+#include "command_options.h"
 #include "engine/topic_io/topic_subscription.h"
 
 namespace ibmw::cli::topic {
@@ -22,8 +23,6 @@ struct ObservationOptions {
   std::chrono::duration<double> duration;
 };
 
-std::string ObservationValue(const Invocation& invocation, const std::string& name,
-                             std::string fallback = {});
 void AddObservationOptions(ibmw::cli::Command& command,
                            std::optional<size_t> default_window = std::nullopt);
 ObservationOptions ParseObservationOptions(

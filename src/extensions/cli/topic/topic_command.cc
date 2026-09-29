@@ -15,13 +15,16 @@
 #include "hz_command.h"
 #include "info_command.h"
 #include "list_command.h"
+#include "pub_command.h"
 #include "type_command.h"
 
 int RunTopicCommand(int argc, const char* const* argv) {
   try {
-    ibmw::cli::Command topic("ibmw topic", "Inspect discovered topics");
+    ibmw::cli::Command topic("ibmw topic", "Inspect and publish topics");
     topic.AddHelpOption("--include-hidden-topics",
                         "Include hidden topics in list, type and find queries");
+
+    ibmw::cli::topic::AddPubCommand(topic);
     ibmw::cli::topic::AddListCommand(topic);
     ibmw::cli::topic::AddTypeCommand(topic);
     ibmw::cli::topic::AddFindCommand(topic);

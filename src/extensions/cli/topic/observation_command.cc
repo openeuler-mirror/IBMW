@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "discovery_options.h"
+#include "command_lifecycle.h"
 #include "base/log_util.h"
 #include "engine/topic_io/topic_subscription.h"
 
@@ -18,57 +19,9 @@ namespace ibmw::cli::topic {
 namespace {
 using Clock = std::chrono::steady_clock;
 using ibmw::runtime::core::topic_io::TopicSubscription;
-volatile std::sig_atomic_t stop_requested = 0;
-void RequestStop(int) { stop_requested = 1; }
 
-class SignalGuard {
- public:
-  SignalGuard() {
-    stop_requested = 0;
-    struct sigaction action {};
-    action.sa_handler = RequestStop;
-    ::sigemptyset(&action.sa_mask);
-    if (::sigaction(SIGINT, &action, &interrupt_) != 0) {
-      throw std::runtime_error("Cannot install SIGINT handler.");
-    }
-    if (::sigaction(SIGTERM, &action, &terminate_) != 0) {
-      ::sigaction(SIGINT, &interrupt_, nullptr);
-      throw std::runtime_error("Cannot install SIGTERM handler.");
-    }
-  }
-  ~SignalGuard() {
-    ::sigaction(SIGINT, &interrupt_, nullptr);
-    ::sigaction(SIGTERM, &terminate_, nullptr);
-  }
- private:
-  struct sigaction interrupt_ {}, terminate_ {};
-};
-
-class LoggerLevelGuard {
- public:
-  LoggerLevelGuard() : previous_(ibmw::common::util::SimpleLogger::GetLogLevel()) {
-    ibmw::common::util::SimpleLogger::SetLogLevel(ibmw::common::util::kLogLevelWarn);
-  }
-  ~LoggerLevelGuard() { ibmw::common::util::SimpleLogger::SetLogLevel(previous_); }
- private:
-  uint32_t previous_;
-};
-
-}  // namespace
-
-std::string ObservationValue(const Invocation& invocation, const std::string& name,
-                             std::string fallback) {
-  const auto it = invocation.options.find(name);
-  if (it == invocation.options.end()) return fallback;
-  if (it->second.size() != 1 || it->second.front().empty()) {
-    throw std::invalid_argument(name + " requires exactly one nonempty value.");
-  }
-  return it->second.front();
-}
-
-namespace {
 double Seconds(const Invocation& invocation, const std::string& name, const char* fallback) {
-  const auto value = ObservationValue(invocation, name, fallback);
+  const auto value = OptionValue(invocation, name, fallback);
   double number = 0;
   const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
   if (error != std::errc{} || end != value.data() + value.size() ||
@@ -86,7 +39,7 @@ ObservationOptions ParseObservationOptions(
   if (sources.size() != 1) throw std::invalid_argument("topic " + std::string(command) + " accepts exactly one discovery source.");
   size_t window = 0;
   if (default_window) {
-    const auto window_text = ObservationValue(invocation, "--window", std::to_string(*default_window));
+    const auto window_text = OptionValue(invocation, "--window", std::to_string(*default_window));
     const auto [end, error] = std::from_chars(window_text.data(), window_text.data() + window_text.size(), window);
     if (error != std::errc{} || end != window_text.data() + window_text.size() || window < 2) {
       throw std::invalid_argument("--window requires an integer of at least 2 messages.");
@@ -98,12 +51,12 @@ ObservationOptions ParseObservationOptions(
       : std::chrono::duration<double>::max();
   TopicSubscription::Options options{
       .source = sources.front(), .topic = invocation.positional_args.front(),
-      .type = ObservationValue(invocation, "--type"), .config_file = ObservationValue(invocation, "--config-file")};
+      .type = OptionValue(invocation, "--type"), .config_file = OptionValue(invocation, "--config-file")};
   if (options.topic.empty()) throw std::invalid_argument("Topic name must not be empty.");
   for (const auto& policy : {std::string("reliability"), std::string("durability")}) {
     const auto option = "--qos-" + policy;
     if (!invocation.HasOption(option)) continue;
-    const auto value = ObservationValue(invocation, option);
+    const auto value = OptionValue(invocation, option);
     const bool valid = policy == "reliability"
         ? value == "reliable" || value == "best_effort"
         : value == "volatile" || value == "transient_local";

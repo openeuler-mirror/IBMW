@@ -1172,6 +1172,80 @@ Record/Playback extension does not maintain a separate copy.
 
 #### Topic CLI
 
+`ibmw topic pub <topic> <type> <values>` creates a publisher directly from CLI
+arguments. It builds an in-memory configuration and reuses Engine startup,
+shutdown and TransportBus publishing; no runtime YAML file or temporary runtime
+configuration file is required, and the topic need not already exist.
+
+```bash
+ibmw topic pub /header dds:ibmw::protocols::common::Header \
+  '{"frame_id":"base","time_stamp":123,"sequence_num":1}' \
+  --dds --domain 0 --type-support ./libcommon_dds_ts.so --once
+```
+
+Select exactly one of `--dds`, `--ros2`, `--zenoh`, `--mqtt`, `--tcp`, `--udp`,
+`--http`, `--iceoryx`, or `--local`. Supply message libraries with
+repeatable `--type-support`; `--transport-library` overrides the installed driver
+library. Domain and Zenoh connection options have the same meanings as observation
+commands. `--ros2-compatible` enables the existing DDS driver's ROS 2 wire naming
+for `ros2:` messages; otherwise IBMW's default DDS naming is preserved. DDS network
+queries use wire topic names, while Registry queries use logical topic names.
+
+| Backend | Connection options |
+|---------|--------------------|
+| DDS / ROS 2 | `--domain`, or `--dds-domain` / `--ros-domain` |
+| Zenoh | `--zenoh-domain`, optional `--zenoh-config` |
+| MQTT | Required `--broker tcp://host:port`; optional `--client-id`, `--mqtt-qos 0\|1\|2` (default: 2) |
+| TCP / UDP | Required `--target IPv4:port`; repeat for multiple recipients |
+| HTTP | Required `--target http://host:port`; repeat for multiple recipients |
+| Iceoryx | Start RouDi first; optional `--iceoryx-runtime-id`, `--shm-init-size` (default: 1024 bytes) |
+| local | Sends inside this CLI process only; cannot reach local subscribers in another process |
+
+MQTT TLS uses `ssl://host:port`, requires `--mqtt-truststore`, and accepts
+`--mqtt-client-cert`, `--mqtt-client-key`, and `--mqtt-key-password`.
+TCP/UDP/HTTP accept `--net-threads` (default: 2). These drivers use IBMW's existing
+transport protocol. HTTP derives its request path from topic/type; custom paths
+and HTTPS targets are not supported. Each selected extension must be built and
+installed; TCP/UDP/HTTP share the net extension, and local is built into Engine.
+
+```bash
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --mqtt --broker tcp://127.0.0.1:1883 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --tcp --target 127.0.0.1:5000 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --iceoryx --type-support ./libcommon_dds_ts.so --once
+```
+
+Publishing selects a transport independently of discovery. `DiscoveryBackend`
+identifies where list/info query endpoint metadata (registry, DDS, ROS 2, Zenoh);
+it does not limit publishing drivers. Publishing needs no prior topic discovery.
+
+The default is 1 Hz until Ctrl+C. `--once` and `--times <count>` are mutually
+exclusive; `--rate <hz>` controls frequency (`-r` remains the ROS 2 backend flag).
+`--wait` delays the first send (default 1 second); `--keep-alive` keeps the publisher
+alive after the last send (default 0.2 seconds). Neither guarantees matching or
+remote acknowledgment. The reported count is the number of send calls.
+DDS/ROS 2 accept `--qos-reliability`, `--qos-durability`, `--qos-history`, and
+`--qos-depth`, defaulting to reliable, volatile, keep_last, and 10.
+
+Pass JSON or YAML contents as one quoted argument. Standard TypeSupport provides
+JSON conversion directly. Rebuild type packages with the source; no separate text
+adapter is needed:
+
+- DDS: `ibmw::dds::GetDdsMessageTypeSupport<T>()` supports CDR and JSON. Generated
+  type headers automatically include their `*Json.hpp` codecs. Handwritten DDS
+  types supply field conversion through `IbmwFromJson` / `IbmwToJson`.
+- ROS 2: `ibmw::GetRos2MessageTypeSupport<T>()` supports ROS 2 serialization and
+  JSON. Link the message package's C++ introspection library.
+- The public TypeSupport CMake target supplies the JSON header dependency.
+
+Text conversion supports numeric, boolean, string, nested message, array and sequence fields,
+and generated DDS enums. Omitted fields retain their defaults. Unknown fields,
+wrong types, overflow, and invalid array lengths are rejected. Unsupported field
+kinds such as unions, maps and wide strings fail explicitly. DDS bounded strings
+remain subject to the selected FastCDR/code generator's compatibility limits.
+
 `ibmw topic echo <topic>` prints received messages as YAML documents separated
 by `---`. Use `--format json` for one JSON value per line, `--once` to stop after
 one message, or `--field header.stamp` to select a nested field. Numeric path
@@ -1198,9 +1272,8 @@ package; explicit `--type-support <path>` packages take precedence and the optio
 is repeatable. Network observation loads packages supplied locally via this option
 or `ibmw.runtime_graph.type_support_pkgs` in `--config-file` (relative paths resolve
 from that file). It does not load packages advertised by network endpoints.
-The standard DDS/ROS 2 TypeSupport adapters currently expose binary formats only;
-installing those packages alone does not enable structured echo. Unsupported
-decoding fails with an explanation; `--raw` prints hexadecimal payload bytes
+Standard DDS/ROS 2 TypeSupport also provides the text conversion needed for
+structured echo. Unsupported decoding fails with an explanation; `--raw` prints hexadecimal payload bytes
 without decoding and cannot be combined with `--field` or `--format`.
 
 When observing ROS messages over DDS, echo first looks for an exact

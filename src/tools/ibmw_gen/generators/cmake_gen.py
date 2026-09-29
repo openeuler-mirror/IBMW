@@ -284,18 +284,8 @@ def generate_cmake(project: dict) -> str:
         lines.append("find_package(fastcdr REQUIRED)")
         lines.append("")
 
-    # nlohmann_json if needed
-    if has_json:
-        lines.append("# --------------------------------------------------------------------------")
-        lines.append("# nlohmann_json — required for JSON type support.")
-        lines.append("# --------------------------------------------------------------------------")
-        lines.append("include(FetchContent)")
-        lines.append("FetchContent_Declare(")
-        lines.append("  nlohmann_json")
-        lines.append("  URL https://github.com/nlohmann/json/archive/v3.11.3.tar.gz")
-        lines.append("  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)")
-        lines.append("FetchContent_MakeAvailable(nlohmann_json)")
-        lines.append("")
+    # The installed IBMW SDK supplies nlohmann_json::nlohmann_json with its
+    # public TypeSupport target. Do not fetch a second copy in JSON projects.
 
     # ROS2 find_package if needed
     if has_ros2:

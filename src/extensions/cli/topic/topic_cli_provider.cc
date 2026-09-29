@@ -8,7 +8,7 @@
 namespace {
 
 constexpr char kTopicCommandName[] = "topic";
-constexpr char kTopicCommandDescription[] = "Inspect discovered topics";
+constexpr char kTopicCommandDescription[] = "Inspect and publish topics";
 constexpr char kTopicProviderName[] = "topic";
 
 const ibmw_cli_command_v1_t kCliCommands[] = {{

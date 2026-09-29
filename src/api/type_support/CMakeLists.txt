@@ -43,6 +43,11 @@ add_library(ibmw::api::ros2_type_support ALIAS ibmw_api_ros2_type_support)
 target_link_libraries(
   ibmw_api_ros2_type_support
   INTERFACE ${CUR_TARGET_NAME} ibmw::api::cpp)
+if(IBMW_BUILD_ROS2_TYPES)
+  ibmw_find_target_package(rosidl_typesupport_introspection_cpp REQUIRED FEATURE ros2-types)
+  target_link_libraries(ibmw_api_ros2_type_support INTERFACE
+    rosidl_typesupport_introspection_cpp::rosidl_typesupport_introspection_cpp)
+endif()
 if(IBMW_FASTCDR_PROVIDER_TARGET)
   target_link_libraries(ibmw_api_ros2_type_support INTERFACE
                         ${IBMW_FASTCDR_PROVIDER_TARGET})
@@ -56,7 +61,8 @@ endif()
 target_include_directories(
   ${CUR_TARGET_NAME}
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
-            $<INSTALL_INTERFACE:include/ibmw>)
+            $<INSTALL_INTERFACE:include/ibmw>
+            $<INSTALL_INTERFACE:include>)
 target_include_directories(
   ibmw_api_dds_type_support
   INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
@@ -72,7 +78,8 @@ target_sources(${CUR_TARGET_NAME} INTERFACE FILE_SET HEADERS BASE_DIRS ${CMAKE_C
 # Set link libraries of target
 target_link_libraries(
   ${CUR_TARGET_NAME}
-  INTERFACE ibmw::api::c)
+  INTERFACE ibmw::api::c
+            nlohmann_json::nlohmann_json)
 
 # Set installation of target
 if(IBMW_INSTALL)

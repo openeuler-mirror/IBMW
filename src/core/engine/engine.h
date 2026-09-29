@@ -121,6 +121,9 @@ class Engine {
  public:
   struct Options {
     std::string cfg_file_path;
+    // Optional complete configuration supplied by an embedding application or CLI.
+    // Mutually exclusive with cfg_file_path; no configuration file is required.
+    YAML::Node config_node{YAML::NodeType::Undefined};
   };
 
   using HookTask = std::function<void()>;

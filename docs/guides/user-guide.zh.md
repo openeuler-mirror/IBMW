@@ -1143,6 +1143,79 @@ Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
 
 #### 话题 CLI
 
+`ibmw topic pub <topic> <type> <values>` 从命令行创建发布端，无需运行配置文件，
+也不生成临时运行配置。后端、domain、QoS 等参数直接构造内存配置，复用 Engine
+的初始化、启动、关闭以及现有 TransportBus 发布流程。无需先启动业务模块或已有发布者。
+
+```bash
+# 使用 common 类型包，一次发送；类型包路径按安装位置调整
+ibmw topic pub /header dds:ibmw::protocols::common::Header \
+  '{"frame_id":"base","time_stamp":123,"sequence_num":1}' \
+  --dds --domain 0 --type-support ./libcommon_dds_ts.so --once
+
+# 每秒 5 条，共发送 10 条；退出前继续存活 0.5 秒
+ibmw topic pub /header dds:ibmw::protocols::common::Header \
+  '{frame_id: "base"}' --zenoh --zenoh-domain robot \
+  --type-support ./libcommon_dds_ts.so --rate 5 --times 10 --keep-alive 0.5
+```
+
+必须选择一个传输后端：`--dds`、`--ros2`、`--zenoh`、`--mqtt`、`--tcp`、
+`--udp`、`--http`、`--iceoryx` 或 `--local`。类型库通过可重复的
+`--type-support` 提供；可用 `--transport-library` 覆盖默认驱动库路径。
+`--domain`、`--dds-domain`、`--ros-domain`、`--zenoh-domain` 和
+`--zenoh-config` 沿用观察命令的连接参数含义。`--ros2-compatible` 仅用于 DDS，
+开启现有驱动的 ROS 2 兼容话题命名，供 `ros2:` 消息与 ROS 2 订阅者互通。
+未启用时保留 IBMW DDS 默认命名；DDS 网络查询显示 wire topic，Registry 查询显示输入的逻辑 topic。
+
+| 后端 | 连接参数 |
+|------|----------|
+| DDS / ROS 2 | `--domain` 或对应的 `--dds-domain` / `--ros-domain` |
+| Zenoh | `--zenoh-domain`，可选 `--zenoh-config` |
+| MQTT | 必须提供 `--broker tcp://host:port`；可选 `--client-id`、`--mqtt-qos 0\|1\|2`（默认 2） |
+| TCP / UDP | 必须提供 `--target IPv4:port`，可重复指定多个接收端 |
+| HTTP | 必须提供 `--target http://host:port`，可重复指定多个接收端 |
+| Iceoryx | 先启动 RouDi；可选 `--iceoryx-runtime-id`、`--shm-init-size`（默认 1024 字节） |
+| local | 仅当前 CLI 进程内发送，无法投递给另一进程的 local 订阅者 |
+
+MQTT TLS 连接使用 `ssl://host:port`，必须提供 `--mqtt-truststore`；
+可提供 `--mqtt-client-cert`、`--mqtt-client-key` 和 `--mqtt-key-password`。
+TCP/UDP/HTTP 可用 `--net-threads` 设置网络线程数（默认 2）。网络后端使用现有 IBMW
+传输协议；HTTP 请求路径由 topic/type 生成，`--target` 不接受自定义路径或 HTTPS。
+除 local 外，所选驱动扩展必须已编译并安装；TCP/UDP/HTTP 共用 net 扩展。
+
+```bash
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --mqtt --broker tcp://127.0.0.1:1883 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --tcp --target 127.0.0.1:5000 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --iceoryx --type-support ./libcommon_dds_ts.so --once
+```
+
+发布后端与发现来源独立：`DiscoveryBackend` 表示 list/info 等命令从哪里查询端点
+（registry、DDS、ROS 2、Zenoh），不限制 pub 可用的传输驱动。pub 不要求先发现话题。
+
+默认以 1 Hz 重复发布同一条消息，直到 Ctrl+C；`--once` 和 `--times` 互斥。
+`--rate` 没有 `-r` 别名，`-r` 保留给 ROS 2 后端。
+`--wait` 是启动后的连接/发现延时（默认 1 秒），`--keep-alive` 是最后一次发送后的存活时间
+（默认 0.2 秒）。两者均不保证订阅端已匹配或远端已确认；输出计数表示调用发送接口的次数。
+DDS/ROS 2 支持 `--qos-reliability`、`--qos-durability`、`--qos-history`、
+`--qos-depth`，默认分别为 reliable、volatile、keep_last、10。
+
+消息内容可以是 JSON 或 YAML，必须作为一个命令行参数传入。标准 TypeSupport
+直接提供 JSON 转换，类型包随源码重新构建，不需要单独选择文本适配器：
+
+- DDS：`GetDdsMessageTypeSupport<T>()` 同时支持 CDR 和 JSON。IDL 生成的类型头文件
+  自动包含对应 `*Json.hpp`；手写 DDS 类型需提供 `IbmwFromJson` / `IbmwToJson` 字段转换。
+- ROS 2：`ibmw::GetRos2MessageTypeSupport<T>()` 同时支持 ROS 2 序列化和 JSON，
+  类型包链接消息包的 introspection C++ 库。
+- JSON 头文件依赖由公共 TypeSupport CMake target 传递。
+
+文本转换支持基础数值、布尔、字符串、嵌套消息和数组/序列；DDS 还支持生成的枚举。
+未提供字段保留消息默认值，未知字段、类型错误、数值越界和数组长度错误会被拒绝。
+当前不支持的字段种类（例如 union、map、宽字符串）会报错，不会静默忽略用户输入。
+DDS bounded string 仍受所选 FastCDR/代码生成器兼容性限制。
+
 `ibmw topic echo <topic>` 将收到的消息输出为 YAML，以 `---` 分隔。
 `--format json` 改为每行一个 JSON 值；`--once` 输出一条后退出；
 `--field header.stamp` 选择嵌套字段，数字路径段表示数组下标，例如
@@ -1165,8 +1238,8 @@ JSON/YAML 负载可直接显示。二进制负载需要匹配的 IBMW TypeSuppor
 类型包；显式传入的 `--type-support <path>` 优先，且该选项可重复。网络模式只加载
 此选项或 `--config-file` 中 `ibmw.runtime_graph.type_support_pkgs` 指定的本机包，
 配置中的相对路径以配置文件目录为基准，不从网络发现信息加载类型包。
-当前通用 DDS/ROS 2 TypeSupport 适配器只提供二进制格式，单独加载这些包仍不足以
-显示字段。解码能力不足时明确报错；`--raw` 可直接输出十六进制负载，无需解码，
+标准 DDS/ROS 2 TypeSupport 同时提供结构化 echo 所需的文本转换。
+解码能力不足时明确报错；`--raw` 可直接输出十六进制负载，无需解码，
 不能与 `--field` 或 `--format` 同用。
 
 DDS 模式查看 ROS 消息时，先查找与 `dds:<wire 类型>` 完全匹配的 TypeSupport。
