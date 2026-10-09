@@ -171,6 +171,45 @@ requesting an upgrade and restart, retain available results, and return 1. In th
 case, count mode only counts runtimes that provide module information.
 The existing RuntimeRegistry mechanism handles stale registrations after process exit.
 
+### Inspecting Module Interfaces
+
+`ibmw module info <module>` shows a registered module's name, runtime ID, PID,
+and published and subscribed topics with their message types. The argument is
+the module name. If several runtimes contain that name, the command lists the
+candidate runtimes and returns 1; select one with `--runtime`.
+`--registry-path` uses the same registry root rules as `module list`.
+
+```bash
+ibmw module info perception
+ibmw module info perception --runtime robot-main
+ibmw module info perception --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+Example output:
+
+```text
+Module: perception
+Runtime: robot-main
+PID: 12345
+
+Publishers:
+  /detections [json:DetectionArray]
+
+Subscribers:
+  /camera/image [json:Image]
+```
+
+Each direction is sorted by topic name and message type. Duplicate endpoints
+with the same topic and type appear once, including topics marked as hidden in
+the registry. An empty direction shows `(none)`; modules without topics can
+still be queried successfully. Results describe the runtime's registered
+interface snapshot, not current traffic, connections, or business health.
+Endpoints absent from the registry are not shown.
+A missing module or selected runtime returns 1. Older runtimes without module
+lists produce an upgrade/restart diagnostic, retain a unique available match's
+output, and return 1. A name found only on topic endpoints is not treated as a
+registered module. A unique match with complete available information returns 0.
+
 ---
 
 ## Build Options

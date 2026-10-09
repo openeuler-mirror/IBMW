@@ -2,7 +2,7 @@
 # All rights reserved.
 
 add_library(ibmw_module_cli_provider SHARED
-            module_command.cc module_cli_provider.cc list_command.cc)
+            module_command.cc module_cli_provider.cc list_command.cc info_command.cc)
 # Registry queries use the existing shared runtime support, without an Engine.
 target_link_libraries(ibmw_module_cli_provider
   PRIVATE ibmw::cli::command ibmw::core::extension_support)

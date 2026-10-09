@@ -161,6 +161,38 @@ ibmw module list --registry-path "$IBMW_REGISTRY_PATH"
 旧版本注册文件缺少模块列表时，命令提示升级并重启对应运行时，保留其他可用结果并返回 1；
 计数模式此时只统计提供模块信息的运行时。进程退出后的过期记录由现有 RuntimeRegistry 机制处理。
 
+### 查看模块通信接口
+
+`ibmw module info <module>` 显示已登记模块的名称、运行时 ID、PID，以及发布和订阅的话题与消息类型。
+参数为模块名；同名模块存在于多个运行时时，命令列出候选运行时并返回 1，使用 `--runtime` 指定目标。
+`--registry-path` 与 `module list` 使用相同的注册根目录规则。
+
+```bash
+ibmw module info perception
+ibmw module info perception --runtime robot-main
+ibmw module info perception --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+示例输出：
+
+```text
+Module: perception
+Runtime: robot-main
+PID: 12345
+
+Publishers:
+  /detections [json:DetectionArray]
+
+Subscribers:
+  /camera/image [json:Image]
+```
+
+各方向按话题名和消息类型排序，相同话题和类型的重复端点只显示一次，包含注册表中标记为隐藏的话题。
+没有对应接口时显示 `(none)`，无话题模块也可成功查询。结果来自运行时登记的接口快照，
+不代表当前消息流量、连接状态或业务健康；未登记的端点不会显示。
+模块或指定运行时不存在时返回 1。旧运行时缺少模块列表时提示升级重启，保留唯一可用匹配的输出并返回 1；
+只出现在话题端点上的模块名不会被视为已登记模块。可用信息完整且唯一匹配时返回 0。
+
 ---
 
 ## 构建选项

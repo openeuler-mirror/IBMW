@@ -9,12 +9,14 @@
 #include <vector>
 
 #include "cli/command.h"
+#include "info_command.h"
 #include "list_command.h"
 
 int RunModuleCommand(int argc, const char* const* argv) {
   try {
     ibmw::cli::Command module("ibmw module", "Inspect registered local modules");
     ibmw::cli::module::AddListCommand(module);
+    ibmw::cli::module::AddInfoCommand(module);
     std::vector<std::string> arguments;
     for (int index = 0; index < argc; ++index) arguments.emplace_back(argv[index]);
     std::vector<char*> mutable_argv;
