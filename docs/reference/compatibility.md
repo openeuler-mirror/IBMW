@@ -32,6 +32,11 @@ case-specific verification.
   data is not converted. Unknown or malformed registrations are skipped without
   deleting another process's files; cleanup requires evidence of process exit
   or PID reuse.
+- Module listing adds an optional `modules` string array to protocol 2 runtime
+  registrations. Missing means the runtime does not advertise module information;
+  an empty array means no registered modules. Existing topic readers ignore the
+  added field. Core, CLI providers, and extensions using `RuntimeRegistration`
+  must be rebuilt together because its C++ layout changes.
 - The default registry root is `$XDG_RUNTIME_DIR/ibmw`, falling back to
   `/tmp/ibmw-<euid>`. Custom roots must be private and owned by the current
   effective UID. Symlink components and writable untrusted ancestors are

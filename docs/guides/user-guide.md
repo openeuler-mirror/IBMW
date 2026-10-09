@@ -138,6 +138,39 @@ For a hands-on walkthrough with 8 working demos plus an extension-loading exampl
 [ibmw-template/](../../ibmw-template/) and the
 [ibmw-gen reference](../../src/tools/ibmw_gen/README.md).
 
+### Listing Local Modules
+
+`ibmw module list` uses RuntimeRegistry to list modules registered by live local runtimes
+owned by the same user. Each line is `runtime_id/module_name [pid: <PID>]`, showing
+the owning process ID by default, sorted by runtime ID and module name.
+Identically named modules in different runtimes remain separate.
+
+```bash
+ibmw module list
+ibmw module list --runtime robot-main
+ibmw module list --count-modules
+# Set IBMW_REGISTRY_PATH to the runtime's private registry root (owned by you, mode 0700).
+ibmw module list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+`--count-modules` (`-c`) only prints the number of module instances.
+`--registry-path` selects the registry root, matching
+`ibmw.runtime_graph.registry_path`; the command adds the `v2/` namespace.
+The default root is `$XDG_RUNTIME_DIR/ibmw`, or `/tmp/ibmw-<euid>` when unset.
+
+The list comes from ModuleBus and includes package-loaded modules, directly
+registered modules, and app-mode runtime contexts created with `CreateModule()`.
+Modules without topics are included; an endpoint's `module_name` alone does not
+create a module record. The list is captured during initialization and refreshed
+before modules start. Registration does not establish business health.
+Runtimes must enable `ibmw.runtime_graph.enabled` (the default) to be discoverable.
+
+An empty list succeeds with exit code 0; a requested runtime that is not found
+returns 1. Older registrations without module information produce a diagnostic
+requesting an upgrade and restart, retain available results, and return 1. In this
+case, count mode only counts runtimes that provide module information.
+The existing RuntimeRegistry mechanism handles stale registrations after process exit.
+
 ---
 
 ## Build Options

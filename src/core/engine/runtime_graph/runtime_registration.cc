@@ -56,13 +56,15 @@ nlohmann::json RuntimeRegistrationToJson(
   for (const auto& topic : registration.topics) {
     topics.push_back(TopicAdvertisementToJson(topic));
   }
-  return nlohmann::json{
+  nlohmann::json result{
       {"protocol_version", registration.protocol_version},
       {"runtime_id", registration.runtime_id},
       {"pid", registration.pid},
       {"process_start_time_ticks", registration.process_start_time_ticks},
       {"control_socket", registration.control_socket},
       {"topics", std::move(topics)}};
+  if (registration.modules) result["modules"] = *registration.modules;
+  return result;
 }
 
 RuntimeRegistration RuntimeRegistrationFromJson(const nlohmann::json& value) {
@@ -81,6 +83,14 @@ RuntimeRegistration RuntimeRegistrationFromJson(const nlohmann::json& value) {
       value.at("control_socket").get<std::string>();
   for (const auto& topic : value.at("topics")) {
     registration.topics.emplace_back(TopicAdvertisementFromJson(topic));
+  }
+  if (value.contains("modules")) {
+    registration.modules = value.at("modules").get<std::vector<std::string>>();
+    auto& modules = *registration.modules;
+    std::sort(modules.begin(), modules.end());
+    // Preserve ModuleBus names, including unnamed app-mode contexts.
+    MW_ASSERT(std::adjacent_find(modules.begin(), modules.end()) == modules.end(),
+              "Runtime registration contains duplicate module names.");
   }
   MW_ASSERT(
       !registration.runtime_id.empty() && registration.pid > 0 &&

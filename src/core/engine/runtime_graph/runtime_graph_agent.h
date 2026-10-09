@@ -47,6 +47,7 @@ class RuntimeGraphAgent {
     return options_.registration;
   }
 
+  // Before Start only; initialized registrations retain their process identity.
   void UpdateRegistration(RuntimeRegistration registration);
 
  private:

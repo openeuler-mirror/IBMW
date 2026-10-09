@@ -95,6 +95,7 @@ endif()
 
 # CLI providers are built after their runtime dependencies.
 add_subdirectory(cli/topic)
+add_subdirectory(cli/module)
 if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
   add_subdirectory(cli/bag)
 endif()

@@ -69,6 +69,9 @@ class RuntimeGraphSubsystem final : public ISubsystem,
   void Start() override;
   void Shutdown() override;
 
+  // Capture app-mode contexts added after Initialize, before ModuleBus starts.
+  void RefreshModuleList();
+
   const RuntimeRegistration& Registration() const;
   bool Enabled() const noexcept { return options_.enabled; }
   const std::filesystem::path& RegistryPath() const noexcept {

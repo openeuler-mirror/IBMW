@@ -134,6 +134,33 @@ ibmw-gen 会生成 Module 脚手架、CMake 规则、YAML 配置以及 DDS/JSON 
 要查看含 8 个可运行 Demo（另含 Extension 加载示例）的实战教程，参见 [ibmw-template/](../../ibmw-template/)
 和 [ibmw-gen 参考](../../src/tools/ibmw_gen/README.zh.md)。
 
+### 查看本机模块
+
+`ibmw module list` 通过 RuntimeRegistry 列出本机同一用户的有效运行时中登记的模块，
+每行输出 `runtime_id/module_name [pid: <PID>]`，默认显示所属进程的 PID，
+按运行时 ID 和模块名排序。同名模块在不同运行时中分别显示。
+
+```bash
+ibmw module list
+ibmw module list --runtime robot-main
+ibmw module list --count-modules
+# 先将 IBMW_REGISTRY_PATH 设为运行时使用的私有注册根目录（当前用户所有，权限 0700）。
+ibmw module list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+`--count-modules`（`-c`）只输出模块实例数量。
+`--registry-path` 指定注册根目录，与 `ibmw.runtime_graph.registry_path` 一致，命令自动使用其 `v2/` 子目录。
+默认根目录为 `$XDG_RUNTIME_DIR/ibmw`，未设置时为 `/tmp/ibmw-<euid>`。
+
+列表来自 ModuleBus，包含包加载、直接注册的模块及 App 模式 `CreateModule()` 创建的运行上下文，
+即使模块没有任何话题也能列出。只有通信端点上的 `module_name` 不会产生模块记录。
+模块列表在初始化时写入，并在模块启动前刷新；它表示已登记模块，不代表业务健康状态。
+运行时需启用 `ibmw.runtime_graph.enabled`（默认开启），关闭注册功能的进程不会出现在结果中。
+
+没有模块时输出为空、退出码为 0；指定的运行时不存在时退出码为 1。
+旧版本注册文件缺少模块列表时，命令提示升级并重启对应运行时，保留其他可用结果并返回 1；
+计数模式此时只统计提供模块信息的运行时。进程退出后的过期记录由现有 RuntimeRegistry 机制处理。
+
 ---
 
 ## 构建选项

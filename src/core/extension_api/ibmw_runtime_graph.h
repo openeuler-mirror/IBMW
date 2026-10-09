@@ -60,6 +60,9 @@ struct RuntimeRegistration {
   uint64_t process_start_time_ticks = 0;
   std::string control_socket;
   std::vector<TopicAdvertisement> topics;
+  // Absent in older registrations; an empty list means no registered modules.
+  // Names come from ModuleBus, including app-mode runtime contexts.
+  std::optional<std::vector<std::string>> modules;
 };
 
 struct TapSessionDescriptor {

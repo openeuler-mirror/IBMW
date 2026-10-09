@@ -121,8 +121,14 @@ RuntimeGraphAgent::~RuntimeGraphAgent() {
 }
 
 void RuntimeGraphAgent::UpdateRegistration(RuntimeRegistration registration) {
-  MW_ASSERT(state_.load() == State::kCreated,
-            "Runtime registration can only be updated before Initialize.");
+  const auto state = state_.load();
+  MW_ASSERT(state == State::kCreated || state == State::kInitialized,
+            "Runtime registration can only be updated before Start.");
+  if (state == State::kInitialized) {
+    MW_ASSERT(SameRegistrationOwner(registration, options_.registration),
+              "Cannot change the identity of an initialized Runtime registration.");
+    WriteRuntimeRegistration(registration, registration_path_);
+  }
   options_.registration = std::move(registration);
 }
 
