@@ -71,6 +71,8 @@ class RuntimeGraphSubsystem final : public ISubsystem,
 
   // Capture app-mode contexts added after Initialize, before ModuleBus starts.
   void RefreshModuleList();
+  // Capture app-mode RPC registrations before the Service subsystem starts.
+  void RefreshServiceList();
 
   const RuntimeRegistration& Registration() const;
   bool Enabled() const noexcept { return options_.enabled; }

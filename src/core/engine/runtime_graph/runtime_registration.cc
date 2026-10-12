@@ -8,6 +8,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 #include <unistd.h>
 
@@ -64,6 +65,22 @@ nlohmann::json RuntimeRegistrationToJson(
       {"control_socket", registration.control_socket},
       {"topics", std::move(topics)}};
   if (registration.modules) result["modules"] = *registration.modules;
+  if (registration.services) {
+    auto services = nlohmann::json::array();
+    for (const auto& service : *registration.services) {
+      services.push_back({
+          {"endpoint_id", service.endpoint_id},
+          {"service_name", service.service_name},
+          {"request_type", service.request_type},
+          {"response_type", service.response_type},
+          {"module_name", service.module_name},
+          {"package_path", service.package_path},
+          {"available_drivers", service.available_drivers},
+          {"server", service.server},
+          {"hidden", service.hidden}});
+    }
+    result["services"] = std::move(services);
+  }
   return result;
 }
 
@@ -91,6 +108,29 @@ RuntimeRegistration RuntimeRegistrationFromJson(const nlohmann::json& value) {
     // Preserve ModuleBus names, including unnamed app-mode contexts.
     MW_ASSERT(std::adjacent_find(modules.begin(), modules.end()) == modules.end(),
               "Runtime registration contains duplicate module names.");
+  }
+  if (value.contains("services")) {
+    const auto& services = value.at("services");
+    MW_ASSERT(services.is_array(), "Runtime services must be a JSON array.");
+    registration.services.emplace();
+    std::unordered_set<std::string> endpoint_ids;
+    for (const auto& item : services) {
+      ibmw::extension::ServiceAdvertisement service{
+          .endpoint_id = item.at("endpoint_id").get<std::string>(),
+          .service_name = item.at("service_name").get<std::string>(),
+          .request_type = item.at("request_type").get<std::string>(),
+          .response_type = item.at("response_type").get<std::string>(),
+          .module_name = item.at("module_name").get<std::string>(),
+          .package_path = item.at("package_path").get<std::string>(),
+          .available_drivers = item.at("available_drivers").get<std::vector<std::string>>(),
+          .server = item.at("server").get<bool>(),
+          .hidden = item.at("hidden").get<bool>()};
+      MW_ASSERT(!service.endpoint_id.empty() && !service.service_name.empty() &&
+                    !service.request_type.empty() && !service.response_type.empty() &&
+                    endpoint_ids.emplace(service.endpoint_id).second,
+                "Runtime registration contains an invalid or duplicate service endpoint.");
+      registration.services->push_back(std::move(service));
+    }
   }
   MW_ASSERT(
       !registration.runtime_id.empty() && registration.pid > 0 &&

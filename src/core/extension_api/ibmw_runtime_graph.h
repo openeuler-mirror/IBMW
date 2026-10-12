@@ -53,6 +53,22 @@ struct TopicAdvertisement {
   std::map<std::string, ibmw::transport::QosDescriptor> driver_qos;
 };
 
+// One registered RPC method, independent of the driver used to call it.
+// Generic IBMW RPC has request/response types, not necessarily a .srv type.
+struct ServiceAdvertisement {
+  std::string endpoint_id;
+  std::string service_name;
+  std::string request_type;
+  std::string response_type;
+  std::string module_name;
+  std::string package_path;
+  std::vector<std::string> available_drivers;
+  bool server = true;
+  bool hidden = false;
+
+  bool operator==(const ServiceAdvertisement&) const = default;
+};
+
 struct RuntimeRegistration {
   uint32_t protocol_version = kRuntimeProtocolVersion;
   std::string runtime_id;
@@ -63,6 +79,8 @@ struct RuntimeRegistration {
   // Absent in older registrations; an empty list means no registered modules.
   // Names come from ModuleBus, including app-mode runtime contexts.
   std::optional<std::vector<std::string>> modules;
+  // Absent in older registrations; an empty list means no registered RPCs.
+  std::optional<std::vector<ServiceAdvertisement>> services;
 };
 
 struct TapSessionDescriptor {

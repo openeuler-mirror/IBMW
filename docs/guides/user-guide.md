@@ -138,6 +138,65 @@ For a hands-on walkthrough with 8 working demos plus an extension-loading exampl
 [ibmw-template/](../../ibmw-template/) and the
 [ibmw-gen reference](../../src/tools/ibmw_gen/README.md).
 
+### Querying Local Services
+
+`ibmw service list`, `type`, and `find` query RPC methods advertised by live local
+IBMW runtimes owned by the same user. This version supports the **registry**
+source only; it does not perform DDS or ROS 2 network discovery or invoke RPCs.
+The CLI uses the registry directly without starting an Engine or loading business
+transport extensions.
+
+```bash
+ibmw service list
+ibmw service list --registry -t
+ibmw service list --count-services
+ibmw service type 'json:/my_project.ComputeService/Compute'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' -c
+ibmw service list --include-hidden-services
+# Set IBMW_REGISTRY_PATH to the runtime's private registry root (owned by you, mode 0700).
+ibmw service list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+Service names are the **full registered RPC method names**, including the type
+prefix, service name, and method name. The generic RPC catalog stores request and
+response types, not a distinct ROS 2 `.srv` type. Therefore `type` prints the exact
+`request_type -> response_type` pair, and `find` matches that entire string.
+Quote it as shown above so the shell does not interpret `>` as redirection.
+Names and type pairs are sorted and deduplicated; if one name has several type
+pairs, `type` prints each pair on its own line and `list -t` shows all of them.
+`list -c` and `find -c` count unique matching service names, not endpoints.
+
+Example `list -t` output:
+
+```text
+json:/my_project.ComputeService/Compute [json:my_project.ComputeRequest -> json:my_project.ComputeResponse]
+```
+
+Only **server registrations** appear in these commands. A registered client alone
+does not add a listed service. A name is hidden when any slash-separated name
+component begins with `_`; `--include-hidden-services` is accepted both before
+the subcommand and after it. Registration is metadata, not a check of service
+readiness or successful communication.
+
+The runtime captures ServiceCatalog metadata during initialization and refreshes
+it before the Service subsystem starts, including registrations added between
+`Engine::Initialize()` and `Start()` in app mode. Server and client roles, full
+method names, request/response types, module/package identities, and enabled RPC
+drivers are stored in the registration. All RPC drivers can be represented by
+this local source, not just `local`. Runtimes must enable
+`ibmw.runtime_graph.enabled` (the default) to publish registrations.
+
+`--registry-path` selects the registry root, matching
+`ibmw.runtime_graph.registry_path`; the command adds the `v2/` namespace.
+The default root is `$XDG_RUNTIME_DIR/ibmw`, or `/tmp/ibmw-<euid>` when unset.
+An empty successful query exits 0; `type` for an unknown or hidden service exits 1.
+Discovery errors exit 1. Older runtimes without service metadata produce an
+upgrade/restart diagnostic and exit 1 while preserving available results from
+newer runtimes. Rebuild/redeploy applications with the updated runtime and restart
+them to publish service metadata. Existing Topic and Module registrations remain
+readable. Exited runtimes are handled by the existing registry liveness checks.
+
 ### Listing Local Modules
 
 `ibmw module list` uses RuntimeRegistry to list modules registered by live local runtimes

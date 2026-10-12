@@ -134,6 +134,56 @@ ibmw-gen 会生成 Module 脚手架、CMake 规则、YAML 配置以及 DDS/JSON 
 要查看含 8 个可运行 Demo（另含 Extension 加载示例）的实战教程，参见 [ibmw-template/](../../ibmw-template/)
 和 [ibmw-gen 参考](../../src/tools/ibmw_gen/README.zh.md)。
 
+### 查询本机 Service
+
+`ibmw service list`、`type` 和 `find` 查询本机同一用户的有效 IBMW 运行时公布的 RPC 方法。
+本版本仅支持 **registry** 来源，不执行 DDS 或 ROS 2 网络发现，也不调用 RPC。
+CLI 直接读取 registry，无需启动 Engine 或加载业务 transport 扩展。
+
+```bash
+ibmw service list
+ibmw service list --registry -t
+ibmw service list --count-services
+ibmw service type 'json:/my_project.ComputeService/Compute'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' -c
+ibmw service list --include-hidden-services
+# 先将 IBMW_REGISTRY_PATH 设为运行时使用的私有注册根目录（当前用户所有，权限 0700）。
+ibmw service list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+服务名是**完整的已注册 RPC 方法名**，包含类型前缀、服务名和方法名。通用 RPC 目录
+保存请求和响应类型，而非独立的 ROS 2 `.srv` 类型，因此 `type` 输出准确的
+`request_type -> response_type` 类型对。
+
+`find` 精确匹配 `type` 返回的完整字符串。类型对需像示例中一样加引号，避免 Shell 将
+`>` 解释为重定向。名称和类型对会排序、去重；同一名称对应多个类型对时，`type` 每行输出一个，
+`list -t` 列出全部类型对。`list -c` 和 `find -c` 统计匹配的唯一服务名数量，而非端点数量。
+
+`list -t` 输出示例：
+
+```text
+json:/my_project.ComputeService/Compute [json:my_project.ComputeRequest -> json:my_project.ComputeResponse]
+```
+
+这些命令只显示**服务端注册**，仅注册客户端不会新增可列出的服务。服务名按 `/` 分隔后，
+任一名称分量以 `_` 开头即视为隐藏服务；`--include-hidden-services` 可以放在子命令之前
+或之后。注册信息只表示元数据，不代表服务已就绪或通信已成功。
+
+运行时在初始化期间采集 ServiceCatalog 元数据，并在 Service 子系统
+启动前刷新，包括 App 模式下在 `Engine::Initialize()` 与 `Start()` 之间新增的注册。
+登记信息包含服务端/客户端角色、完整方法名、请求/响应类型、模块/包标识，以及已启用的
+RPC Driver。本机来源可以表示所有 RPC Driver，并不限于 `local`。
+运行时需启用 `ibmw.runtime_graph.enabled`（默认开启）才能发布登记信息。
+
+`--registry-path` 指定注册根目录，与 `ibmw.runtime_graph.registry_path` 一致，
+命令自动使用其 `v2/` 子目录。默认根目录为 `$XDG_RUNTIME_DIR/ibmw`，未设置时为
+`/tmp/ibmw-<euid>`。查询成功但结果为空时退出码为 0；`type` 查询不存在或被隐藏的服务时
+退出码为 1，发现错误也返回 1。旧版本运行时缺少服务元数据时，命令提示升级并重启，
+保留新版本运行时的可用结果并返回 1。需要使用更新后的运行时重新构建/部署应用并重启，
+才能发布服务元数据。已有 Topic 和 Module 登记仍可读取；已退出运行时的记录由现有
+registry 存活检查机制处理。
+
 ### 查看本机模块
 
 `ibmw module list` 通过 RuntimeRegistry 列出本机同一用户的有效运行时中登记的模块，

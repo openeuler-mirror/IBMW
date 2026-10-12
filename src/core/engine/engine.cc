@@ -401,6 +401,9 @@ void Engine::StartImpl() {
   for (size_t pos : init_order_) {
     auto& entry = subsystems_[pos];
     RunHooks(Before(Phase::kStart, entry.id));
+    if (entry.id == Subsystem::kService) {
+      runtime_graph_subsystem_.RefreshServiceList();
+    }
     if (entry.id == Subsystem::kModule) {
       runtime_graph_subsystem_.RefreshModuleList();
     }
