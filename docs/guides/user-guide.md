@@ -138,13 +138,13 @@ For a hands-on walkthrough with 8 working demos plus an extension-loading exampl
 [ibmw-template/](../../ibmw-template/) and the
 [ibmw-gen reference](../../src/tools/ibmw_gen/README.md).
 
-### Querying Local Services
+### Querying Services
 
-`ibmw service list`, `type`, and `find` query RPC methods advertised by live local
-IBMW runtimes owned by the same user. This version supports the **registry**
-source only; it does not perform DDS or ROS 2 network discovery or invoke RPCs.
-The CLI uses the registry directly without starting an Engine or loading business
-transport extensions.
+`ibmw service list`, `type`, and `find` support registry, DDS, ROS 2, Zenoh,
+MQTT, HTTP, and gRPC discovery. Registry is the default and reads live local
+IBMW runtimes owned by the same user. Network sources use independent discovery
+observers without starting an Engine. These commands inspect metadata and do
+not invoke business RPCs.
 
 ```bash
 ibmw service list
@@ -158,13 +158,19 @@ ibmw service list --include-hidden-services
 ibmw service list --registry-path "$IBMW_REGISTRY_PATH"
 ```
 
-Service names are the **full registered RPC method names**, including the type
-prefix, service name, and method name. The generic RPC catalog stores request and
-response types, not a distinct ROS 2 `.srv` type. Therefore `type` prints the exact
-`request_type -> response_type` pair, and `find` matches that entire string.
-Quote it as shown above so the shell does not interpret `>` as redirection.
-Names and type pairs are sorted and deduplicated; if one name has several type
-pairs, `type` prints each pair on its own line and `list -t` shows all of them.
+For registry, HTTP, gRPC, MQTT and Zenoh, service names are the **full registered
+RPC method names**, including the type prefix. `type` prints the exact
+`request_type -> response_type` pair. ROS 2 reports native service names and
+`pkg/srv/Type` types. DDS reports wire service names and wire request/response
+type pairs, recognizing ROS 2 `rq/...Request`/`rr/...Reply` and IBMW
+`ibmw_rpc/rq/...`/`ibmw_rpc/rr/...` conventions; it does not reconstruct logical
+IBMW names or claim to discover arbitrary vendor RPC protocols. A DDS server
+requires a request reader and a reply writer in the same participant.
+
+`find` matches the exact string returned by `type`. Quote type pairs so the shell
+does not interpret `>` as redirection. Names and types are sorted and deduplicated;
+if one name has several types, `type` prints each on its own line and `list -t`
+shows all of them.
 `list -c` and `find -c` count unique matching service names, not endpoints.
 
 Example `list -t` output:
@@ -179,8 +185,8 @@ component begins with `_`; `--include-hidden-services` is accepted both before
 the subcommand and after it. Registration is metadata, not a check of service
 readiness or successful communication.
 
-The runtime captures ServiceCatalog metadata during initialization and refreshes
-it before the Service subsystem starts, including registrations added between
+For registry discovery, the runtime captures ServiceCatalog metadata during
+initialization and refreshes it before the Service subsystem starts, including registrations added between
 `Engine::Initialize()` and `Start()` in app mode. Server and client roles, full
 method names, request/response types, module/package identities, and enabled RPC
 drivers are stored in the registration. All RPC drivers can be represented by
@@ -196,6 +202,64 @@ upgrade/restart diagnostic and exit 1 while preserving available results from
 newer runtimes. Rebuild/redeploy applications with the updated runtime and restart
 them to publish service metadata. Existing Topic and Module registrations remain
 readable. Exited runtimes are handled by the existing registry liveness checks.
+
+#### Network sources
+
+```bash
+ibmw service list --dds --dds-domain 10 -t
+ibmw service list --ros2 --ros-domain 10 -t
+ibmw service type /add_two_ints --ros2
+ibmw service find example_interfaces/srv/AddTwoInts --ros2
+ibmw service list --zenoh --zenoh-domain robot --zenoh-config ./zenoh.json5
+ibmw service list --mqtt tcp://192.168.1.10:1883 -t
+ibmw service list --http 192.168.1.10:50080 -t
+ibmw service list --grpc 192.168.1.10:50051 -t
+ibmw service list --registry --dds --ros2 --domain 10 --timeout 3
+```
+
+Source flags apply to all three subcommands and may be combined. Short aliases
+are `-d` (DDS), `-r` (ROS 2), and `-z` (Zenoh). `--domain` applies to selected
+DDS/ROS 2 sources; source-specific domains override it. DDS defaults to domain 0;
+ROS 2 otherwise uses `ROS_DOMAIN_ID`, then 0. Zenoh uses its native configuration
+and `limit_domain` (empty by default). Network plugins are built with their
+corresponding extension build options. Missing plugins report an error.
+
+HTTP and gRPC require an explicit **server** address; the CLI actively connects
+to that existing listener. HTTP uses the read-only
+`GET /ibmw/discovery/services/v1` endpoint. gRPC uses the IBMW-specific
+`/ibmw.discovery.v1.ServiceDirectory/List` unary method with framed JSON, not
+gRPC reflection. These sources currently use plaintext HTTP/HTTP2. MQTT requires
+an explicit broker URI (`tcp://host:port`, or `ssl://host:port` with a trusted
+server certificate); CLI credentials and custom client certificates are not
+currently exposed. Each MQTT query subscribes to its own temporary reply topic
+before publishing a directory request. Responses are not retained. Zenoh queries
+runtime-owned directory queryables. No discovery server needs the CLI's IP in
+advance, and later CLI processes can query independently.
+
+HTTP, gRPC, MQTT and Zenoh directory responders require the updated IBMW runtime
+and a configured RPC driver. They expose successfully registered server names and
+types only, including app-mode registrations before Start. They do not export
+registry paths or module library paths. DDS and ROS 2 use native discovery and
+also work with matching native service servers. MQTT broker ACLs must allow the
+`ibmw/discovery/services/v1/request` and `ibmw/discovery/services/v1/reply/+`
+topics. Directory access follows the existing listener/broker/session access
+controls.
+
+MQTT `list/type/find` accepts `--mqtt ssl://host:port`. Supply
+`--mqtt-truststore <path>` for a private CA, or use the system trust store.
+Mutual TLS requires both `--mqtt-client-cert <path>` and
+`--mqtt-client-key <path>`. These credentials require a TLS MQTT source;
+authentication or connection failure returns exit code 1, not a successful
+empty directory.
+
+`--timeout` selects a shared collection window (default 2 seconds, range
+0.01–60). Selected sources are queried concurrently. Native session setup and
+transport cleanup may add overhead. An empty successful collection is not proof
+that all peers are reachable; allow a longer window on slow discovery networks.
+An unavailable/error source produces a diagnostic and exit code 1 while retaining
+results from working sources. An older HTTP/gRPC server without the directory
+method reports an error; an older MQTT/Zenoh runtime simply does not reply to
+metadata queries.
 
 ### Listing Local Modules
 

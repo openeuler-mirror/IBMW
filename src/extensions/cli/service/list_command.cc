@@ -38,9 +38,9 @@ int RunList(const Invocation& invocation) {
 }  // namespace
 
 void AddListCommand(Command& service) {
-  auto& list = service.AddSubcommand("list", "List registered service methods");
+  auto& list = service.AddSubcommand("list", "List discovered services");
   list.SetHandler(RunList);
-  list.AddOption("--show-types", "-t", {}, "Additionally show request -> response types");
+  list.AddOption("--show-types", "-t", {}, "Additionally show service types");
   list.AddOption("--count-services", "-c", {}, "Only display the number of service names");
   AddDiscoveryOptions(list);
 }

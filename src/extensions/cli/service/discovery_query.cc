@@ -10,10 +10,12 @@
 namespace ibmw::cli::service {
 
 ibmw::discovery::ServiceDiscoverySnapshot DiscoverServices(const Invocation& invocation) {
-  auto snapshot = ibmw::discovery::DiscoverRegistryServices(ParseRegistryPath(invocation));
+  auto snapshot = ibmw::discovery::DiscoverServices(ParseDiscoveryOptions(invocation),
+      ParseDiscoveryTimeout(invocation));
   for (const auto& source : snapshot.sources) {
     if (source.status != ibmw::discovery::DiscoveryStatus::kReady) {
-      std::cerr << "ibmw service: error: registry: " << source.message << '\n';
+      std::cerr << "ibmw service: error: " << ibmw::discovery::BackendName(source.source.backend)
+                << ": " << source.message << '\n';
     }
   }
   return snapshot;
@@ -25,7 +27,8 @@ ServiceTypes VisibleServices(
   for (const auto& endpoint : snapshot.services) {
     const auto& service = endpoint.advertisement;
     if (!service.server || (!include_hidden && service.hidden)) continue;
-    result[service.service_name].insert(service.request_type + " -> " + service.response_type);
+    result[service.service_name].insert(endpoint.type_name.empty()
+        ? service.request_type + " -> " + service.response_type : endpoint.type_name);
   }
   return result;
 }

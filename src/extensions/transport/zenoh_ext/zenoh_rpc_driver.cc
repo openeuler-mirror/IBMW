@@ -106,12 +106,14 @@ void ZenohRpcDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::Start) == State::Init,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->StartServiceDiscovery(limit_domain_);
 }
 
 void ZenohRpcDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::Shutdown) == State::Shutdown)
     return;
 
+  zenoh_bus_ptr_->StopServiceDiscovery();
   client_tool_ptr_.reset();
 }
 
@@ -423,6 +425,8 @@ bool ZenohRpcDriver::RegisterServiceFunc(
       }
     };
     zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled);
+    zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
+                                 info.rsp_type_support_ref.TypeName());
 
     z_node_shm_size_map_["rsp/" + pattern] = shm_init_loan_size_;
     return true;

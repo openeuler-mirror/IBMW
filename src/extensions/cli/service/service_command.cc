@@ -15,7 +15,7 @@
 
 int RunServiceCommand(int argc, const char* const* argv) {
   try {
-    ibmw::cli::Command service("ibmw service", "Inspect registered local services");
+    ibmw::cli::Command service("ibmw service", "Inspect local and network services");
     service.AddHelpOption("--include-hidden-services",
                           "Include hidden services in list, type and find queries");
     ibmw::cli::service::AddListCommand(service);

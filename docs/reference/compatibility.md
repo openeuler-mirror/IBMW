@@ -19,6 +19,8 @@ case-specific verification.
 ## Package ABI and headers
 
 - Core, CLI, application modules, and extensions are built and deployed together.
+  Each update requires rebuilding all of them from the same source revision;
+  loading binaries from earlier IBMW revisions is not a supported deployment.
   Runtime ABI 2 includes per-driver endpoint QoS and requires matching headers,
   compiler, and standard library. Extensions requesting another nonzero Runtime
   ABI are rejected before initialization; ABI 0 explicitly selects the existing

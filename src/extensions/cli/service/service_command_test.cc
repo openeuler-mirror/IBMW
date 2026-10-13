@@ -215,7 +215,9 @@ TEST(ServiceCommandTest, HelpAndArgumentValidation) {
     EXPECT_EQ(help.code, 0);
     EXPECT_NE(help.output.find("--registry"), std::string::npos);
     EXPECT_NE(help.output.find("--include-hidden-services"), std::string::npos);
-    EXPECT_EQ(help.output.find("--dds"), std::string::npos);
+    for (const std::string source : {"--dds", "--ros2", "--zenoh", "--http", "--grpc", "--mqtt"}) {
+      EXPECT_NE(help.output.find(source), std::string::npos);
+    }
     EXPECT_NE(InvokeService({verb, "--unknown"}).code, 0);
   }
   EXPECT_NE(InvokeService({"type"}).code, 0);
@@ -223,7 +225,7 @@ TEST(ServiceCommandTest, HelpAndArgumentValidation) {
   EXPECT_NE(InvokeService({"list", "extra"}).code, 0);
   EXPECT_NE(InvokeService({"list", "--registry-path", ""}).code, 0);
   EXPECT_NE(InvokeService({"list", "--registry-path", "/tmp/a", "--registry-path", "/tmp/b"}).code, 0);
-  EXPECT_NE(InvokeService({"list", "--dds"}).code, 0);
+  EXPECT_NE(InvokeService({"list", "--dds", "--dds-domain", "invalid"}).code, 0);
 }
 
 TEST_F(RegistryServiceCommandTest, RegistrationRoundTripsAndOldRecordsRemainReadable) {

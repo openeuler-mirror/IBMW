@@ -37,6 +37,7 @@ void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_si
 }
 
 void ZenohBus::Shutdown() {
+  StopServiceDiscovery();
   StopDiscovery();
   for (auto &ptr : z_pub_catalog_) {
     z_drop(z_move(ptr.second->z_pub));

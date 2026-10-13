@@ -125,6 +125,30 @@ void MqttRpcDriver::Initialize(YAML::Node options_node) {
     MW_TRACE("Mqtt service driver does not enable the timeout function.");
   }
 
+  // Use a non-shared subscription: every runtime answers on the querying
+  // client's unique reply topic. Nothing is retained at the broker.
+  namespace directory = ibmw::discovery::service_protocol;
+  sub_info_vec_.push_back({directory::kMqttRequestTopic, 1});
+  msg_handle_catalog_ptr_->RegisterMsgHandle(directory::kMqttRequestTopic,
+      [catalog = discovery_catalog_, client = client_](MQTTAsync_message* message) {
+        try {
+          constexpr std::string_view prefix = directory::kMqttReplyPrefix;
+          if (message->retained || message->payloadlen != static_cast<int>(prefix.size() + 20)) return;
+          const std::string topic(static_cast<const char*>(message->payload), message->payloadlen);
+          if (!topic.starts_with(prefix) ||
+              topic.find_first_not_of("0123456789abcdef", prefix.size()) != std::string::npos) return;
+          const auto payload = catalog->Encode();
+          MQTTAsync_message reply = MQTTAsync_message_initializer;
+          reply.payload = const_cast<char*>(payload.data());
+          reply.payloadlen = static_cast<int>(payload.size());
+          reply.qos = 1;
+          const auto code = MQTTAsync_sendMessage(client, topic.c_str(), &reply, nullptr);
+          if (code != MQTTASYNC_SUCCESS) MW_WARN("Cannot send MQTT service directory: {}", code);
+        } catch (const std::exception& error) {
+          MW_WARN("Cannot produce MQTT service directory: {}", error.what());
+        }
+      });
+
   options_node = options_;
 }
 
@@ -338,6 +362,8 @@ bool MqttRpcDriver::RegisterServiceFunc(
     sub_info_vec_.emplace_back(MqttSubInfo{mqtt_sub_topic_2, qos});
 
     msg_handle_catalog_ptr_->RegisterMsgHandle(mqtt_sub_topic_2, handle);
+    discovery_catalog_->Add(info.func_name, info.req_type_support_ref.TypeName(),
+                            info.rsp_type_support_ref.TypeName());
 
     return true;
   } catch (const std::exception& e) {

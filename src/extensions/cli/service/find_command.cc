@@ -28,9 +28,9 @@ int RunFind(const Invocation& invocation) {
 }  // namespace
 
 void AddFindCommand(Command& service) {
-  auto& find = service.AddSubcommand("find", "Find services by request -> response types");
+  auto& find = service.AddSubcommand("find", "Find services by exact type");
   find.SetHandler(RunFind);
-  find.AddArgument("<type>", "Exact type pair, quoted: 'request_type -> response_type'");
+  find.AddArgument("<type>", "Exact type from type/list -t (quote request -> response pairs)");
   find.AddOption("--count-services", "-c", {}, "Only display the number of matching service names");
   AddDiscoveryOptions(find);
 }

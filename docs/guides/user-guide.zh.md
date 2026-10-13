@@ -134,11 +134,11 @@ ibmw-gen 会生成 Module 脚手架、CMake 规则、YAML 配置以及 DDS/JSON 
 要查看含 8 个可运行 Demo（另含 Extension 加载示例）的实战教程，参见 [ibmw-template/](../../ibmw-template/)
 和 [ibmw-gen 参考](../../src/tools/ibmw_gen/README.zh.md)。
 
-### 查询本机 Service
+### 查询 Service
 
-`ibmw service list`、`type` 和 `find` 查询本机同一用户的有效 IBMW 运行时公布的 RPC 方法。
-本版本仅支持 **registry** 来源，不执行 DDS 或 ROS 2 网络发现，也不调用 RPC。
-CLI 直接读取 registry，无需启动 Engine 或加载业务 transport 扩展。
+`ibmw service list`、`type` 和 `find` 支持 registry、DDS、ROS 2、Zenoh、MQTT、HTTP
+和 gRPC 发现。默认使用 registry，读取本机同一用户的有效 IBMW 运行时登记信息。
+网络来源使用独立的发现观察器，无需启动 Engine。这些命令只查询元数据，不调用业务 RPC。
 
 ```bash
 ibmw service list
@@ -152,13 +152,17 @@ ibmw service list --include-hidden-services
 ibmw service list --registry-path "$IBMW_REGISTRY_PATH"
 ```
 
-服务名是**完整的已注册 RPC 方法名**，包含类型前缀、服务名和方法名。通用 RPC 目录
-保存请求和响应类型，而非独立的 ROS 2 `.srv` 类型，因此 `type` 输出准确的
-`request_type -> response_type` 类型对。
+对于 registry、HTTP、gRPC、MQTT 和 Zenoh，服务名是**完整的已注册 RPC 方法名**，
+包含类型前缀；`type` 输出准确的 `request_type -> response_type` 类型对。
+ROS 2 返回原生服务名和 `pkg/srv/Type` 类型。DDS 返回线协议服务名和请求/响应类型对，
+识别 ROS 2 的 `rq/...Request`/`rr/...Reply` 和 IBMW 的
+`ibmw_rpc/rq/...`/`ibmw_rpc/rr/...` 约定；不会还原 IBMW 逻辑名称，
+也不支持发现任意厂商的 RPC 协议。DDS 服务端必须在同一个 participant 中同时具有
+请求 reader 和响应 writer。
 
 `find` 精确匹配 `type` 返回的完整字符串。类型对需像示例中一样加引号，避免 Shell 将
-`>` 解释为重定向。名称和类型对会排序、去重；同一名称对应多个类型对时，`type` 每行输出一个，
-`list -t` 列出全部类型对。`list -c` 和 `find -c` 统计匹配的唯一服务名数量，而非端点数量。
+`>` 解释为重定向。名称和类型会排序、去重；同一名称对应多个类型时，`type` 每行输出一个，
+`list -t` 列出全部类型。`list -c` 和 `find -c` 统计匹配的唯一服务名数量，而非端点数量。
 
 `list -t` 输出示例：
 
@@ -170,7 +174,7 @@ json:/my_project.ComputeService/Compute [json:my_project.ComputeRequest -> json:
 任一名称分量以 `_` 开头即视为隐藏服务；`--include-hidden-services` 可以放在子命令之前
 或之后。注册信息只表示元数据，不代表服务已就绪或通信已成功。
 
-运行时在初始化期间采集 ServiceCatalog 元数据，并在 Service 子系统
+对于 registry 发现，运行时在初始化期间采集 ServiceCatalog 元数据，并在 Service 子系统
 启动前刷新，包括 App 模式下在 `Engine::Initialize()` 与 `Start()` 之间新增的注册。
 登记信息包含服务端/客户端角色、完整方法名、请求/响应类型、模块/包标识，以及已启用的
 RPC Driver。本机来源可以表示所有 RPC Driver，并不限于 `local`。
@@ -183,6 +187,54 @@ RPC Driver。本机来源可以表示所有 RPC Driver，并不限于 `local`。
 保留新版本运行时的可用结果并返回 1。需要使用更新后的运行时重新构建/部署应用并重启，
 才能发布服务元数据。已有 Topic 和 Module 登记仍可读取；已退出运行时的记录由现有
 registry 存活检查机制处理。
+
+#### 网络来源
+
+```bash
+ibmw service list --dds --dds-domain 10 -t
+ibmw service list --ros2 --ros-domain 10 -t
+ibmw service type /add_two_ints --ros2
+ibmw service find example_interfaces/srv/AddTwoInts --ros2
+ibmw service list --zenoh --zenoh-domain robot --zenoh-config ./zenoh.json5
+ibmw service list --mqtt tcp://192.168.1.10:1883 -t
+ibmw service list --http 192.168.1.10:50080 -t
+ibmw service list --grpc 192.168.1.10:50051 -t
+ibmw service list --registry --dds --ros2 --domain 10 --timeout 3
+```
+
+来源选项适用于三个子命令，可以组合使用。短选项为 `-d`（DDS）、`-r`（ROS 2）和
+`-z`（Zenoh）。`--domain` 作用于已选择的 DDS/ROS 2 来源，各来源专用的 domain 选项
+优先于它。DDS 默认使用 domain 0；ROS 2 未指定 domain 时使用 `ROS_DOMAIN_ID`，
+再默认到 0。Zenoh 使用原生配置和 `limit_domain`（默认为空）。网络发现插件随对应的
+Extension 构建选项启用；缺少插件时命令报错。
+
+HTTP 和 gRPC 必须显式指定**服务端**地址，CLI 主动连接已有监听端口。
+HTTP 使用只读端点 `GET /ibmw/discovery/services/v1`；gRPC 使用 IBMW 专用的
+`/ibmw.discovery.v1.ServiceDirectory/List` 一元方法，通过 gRPC 帧传输 JSON，
+不使用 gRPC reflection。这两种来源目前使用明文 HTTP/HTTP2。
+MQTT 必须显式指定 broker URI（`tcp://host:port`，或使用受信任服务端证书的
+`ssl://host:port`）；CLI 暂未提供认证凭据和自定义客户端证书选项。
+每次 MQTT 查询先订阅独立的临时回复主题，再发布目录请求；回复不设置 retained 标志。
+Zenoh 查询运行时持有的目录 queryable。发现服务端无需预先知道 CLI 的 IP，后续启动的
+CLI 进程也可独立查询。
+
+HTTP、gRPC、MQTT 和 Zenoh 的目录响应器需要更新后的 IBMW 运行时，并配置对应的
+RPC Driver。它们只公开成功注册的服务端名称和类型，包括 App 模式下 Start 之前的注册，
+不会导出 registry 路径或模块库路径。DDS 和 ROS 2 使用原生发现，也可发现符合相应协议的
+原生服务端。MQTT broker ACL 必须允许访问 `ibmw/discovery/services/v1/request`
+和 `ibmw/discovery/services/v1/reply/+` 主题。目录访问沿用现有监听端口、broker
+或会话的访问控制。
+
+MQTT 的 `list/type/find` 支持 `--mqtt ssl://host:port`。使用私有 CA 时提供
+`--mqtt-truststore <path>`，否则使用系统信任库；双向 TLS 需要同时提供
+`--mqtt-client-cert <path>` 和 `--mqtt-client-key <path>`。证书配置仅适用于
+TLS MQTT 来源，认证或连接失败返回退出码 1，不作为成功的空目录。
+
+`--timeout` 设置共享采集窗口，默认 2 秒，范围为 0.01–60 秒；选中的来源并发查询。
+原生会话建立和 transport 清理可能带来额外耗时。成功返回空结果不代表所有对端均可达，
+发现较慢的网络应适当延长窗口。任一来源不可用或出错时，命令输出诊断并返回退出码 1，
+同时保留其他来源的有效结果。旧版 HTTP/gRPC 服务端缺少目录方法时会报错；
+旧版 MQTT/Zenoh 运行时则不会回复元数据查询。
 
 ### 查看本机模块
 

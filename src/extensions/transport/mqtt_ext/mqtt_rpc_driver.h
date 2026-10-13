@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "engine/discovery/service_discovery_protocol.h"
 #include "engine/service/service_driver.h"
 #include "engine/rpc_client_tool.h"
 #include "mqtt_ext/msg_handle_catalog.h"
@@ -80,6 +81,8 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver {
     kShutdown,
   };
 
+  std::shared_ptr<ibmw::discovery::service_protocol::Catalog> discovery_catalog_ =
+      std::make_shared<ibmw::discovery::service_protocol::Catalog>();
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
 

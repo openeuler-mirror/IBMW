@@ -25,6 +25,7 @@ set(shared_runtime_src
     ${CMAKE_CURRENT_SOURCE_DIR}/discovery/discovery_provider.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/discovery/registry_discovery_provider.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/discovery/service_discovery.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/service_discovery_protocol.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_agent.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_client.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registration.cc

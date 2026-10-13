@@ -30,9 +30,9 @@ int RunType(const Invocation& invocation) {
 }  // namespace
 
 void AddTypeCommand(Command& service) {
-  auto& type = service.AddSubcommand("type", "Print a service's request -> response types");
+  auto& type = service.AddSubcommand("type", "Print a discovered service's types");
   type.SetHandler(RunType);
-  type.AddArgument("<service>", "Full registered RPC method name");
+  type.AddArgument("<service>", "Service name exactly as shown by list");
   AddDiscoveryOptions(type);
 }
 
