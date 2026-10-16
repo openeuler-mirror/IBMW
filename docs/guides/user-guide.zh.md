@@ -1143,6 +1143,16 @@ Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
 
 #### 话题 CLI
 
+**性能观察结论**
+
+以下结论基于 i7-12700、Linux 5.15、ROS 2 Humble / Fast DDS 2.6.12
+环境下的同机跨进程重复测试；观测负载为 64KiB / 1MiB、1 / 4 个发布者和观察进程。
+
+- **原生业务观测**：开启 `topic hz/bw/echo` 会增加资源开销和部分时延；本次四个场景中，IBMW 的发送到接收 p99 更低，ROS 2 的发布调用 p99 更低，两侧消息类型、观察 QoS 和 writer 数不同。
+- **同一 ROS 业务观测**：七个场景中，IBMW 观察 CLI 的 CPU 均低于 ROS 2 CLI，PSS 内存均更高，多观察者下业务时延的增加更明显。
+- **端点查询**：相同 2 秒发现窗口下，IBMW `topic list/info/type/find` 的命令耗时和累计 CPU 时间均较低；此结论仅描述查询命令自身开销。
+- **CLI 主动发布**：64KiB、总 10Hz、1 / 4 个 CLI 的三轮测试均收全；IBMW `topic pub` 的累计 CPU 时间和 PSS 较低，生命周期耗时较长，其中包含本次测试设置的 3 秒就绪等待，ROS 2 则等待订阅匹配。
+
 `ibmw topic pub <topic> <type> <values>` 从命令行创建发布端，无需运行配置文件，
 也不生成临时运行配置。后端、domain、QoS 等参数直接构造内存配置，复用 Engine
 的初始化、启动、关闭以及现有 TransportBus 发布流程。无需先启动业务模块或已有发布者。
