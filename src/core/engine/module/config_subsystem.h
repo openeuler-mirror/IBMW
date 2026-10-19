@@ -32,13 +32,8 @@ class ConfigSubsystem : public ISubsystem {
   ConfigSubsystem(const ConfigSubsystem&) = delete;
   ConfigSubsystem& operator=(const ConfigSubsystem&) = delete;
 
-  // ConfigSubsystem is special: it takes a filesystem path, not a YAML node.
-  // The YAML-based Initialize() satisfies the interface but must not be called.
-  void Initialize(YAML::Node /*options_node*/) override {
-    MW_REQUIRE(false, "ConfigSubsystem::Initialize(YAML::Node) must not be called; "
-                      "use Initialize(const std::filesystem::path&) instead.");
-  }
-
+  // Receives the complete root configuration, including the ibmw map.
+  void Initialize(YAML::Node root) override;
   void Initialize(const std::filesystem::path& cfg_file_path);
   void Start() override;
   void Shutdown() override;
@@ -60,6 +55,7 @@ class ConfigSubsystem : public ISubsystem {
   std::list<std::pair<std::string, std::string>> GenInitializationReport() const override;
 
  private:
+  void InitializeRoot(YAML::Node root);
   std::filesystem::path cfg_file_path_;
   Options options_;
 

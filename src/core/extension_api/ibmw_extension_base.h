@@ -10,7 +10,7 @@
 namespace ibmw {
 
 namespace extension {
-class RuntimeV1;
+class RuntimeV2;
 }
 
 namespace runtime::core {
@@ -33,7 +33,7 @@ class EngineExtensionBase {
   // New extensions can opt into the narrow extension-facing runtime contract.
   // Legacy extensions continue to receive Engine until migrated.
   virtual uint32_t RequiredRuntimeAbi() const noexcept { return 0; }
-  virtual bool InitializeRuntime(extension::RuntimeV1*) noexcept {
+  virtual bool InitializeRuntime(extension::RuntimeV2*) noexcept {
     return false;
   }
 

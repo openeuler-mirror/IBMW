@@ -1329,7 +1329,7 @@ bool DdsTransportDriver::OnMessage(
 
 runtime::core::transport::SerializedSubscriberHandle
 DdsTransportDriver::AttachSerializedSubscriber(
-    const runtime::core::transport::SerializedSubscriberOptions& options,
+    const runtime::core::transport::SerializedSubscriberOptionsV2& options,
     runtime::core::transport::SerializedMessageCallback callback) noexcept {
   try {
     MW_REQUIRE(
@@ -1338,6 +1338,8 @@ DdsTransportDriver::AttachSerializedSubscriber(
     MW_REQUIRE(callback, "Serialized subscriber callback cannot be empty.");
     const auto& descriptor = options.topic;
     MW_REQUIRE(!descriptor.topic.empty(), "DDS topic cannot be empty.");
+    MW_REQUIRE(options.wire_topic_name.empty() == options.wire_type_name.empty(),
+               "DDS subscription requires both native topic and type names.");
     const bool is_ros2_type = ROS2TypeHelper::IsROS2Type(descriptor.msg_type);
     MW_REQUIRE(
         descriptor.msg_type.starts_with("dds:") || is_ros2_type,
@@ -1351,13 +1353,15 @@ DdsTransportDriver::AttachSerializedSubscriber(
         "ROS2, got '{}'.",
         descriptor.serialization_type);
 
-    const std::string dds_type_name =
-        is_ros2_type
+    const std::string dds_type_name = !options.wire_type_name.empty()
+        ? options.wire_type_name
+        : is_ros2_type
             ? ROS2TypeHelper::ConvertToDdsTypeName(
                   ROS2TypeHelper::ExtractROS2TypeName(descriptor.msg_type))
             : descriptor.msg_type.substr(4);
-    const std::string dds_topic_name =
-        GetDdsTopicName(descriptor.topic, descriptor.msg_type);
+    const std::string dds_topic_name = options.wire_topic_name.empty()
+        ? GetDdsTopicName(descriptor.topic, descriptor.msg_type)
+        : options.wire_topic_name;
     eprosima::fastdds::dds::TypeSupport type(
         new RawCdrTopicDataType(dds_type_name));
     type.register_type(dds_bus_.GetParticipant());
@@ -1366,6 +1370,9 @@ DdsTransportDriver::AttachSerializedSubscriber(
         dds_bus_.GetParticipant(), dds_topic_name, type.get_type_name(),
         topic_map_);
     MW_REQUIRE(topic != nullptr, "Failed to create DDS topic '{}'.", dds_topic_name);
+    MW_REQUIRE(topic->get_type_name() == dds_type_name,
+               "DDS topic '{}' changed type from '{}' to '{}'; restart the subscription owner.",
+               dds_topic_name, topic->get_type_name(), dds_type_name);
 
     auto listener = std::make_unique<SerializedDataReaderListener>(
         descriptor, std::move(callback));

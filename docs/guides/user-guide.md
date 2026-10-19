@@ -1159,12 +1159,408 @@ publisher's first send.
 |-----|------|---------|-------------|
 | `service_name` | string | `""` | RPC service name |
 | `timer_executor` | string | `""` | Timer executor |
-| `type_support_pkgs[].path` | string | -- | Type support .so |
 | `record_actions[].name` | string | -- | Action name |
 | `record_actions[].options.bag_path` | string | -- | Bag storage dir |
 | `record_actions[].options.mode` | string | -- | `imd` or `signal` |
 | `record_actions[].options.topic_meta_list[].topic` | string | -- | Topic |
 | `record_actions[].options.topic_meta_list[].msg_type` | string | -- | Type |
+
+Runtime Graph (`ibmw.runtime_graph`) owns runtime advertisements, topic discovery,
+and the control socket. Configure TypeSupport packages used for topic schemas,
+recording, or playback under `ibmw.runtime_graph.type_support_pkgs`; the
+Record/Playback extension does not maintain a separate copy.
+
+#### Topic CLI
+
+`ibmw topic pub <topic> <type> <values>` creates a publisher directly from CLI
+arguments. It builds an in-memory configuration and reuses Engine startup,
+shutdown and TransportBus publishing; no runtime YAML file or temporary runtime
+configuration file is required, and the topic need not already exist.
+
+```bash
+ibmw topic pub /header dds:ibmw::protocols::common::Header \
+  '{"frame_id":"base","time_stamp":123,"sequence_num":1}' \
+  --dds --domain 0 --type-support ./libcommon_dds_ts.so --once
+```
+
+Select exactly one of `--dds`, `--ros2`, `--zenoh`, `--mqtt`, `--tcp`, `--udp`,
+`--http`, `--iceoryx`, or `--local`. Supply message libraries with
+repeatable `--type-support`; `--transport-library` overrides the installed driver
+library. Domain and Zenoh connection options have the same meanings as observation
+commands. `--ros2-compatible` enables the existing DDS driver's ROS 2 wire naming
+for `ros2:` messages; otherwise IBMW's default DDS naming is preserved. DDS network
+queries use wire topic names, while Registry queries use logical topic names.
+
+| Backend | Connection options |
+|---------|--------------------|
+| DDS / ROS 2 | `--domain`, or `--dds-domain` / `--ros-domain` |
+| Zenoh | `--zenoh-domain`, optional `--zenoh-config` |
+| MQTT | Required `--broker tcp://host:port`; optional `--client-id`, `--mqtt-qos 0\|1\|2` (default: 2) |
+| TCP / UDP | Required `--target IPv4:port`; repeat for multiple recipients |
+| HTTP | Required `--target http://host:port`; repeat for multiple recipients |
+| Iceoryx | Start RouDi first; optional `--iceoryx-runtime-id`, `--shm-init-size` (default: 1024 bytes) |
+| local | Sends inside this CLI process only; cannot reach local subscribers in another process |
+
+MQTT TLS uses `ssl://host:port`, requires `--mqtt-truststore`, and accepts
+`--mqtt-client-cert`, `--mqtt-client-key`, and `--mqtt-key-password`.
+TCP/UDP/HTTP accept `--net-threads` (default: 2). These drivers use IBMW's existing
+transport protocol. HTTP derives its request path from topic/type; custom paths
+and HTTPS targets are not supported. Each selected extension must be built and
+installed; TCP/UDP/HTTP share the net extension, and local is built into Engine.
+
+```bash
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --mqtt --broker tcp://127.0.0.1:1883 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --tcp --target 127.0.0.1:5000 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --iceoryx --type-support ./libcommon_dds_ts.so --once
+```
+
+Publishing selects a transport independently of discovery. `DiscoveryBackend`
+identifies where list/info query endpoint metadata (registry, DDS, ROS 2, Zenoh);
+it does not limit publishing drivers. Publishing needs no prior topic discovery.
+
+The default is 1 Hz until Ctrl+C. `--once` and `--times <count>` are mutually
+exclusive; `--rate <hz>` controls frequency (`-r` remains the ROS 2 backend flag).
+`--wait` delays the first send (default 1 second); `--keep-alive` keeps the publisher
+alive after the last send (default 0.2 seconds). Neither guarantees matching or
+remote acknowledgment. The reported count is the number of send calls.
+DDS/ROS 2 accept `--qos-reliability`, `--qos-durability`, `--qos-history`, and
+`--qos-depth`, defaulting to reliable, volatile, keep_last, and 10.
+
+Pass JSON or YAML contents as one quoted argument. Standard TypeSupport provides
+JSON conversion directly. Rebuild type packages with the source; no separate text
+adapter is needed:
+
+- DDS: `ibmw::dds::GetDdsMessageTypeSupport<T>()` supports CDR and JSON. Generated
+  type headers automatically include their `*Json.hpp` codecs. Handwritten DDS
+  types supply field conversion through `IbmwFromJson` / `IbmwToJson`.
+- ROS 2: `ibmw::GetRos2MessageTypeSupport<T>()` supports ROS 2 serialization and
+  JSON. Link the message package's C++ introspection library.
+- The public TypeSupport CMake target supplies the JSON header dependency.
+
+Text conversion supports numeric, boolean, string, nested message, array and sequence fields,
+and generated DDS enums. Omitted fields retain their defaults. Unknown fields,
+wrong types, overflow, and invalid array lengths are rejected. Unsupported field
+kinds such as unions, maps and wide strings fail explicitly. DDS bounded strings
+remain subject to the selected FastCDR/code generator's compatibility limits.
+
+`ibmw topic echo <topic>` prints received messages as YAML documents separated
+by `---`. Use `--format json` for one JSON value per line, `--once` to stop after
+one message, or `--field header.stamp` to select a nested field. Numeric path
+segments index arrays, for example `--field poses.0.position`. It uses the same
+discovery and subscription routes as `hz` and `bw` and accepts their discovery,
+type, connection, QoS, timeout and duration options; it has no statistics window.
+Use `--queue-size <messages>` to set the maximum number of messages waiting for
+output (positive integer, default: 100). Echo exits with an error if the queue
+fills. A larger queue buffers bursts at the cost of memory; it cannot compensate
+for reception that continuously outpaces output.
+
+```bash
+ibmw topic echo /sensor_data --once
+ibmw topic echo /status --format json --field state
+ibmw topic echo /chatter --ros2 --type-support ./libtext_ts.so --once
+ibmw topic echo /binary_topic --raw --duration 10
+ibmw topic echo /sensor_data --queue-size 1000
+```
+
+JSON/YAML payloads can be displayed directly. Binary payloads require a matching
+IBMW TypeSupport package that can deserialize the received format and serialize
+JSON or YAML. Registry observation can use the selected publisher's registered
+package; explicit `--type-support <path>` packages take precedence and the option
+is repeatable. Network observation loads packages supplied locally via this option
+or `ibmw.runtime_graph.type_support_pkgs` in `--config-file` (relative paths resolve
+from that file). It does not load packages advertised by network endpoints.
+Standard DDS/ROS 2 TypeSupport also provides the text conversion needed for
+structured echo. Unsupported decoding fails with an explanation; `--raw` prints hexadecimal payload bytes
+without decoding and cannot be combined with `--field` or `--format`.
+
+When observing ROS messages over DDS, echo first looks for an exact
+`dds:<wire type>` TypeSupport. Only if absent, it matches the ROS-generated DDS
+naming convention to a loaded ROS package, for example
+`dds:std_msgs::msg::dds_::String_` to `ros2:std_msgs/msg/String`, and reads the CDR
+using that package's `ros2` deserializer. This covers `msg`, `srv`, and `action`
+type names; the package must also support JSON/YAML conversion. An exact native
+DDS decoder takes precedence; its format or decoding errors do not trigger a
+fallback. Topic names and discovery output retain their DDS wire names:
+
+```bash
+ibmw topic echo rt/chatter --dds --type-support ./libtext_ts.so --once
+```
+
+Output and decoding run on the command thread. The receive queue holds up to 100
+messages; if output cannot keep up and the queue fills, echo fails explicitly.
+`--timeout` limits discovery of a publisher; a discovered silent publisher may
+still make `--once` wait, so use `--duration` to bound that wait. A run that receives
+no messages reports this on stderr. Arbitrary expression filters, ROS simulation
+time and automatic reflection of arbitrary binary types are not implemented.
+
+`ibmw topic hz <topic>` measures the rate received by an observer. Once per second
+it prints average Hz, minimum/maximum interarrival time, population standard
+deviation, and the number of messages in the window. It uses a steady clock and
+the latest 10000 messages by default. ROS simulation time and message field
+filters are not currently supported.
+
+```bash
+ibmw topic hz /sensor_data                     # Registry discovery, capability-based subscription
+ibmw topic hz /chatter -r --ros-domain 10       # Independent ROS 2 subscriber
+ibmw topic hz rt/chatter -d --dds-domain 10     # Native DDS wire topic name
+ibmw topic hz /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic hz /chatter -r -w 100 --duration 10
+```
+
+`ibmw topic bw <topic>` measures received serialized payload bandwidth. It uses
+the same subscriptions as `hz`, with a default window of 100 messages. Once per
+second it prints bandwidth and the window's mean/minimum/maximum message sizes,
+using decimal B/KB/MB units (1 KB = 1000 bytes). Bandwidth is the window's total
+bytes divided by the time from its first message to the current steady-clock
+time; silence after the last message therefore lowers the reported bandwidth.
+At least two messages are required. Sizes exclude transport headers, framing,
+retransmissions and other protocol overhead. Cached typed subscriptions measure
+their generated serialized payload, not the in-memory object size.
+
+```bash
+ibmw topic bw /sensor_data
+ibmw topic bw /chatter -r --ros-domain 10 -w 100 --duration 10
+```
+
+`hz` and `bw` accept one discovery source per invocation and do not support `--all`.
+Use `--type <type>` with a name reported by `topic type` to select among multiple
+published types. Explicit queries include hidden topics. `--window/-w` must be
+at least 2. `--timeout` bounds the wait to discover a publisher (default: 10
+seconds); `--duration` limits observation after subscription, otherwise Ctrl+C
+stops the command. An observer that has received no messages prints a notice.
+The measured rate and bandwidth depend on observer scheduling and transport loss and do not
+represent a business subscriber's received rate.
+
+Network observation loads the selected transport library from the installation
+directory. ROS 2 generic subscriptions still require the corresponding message
+type package to be installed. Optional `--config-file <yaml>` loads only the
+selected `ibmw.extensions.items`, `ibmw.messaging.drivers`, and scheduling
+configuration. Relative paths are resolved against that file; discovery options
+and their defaults always determine the domain. `--zenoh-config` takes precedence
+over the file's `native_cfg_path`. DDS/ROS 2 request `best_effort` and `volatile`
+by default, with `--qos-reliability` and `--qos-durability` overrides. For DDS
+publishers with exclusive ownership, unspecified reliability defaults to `reliable`;
+explicit `--qos-reliability best_effort` is rejected as incompatible. Registry
+observation follows publisher additions/removals and shares capture route selection
+with `bag record --registry`: independent subscriptions first, Runtime Tap as fallback.
+DDS/ROS 2 QoS from registry discovery adapts to publishers; cached typed subscriptions retain the
+single-publisher and pre-start registration restrictions. Tap drops are reported
+when detected.
+
+`ibmw topic list`, `info`, `type`, and `find` share these discovery options:
+
+| Option | Meaning |
+|--------|---------|
+| `--registry` | Read local runtime registrations across all transport drivers; default source |
+| `-d`, `--dds` | Select DDS discovery |
+| `-r`, `--ros2` | Select ROS 2 discovery |
+| `-z`, `--zenoh` | Select Zenoh discovery |
+| `-a`, `--all` | Select all four sources, within their configured domains |
+| `--domain <id>` | Set the domain for selected DDS and ROS 2 sources |
+| `--dds-domain <id>` | Override the DDS domain; otherwise `--domain` or 0 |
+| `--ros-domain <id>` | Override the ROS 2 domain; otherwise `--domain`, `ROS_DOMAIN_ID`, or 0 |
+| `--zenoh-domain <name>` | Zenoh business namespace (`limit_domain`); default empty |
+| `--zenoh-config <path>` | Zenoh native connection configuration |
+| `--registry-path <path>` | Local registry root; default `$XDG_RUNTIME_DIR/ibmw` or `/tmp/ibmw-<euid>`. Protocol data lives in `v2/`; custom roots must be private (0700). |
+
+Verbose output labels this source as `source: registry`; `drivers` lists the actual transports.
+
+Like ROS 2, `info <topic>` directly resolves hidden topics. `list`, `find`, and
+`type` exclude them unless `--include-hidden-topics` is set. The switch works
+before or after the subcommand, e.g. `ibmw topic --include-hidden-topics type /_hidden`.
+
+`info -v` shows each endpoint's type and available ownership information, including
+module names from runtime registrations. QoS is displayed separately for each
+driver. Reported policies retain their values; missing policies show `unknown`,
+and an empty profile shows `unavailable (not reported by this source)`. Runtime
+registrations require the current `module_name` and `driver_qos` fields.
+Combined-source counts include observations from each source, without cross-source deduplication.
+
+Source flags can be combined: `list --registry --dds`, `list -d -r --domain 10`.
+Domain/configuration options require their corresponding source to be selected.
+Numeric domains accept unsigned 32-bit decimal values; backend-specific network
+limits will be checked by the respective network adapters.
+
+The DDS source is implemented when `IBMW_BUILD_DDS_EXTENSION` is enabled. The
+separate `libibmw_discovery_dds.so` plugin is loaded only when DDS is selected;
+source-only local queries do not load it. `IBMW_DISCOVERY_PLUGIN_DIR` can be
+used to override the plugin lookup directory.
+
+DDS joins the selected domain and collects native writer and reader discovery
+callbacks without subscribing to business data. The result keeps the native DDS
+topic and type names, endpoint and participant GUIDs, CDR serialization and
+the reported QoS.
+
+The ROS 2 source requires `IBMW_BUILD_WITH_ROS2` and `IBMW_BUILD_ROS2_EXTENSION`.
+Selecting `-r` loads the separate `libibmw_discovery_ros2.so` plugin. It queries
+the ROS graph through a private rclcpp context and observer node, without
+initializing the IBMW ROS 2 business transport extension or subscribing to
+business data. The plugin requires the ROS 2/rclcpp runtime and follows native
+ROS environment settings such as `RMW_IMPLEMENTATION`. Results contain logical
+ROS topic/type names, endpoint GIDs and graph-reported QoS; `topic info -v` also
+shows node names and namespaces. Unavailable DDS participant GUIDs and wire
+names remain empty rather than being inferred from RMW GIDs or ROS names.
+The observer disables rosout, parameter events and services such as parameter
+services.
+
+```bash
+ibmw topic list -r --ros-domain 10
+ibmw topic info /chatter -r --ros-domain 10 -v
+ibmw topic list -d -r --dds-domain 10 --ros-domain 20
+```
+
+The Zenoh source requires `IBMW_BUILD_ZENOH_EXTENSION`. Selecting `-z` loads
+`libibmw_discovery_zenoh.so` and opens its own Zenoh session, without loading the
+business transport extension into the CLI. The running business application
+must use the updated `libibmw_zenoh_transport.so`: it serves endpoint metadata
+through a queryable on its existing session. Arbitrary Zenoh applications and
+older IBMW extensions do not expose this metadata automatically.
+
+`--zenoh-domain` must exactly match the business YAML `limit_domain` value;
+omitting it selects the empty domain, not every domain. `--zenoh-config` accepts
+a native Zenoh configuration for the observer (for example, peer/router
+connections); the observer must be able to reach the business sessions. With no
+configuration file it uses Zenoh defaults, including native scouting settings.
+UDP scouting establishes session connectivity; IBMW metadata queries then
+provide the logical topic and type names.
+
+```bash
+ibmw topic list -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic info /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5 -v
+ibmw topic type /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+```
+
+Results count successfully declared Zenoh publishers/subscribers, including
+silent and subscriber-only topics. Multiple module callbacks sharing one native
+subscriber count as one endpoint. RPC internals are excluded. Each endpoint has
+its session ZID, instance-local ID, logical topic/type and actual wire key.
+Serialization and QoS remain empty when registration does not establish them.
+The observer retries metadata queries during the collection window and replaces
+each instance's snapshot by revision, removing instances that have not replied
+for two seconds. A snapshot remains a bounded observation: an instance may exit
+just before the result is printed.
+
+Network queries collect a snapshot over a default two-second window. Each
+invocation discovers independently, without a persistent discovery service.
+Domain, discovery settings, security and network reachability determine what
+can be observed. DDS, ROS 2 and Zenoh remain separate sources: combined queries keep
+their endpoints without merging identities across sources. Failed sources return
+exit status 1 while successful sources still
+print their results.
+
+Native ROS 2 libraries can exit the process during loading, for example when
+Humble is given an uninstalled `RMW_IMPLEMENTATION`. This happens before the
+adapter runs, so it cannot be caught as a source error or preserve other sources'
+results. The selected RMW must be available before using ROS 2 discovery.
+
+`bag record` defaults to local registry discovery and selects subscriptions by
+transport capability; network recording supports DDS, ROS 2 and Zenoh:
+
+```bash
+ibmw bag record --registry /chatter -o ./registry_bag
+ibmw bag record --dds --domain 87 --config-file ./dds-recorder.yaml /native_topic -o ./dds_bag
+ibmw bag record --ros2 --domain 87 --config-file ./ros2-recorder.yaml /chatter -o ./ros2_bag
+ibmw bag record --zenoh --zenoh-domain robot --config-file ./zenoh-recorder.yaml /chatter -o ./zenoh_bag
+```
+
+Registry discovery does not prescribe the capture transport. Registry recording uses
+advertised capabilities and connection settings to create an independent observer
+runtime, choosing iceoryx, DDS, Zenoh, MQTT, ROS 2, then Runtime Tap in priority
+order. DDS, ROS 2 and Zenoh use native serialized subscriptions; iceoryx and MQTT
+use TypeSupport-backed cached typed subscriptions. Observer runtimes use distinct
+instance names and do not load business modules. One direct route must cover all
+publishers of a topic, preventing duplicate recording through multiple drivers.
+
+Cached typed subscriptions require one publisher and registration before driver
+startup; existing typed subscriptions can be reused afterward. Multiple publishers,
+conflicting connections or unsupported dynamic registration select another eligible
+direct route, then one Tap per publisher. UDP, TCP, HTTP and local usually use Tap.
+Tap must be advertised by the publisher and does not capture explicit
+Loan/PublishLoaned publications that bypass ordinary Send.
+
+Network recording obtains subscription addresses from the selected discovery
+plugin and receives serialized messages through the recorder's transport extension,
+without publisher registration files. One network subscription receives all
+publishers of a topic. Network mode uses recorder-owned configuration and never
+loads extensions or TypeSupport paths supplied by network metadata.
+
+Network recording requires recorder-owned configuration and local TypeSupport
+packages containing schemas:
+
+```yaml
+ibmw:
+  runtime_graph:
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options: {domain_id: 87}
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          subscribers:
+            - topic: ".*"
+              qos: {history: keep_last, depth: 100}
+```
+
+For ROS 2, use `ros2_extension`, `libibmw_ros2_transport.so`, `type: ros2`, and
+TypeSupport packages for the selected ROS message types. The recorder assigns
+its own node name and owns an independent ROS context. For Zenoh, use
+`zenoh_extension`, `libibmw_zenoh_transport.so`, `type: zenoh`, with extension
+options such as:
+
+```yaml
+options:
+  limit_domain: robot
+  native_cfg_path: ./zenoh-client.json5
+```
+
+Relative package, extension, DDS `xml_profile_file` and Zenoh `native_cfg_path`
+paths resolve from the recorder configuration directory. Missing schemas for
+selected topics cause an explicit error. Network metadata never supplies paths
+for loading executable code.
+
+| Source | Subscription address | Bag type / serialization |
+|--------|----------------------|--------------------------|
+| DDS | Discovered native DDS topic/type, without another name conversion | `dds:<native type>` / `cdr` |
+| ROS 2 | ROS graph topic and `pkg/msg/Type` | `ros2:pkg/msg/Type` / `ros2` |
+| Zenoh | Actual wire key from metadata | Original logical type / actual envelope format |
+
+Zenoh learns the serialization format from each received sample and validates
+its schema before recording it. With `--serialization-format auto`, a package
+providing only matching schemas is sufficient; format conversion also requires
+TypeSupport serialization functions. Missing schemas stop recording with an
+error when the corresponding sample arrives. Topics without received samples
+do not create channels with an unknown format. DDS and ROS 2 adapt
+reliability/durability to all observed publishers, ignoring subscriber QoS when
+computing offered policies. All three backends share dynamic capture planning.
+
+`--domain` selects the DDS or ROS 2 domain. It defaults to configured `domain_id`,
+then `ROS_DOMAIN_ID` for ROS 2, otherwise 0. Explicit CLI and configuration values
+must agree. Zenoh `--zenoh-domain` must likewise agree with `limit_domain`.
+Zenoh discovery and capture own separate sessions using the same native config
+by default; use a client config or automatically assigned listen ports. If the
+capture config specifies a fixed listen port or session ID, pass a separate
+observer config with `--zenoh-config <path>`.
+
+Recording collects an initial two-second snapshot and keeps the observer alive
+for late publishers. Zenoh removes instances after two seconds without a
+metadata reply. `--no-discovery` disables subsequent graph updates; existing
+network subscriptions can still receive new publishers on their topic. Each
+invocation selects one source. `-a` selects all topics in that source, and `-d`
+remains the split duration. `--use-sim-time` supports local, ROS 2 and Zenoh
+sources exposing logical `/clock` topics.
+
+The DDS observer uses default discovery settings for the selected domain;
+custom transport settings apply to the capture driver. Generic keyed DDS types
+remain unsupported. Bags retain native DDS names; playback mapping back to
+these names is outside this recording change. Raw DDS mode does not map `/clock`.
 
 ---
 

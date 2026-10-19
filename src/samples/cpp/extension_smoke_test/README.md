@@ -61,6 +61,12 @@ cd /tmp/ibmw_regress/stage
 LD_LIBRARY_PATH=$PWD/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH ./run_all_tests.sh
 ```
 
+CMake generates `cli-stage.yaml` from the enabled CLI providers. The staging
+helper copies it to `stage/cli.yaml`, where provider paths are relative to
+`stage/lib`. Both `stage/ibmw` and `stage/bin/ibmw` use this manifest, including
+after moving the staged directory. Reconfigure the build before staging if
+`cli-stage.yaml` is missing.
+
 Useful flags:
 
 ```bash

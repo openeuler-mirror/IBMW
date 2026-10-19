@@ -17,28 +17,19 @@ file(GLOB_RECURSE cli_support_src CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM cli_support_src ${test_files}
-                     ${CMAKE_CURRENT_SOURCE_DIR}/bag_command.cc
-                     ${CMAKE_CURRENT_SOURCE_DIR}/bag_cli_provider.cc
                      ${CMAKE_CURRENT_SOURCE_DIR}/record_playback_extension.cc)
 
 set(runtime_support_src
     ${CMAKE_CURRENT_SOURCE_DIR}/global.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/topic_advertisement.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/mcap_impl.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/playback_action.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/record_action.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/recorder/record_payload.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/bag_runtime_agent.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/bag_runtime_agent_client.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_playback_stream.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_registration.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_registry.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/runtime_tap_stream.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/schema/schema_registry.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/service.cc)
 list(REMOVE_ITEM cli_support_src ${runtime_support_src})
 
 add_library(${CUR_TARGET_NAME}_runtime_support STATIC ${runtime_support_src})
+add_library(${CUR_TARGET_ALIAS_NAME}_runtime_support ALIAS ${CUR_TARGET_NAME}_runtime_support)
 set_target_properties(${CUR_TARGET_NAME}_runtime_support PROPERTIES
                       POSITION_INDEPENDENT_CODE ON)
 target_include_directories(
@@ -47,6 +38,7 @@ target_include_directories(
           $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
 
 add_library(${CUR_TARGET_NAME}_cli_support STATIC ${cli_support_src})
+add_library(${CUR_TARGET_ALIAS_NAME}_cli_support ALIAS ${CUR_TARGET_NAME}_cli_support)
 set_target_properties(${CUR_TARGET_NAME}_cli_support PROPERTIES
                       POSITION_INDEPENDENT_CODE ON)
 target_include_directories(
@@ -142,9 +134,8 @@ if(IBMW_BUILD_TESTS AND test_files)
   target_link_libraries(${CUR_TARGET_NAME}_test PRIVATE
                         ${CUR_TARGET_NAME}_runtime_support
                         ${CUR_TARGET_NAME}_cli_support
-                        ${CUR_TARGET_NAME}_cli_provider ibmw::core::engine
+                        ibmw::core::engine
                         SQLite::SQLite3)
-  add_dependencies(${CUR_TARGET_NAME}_test ${CUR_TARGET_NAME}_cli_provider)
 
   file(GENERATE
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/runtime-load-test.yaml
@@ -159,59 +150,3 @@ endif()
 
 # Set misc of target
 set_target_properties(${CUR_TARGET_NAME} PROPERTIES OUTPUT_NAME "ibmw_record_playback")
-
-# The command implementation is a separate provider DSO. It is intentionally
-# Core-dependent because it owns the standalone bag CLI's temporary Engine
-# instances; the runtime extension above remains a provider-only DSO.
-add_library(${CUR_TARGET_NAME}_cli_provider SHARED
-            ${CMAKE_CURRENT_SOURCE_DIR}/bag_command.cc
-            ${CMAKE_CURRENT_SOURCE_DIR}/bag_cli_provider.cc)
-add_library(${CUR_TARGET_ALIAS_NAME}_cli_provider ALIAS
-            ${CUR_TARGET_NAME}_cli_provider)
-target_include_directories(
-  ${CUR_TARGET_NAME}_cli_provider
-  PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
-          $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>)
-target_link_libraries(
-  ${CUR_TARGET_NAME}_cli_provider
-  PRIVATE ${CUR_TARGET_NAME}_cli_support
-          ${CUR_TARGET_NAME}_runtime_support
-          ibmw::core::extension_api
-          ibmw::core::engine
-          ibmw::api::cpp
-          ibmw::base
-          nlohmann_json::nlohmann_json
-          mcap::mcap
-          SQLite::SQLite3)
-if(IBMW_BUILD_WITH_ROS2)
-  target_compile_definitions(${CUR_TARGET_NAME}_cli_provider
-                             PRIVATE IBMW_HAS_ROSBAG2=1)
-  target_link_libraries(
-    ${CUR_TARGET_NAME}_cli_provider
-    PRIVATE rclcpp::rclcpp
-            ament_index_cpp::ament_index_cpp
-            rosbag2_cpp::rosbag2_cpp
-            rosbag2_storage::rosbag2_storage
-            rosbag2_transport::rosbag2_transport)
-endif()
-add_werror(${CUR_TARGET_NAME}_cli_provider)
-set_target_properties(${CUR_TARGET_NAME}_cli_provider
-                      PROPERTIES OUTPUT_NAME "ibmw_record_playback_cli")
-
-# The CLI host discovers providers from a generic deployment manifest.  Keep a
-# build-tree manifest next to the ibmw executable for smoke tests and install a
-# prefix-relative manifest for normal deployments.  The manifest contains no
-# record/playback-specific symbol or environment variable; it only selects the
-# provider DSO.
-file(GENERATE
-  OUTPUT ${CMAKE_BINARY_DIR}/cli.yaml
-  CONTENT "providers:\n  - library: $<TARGET_FILE:${CUR_TARGET_NAME}_cli_provider>\n")
-file(GENERATE
-  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cli-install.yaml
-  CONTENT "providers:\n  - library: ../../bin/$<TARGET_FILE_NAME:${CUR_TARGET_NAME}_cli_provider>\n")
-if(IBMW_INSTALL)
-  install(TARGETS ${CUR_TARGET_NAME}_cli_provider LIBRARY DESTINATION bin)
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/cli-install.yaml
-          DESTINATION share/ibmw
-          RENAME cli.yaml)
-endif()

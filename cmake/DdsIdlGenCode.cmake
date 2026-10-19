@@ -170,15 +170,16 @@ function(add_dds_idl_gencode_target)
     set(GEN_CDR_IPP "${ARG_GENCODE_PATH}/${IDL_NAME}CdrAux.ipp")
     set(GEN_CDR_HPP "${ARG_GENCODE_PATH}/${IDL_NAME}CdrAux.hpp")
     set(GEN_SCHEMA_HPP "${ARG_GENCODE_PATH}/${IDL_NAME}Schema.hpp")
+    set(GEN_JSON_HPP "${ARG_GENCODE_PATH}/${IDL_NAME}Json.hpp")
     # Auto-generated 2-line wrapper TU that #includes the .ipp once so the
     # inline FastCDR specializations get emitted into the static library.
     set(GEN_CDR_IMPL_TU "${ARG_GENCODE_PATH}/${IDL_NAME}CdrImpl.cc")
 
     # Per-IDL output list for this custom command
-    set(CUR_IDL_OUTPUTS ${GEN_TYPE_HPP} ${GEN_PUBSUB_CXX} ${GEN_PUBSUB_HPP} ${GEN_CDR_IPP} ${GEN_CDR_HPP} ${GEN_SCHEMA_HPP})
+    set(CUR_IDL_OUTPUTS ${GEN_TYPE_HPP} ${GEN_PUBSUB_CXX} ${GEN_PUBSUB_HPP} ${GEN_CDR_IPP} ${GEN_CDR_HPP} ${GEN_SCHEMA_HPP} ${GEN_JSON_HPP})
 
     # Accumulate headers and sources across all IDL files
-    list(APPEND GEN_HDRS ${GEN_TYPE_HPP} ${GEN_CDR_HPP} ${GEN_CDR_IPP} ${GEN_SCHEMA_HPP})
+    list(APPEND GEN_HDRS ${GEN_TYPE_HPP} ${GEN_CDR_HPP} ${GEN_CDR_IPP} ${GEN_SCHEMA_HPP} ${GEN_JSON_HPP})
 
     # Only wrap IDLs explicitly opted-in via WRAP_IDLS. This avoids forcing
     # the py CDR transformer to handle every IDL pattern (unions, nested-struct
@@ -229,6 +230,7 @@ function(add_dds_idl_gencode_target)
         -typeros2
         -cs
         -replace
+        -extrastg ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/DdsJson.stg ${IDL_NAME}Json.hpp
         ${INCLUDE_ARGS}
         ${IDL_BASENAME}
       COMMAND ${CMAKE_COMMAND} -E env python3
@@ -238,6 +240,10 @@ function(add_dds_idl_gencode_target)
         --symbol k${IDL_NAME}Idl
         ${SCHEMA_INCLUDE_ARGS}
       ${_POSTPROCESS_COMMAND}
+      COMMAND ${CMAKE_COMMAND}
+        -DTYPE_HEADER=${GEN_TYPE_HPP}
+        -DJSON_HEADER=${IDL_NAME}Json.hpp
+        -P ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/IncludeDdsJson.cmake
       # DEPENDS the IDL source plus the .ipp outputs of all previously processed
       # IDLs in this target. The latter forces serial execution under `make -j`
       # so inject_dependent_ipp_includes can see same-target dependent .ipp
@@ -246,6 +252,8 @@ function(add_dds_idl_gencode_target)
         ${IDL_FILE}
         ${SCHEMA_DEP_IDLS}
         ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/embed_idl_schema.py
+        ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/DdsJson.stg
+        ${_DDS_IDL_GEN_CODE_CMAKE_DIR}/IncludeDdsJson.cmake
         ${_PREV_IDL_IPP_OUTPUTS}
       WORKING_DIRECTORY ${IDL_DIR}
       COMMENT "${_GENCODE_COMMENT}"
@@ -357,6 +365,7 @@ function(add_dds_idl_gencode_target)
     else()
       set(_link_keyword PUBLIC)
     endif()
+    target_link_libraries(${ARG_TARGET_NAME} ${_link_keyword} ibmw::api::type_support)
     foreach(DEP ${ARG_DEPENDENCIES})
       target_link_libraries(${ARG_TARGET_NAME} ${_link_keyword} ${DEP})
     endforeach()

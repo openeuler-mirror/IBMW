@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "engine/transport/serialized_callback.h"
+#include "engine/transport/serialized_transport_driver.h"
 #include "engine/transport/transport_driver.h"
 #include "engine/transport/transport_driver_tools.h"
 #include "base/buffer_util.h"
@@ -49,7 +51,26 @@ class ZenohTransportDriver : public runtime::core::transport::TransportDriver {
   bool OnMessage(const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept override;
   void Send(runtime::core::transport::MessageFrame& msg_wrapper) noexcept override;
 
+  runtime::core::transport::SerializedTransportOperationsV2 SerializedOperations() noexcept;
+  runtime::core::transport::SerializedSubscriberHandle AttachSerializedSubscriber(
+      const runtime::core::transport::SerializedSubscriberOptionsV2& options,
+      runtime::core::transport::SerializedMessageCallback callback) noexcept;
+  bool DetachSerializedSubscriber(runtime::core::transport::SerializedSubscriberHandle handle) noexcept;
+
  private:
+  struct NativeSubscriber {
+    z_owned_subscriber_t subscription;
+    std::shared_ptr<runtime::core::transport::SerializedCallback> callback;
+    NativeSubscriber() { z_internal_null(&subscription); }
+    ~NativeSubscriber() {
+      if (callback) callback->Stop();
+      z_drop(z_move(subscription));
+    }
+  };
+  std::mutex native_mutex_;
+  uint64_t next_native_handle_ = 1;
+  std::unordered_map<uint64_t, std::unique_ptr<NativeSubscriber>> native_subscribers_;
+
   enum class State : uint32_t {
     kPreInit,
     kInit,

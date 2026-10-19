@@ -98,7 +98,8 @@ cd /tmp/ibmw-record-smoke-stage
 ## Transport 覆盖
 
 每种 transport 使用自己的 YAML、Runtime ID 和 topic。测试先启动使用该 transport
-发布消息的 Runtime，再启动 recorder 录制这个 topic。通过标准是：bag 中出现预期
+发布消息的 Runtime，再启动 `bag record --registry`，按驱动采集能力独立订阅或使用 Runtime Tap 录制这个 topic。
+这些用例验证本机发布采集；DDS、ROS 2、Zenoh 原生订阅由各传输模块的回归测试覆盖。通过标准是：bag 中出现预期
 的 topic，至少包含 5 条消息；`ibmw bag info` 能正常读取；没有 dropped/duplicate
 message；recorder 收到停止信号后以退出码 0 完成关闭。以上结果共同确认该
 transport 发布的消息已由 recorder 写入 bag。
@@ -110,15 +111,15 @@ Local、TCP、UDP、HTTP 还会检查测试 Runtime 的 subscriber 接收日志�
 
 | Transport | 发布端配置 | 输出格式 | 通过时必须看到 |
 |-----------|---------------------|--------------------|--------------------------|
-| Local | Runtime publisher + Runtime subscriber；recorder subscriber | `auto`（实际为 CDR） | bag 中有 Local topic 的消息；Runtime subscriber 收到消息 |
-| DDS | Runtime publisher；recorder subscriber | `cdr` | recorder subscriber 收到 DDS topic 并写入 bag |
-| Iceoryx | Runtime publisher；recorder subscriber | `cdr` | recorder subscriber 收到 Iceoryx topic 并写入 bag |
-| MQTT | Runtime publisher；recorder subscriber | `cdr` | recorder subscriber 收到 MQTT topic 并写入 bag |
-| Zenoh | Runtime publisher；recorder subscriber | `cdr` | recorder subscriber 收到 Zenoh topic 并写入 bag |
-| ROS2 | Runtime publisher；recorder subscriber | `ros2` | recorder subscriber 收到 ROS2 topic 并写入 bag，序列化格式为 `ros2` |
-| TCP | Runtime publisher + Runtime subscriber；recorder subscriber | `cdr` | bag 中有 TCP topic 的消息；Runtime subscriber 收到消息 |
-| UDP | Runtime publisher + Runtime subscriber；recorder subscriber | `cdr` | bag 中有 UDP topic 的消息；Runtime subscriber 收到消息 |
-| HTTP | Runtime publisher + Runtime subscriber；recorder subscriber | `cdr` | bag 中有 HTTP topic 的消息；Runtime subscriber 收到消息 |
+| Local | Runtime publisher + Runtime subscriber；recorder Tap | `auto`（实际为 CDR） | bag 中有 Local topic 的消息；Runtime subscriber 收到消息 |
+| DDS | Runtime publisher；recorder 原生序列化订阅 | `cdr` | recorder 原生订阅采集到 DDS topic 并写入 bag |
+| Iceoryx | Runtime publisher；recorder 缓存类型订阅 | `cdr` | recorder 独立订阅采集到 Iceoryx topic 并写入 bag |
+| MQTT | Runtime publisher；recorder 缓存类型订阅 | `cdr` | recorder 独立订阅采集到 MQTT topic 并写入 bag |
+| Zenoh | Runtime publisher；recorder 原生序列化订阅 | `cdr` | recorder 原生订阅采集到 Zenoh topic 并写入 bag |
+| ROS2 | Runtime publisher；recorder 原生序列化订阅 | `ros2` | recorder 原生订阅采集到 ROS2 topic 并写入 bag，序列化格式为 `ros2` |
+| TCP | Runtime publisher + Runtime subscriber；recorder Tap | `cdr` | bag 中有 TCP topic 的消息；Runtime subscriber 收到消息 |
+| UDP | Runtime publisher + Runtime subscriber；recorder Tap | `cdr` | bag 中有 UDP topic 的消息；Runtime subscriber 收到消息 |
+| HTTP | Runtime publisher + Runtime subscriber；recorder Tap | `cdr` | bag 中有 HTTP topic 的消息；Runtime subscriber 收到消息 |
 
 
 ## CLI 功能如何验证

@@ -46,3 +46,25 @@ bash scripts/check_red_lines.sh
 Not every build exposes every command or target. Use the preset and focused test
 target appropriate to the feature, then report exactly what ran. For benchmark
 work, follow [Transport Benchmark](../guides/transport-benchmark.md).
+
+## TypeSupport consumers
+
+These standalone regressions create their build and install trees under `/tmp`:
+
+```bash
+# Default non-ROS SDK export, build-tree consumer, and relocated installed consumer.
+bash scripts/tests/test_json_sdk_export.sh
+# Also exercise the upstream JSON export and propagated diagnostic settings.
+bash scripts/tests/test_json_sdk_export.sh -DJSON_Install=ON -DJSON_Diagnostics=ON
+# DDS inheritance/name collisions; optionally include an imported ROS2 service.
+bash scripts/tests/test_text_typesupport_consumers.sh -DCMAKE_PREFIX_PATH=<installed-sdk>
+bash scripts/tests/test_text_typesupport_consumers.sh -DCMAKE_PREFIX_PATH=<installed-sdk> -DIBMW_TEST_ROS2_SERVICE=ON
+```
+
+The SDK export script accepts additional CMake arguments for local dependency
+sources. The codec consumer requires Fast-DDS-Gen and the SDK's matching DDS
+libraries; the optional service case also requires ROS2 `example_interfaces`.
+Discovery exception tests run with the Core tests. DDS ownership reconnection
+and Zenoh auto-record schema tests join CTest when their transports are enabled
+(the latter also requires recording). They assert received samples and stored
+schema metadata, respectively.

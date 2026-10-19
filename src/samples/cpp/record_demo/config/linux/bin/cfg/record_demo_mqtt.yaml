@@ -4,6 +4,10 @@
 ibmw:
   config:
     temp_cfg_path: ./cfg/tmp/record-demo-mqtt
+  runtime_graph:
+    runtime_id: record-demo-mqtt
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
 
   extensions:
     items:
@@ -14,12 +18,7 @@ ibmw:
           client_id: record_demo_mqtt_publisher
       - name: record_playback_extension
         path: ./libibmw_record_playback.so
-        options:
-          enable_runtime_agent: true
-          runtime_id: record-demo-mqtt
-          runtime_registry_path: /tmp/ibmw/runtimes
-          type_support_pkgs:
-            - path: ./libcommon_dds_ts.so
+        options: {}
 
   logging:
     core_level: INFO

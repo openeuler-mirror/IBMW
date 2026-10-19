@@ -2,6 +2,8 @@
 // All rights reserved.
 
 #include "zenoh_ext/zenoh_transport_driver.h"
+#include "zenoh_ext/zenoh_serialized_message.h"
+#include "zenoh_ext/discovery/zenoh_discovery_protocol.h"
 
 namespace YAML {
 template <>
@@ -56,11 +58,100 @@ void ZenohTransportDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->StartDiscovery(limit_domain_);
 }
 
 void ZenohTransportDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
+  zenoh_bus_ptr_->StopDiscovery();
+  std::vector<uint64_t> handles;
+  {
+    std::lock_guard lock(native_mutex_);
+    for (const auto& [handle, subscriber] : native_subscribers_) handles.push_back(handle);
+  }
+  for (const auto handle : handles) DetachSerializedSubscriber({handle});
+}
+
+runtime::core::transport::SerializedTransportOperationsV2
+ZenohTransportDriver::SerializedOperations() noexcept {
+  using namespace runtime::core::transport;
+  return {.context = this,
+          .supports_topic = [](void*, const TopicDescriptor& topic) noexcept {
+            return !topic.msg_type.empty();
+          },
+          .attach_subscriber = [](void* driver, const SerializedSubscriberOptionsV2& options,
+                                  SerializedMessageCallback callback) noexcept {
+            return static_cast<ZenohTransportDriver*>(driver)->AttachSerializedSubscriber(options, std::move(callback));
+          },
+          .detach_subscriber = [](void* driver, SerializedSubscriberHandle handle) noexcept {
+            return static_cast<ZenohTransportDriver*>(driver)->DetachSerializedSubscriber(handle);
+          }};
+}
+
+runtime::core::transport::SerializedSubscriberHandle
+ZenohTransportDriver::AttachSerializedSubscriber(
+    const runtime::core::transport::SerializedSubscriberOptionsV2& options,
+    runtime::core::transport::SerializedMessageCallback callback) noexcept {
+  try {
+    std::lock_guard lock(native_mutex_);
+    MW_ASSERT(state_ == State::kInit || state_ == State::kStart, "Zenoh driver is not running.");
+    MW_ASSERT(callback && ibmw::discovery::zenoh_protocol::IsConcreteKey(options.wire_topic_name) &&
+                  options.wire_type_name == options.topic.msg_type,
+              "Invalid native Zenoh subscription address or type.");
+    auto subscriber = std::make_unique<NativeSubscriber>();
+    subscriber->callback = std::make_shared<runtime::core::transport::SerializedCallback>(std::move(callback));
+    const bool attached = zenoh_bus_ptr_->CreateSubscriber(options.wire_topic_name,
+        [state = subscriber->callback, topic = options.topic,
+         expected_key = options.wire_topic_name](const z_loaned_sample_t* sample) {
+          try {
+            z_view_string_t key;
+            z_keyexpr_as_view_string(z_sample_keyexpr(sample), &key);
+            if (std::string_view(z_string_data(z_loan(key)), z_string_len(z_loan(key))) != expected_key)
+              return;
+            const auto* wire = z_sample_payload(sample);
+            auto bytes = std::make_shared<std::string>(z_bytes_len(wire), '\0');
+            auto reader = z_bytes_get_reader(wire);
+            MW_ASSERT(z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(bytes->data()), bytes->size()) == bytes->size(),
+                      "Cannot read Zenoh sample.");
+            const auto decoded = DecodeZenohPayload(*bytes);
+            auto descriptor = topic;
+            descriptor.serialization_type = decoded.serialization;
+            // Schemas are resolved by the consumer using the actual format.
+            if (descriptor.serialization_type != topic.serialization_type) descriptor.schema = {};
+            auto payload = std::shared_ptr<ibmw::util::BufferArrayView>(
+                new ibmw::util::BufferArrayView(decoded.payload.data(), decoded.payload.size()),
+                [bytes](auto* view) { delete view; });
+            state->Invoke({.topic = std::move(descriptor),
+                           .receive_timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::system_clock::now().time_since_epoch()).count()),
+                           .source_driver = "zenoh", .payload = std::move(payload)});
+          } catch (const std::exception& error) {
+            MW_ERROR("Native Zenoh receive failed: {}", error.what());
+          }
+        }, subscriber->subscription);
+    MW_ASSERT(attached, "Cannot declare native Zenoh subscriber.");
+    const uint64_t handle = next_native_handle_++;
+    native_subscribers_.emplace(handle, std::move(subscriber));
+    return {handle};
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot attach native Zenoh subscriber: {}", error.what());
+    return {};
+  }
+}
+
+bool ZenohTransportDriver::DetachSerializedSubscriber(
+    runtime::core::transport::SerializedSubscriberHandle handle) noexcept {
+  std::unique_ptr<NativeSubscriber> subscriber;
+  {
+    std::lock_guard lock(native_mutex_);
+    const auto found = native_subscribers_.find(handle.value);
+    if (found == native_subscribers_.end()) return false;
+    subscriber = std::move(found->second);
+    native_subscribers_.erase(found);
+  }
+  subscriber.reset();
+  return true;
 }
 
 bool ZenohTransportDriver::RegisterSendType(
@@ -95,7 +186,9 @@ bool ZenohTransportDriver::RegisterSendType(
                           util::UrlEncode(info.msg_type) +
                           limit_domain_;
 
-    zenoh_bus_ptr_->RegisterPublisher(pattern, shm_enabled);
+    if (!zenoh_bus_ptr_->RegisterPublisher(pattern, shm_enabled)) return false;
+    zenoh_bus_ptr_->RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole::kPublisher,
+                                          info.topic_name, info.msg_type, pattern);
 
     z_pub_shm_size_map_[pattern] = shm_init_loan_size_;
 
@@ -132,8 +225,6 @@ bool ZenohTransportDriver::OnMessage(
     msg_handler_tool_unique_ptr->AddMessageHandlerWrapper(&message_handler);
 
     auto* msg_handler_tool_ptr = msg_handler_tool_unique_ptr.get();
-
-    message_handler_map_.emplace(pattern, std::move(msg_handler_tool_unique_ptr));
 
     auto handle =
         [this, topic_name = info.topic_name, msg_handler_tool_ptr](const z_loaned_sample_t* message) {
@@ -179,7 +270,10 @@ bool ZenohTransportDriver::OnMessage(
           }
         };
 
-    zenoh_bus_ptr_->RegisterSubscriber(pattern, std::move(handle));
+    if (!zenoh_bus_ptr_->RegisterSubscriber(pattern, std::move(handle))) return false;
+    message_handler_map_.emplace(pattern, std::move(msg_handler_tool_unique_ptr));
+    zenoh_bus_ptr_->RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole::kSubscriber,
+                                          info.topic_name, info.msg_type, pattern);
     MW_INFO("Register subscribe type to zenoh transport, url: {}", pattern);
     return true;
   } catch (const std::exception& e) {

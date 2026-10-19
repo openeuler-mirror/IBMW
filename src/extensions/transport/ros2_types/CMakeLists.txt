@@ -1,7 +1,7 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
 
-# Find ROS2 message packages (only need message definitions, not TypeSupport)
+# Find ROS2 message packages for message definitions and text introspection.
 ibmw_find_target_package(std_msgs QUIET FEATURE ros2-types)
 ibmw_find_target_package(geometry_msgs QUIET FEATURE ros2-types)
 ibmw_find_target_package(sensor_msgs QUIET FEATURE ros2-types)
@@ -80,22 +80,26 @@ target_link_libraries(
             ibmw::api::cpp
             ibmw::api::ros2_type_support)
 
-# Link ROS2 message definitions (only message classes, not TypeSupport)
+# Text serialization instantiates each message's introspection TypeSupport.
+# Propagate these libraries to all consumers, including installed targets.
 target_link_libraries(
   ${CUR_TARGET_NAME}
-  INTERFACE std_msgs::std_msgs__rosidl_generator_cpp)
+  INTERFACE std_msgs::std_msgs__rosidl_generator_cpp
+            std_msgs::std_msgs__rosidl_typesupport_introspection_cpp)
 
 if(geometry_msgs_FOUND)
   target_link_libraries(
     ${CUR_TARGET_NAME}
-    INTERFACE geometry_msgs::geometry_msgs__rosidl_generator_cpp)
+    INTERFACE geometry_msgs::geometry_msgs__rosidl_generator_cpp
+              geometry_msgs::geometry_msgs__rosidl_typesupport_introspection_cpp)
   message(STATUS "  - geometry_msgs support enabled")
 endif()
 
 if(sensor_msgs_FOUND)
   target_link_libraries(
     ${CUR_TARGET_NAME}
-    INTERFACE sensor_msgs::sensor_msgs__rosidl_generator_cpp)
+    INTERFACE sensor_msgs::sensor_msgs__rosidl_generator_cpp
+              sensor_msgs::sensor_msgs__rosidl_typesupport_introspection_cpp)
   message(STATUS "  - sensor_msgs support enabled")
 endif()
 

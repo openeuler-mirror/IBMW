@@ -24,7 +24,7 @@ bool DdsSupportsTopic(void* context, const TopicDescriptor& topic) noexcept {
 }
 
 SerializedSubscriberHandle DdsAttachSubscriber(
-    void* context, const SerializedSubscriberOptions& options,
+    void* context, const SerializedSubscriberOptionsV2& options,
     SerializedMessageCallback callback) noexcept {
   return static_cast<DdsTransportDriver*>(context)->AttachSerializedSubscriber(
       options, std::move(callback));
@@ -245,7 +245,7 @@ void DdsExtension::RegisterDdsTransportDriver() {
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(dds_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
+      runtime::core::transport::SerializedTransportCapabilityV2{
           .capture_mode = runtime::core::transport::SerializedCaptureMode::kNativeSerialized,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kNativeSerialized,
           .serialization = runtime::core::transport::SerializedFormatSupport::kNative,

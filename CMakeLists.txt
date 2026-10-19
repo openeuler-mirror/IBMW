@@ -304,8 +304,7 @@ if(IBMW_BUILD_TESTS)
         COMMAND ${IBMW_TEST_BASH_EXECUTABLE}
                 ${PROJECT_SOURCE_DIR}/scripts/tests/test_installed_typesupport_package.sh)
       set(IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
-          "IBMW_INSTALLED_TYPESUPPORT_IBMW_BUILD=${CMAKE_BINARY_DIR}"
-          "IBMW_INSTALLED_TYPESUPPORT_NLOHMANN_SOURCE=${FETCHCONTENT_BASE_DIR}/nlohmann_json-src")
+          "IBMW_INSTALLED_TYPESUPPORT_IBMW_BUILD=${CMAKE_BINARY_DIR}")
       if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT ADDRESS_SANITIZER
                                                      AND NOT THREAD_SANITIZER)
         list(APPEND IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
@@ -387,6 +386,9 @@ if(IBMW_BUILD_WITH_ROS2)
   include(GetEventsExecutor)
 endif()
 
+# Public TypeSupport adapters and generated DDS codecs use JSON.
+include(GetNlohmannJson)
+
 # Runtime dependencies
 if(IBMW_BUILD_RUNTIME)
   include(GetAsio)
@@ -394,7 +396,6 @@ if(IBMW_BUILD_RUNTIME)
   include(GetYamlCpp)
   include(GetTBB)
   include(GetBackward)
-  include(GetNlohmannJson)
 endif()
 
 # FastDDS/FastCDR is required by both:
@@ -506,6 +507,7 @@ if(IBMW_INSTALL)
     FILES_MATCHING
     PATTERN "*.cmake"
     PATTERN "*.py"
+    PATTERN "*.stg"
     PATTERN "ibmw-config.cmake.in" EXCLUDE)
 
   # Install the generated targets file (note: renamed from ibmw-config to

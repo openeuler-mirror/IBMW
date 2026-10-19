@@ -60,7 +60,7 @@ enum class SerializedPublishCompletion : uint8_t {
   kPayloadConsumedOnReturn = 0,
 };
 
-struct SerializedTransportOperationsV1 {
+struct SerializedTransportOperationsV2 {
   // Borrowed driver-owned context. It has the same lifetime as the registered
   // TransportDriver and is never released through this table.
   void* context = nullptr;
@@ -75,7 +75,7 @@ struct SerializedTransportOperationsV1 {
   // fields when the transport exposes them; unavailable identity stays
   // invalid. Callbacks run on the declared callback thread.
   SerializedSubscriberHandle (*attach_subscriber)(
-      void* context, const SerializedSubscriberOptions& options,
+      void* context, const SerializedSubscriberOptionsV2& options,
       SerializedMessageCallback callback) noexcept = nullptr;
 
   // Detach is called by the lifecycle owner, not from the callback itself. A
@@ -114,16 +114,17 @@ struct SerializedTransportOperationsV1 {
  * `provider_name` is the extension/provider identity supplied by the
  * registering extension; it is not inferred from `TransportDriver::Name()`.
  * All pointers are borrowed and remain valid for the registered driver
- * lifetime.  `struct_size` allows a future V2 to append fields without
- * changing the V1 consumer's layout assumptions. This slot follows the
+ * lifetime. Version 2 covers the wire names in SerializedSubscriberOptionsV2.
+ * `struct_size` validates this descriptor, not objects passed to operations.
+ * This slot follows the
  * repository's current C++ extension ABI policy; it does not claim binary
  * compatibility across unrelated compiler or standard-library toolchains.
  */
-struct SerializedTransportCapabilityV1 {
-  static constexpr uint32_t kAbiVersion = 1;
+struct SerializedTransportCapabilityV2 {
+  static constexpr uint32_t kAbiVersion = 2;
 
   uint32_t abi_version = kAbiVersion;
-  uint32_t struct_size = sizeof(SerializedTransportCapabilityV1);
+  uint32_t struct_size = sizeof(SerializedTransportCapabilityV2);
   SerializedCaptureMode capture_mode = SerializedCaptureMode::kRuntimeTap;
   SerializedPublishMode publish_mode = SerializedPublishMode::kBus;
   SerializedFormatSupport serialization =
@@ -145,14 +146,15 @@ struct SerializedTransportCapabilityV1 {
   std::string_view provider_instance_option;
   std::string_view provider_clear_option;
   std::string_view provider_strip_leading_slash_option;
-  SerializedTransportOperationsV1 operations;
+  SerializedTransportOperationsV2 operations;
 
   bool IsUsable() const noexcept {
     return abi_version == kAbiVersion &&
-           struct_size >= sizeof(SerializedTransportCapabilityV1);
+           struct_size >= sizeof(SerializedTransportCapabilityV2);
   }
 
   bool HasValidContract() const noexcept {
+    if (!IsUsable()) return false;
     const bool valid_capture_mode =
         capture_mode == SerializedCaptureMode::kRuntimeTap ||
         capture_mode == SerializedCaptureMode::kNativeSerialized ||
@@ -199,7 +201,7 @@ struct SerializedTransportCapabilityV1 {
          operations.supports_topic != nullptr &&
          operations.register_publisher != nullptr &&
          operations.send != nullptr);
-    return IsUsable() && valid_capture_mode && valid_publish_mode &&
+    return valid_capture_mode && valid_publish_mode &&
            valid_serialization && valid_schema && valid_loan &&
            valid_backpressure && valid_callback_thread && valid_detach &&
            valid_publish_completion &&
@@ -216,11 +218,11 @@ struct SerializedTransportCapabilityV1 {
 };
 
 /** Legacy C++ capability interface implemented by native serialized drivers. */
-class __attribute__((visibility("default"))) SerializedTransportDriver {
+class __attribute__((visibility("default"))) SerializedTransportDriverV2 {
  public:
-  virtual ~SerializedTransportDriver() = default;
+  virtual ~SerializedTransportDriverV2() = default;
   virtual SerializedSubscriberHandle AttachSerializedSubscriber(
-      const SerializedSubscriberOptions&, SerializedMessageCallback) noexcept = 0;
+      const SerializedSubscriberOptionsV2&, SerializedMessageCallback) noexcept = 0;
   virtual bool DetachSerializedSubscriber(SerializedSubscriberHandle) noexcept = 0;
   virtual SerializedPublisherHandle RegisterSerializedPublisher(
       const SerializedPublisherOptions&) noexcept = 0;

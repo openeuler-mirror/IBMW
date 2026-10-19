@@ -6,6 +6,8 @@
 #include <memory>
 #include <thread>
 
+#include <optional>
+
 #include "engine/extension/extension_base.h"
 
 #include "rclcpp/executors.hpp"
@@ -17,6 +19,7 @@ class Ros2Extension : public ExtensionBase {
  public:
   struct Options {
     std::string node_name;
+    std::optional<uint32_t> domain_id;
     // SingleThreaded | StaticSingleThreaded | MultiThreaded
     std::string executor_type = "MultiThreaded";
     uint32_t executor_thread_num = 2;
@@ -43,6 +46,7 @@ class Ros2Extension : public ExtensionBase {
  private:
   Options options_;
 
+  std::shared_ptr<rclcpp::Context> ros2_context_;
   std::shared_ptr<rclcpp::Node> ros2_node_ptr_;
   std::shared_ptr<rclcpp::Executor> ros2_node_executor_ptr_;
   std::unique_ptr<std::thread> ros2_thread_ptr_;

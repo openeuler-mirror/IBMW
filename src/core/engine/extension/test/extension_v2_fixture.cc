@@ -5,15 +5,32 @@
 #include <stdexcept>
 
 #include "extension_api/ibmw_extension_main.h"
+#if defined(IBMW_EXT_FIXTURE_RUNTIME_ABI)
+#include "extension_api/ibmw_extension_runtime.h"
+#endif
 
 namespace {
 
 uint32_t g_create_count = 0U;
+uint32_t g_engine_init_count = 0U;
+uint32_t g_runtime_init_count = 0U;
 
 class FixtureExtension final : public ibmw::EngineExtensionBase {
  public:
   std::string_view Name() const noexcept override { return "extension-v2-fixture"; }
-  bool Initialize(ibmw::runtime::core::Engine*) noexcept override { return true; }
+  bool Initialize(ibmw::runtime::core::Engine*) noexcept override {
+    ++g_engine_init_count;
+    return true;
+  }
+#if defined(IBMW_EXT_FIXTURE_RUNTIME_ABI)
+  uint32_t RequiredRuntimeAbi() const noexcept override {
+    return IBMW_EXT_FIXTURE_RUNTIME_ABI;
+  }
+  bool InitializeRuntime(ibmw::extension::RuntimeV2* runtime) noexcept override {
+    ++g_runtime_init_count;
+    return runtime && runtime->AbiVersion() == 2;
+  }
+#endif
   void Shutdown() noexcept override {}
 };
 
@@ -37,6 +54,14 @@ extern "C" {
 
 IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureCreateCount() {
   return g_create_count;
+}
+
+IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureEngineInitCount() {
+  return g_engine_init_count;
+}
+
+IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureRuntimeInitCount() {
+  return g_runtime_init_count;
 }
 
 #if defined(IBMW_EXT_FIXTURE_LEGACY)

@@ -35,14 +35,16 @@ bool NormalPublisherModule::Setup(ibmw::Runtime core) {
 
 bool NormalPublisherModule::Run() {
   running_ = true;
-  std::thread([this]() { PublishLoop(); }).detach();
+  publish_thread_ = std::thread([this]() { PublishLoop(); });
   MW_INFO("NormalPublisherModule::Run succeeded.");
   return true;
 }
 
 void NormalPublisherModule::Stop() {
   running_ = false;
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (publish_thread_.joinable()) {
+    publish_thread_.join();
+  }
   MW_INFO("NormalPublisherModule::Stop succeeded.");
 }
 

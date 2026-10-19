@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #include "engine/transport/serialized_message.h"
 
@@ -17,9 +18,13 @@ struct SerializedSubscriberHandle {
   bool operator==(const SerializedSubscriberHandle&) const = default;
 };
 
-struct SerializedSubscriberOptions {
+struct SerializedSubscriberOptionsV2 {
   TopicDescriptor topic;
   QosDescriptor requested_qos;
+  // Both names are required when bypassing logical-to-wire name conversion.
+  // Empty names retain the driver's normal logical topic mapping.
+  std::string wire_topic_name;
+  std::string wire_type_name;
 };
 
 using ibmw::transport::SerializedMessageCallback;

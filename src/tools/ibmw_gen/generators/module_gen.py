@@ -39,6 +39,7 @@ def _gen_publisher_unified_header(mod: dict, ns: str) -> str:
 
 #include <atomic>
 #include <optional>
+#include <thread>
 
 #include "cpp/module_base.h"
 
@@ -73,6 +74,7 @@ class {name} : public ibmw::Module {{
   IBMW_TS_SENDER_ACCESS_MEMBER access_;
   uint32_t msg_count_ = 0;
   std::atomic<bool> running_{{false}};
+  std::thread publish_thread_;
 }};
 
 }}  // namespace {ns}
@@ -130,14 +132,16 @@ bool {name}::Setup(ibmw::Runtime core) {{
 
 bool {name}::Run() {{
   running_ = true;
-  std::thread([this]() {{ PublishLoop(); }}).detach();
+  publish_thread_ = std::thread([this]() {{ PublishLoop(); }});
   MW_INFO("{name}::Run succeeded.");
   return true;
 }}
 
 void {name}::Stop() {{
   running_ = false;
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  if (publish_thread_.joinable()) {{
+    publish_thread_.join();
+  }}
   MW_INFO("{name}::Stop succeeded.");
 }}
 

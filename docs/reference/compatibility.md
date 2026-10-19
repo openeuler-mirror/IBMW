@@ -18,6 +18,25 @@ case-specific verification.
 
 ## Package ABI and headers
 
+- Core, CLI, application modules, and extensions are built and deployed together.
+  Runtime ABI 2 includes per-driver endpoint QoS and requires matching headers,
+  compiler, and standard library. Extensions requesting another nonzero Runtime
+  ABI are rejected before initialization; ABI 0 explicitly selects the existing
+  Engine initialization interface. Runtime ABI 1 interoperability is unsupported.
+- Serialized transport ABI 2 includes native wire topic/type subscription names.
+  Core validates the capability version and size before accepting its operation
+  table. ABI 1 drivers must be rebuilt; descriptor size alone does not establish
+  compatibility of the C++ objects passed to an operation.
+- Runtime graph protocol 2 uses `<registry_path>/v2/` for registrations and
+  sockets, including when a custom registry root is configured. Old protocol
+  data is not converted. Unknown or malformed registrations are skipped without
+  deleting another process's files; cleanup requires evidence of process exit
+  or PID reuse.
+- The default registry root is `$XDG_RUNTIME_DIR/ibmw`, falling back to
+  `/tmp/ibmw-<euid>`. Custom roots must be private and owned by the current
+  effective UID. Symlink components and writable untrusted ancestors are
+  rejected; existing directory permissions are never silently changed.
+
 - Package loading has one public entry, `IbmwPkgEntry`, with typed-slot driver
   injection. Slot IDs are stable; string driver names and dual-entry ABI behavior
   are not public contracts. See [API Reference](api-reference.md).

@@ -76,6 +76,19 @@ void ApplyQosDescriptor(
           eprosima::fastdds::dds::VOLATILE_DURABILITY_QOS;
     }
   }
+
+  const auto ownership = descriptor.policies.find("ownership");
+  if (ownership != descriptor.policies.end()) {
+    if (ownership->second == "shared") {
+      qos.ownership().kind = eprosima::fastdds::dds::SHARED_OWNERSHIP_QOS;
+    } else if (ownership->second == "exclusive") {
+      qos.ownership().kind = eprosima::fastdds::dds::EXCLUSIVE_OWNERSHIP_QOS;
+    }
+  }
+  const auto liveliness = descriptor.policies.find("liveliness");
+  if (liveliness != descriptor.policies.end() && liveliness->second == "automatic") {
+    qos.liveliness().kind = eprosima::fastdds::dds::AUTOMATIC_LIVELINESS_QOS;
+  }
 }
 
 }  // namespace ibmw::extensions::dds_extension::detail

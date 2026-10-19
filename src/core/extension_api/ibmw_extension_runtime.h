@@ -23,7 +23,9 @@
 
 namespace ibmw::extension {
 
-inline constexpr uint32_t kRuntimeAbiVersionV1 = 1;
+// V2 includes per-driver endpoint QoS. V1 binaries must be rejected before
+// InitializeRuntime; all components use the same compiler/STL and headers.
+inline constexpr uint32_t kRuntimeAbiVersionV2 = 2;
 
 enum class RuntimePhase : uint8_t {
   kInitialize,
@@ -36,6 +38,7 @@ enum class RuntimeSubsystem : uint8_t {
   kLogger,
   kModule,
   kAll,
+  kRuntimeGraph,
 };
 
 enum class RuntimeHookTiming : uint8_t {
@@ -69,7 +72,7 @@ struct TransportCaptureCapabilityV1 {
   std::string provider_strip_leading_slash_option;
 };
 
-struct TransportEndpoint {
+struct TransportEndpointV2 {
   bool published = true;
   std::string topic;
   std::string msg_type;
@@ -80,6 +83,7 @@ struct TransportEndpoint {
   std::vector<std::string> drivers;
   ibmw::transport::QosDescriptor qos;
   std::map<std::string, TransportCaptureCapabilityV1> capture_capabilities;
+  std::map<std::string, ibmw::transport::QosDescriptor> driver_qos;
 };
 
 struct MessageView {
@@ -118,17 +122,17 @@ struct PublisherHandle {
   explicit operator bool() const noexcept { return value != nullptr; }
 };
 
-class RuntimeV1 {
+class RuntimeV2 {
  public:
   using Hook = std::function<void()>;
   using MessageCallback =
       std::function<void(MessageView&, std::function<void()>&&)>;
   using PublishTap = std::function<void(MessageView&)>;
 
-  RuntimeV1() = default;
-  virtual ~RuntimeV1() = default;
-  RuntimeV1(const RuntimeV1&) = delete;
-  RuntimeV1& operator=(const RuntimeV1&) = delete;
+  RuntimeV2() = default;
+  virtual ~RuntimeV2() = default;
+  RuntimeV2(const RuntimeV2&) = delete;
+  RuntimeV2& operator=(const RuntimeV2&) = delete;
 
   virtual uint32_t AbiVersion() const noexcept = 0;
   virtual YAML::Node GetExtensionOptions(std::string_view name) const = 0;
@@ -141,7 +145,7 @@ class RuntimeV1 {
   virtual ibmw::logger::LoggerRef GetLogger() const = 0;
   virtual const ibmw_service_handle_base_t* GetRpcHandle() const = 0;
 
-  virtual std::vector<TransportEndpoint> GetTransportEndpoints() const = 0;
+  virtual std::vector<TransportEndpointV2> GetTransportEndpoints() const = 0;
   virtual bool Subscribe(
       SubscriptionOptions options, MessageCallback callback) = 0;
   virtual PublisherHandle RegisterPublisher(PublisherOptions options) = 0;

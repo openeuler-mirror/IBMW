@@ -3,13 +3,8 @@
 //
 // App-mode entry point for ros2_interop_app.
 //
-// This main.cc contains no driver-injection boilerplate even when
-// loaned_publisher modules are present. The framework's
-// ModuleBus::BroadcastDriverSlot() runs between Initialize() and Start()
-// and dispatches each used transport driver pointer into every registered
-// module via Module::SetDriverSlot(slot_id, ptr). Loaned modules use
-// IBMW_USE_DRIVER to capture the iceoryx / dds driver pointer they need
-// (compile-time typed slot match, no string compare).
+// Managed modules use public transport access handles. Concrete driver
+// injection is reserved for explicitly direct transport modules.
 
 #include <csignal>
 #include <iostream>
@@ -59,9 +54,7 @@ int32_t main(int32_t argc, char** argv) {
 
     core.Initialize(options);
 
-    // Start (blocking). The framework auto-injects transport drivers into
-    // any module that overrides Module::SetDriverSlot (typically via the
-    // IBMW_USE_DRIVER macro) — no boilerplate needed.
+    // Start (blocking). Runtime configuration selects concrete transports.
     std::cout << "Starting engine..." << std::endl;
     core.Start();
 

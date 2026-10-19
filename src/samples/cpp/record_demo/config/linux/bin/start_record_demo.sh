@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 source "${SCRIPT_DIR}/record_demo_env.sh"
-mkdir -p /tmp/ibmw/runtimes
+RUNTIME_DIR="${XDG_RUNTIME_DIR:+${XDG_RUNTIME_DIR}/ibmw}"
+RUNTIME_DIR="${RUNTIME_DIR:-/tmp/ibmw-$(id -u)}"
 
 for required_file in \
   ./ibmw \
@@ -100,7 +101,7 @@ done
 # A Runtime must finish module initialization before the recorder takes its
 # first graph snapshot.  The registry files are the synchronization point.
 for runtime_id in record-demo-dds record-demo-iceoryx record-demo-mqtt record-demo-ros2; do
-  registration="/tmp/ibmw/runtimes/${runtime_id}.json"
+  registration="$RUNTIME_DIR/v2/${runtime_id}.json"
   child_pid="${CHILD_PIDS[${runtime_id}]}"
   for attempt in {1..50}; do
     if [[ -s "${registration}" ]] &&

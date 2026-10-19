@@ -15,11 +15,15 @@
 
 #include "base/exception.h"
 #include "base/time_util.h"
-#include "record_playback_ext/discovery/bag_topic_graph.h"
+#include "engine/runtime_graph/runtime_registry.h"
+#include "engine/runtime_graph/topic_graph.h"
 #include "record_playback_ext/runtime/runtime_playback_stream.h"
-#include "record_playback_ext/runtime/runtime_registry.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::RuntimeRegistry;
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
+using ibmw::runtime::core::runtime_graph::TopicGraph;
 
 namespace {
 
@@ -213,7 +217,7 @@ uint64_t BagPlayer::PlayOnce(uint64_t loop_index) {
   RuntimeRegistry registry(options_.runtime_registry_path);
   bool waiting_printed = false;
   while (!control_.IsStopped()) {
-    BagTopicGraph graph;
+    TopicGraph graph;
     if (!options_.runtime_routes.empty()) {
       graph.ReplaceRuntimes(registry.DiscoverLocalRuntimes());
     }

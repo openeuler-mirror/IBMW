@@ -37,11 +37,31 @@ namespace ibmw::runtime::core::configurator {
 
 void ConfigSubsystem::Initialize(
     const std::filesystem::path& cfg_file_path) {
+  MW_REQUIRE(state_ == State::kPreInit, "Config service can only be initialized once.");
+  cfg_file_path_ = cfg_file_path;
+  YAML::Node root;
+  if (!cfg_file_path_.empty()) {
+    cfg_file_path_ = std::filesystem::canonical(std::filesystem::absolute(cfg_file_path_));
+    MW_INFO("Cfg file path: {}", cfg_file_path_.string());
+    default_cfg_access_.SetConfigFilePath(cfg_file_path_.string());
+    std::ifstream file_stream(cfg_file_path_);
+    MW_REQUIRE(file_stream, "Can not open cfg file '{}'.", cfg_file_path_.string());
+    std::stringstream file_data;
+    file_data << file_stream.rdbuf();
+    root = YAML::Load(ibmw::common::util::ReplaceEnvVars(file_data.str()));
+  }
+  InitializeRoot(std::move(root));
+}
+
+void ConfigSubsystem::Initialize(YAML::Node root) {
+  MW_REQUIRE(root.IsMap(), "In-memory configuration must be a map.");
+  InitializeRoot(YAML::Clone(root));
+}
+
+void ConfigSubsystem::InitializeRoot(YAML::Node root) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
       "Config service can only be initialized once.");
-
-  cfg_file_path_ = cfg_file_path;
 
   // Heap-allocated to avoid yaml-cpp static destruction order issues with extensions.
   // Freed in ~ConfigSubsystem().
@@ -53,22 +73,8 @@ void ConfigSubsystem::Initialize(
   auto& root_options_node = *root_options_node_ptr_;
   auto& user_root_options_node = *user_root_options_node_ptr_;
 
-  if (!cfg_file_path_.empty()) {
-    cfg_file_path_ = std::filesystem::canonical(std::filesystem::absolute(cfg_file_path_));
-    MW_INFO("Cfg file path: {}", cfg_file_path_.string());
-
-    default_cfg_access_.SetConfigFilePath(cfg_file_path_.string());
-
-    std::ifstream file_stream(cfg_file_path_);
-    MW_REQUIRE(file_stream, "Can not open cfg file '{}'.", cfg_file_path_.string());
-
-    std::stringstream file_data;
-    file_data << file_stream.rdbuf();
-    ori_root_options_node = YAML::Load(ibmw::common::util::ReplaceEnvVars(file_data.str()));
-    user_root_options_node = YAML::Clone(ori_root_options_node);
-  } else {
-    MW_INFO("ibmw start with no cfg file.");
-  }
+  ori_root_options_node = std::move(root);
+  user_root_options_node = YAML::Clone(ori_root_options_node);
 
   if (!ori_root_options_node["ibmw"]) {
     ori_root_options_node["ibmw"] = YAML::Node();

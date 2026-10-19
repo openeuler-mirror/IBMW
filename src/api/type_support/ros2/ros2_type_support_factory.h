@@ -24,6 +24,7 @@
 
 #include "ros2_type_support.h"
 #include "ibmw_ros2_type_support.h"
+#include "ros2_text_serialization.h"
 
 namespace ibmw::ros2 {
 
@@ -134,10 +135,9 @@ namespace ibmw::ros2 {
 namespace detail_impl {
 
 inline constexpr char kRos2SerializationType[] = "ros2";
-inline constexpr ibmw_string_view_t kRos2SerializationTypes[] = {{
-    .str = kRos2SerializationType,
-    .len = sizeof(kRos2SerializationType) - 1,
-}};
+inline constexpr ibmw_string_view_t kRos2SerializationTypes[] = {
+    {.str = kRos2SerializationType, .len = sizeof(kRos2SerializationType) - 1},
+    {.str = "json", .len = 4}};
 
 inline bool IsRos2SerializationType(
     ibmw_string_view_t serialization_type) noexcept {
@@ -152,13 +152,19 @@ bool SerializeRos2Message(
     const void* message,
     const ibmw_buffer_array_allocator_t* allocator,
     ibmw_buffer_array_t* buffer_array) noexcept {
-  if (!IsRos2SerializationType(serialization_type) || message == nullptr ||
+  if (serialization_type.str == nullptr || message == nullptr ||
       allocator == nullptr || allocator->allocate == nullptr ||
       buffer_array == nullptr) {
     return false;
   }
 
   try {
+    if (util::ToStdStringView(serialization_type) == "json") {
+      return util::text::Store(
+          text_detail::WriteMessage(message, text_detail::Members<ROS2MsgType>()),
+          allocator, buffer_array);
+    }
+    if (!IsRos2SerializationType(serialization_type)) return false;
     rtps_compat::SerializedPayload_t payload;
     if (!ROS2CdrSerializer::Serialize(
             *static_cast<const ROS2MsgType*>(message), &payload)) {
@@ -187,12 +193,18 @@ bool DeserializeRos2Message(
     ibmw_string_view_t serialization_type,
     ibmw_buffer_array_view_t buffers,
     void* message) noexcept {
-  if (!IsRos2SerializationType(serialization_type) || message == nullptr ||
+  if (serialization_type.str == nullptr || message == nullptr ||
       buffers.data == nullptr || buffers.len == 0) {
     return false;
   }
 
   try {
+    if (util::ToStdStringView(serialization_type) == "json") {
+      text_detail::ReadMessage(util::text::Parse(buffers), message,
+                               text_detail::Members<ROS2MsgType>());
+      return true;
+    }
+    if (!IsRos2SerializationType(serialization_type)) return false;
     size_t serialized_size = 0;
     for (size_t index = 0; index < buffers.len; ++index) {
       if (buffers.data[index].data == nullptr ||
@@ -309,7 +321,7 @@ const ibmw_type_support_base_t* GetIbmwTypeSupport(const std::string& ros2_type_
             serialization_type, buffers, message);
       },
 
-      .serialization_types_supported_num = [](void*) -> size_t { return 1; },
+      .serialization_types_supported_num = [](void*) -> size_t { return 2; },
 
       .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* {
         return detail_impl::kRos2SerializationTypes;
@@ -327,92 +339,12 @@ const ibmw_type_support_base_t* GetIbmwTypeSupport(const std::string& ros2_type_
 
 }  // namespace ibmw::ros2
 
-// ========================================================================
-// Convenience wrapper: ibmw::GetRos2MessageTypeSupport<T>()
-// Used by the ROS2 RPC code generator (ros2_gen_ibmw_cpp_rpc.py) and
-// type_support_pkg_main.cc files.
-//
-// This constructs the ibmw_type_support_base_t DIRECTLY from the message
-// type, using rosidl_generator_traits::name<T>() for the human-readable
-// ROS2 type name.  It does NOT go through ROS2TypeSupportFactory (which
-// is only for extension-level dynamic type support).
-// ========================================================================
-
+// Message traits supply the canonical name to the shared TypeSupport factory.
 #include <rosidl_runtime_cpp/traits.hpp>
 
 namespace ibmw {
-
 template <typename ROS2MsgType>
 const ibmw_type_support_base_t* GetRos2MessageTypeSupport() {
-  // Use rosidl_generator_traits::name<T>() to get the proper ROS2 type name
-  // (e.g. "example_ros2/msg/RosTestMsg", "example_ros2/srv/RosTestRpc_Request")
-  static const std::string kRos2TypeName = rosidl_generator_traits::name<ROS2MsgType>();
-
-  // Derive the DDS type name for FastDDS TopicDataType
-  static const std::string kDdsTypeName =
-      ibmw::ros2::detail_impl::Ros2TypeNameToDdsTypeName(kRos2TypeName);
-
-  // Wrap as eprosima::fastdds::dds::TypeSupport. TypeSupport owns the
-  // TopicDataType pointer, so do not keep a second shared_ptr owner here.
-  // See ibmw::ros2::GetIbmwTypeSupport above: handwritten ROS2 TopicDataType
-  // instances intentionally stay off FastDDS PlainCdr optimizations.
-  static eprosima::fastdds::dds::TypeSupport type_support(
-      new ibmw::ros2::ROS2TypeSupport<ROS2MsgType>(kDdsTypeName, false));
-
-  // ibmw type name: ros2:example_ros2/msg/RosTestMsg
-  static const std::string kIbmwTypeName = "ros2:" + kRos2TypeName;
-
-  // Build the ibmw type support struct inline
-  static const ibmw_type_support_base_t kTs{
-      .type_name = [](void*) -> ibmw_string_view_t {
-        return ibmw::util::ToIbmwStringView(kIbmwTypeName);
-      },
-
-      .create = [](void*) -> void* {
-        return new ROS2MsgType();
-      },
-
-      .destroy = [](void*, void* msg) {
-        delete static_cast<ROS2MsgType*>(msg);
-      },
-
-      .copy = [](void*, const void* from, void* to) {
-        *static_cast<ROS2MsgType*>(to) = *static_cast<const ROS2MsgType*>(from);
-      },
-
-      .move = [](void*, void* from, void* to) {
-        *static_cast<ROS2MsgType*>(to) = std::move(*static_cast<ROS2MsgType*>(from));
-      },
-
-      .serialize = [](void*, ibmw_string_view_t serialization_type,
-                      const void* message,
-                      const ibmw_buffer_array_allocator_t* allocator,
-                      ibmw_buffer_array_t* buffer_array) -> bool {
-        return ibmw::ros2::detail_impl::SerializeRos2Message<ROS2MsgType>(
-            serialization_type, message, allocator, buffer_array);
-      },
-
-      .deserialize = [](void*, ibmw_string_view_t serialization_type,
-                        ibmw_buffer_array_view_t buffers,
-                        void* message) -> bool {
-        return ibmw::ros2::detail_impl::DeserializeRos2Message<ROS2MsgType>(
-            serialization_type, buffers, message);
-      },
-
-      .serialization_types_supported_num = [](void*) -> size_t { return 1; },
-
-      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* {
-        return ibmw::ros2::detail_impl::kRos2SerializationTypes;
-      },
-
-      // Return FastDDS TypeSupport for DDS driver
-      .custom_type_support_ptr = [](void*) -> const void* {
-        return &type_support;
-      },
-
-      .ctx = nullptr};
-
-  return &kTs;
+  return ros2::GetIbmwTypeSupport<ROS2MsgType>(rosidl_generator_traits::name<ROS2MsgType>());
 }
-
 }  // namespace ibmw

@@ -17,6 +17,30 @@ file(GLOB_RECURSE head_files ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
 file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM src ${test_files})
+set(discovery_test_src ${CMAKE_CURRENT_SOURCE_DIR}/discovery/discovery_provider_test.cc)
+list(REMOVE_ITEM test_files ${discovery_test_src})
+
+# Shared discovery and serialized payload code has no Engine dependency.
+set(shared_runtime_src
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/discovery_provider.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/registry_discovery_provider.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_agent.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_client.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registration.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registry.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_advertisement.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/topic_graph.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/type_support_registry.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/registry_subscription.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/runtime_tap_source.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/runtime_tap_stream.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/topic_io/serialized_payload.cc)
+list(REMOVE_ITEM src ${shared_runtime_src})
+target_sources(ibmw_extension_support PRIVATE ${shared_runtime_src})
+target_include_directories(ibmw_extension_support
+  PUBLIC $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include>)
+target_link_libraries(ibmw_extension_support PRIVATE ibmw::base yaml-cpp::yaml-cpp)
 set(LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1/driver_fixture.cc)
 set(LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER
@@ -100,7 +124,11 @@ target_link_libraries(
          backward_iface
          ibmw::api::cpp
          ibmw::core::extension_api
+         ibmw::core::extension_support
          ibmw::base)
+target_include_directories(${CUR_TARGET_NAME}
+  PUBLIC $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
+         $<INSTALL_INTERFACE:include>)
 
 # Add -Werror option
 include(AddWerror)
@@ -126,6 +154,29 @@ if(IBMW_INSTALL)
 endif()
 
 # Set test of target
+if(IBMW_BUILD_TESTS)
+  add_library(ibmw_discovery_failure_fixture MODULE discovery/test/failure_plugin.cpp)
+  target_link_libraries(ibmw_discovery_failure_fixture PRIVATE ibmw::core::extension_api)
+  set_target_properties(ibmw_discovery_failure_fixture PROPERTIES
+    OUTPUT_NAME ibmw_discovery_dds
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/discovery-failure"
+    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+  # GNU unique symbols can pin the DSO, masking exception lifetime failures.
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(ibmw_discovery_failure_fixture PRIVATE -fno-gnu-unique)
+  endif()
+  add_executable(ibmw_discovery_test ${discovery_test_src})
+  add_dependencies(ibmw_discovery_test ibmw_discovery_failure_fixture)
+  target_compile_definitions(ibmw_discovery_test PRIVATE
+    DISCOVERY_FAILURE_PLUGIN_DIR="$<TARGET_FILE_DIR:ibmw_discovery_failure_fixture>"
+    DISCOVERY_FAILURE_PLUGIN_PATH="$<TARGET_FILE:ibmw_discovery_failure_fixture>")
+  target_link_libraries(ibmw_discovery_test
+                       PRIVATE ibmw::core::extension_support GTest::gtest_main)
+  add_werror(ibmw_discovery_test)
+  add_test(NAME ibmw_discovery_test COMMAND ibmw_discovery_test)
+  set_tests_properties(ibmw_discovery_test PROPERTIES TIMEOUT 30)
+endif()
+
 if(IBMW_BUILD_TESTS AND test_files)
   add_library(legacy_transport_driver_v1 MODULE
               ${LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC})
@@ -153,7 +204,9 @@ if(IBMW_BUILD_TESTS AND test_files)
                            extension_v2_fixture
                            extension_v2_bad_version_fixture
                            extension_v2_bad_size_fixture
-                           extension_v2_destroy_throws_fixture)
+                           extension_v2_destroy_throws_fixture
+                           extension_runtime_v1_fixture
+                           extension_runtime_v2_fixture)
     add_library(${fixture} MODULE ${EXTENSION_V2_FIXTURE_SRC})
     target_link_libraries(${fixture} PRIVATE ibmw::core::extension_api)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
@@ -192,6 +245,13 @@ if(IBMW_BUILD_TESTS AND test_files)
                              PRIVATE IBMW_EXT_FIXTURE_BAD_SIZE)
   target_compile_definitions(extension_v2_destroy_throws_fixture
                              PRIVATE IBMW_EXT_FIXTURE_DESTROY_THROWS)
+  target_compile_definitions(extension_runtime_v1_fixture
+                             PRIVATE IBMW_EXT_FIXTURE_RUNTIME_ABI=1)
+  target_compile_definitions(extension_runtime_v2_fixture
+                             PRIVATE IBMW_EXT_FIXTURE_RUNTIME_ABI=2)
+  foreach(fixture IN ITEMS extension_runtime_v1_fixture extension_runtime_v2_fixture)
+    target_link_libraries(${fixture} PRIVATE ibmw::api::cpp yaml-cpp::yaml-cpp)
+  endforeach()
 
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
   set_tests_properties(${CUR_TARGET_NAME}_test PROPERTIES TIMEOUT 120)
@@ -202,6 +262,8 @@ if(IBMW_BUILD_TESTS AND test_files)
                    extension_v2_bad_version_fixture
                    extension_v2_bad_size_fixture
                    extension_v2_destroy_throws_fixture
+                   extension_runtime_v1_fixture
+                   extension_runtime_v2_fixture
                    type_support_v1_fixture
                    type_support_bad_v1_fixture
                    type_support_bad_size_v1_fixture
@@ -219,6 +281,8 @@ if(IBMW_BUILD_TESTS AND test_files)
       "EXTENSION_V2_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_version_fixture>\""
       "EXTENSION_V2_BAD_SIZE_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_size_fixture>\""
       "EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_destroy_throws_fixture>\""
+      "EXTENSION_RUNTIME_V1_FIXTURE_PATH=\"$<TARGET_FILE:extension_runtime_v1_fixture>\""
+      "EXTENSION_RUNTIME_V2_FIXTURE_PATH=\"$<TARGET_FILE:extension_runtime_v2_fixture>\""
       "TYPE_SUPPORT_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_v1_fixture>\""
       "TYPE_SUPPORT_BAD_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_v1_fixture>\""
       "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""

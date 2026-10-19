@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "record_playback_ext/discovery/bag_topic_graph.h"
+#include "record_playback_ext/coordinator/bag_capture_planner.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -25,7 +25,7 @@ class RecordTopicSelector {
 
   explicit RecordTopicSelector(Options options);
 
-  std::set<std::string> Select(const BagTopicGraph& graph) const;
+  std::set<std::string> Select(const CaptureGraph& graph) const;
 
  private:
   Options options_;

@@ -59,10 +59,7 @@
     ++zero_copy_count_;                                                       \
     /* IBMW_PUBSUB_LOANED_PUBLISHER_BODY_BEGIN */                             \
     /* IBMW: user code begin (populate_loaned_message) */                     \
-    /* TODO: populate `*loop_var` (or `loop_var->field`) here. For */         \
-    /* plain types this writes directly into the DDS shared buffer */         \
-    /* (zero-copy); for non-plain types it writes into a heap message */      \
-    /* that is serialized on publish(). */                                    \
+    /* TODO: populate `*loop_var` (or `loop_var->field`) here. */             \
     /* IBMW: user code end (populate_loaned_message) */                       \
     /* IBMW_PUBSUB_LOANED_PUBLISHER_BODY_END */                               \
     if ((publish_count_ % 50) == 0) {                                         \

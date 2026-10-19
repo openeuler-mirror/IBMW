@@ -69,10 +69,10 @@ void Engine::BuildSubsystemTable() {
   auto get_executor_fn = std::bind(&Engine::GetExecutor, this, std::placeholders::_1);
 
   subsystems_ = {
-      // 0 — Configurator (root; no dependencies, special path-based init)
+      // 0 — Configurator (root; no dependencies, accepts a path or root node)
       {.id = Subsystem::kConfigurator,
        .name = "Configurator",
-       .config_key = "",  // No YAML key — uses file path directly.
+       .config_key = "",  // Receives the complete configuration.
        .instance = &config_subsystem_,
        .depends_on = {},
        .pre_init = {},   // Engine::Initialize handles the special path-based call.
@@ -204,6 +204,15 @@ void Engine::BuildSubsystemTable() {
        },
        .post_init = {},
        .pre_shutdown = {}},
+      // 11 — Runtime Graph (advertisements and runtime control endpoint)
+      {.id = Subsystem::kRuntimeGraph,
+       .name = "RuntimeGraph",
+       .config_key = "runtime_graph",
+       .instance = &runtime_graph_subsystem_,
+       .depends_on = {Subsystem::kModule},
+       .pre_init = [this] { runtime_graph_subsystem_.SetEngine(this); },
+       .post_init = {},
+       .pre_shutdown = {}},
   };
 }
 
@@ -296,6 +305,8 @@ void Engine::RunHooks(HookPoint point) {
 // ---------------------------------------------------------------------------
 
 void Engine::Initialize(const Options& options) {
+  MW_REQUIRE(options.cfg_file_path.empty() || !options.config_node.IsDefined(),
+             "Specify either cfg_file_path or config_node, not both.");
   phase_.store(Phase::kConfigure, std::memory_order_release);
   options_ = options;
 
@@ -314,9 +325,15 @@ void Engine::Initialize(const Options& options) {
       // Inject shared logger.
       entry.instance->SetLogger(logger_ptr_);
 
-      // Initialize: ConfigSubsystem uses path-based init; all others use YAML.
+      // Both configuration sources share normalization and subsystem initialization.
       if (entry.id == Subsystem::kConfigurator) {
-        config_subsystem_.Initialize(options_.cfg_file_path);
+        if (options_.config_node.IsDefined()) {
+          config_subsystem_.Initialize(options_.config_node);
+        } else {
+          config_subsystem_.Initialize(options_.cfg_file_path);
+        }
+        runtime_graph_subsystem_.Configure(
+            config_subsystem_.GetIbmwOptionsNode("runtime_graph"));
       } else {
         entry.instance->Initialize(
             config_subsystem_.GetIbmwOptionsNode(entry.config_key));

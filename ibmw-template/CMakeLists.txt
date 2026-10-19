@@ -35,17 +35,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # --------------------------------------------------------------------------
 find_package(ibmw 0.1.0 REQUIRED)
 
-# --------------------------------------------------------------------------
-# nlohmann_json — required for JSON demos (6 & 7).
-# IBMW uses it internally but does not install it, so external projects
-# must fetch it themselves.
-# --------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-  nlohmann_json
-  URL https://github.com/nlohmann/json/archive/v3.11.3.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(nlohmann_json)
+# find_package(ibmw) also supplies nlohmann_json::nlohmann_json for JSON demos.
 
 # ==========================================================================
 # 1. Minimal module demo (no transport)

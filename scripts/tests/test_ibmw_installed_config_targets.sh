@@ -17,7 +17,7 @@ fail() {
 }
 
 mkdir -p "$SCRATCH/fakes/lib/cmake" "$SCRATCH/helpers" "$SCRATCH/tools"
-for package in fmt stdexec fastcdr fastrtps fastdds; do
+for package in fmt stdexec fastcdr fastrtps fastdds nlohmann_json; do
   package_dir="$SCRATCH/fakes/lib/cmake/$package"
   mkdir -p "$package_dir"
   cat >"$package_dir/${package}Config.cmake" <<EOF
@@ -44,6 +44,7 @@ set(IBMW_BUILD_RUNTIME OFF)
 set(IBMW_BUILD_PROTOCOLS ON)
 set(IBMW_BUILD_DDS_EXTENSION OFF)
 set(IBMW_BUILD_ROS2_TYPES OFF)
+set(IBMW_BUILD_ICEORYX_EXTENSION OFF)
 set(IBMW_BUILD_WITH_ROS2 OFF)
 set(IBMW_TARGET_ROS2_TIER "${TIER}")
 configure_file("${INPUT}" "${OUTPUT}" @ONLY)

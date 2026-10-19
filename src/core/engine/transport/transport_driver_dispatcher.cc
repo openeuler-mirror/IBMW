@@ -208,6 +208,18 @@ TransportDriverDispatcher::TopicDriverInfoMap TransportDriverDispatcher::GetSubT
   return result;
 }
 
+std::vector<TransportDriverDispatcher::LoanedPodTopicInfo>
+TransportDriverDispatcher::GetLoanedPodTopics() const {
+  std::vector<LoanedPodTopicInfo> result;
+  result.reserve(pod_registration_map_.size());
+  for (const auto& [key, registration] : pod_registration_map_) {
+    static_cast<void>(key);
+    result.push_back({registration->info,
+                      std::string(registration->driver->Name())});
+  }
+  return result;
+}
+
 std::vector<TransportDriver*> TransportDriverDispatcher::GetDriversByRules(
     std::string_view topic_name,
     const std::vector<std::pair<std::string, std::vector<std::string>>>& rules) {

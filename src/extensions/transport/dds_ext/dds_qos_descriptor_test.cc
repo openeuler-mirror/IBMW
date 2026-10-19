@@ -71,5 +71,14 @@ TEST(DdsQosDescriptorTest, MalformedDepthDoesNotThrowOrChangeQos) {
   EXPECT_EQ(qos.history().depth, 7);
 }
 
+TEST(DdsQosDescriptorTest, DiscoveryOwnershipAndLivelinessOverrideReaderDefaults) {
+  eprosima::fastdds::dds::DataWriterQos qos;
+  qos.liveliness().kind = eprosima::fastdds::dds::MANUAL_BY_TOPIC_LIVELINESS_QOS;
+  detail::ApplyQosDescriptor(
+      QosDescriptor{.policies = {{"ownership", "exclusive"}, {"liveliness", "automatic"}}}, qos);
+  EXPECT_EQ(qos.ownership().kind, eprosima::fastdds::dds::EXCLUSIVE_OWNERSHIP_QOS);
+  EXPECT_EQ(qos.liveliness().kind, eprosima::fastdds::dds::AUTOMATIC_LIVELINESS_QOS);
+}
+
 }  // namespace
 }  // namespace ibmw::extensions::dds_extension

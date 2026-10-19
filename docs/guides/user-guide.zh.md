@@ -1130,12 +1130,366 @@ RouDi），并且 Subscriber 必须在 Publisher 第一次发送之前启动。
 |-----|------|------|------|
 | `service_name` | string | `""` | RPC service 名 |
 | `timer_executor` | string | `""` | Timer Executor |
-| `type_support_pkgs[].path` | string | -- | Type support .so |
 | `record_actions[].name` | string | -- | Action 名 |
 | `record_actions[].options.bag_path` | string | -- | Bag 存储目录 |
 | `record_actions[].options.mode` | string | -- | `imd` 或 `signal` |
 | `record_actions[].options.topic_meta_list[].topic` | string | -- | Topic |
 | `record_actions[].options.topic_meta_list[].msg_type` | string | -- | 类型 |
+
+Runtime Graph（`ibmw.runtime_graph`）统一负责运行时广告、话题发现和控制
+Socket。需要用于话题 schema、录制或回放的 TypeSupport 包配置在
+`ibmw.runtime_graph.type_support_pkgs` 下；Record/Playback 扩展本身不再
+单独维护这份配置。
+
+#### 话题 CLI
+
+**性能观察结论**
+
+以下结论基于 i7-12700、Linux 5.15、ROS 2 Humble / Fast DDS 2.6.12
+环境下的同机跨进程重复测试；观测负载为 64KiB / 1MiB、1 / 4 个发布者和观察进程。
+
+- **原生业务观测**：开启 `topic hz/bw/echo` 会增加资源开销和部分时延；本次四个场景中，IBMW 的发送到接收 p99 更低，ROS 2 的发布调用 p99 更低，两侧消息类型、观察 QoS 和 writer 数不同。
+- **同一 ROS 业务观测**：七个场景中，IBMW 观察 CLI 的 CPU 均低于 ROS 2 CLI，PSS 内存均更高，多观察者下业务时延的增加更明显。
+- **端点查询**：相同 2 秒发现窗口下，IBMW `topic list/info/type/find` 的命令耗时和累计 CPU 时间均较低；此结论仅描述查询命令自身开销。
+- **CLI 主动发布**：64KiB、总 10Hz、1 / 4 个 CLI 的三轮测试均收全；IBMW `topic pub` 的累计 CPU 时间和 PSS 较低，生命周期耗时较长，其中包含本次测试设置的 3 秒就绪等待，ROS 2 则等待订阅匹配。
+
+`ibmw topic pub <topic> <type> <values>` 从命令行创建发布端，无需运行配置文件，
+也不生成临时运行配置。后端、domain、QoS 等参数直接构造内存配置，复用 Engine
+的初始化、启动、关闭以及现有 TransportBus 发布流程。无需先启动业务模块或已有发布者。
+
+```bash
+# 使用 common 类型包，一次发送；类型包路径按安装位置调整
+ibmw topic pub /header dds:ibmw::protocols::common::Header \
+  '{"frame_id":"base","time_stamp":123,"sequence_num":1}' \
+  --dds --domain 0 --type-support ./libcommon_dds_ts.so --once
+
+# 每秒 5 条，共发送 10 条；退出前继续存活 0.5 秒
+ibmw topic pub /header dds:ibmw::protocols::common::Header \
+  '{frame_id: "base"}' --zenoh --zenoh-domain robot \
+  --type-support ./libcommon_dds_ts.so --rate 5 --times 10 --keep-alive 0.5
+```
+
+必须选择一个传输后端：`--dds`、`--ros2`、`--zenoh`、`--mqtt`、`--tcp`、
+`--udp`、`--http`、`--iceoryx` 或 `--local`。类型库通过可重复的
+`--type-support` 提供；可用 `--transport-library` 覆盖默认驱动库路径。
+`--domain`、`--dds-domain`、`--ros-domain`、`--zenoh-domain` 和
+`--zenoh-config` 沿用观察命令的连接参数含义。`--ros2-compatible` 仅用于 DDS，
+开启现有驱动的 ROS 2 兼容话题命名，供 `ros2:` 消息与 ROS 2 订阅者互通。
+未启用时保留 IBMW DDS 默认命名；DDS 网络查询显示 wire topic，Registry 查询显示输入的逻辑 topic。
+
+| 后端 | 连接参数 |
+|------|----------|
+| DDS / ROS 2 | `--domain` 或对应的 `--dds-domain` / `--ros-domain` |
+| Zenoh | `--zenoh-domain`，可选 `--zenoh-config` |
+| MQTT | 必须提供 `--broker tcp://host:port`；可选 `--client-id`、`--mqtt-qos 0\|1\|2`（默认 2） |
+| TCP / UDP | 必须提供 `--target IPv4:port`，可重复指定多个接收端 |
+| HTTP | 必须提供 `--target http://host:port`，可重复指定多个接收端 |
+| Iceoryx | 先启动 RouDi；可选 `--iceoryx-runtime-id`、`--shm-init-size`（默认 1024 字节） |
+| local | 仅当前 CLI 进程内发送，无法投递给另一进程的 local 订阅者 |
+
+MQTT TLS 连接使用 `ssl://host:port`，必须提供 `--mqtt-truststore`；
+可提供 `--mqtt-client-cert`、`--mqtt-client-key` 和 `--mqtt-key-password`。
+TCP/UDP/HTTP 可用 `--net-threads` 设置网络线程数（默认 2）。网络后端使用现有 IBMW
+传输协议；HTTP 请求路径由 topic/type 生成，`--target` 不接受自定义路径或 HTTPS。
+除 local 外，所选驱动扩展必须已编译并安装；TCP/UDP/HTTP 共用 net 扩展。
+
+```bash
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --mqtt --broker tcp://127.0.0.1:1883 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --tcp --target 127.0.0.1:5000 --type-support ./libcommon_dds_ts.so --once
+ibmw topic pub /header dds:ibmw::protocols::common::Header '{frame_id: "base"}' \
+  --iceoryx --type-support ./libcommon_dds_ts.so --once
+```
+
+发布后端与发现来源独立：`DiscoveryBackend` 表示 list/info 等命令从哪里查询端点
+（registry、DDS、ROS 2、Zenoh），不限制 pub 可用的传输驱动。pub 不要求先发现话题。
+
+默认以 1 Hz 重复发布同一条消息，直到 Ctrl+C；`--once` 和 `--times` 互斥。
+`--rate` 没有 `-r` 别名，`-r` 保留给 ROS 2 后端。
+`--wait` 是启动后的连接/发现延时（默认 1 秒），`--keep-alive` 是最后一次发送后的存活时间
+（默认 0.2 秒）。两者均不保证订阅端已匹配或远端已确认；输出计数表示调用发送接口的次数。
+DDS/ROS 2 支持 `--qos-reliability`、`--qos-durability`、`--qos-history`、
+`--qos-depth`，默认分别为 reliable、volatile、keep_last、10。
+
+消息内容可以是 JSON 或 YAML，必须作为一个命令行参数传入。标准 TypeSupport
+直接提供 JSON 转换，类型包随源码重新构建，不需要单独选择文本适配器：
+
+- DDS：`GetDdsMessageTypeSupport<T>()` 同时支持 CDR 和 JSON。IDL 生成的类型头文件
+  自动包含对应 `*Json.hpp`；手写 DDS 类型需提供 `IbmwFromJson` / `IbmwToJson` 字段转换。
+- ROS 2：`ibmw::GetRos2MessageTypeSupport<T>()` 同时支持 ROS 2 序列化和 JSON，
+  类型包链接消息包的 introspection C++ 库。
+- JSON 头文件依赖由公共 TypeSupport CMake target 传递。
+
+文本转换支持基础数值、布尔、字符串、嵌套消息和数组/序列；DDS 还支持生成的枚举。
+未提供字段保留消息默认值，未知字段、类型错误、数值越界和数组长度错误会被拒绝。
+当前不支持的字段种类（例如 union、map、宽字符串）会报错，不会静默忽略用户输入。
+DDS bounded string 仍受所选 FastCDR/代码生成器兼容性限制。
+
+`ibmw topic echo <topic>` 将收到的消息输出为 YAML，以 `---` 分隔。
+`--format json` 改为每行一个 JSON 值；`--once` 输出一条后退出；
+`--field header.stamp` 选择嵌套字段，数字路径段表示数组下标，例如
+`--field poses.0.position`。发现和订阅路径与 `hz`、`bw` 共用，支持相同的
+发现来源、类型、连接配置、QoS、超时和观察时长参数，不提供统计窗口参数。
+`--queue-size <条数>` 设置待打印队列上限，必须为正整数，默认 100 条。
+队列满时会报错退出；增大上限可以缓冲短时积压，但会增加内存占用，
+无法解决接收速度持续超过输出速度的问题。
+
+```bash
+ibmw topic echo /sensor_data --once
+ibmw topic echo /status --format json --field state
+ibmw topic echo /chatter --ros2 --type-support ./libtext_ts.so --once
+ibmw topic echo /binary_topic --raw --duration 10
+ibmw topic echo /sensor_data --queue-size 1000
+```
+
+JSON/YAML 负载可直接显示。二进制负载需要匹配的 IBMW TypeSupport 包，同时支持
+接收格式的反序列化及 JSON 或 YAML 序列化。Registry 模式可使用所选发布者登记的
+类型包；显式传入的 `--type-support <path>` 优先，且该选项可重复。网络模式只加载
+此选项或 `--config-file` 中 `ibmw.runtime_graph.type_support_pkgs` 指定的本机包，
+配置中的相对路径以配置文件目录为基准，不从网络发现信息加载类型包。
+标准 DDS/ROS 2 TypeSupport 同时提供结构化 echo 所需的文本转换。
+解码能力不足时明确报错；`--raw` 可直接输出十六进制负载，无需解码，
+不能与 `--field` 或 `--format` 同用。
+
+DDS 模式查看 ROS 消息时，先查找与 `dds:<wire 类型>` 完全匹配的 TypeSupport。
+若不存在，才按 ROS 生成的 DDS 命名约定匹配已加载的 ROS 类型包，例如
+`dds:std_msgs::msg::dds_::String_` 对应 `ros2:std_msgs/msg/String`，并使用该包的
+`ros2` 反序列化入口读取 CDR。支持 `msg`、`srv` 和 `action` 类型命名；类型包仍需
+提供 JSON/YAML 转换。完全匹配的原生 DDS 解码器优先，其格式或解码错误不会触发
+回退。话题名称及发现输出仍保留 DDS wire 名称，例如：
+
+```bash
+ibmw topic echo rt/chatter --dds --type-support ./libtext_ts.so --once
+```
+
+解码和打印在命令线程执行，接收队列最多保留 100 条消息；输出跟不上导致队列满时
+明确失败。`--timeout` 只限制发现发布者的等待时间；发布者已发现但不发消息时，
+`--once` 仍会等待，可用 `--duration` 限制观察时长。没有收到消息时向 stderr 提示。
+当前未实现任意表达式过滤、ROS 仿真时间或任意二进制类型的自动反射。
+
+`ibmw topic hz <topic>` 订阅一个话题，统计观察端实际接收到的频率，每秒输出
+平均 Hz、接收间隔的最小值/最大值、总体标准差和窗口消息数。默认使用单调时钟，
+窗口为最近 10000 条消息；当前不支持 ROS 仿真时间或消息字段过滤。
+
+```bash
+ibmw topic hz /sensor_data                     # 默认：Registry 发现，按能力选择订阅
+ibmw topic hz /chatter -r --ros-domain 10       # 独立 ROS 2 订阅端
+ibmw topic hz rt/chatter -d --dds-domain 10     # 原生 DDS wire topic 名称
+ibmw topic hz /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic hz /chatter -r -w 100 --duration 10
+```
+
+`ibmw topic bw <topic>` 统计观察端收到的序列化消息带宽，复用 `hz` 的订阅方式，
+默认窗口为最近 100 条消息。每秒输出带宽及窗口内消息大小的平均值、最小值和
+最大值，使用十进制 B/KB/MB 单位（1 KB = 1000 字节）。带宽等于窗口总字节数
+除以从窗口第一条消息到当前单调时钟的时长；最后一条消息之后的静默时间也计入，
+因此停止发布后带宽会下降。至少收到两条消息才能计算。大小只包含序列化负载，
+不包含传输协议头、封装、重传等开销；缓存类型订阅统计生成的序列化负载大小，
+不代表消息对象的内存大小。
+
+```bash
+ibmw topic bw /sensor_data
+ibmw topic bw /chatter -r --ros-domain 10 -w 100 --duration 10
+```
+
+`hz` 和 `bw` 每次只接受一个发现来源，不支持 `--all`。话题存在多个发布类型时使用
+`--type <type>` 指定 `topic type` 显示的类型名。隐藏话题可直接指定。
+`--window/-w` 至少为 2；`--timeout` 设置等待发现发布者的时限（默认 10 秒）；
+`--duration` 设置订阅建立后的观察时长，默认持续到 Ctrl+C。尚未接收到消息时
+输出提示；频率和带宽受观察端调度和传输丢包影响，不等于业务订阅者的接收结果。
+
+网络模式自动加载安装目录中的对应 transport 库；ROS 2 通用订阅仍要求本机安装
+相应消息类型包。需要额外传输配置时传入 `--config-file <yaml>`，只加载其中选定的
+`ibmw.extensions.items`、`ibmw.messaging.drivers` 和调度配置。相对路径基于该文件，
+domain 始终由上述发现参数及其默认值决定；Zenoh 原生配置优先使用 `--zenoh-config`，
+否则使用配置中的 `native_cfg_path`。DDS/ROS 2 默认请求 `best_effort`、`volatile`，
+可用 `--qos-reliability`、`--qos-durability` 覆盖。对于 exclusive ownership 的 DDS
+发布者，未指定可靠性时自动使用 `reliable`；显式指定 `--qos-reliability best_effort`
+会报 QoS 不兼容错误。Registry 模式跟踪发布端增减，并与
+`bag record --registry` 共用采集路径选择：优先独立订阅，必要时使用 Runtime Tap。
+Registry 发现的 DDS/ROS 2 QoS 按发布端适配；缓存类型订阅保留单发布者和启动前注册限制。
+发现 Tap 丢包时报告累计丢包数。
+
+`ibmw topic list`、`info`、`type`、`find` 共用以下发现参数：
+
+| 参数 | 含义 |
+|------|------|
+| `--registry` | 读取本机运行时登记，覆盖各种传输驱动；未选择来源时默认使用 |
+| `-d`、`--dds` | 选择 DDS 发现 |
+| `-r`、`--ros2` | 选择 ROS 2 发现 |
+| `-z`、`--zenoh` | 选择 Zenoh 发现 |
+| `-a`、`--all` | 选择全部四种来源，范围限于各自配置的域 |
+| `--domain <id>` | 为选中的 DDS、ROS 2 设置共同 domain |
+| `--dds-domain <id>` | 覆盖 DDS domain；否则使用 `--domain` 或 0 |
+| `--ros-domain <id>` | 覆盖 ROS 2 domain；否则依次使用 `--domain`、`ROS_DOMAIN_ID`、0 |
+| `--zenoh-domain <name>` | Zenoh 业务域（`limit_domain`），默认空域 |
+| `--zenoh-config <path>` | Zenoh 原生连接配置 |
+| `--registry-path <path>` | 本机注册根目录，默认 `$XDG_RUNTIME_DIR/ibmw`，否则 `/tmp/ibmw-<euid>`。协议数据位于 `v2/`；自定义根目录需为当前用户私有（0700）。 |
+
+本机登记来源在详细输出中标为 `source: registry`，实际传输驱动另列于 `drivers`。
+
+`info <topic>` 与 ROS 2 一样允许直接查询隐藏话题；`list`、`find`、`type`
+默认过滤隐藏话题，使用 `--include-hidden-topics` 后包含它们。该开关可放在
+子命令前或后，例如 `ibmw topic --include-hidden-topics type /_hidden`。
+
+`info -v` 为每个端点显示类型及可获取的归属信息，本机登记还显示模块名。
+多驱动端点的 QoS 按驱动分别展示；有值的策略直接输出，未报告的策略标为
+`unknown`，完全没有 QoS 数据时显示 `unavailable (not reported by this source)`。
+本机登记使用当前结构的 `module_name` 和 `driver_qos` 字段，不读取旧结构。
+组合来源的计数包含各来源的观察结果，不表示跨来源去重后的端点数量。
+
+来源参数可以组合，例如 `list --registry --dds`、`list -d -r --domain 10`。
+域与配置参数要求同时选中对应来源。数字域接受 32 位无符号十进制数值，
+具体网络实现的取值限制将在对应网络适配器中校验。
+
+DDS 来源已实现（需开启 `IBMW_BUILD_DDS_EXTENSION`）。独立的
+`libibmw_discovery_dds.so` 仅在选择 DDS 时加载；只查询本机时不会加载它。
+可用 `IBMW_DISCOVERY_PLUGIN_DIR` 覆盖插件查找目录。
+
+DDS 加入指定 domain，通过原生 writer/reader 发现回调收集信息，不订阅业务
+数据。结果保留原生 DDS topic/type 名称、端点和 participant GUID、CDR 序列化
+格式及已报告的 QoS。
+
+ROS 2 来源需开启 `IBMW_BUILD_WITH_ROS2` 和 `IBMW_BUILD_ROS2_EXTENSION`。
+选择 `-r` 时加载独立的 `libibmw_discovery_ros2.so`，通过私有 rclcpp context
+和查询节点读取 ROS graph，不初始化 IBMW ROS 2 业务传输扩展，也不订阅业务
+数据。该插件需要 ROS 2/rclcpp 运行时，遵循 `RMW_IMPLEMENTATION` 等原生
+ROS 环境配置。返回 ROS 逻辑话题名、类型名、端点 GID 和 graph 报告的 QoS；
+`topic info -v` 还显示节点名与命名空间。未提供的 DDS participant GUID 和
+底层名称保持为空，不根据 RMW GID 或 ROS 名称推测。查询节点关闭 rosout、
+参数事件和参数等服务。
+
+```bash
+ibmw topic list -r --ros-domain 10
+ibmw topic info /chatter -r --ros-domain 10 -v
+ibmw topic list -d -r --dds-domain 10 --ros-domain 20
+```
+
+Zenoh 来源需开启 `IBMW_BUILD_ZENOH_EXTENSION`。选择 `-z` 时加载独立的
+`libibmw_discovery_zenoh.so` 并创建查询 session，CLI 不加载业务传输扩展。
+运行中的业务程序需要使用更新后的 `libibmw_zenoh_transport.so`，由它在已有
+session 上通过 queryable 提供端点元信息。普通 Zenoh 程序和旧版 IBMW 扩展
+不会自动提供这些元信息。
+
+`--zenoh-domain` 必须精确匹配业务 YAML 中的 `limit_domain` 原值；省略时只查
+空域，并非全部域。`--zenoh-config` 接受查询端的 Zenoh 原生配置，例如连接
+peer/router 的地址；查询 session 必须能到达业务 session。省略配置文件时
+使用 Zenoh 默认配置，包括原生 scouting 设置。UDP scouting 用于建立 session
+连接，随后通过 IBMW 元信息查询获取逻辑话题名和类型名。
+
+```bash
+ibmw topic list -z --zenoh-domain robot --zenoh-config ./observer.json5
+ibmw topic info /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5 -v
+ibmw topic type /chatter -z --zenoh-domain robot --zenoh-config ./observer.json5
+```
+
+统计对象是成功创建的 Zenoh publisher/subscriber，包括未发送消息的端点和
+只有订阅者的话题。多个模块回调共用一个原生 subscriber 时只计一个端点，
+RPC 内部端点不纳入话题发现。结果提供 session ZID、实例内端点 ID、逻辑
+topic/type 和实际 wire key；注册时无法确定的序列化格式和 QoS 保持为空。
+查询端在收集窗口内重试，按 revision 替换各实例快照，并移除连续 2 秒未回复的
+实例。快照仍是有限时间内的观察，输出时实例可能刚刚退出。
+
+网络查询默认收集 2 秒后返回快照；每次调用独立发现，不使用常驻发现服务。
+实际可见范围由 domain、发现配置、安全配置和网络可达性决定。DDS、ROS 2 与
+Zenoh 是独立来源，组合查询保留各自端点，不跨来源合并身份。
+来源失败时退出码为 1，但组合查询仍输出成功来源的结果。
+
+ROS 2 原生库可能在加载阶段直接退出进程，例如 Humble 中指定了未安装的
+`RMW_IMPLEMENTATION`。这种退出发生在适配器运行前，无法作为普通来源错误
+捕获，也无法保留其他来源结果；使用 ROS 2 发现前需确保所选 RMW 可用。
+
+`bag record` 默认通过本机 registry 发现话题，按驱动采集能力选择订阅；网络模式
+支持 DDS、ROS 2 和 Zenoh：
+
+```bash
+ibmw bag record --registry /chatter -o ./registry_bag
+ibmw bag record --dds --domain 87 --config-file ./dds-recorder.yaml /native_topic -o ./dds_bag
+ibmw bag record --ros2 --domain 87 --config-file ./ros2-recorder.yaml /chatter -o ./ros2_bag
+ibmw bag record --zenoh --zenoh-domain robot --config-file ./zenoh-recorder.yaml /chatter -o ./zenoh_bag
+```
+
+Registry 发现与采集方式相互独立。Registry 模式根据注册信息中的采集能力和连接配置，
+在独立录制运行时建立订阅：按优先级选择 iceoryx、DDS、Zenoh、MQTT、ROS 2，
+最后才使用 Runtime Tap。DDS、ROS 2、Zenoh 使用原生序列化订阅；iceoryx、MQTT
+使用 TypeSupport 和缓存类型订阅。录制运行时使用独立实例名，不加载业务模块。
+同一话题只选择一条覆盖全部发布者的传输路径，避免多驱动重复录制。
+
+缓存类型订阅仅用于单发布者话题，并在驱动启动前注册；运行中可复用已注册的
+类型订阅。多发布者、连接配置冲突或无法动态注册时，选择其他可用的直连路径，
+否则为每个发布者建立 Tap。UDP、TCP、HTTP、local 通常使用 Tap。Tap 必须由发布端
+声明支持，且无法采集绕过普通 Send 的显式 Loan/PublishLoaned 发布。
+
+网络模式不需要发布端的本机注册文件，通过对应发现插件取得订阅地址，再由
+录制进程的传输扩展接收序列化消息。同一话题的多个网络发布者共用一个订阅。
+网络模式使用录制端自己的配置，不从网络元信息加载扩展或 TypeSupport。
+
+网络录制必须提供录制端自己的配置和包含 schema 的本机 TypeSupport 包：
+
+```yaml
+ibmw:
+  runtime_graph:
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options: {domain_id: 87}
+  messaging:
+    drivers:
+      - type: dds
+        options:
+          subscribers:
+            - topic: ".*"
+              qos: {history: keep_last, depth: 100}
+```
+
+ROS 2 配置使用 `ros2_extension`、`libibmw_ros2_transport.so`、`type: ros2`，
+并加载对应 ROS 消息类型的 TypeSupport 包。录制端自动设置独立节点名，使用
+独立 ROS context。Zenoh 配置使用 `zenoh_extension`、`libibmw_zenoh_transport.so`、
+`type: zenoh`，其扩展 options 示例为：
+
+```yaml
+options:
+  limit_domain: robot
+  native_cfg_path: ./zenoh-client.json5
+```
+
+包、扩展、DDS `xml_profile_file` 和 Zenoh `native_cfg_path` 的相对路径以
+录制配置文件目录为基准。所选话题缺少 schema 会明确报错。网络元信息中的
+路径不会用于加载代码。
+
+| 来源 | 使用的订阅地址 | bag 中的类型／格式 |
+|------|----------------|--------------------|
+| DDS | 发现的原始 DDS topic/type，不再次转换名称 | `dds:<原始类型名>`／`cdr` |
+| ROS 2 | ROS graph 的 topic 和 `pkg/msg/Type` | `ros2:pkg/msg/Type`／`ros2` |
+| Zenoh | 元信息中的实际 wire key | 原有逻辑类型／消息封装携带的实际格式 |
+
+Zenoh 从每条收到的消息中取得实际格式，并在写入前匹配 schema。
+使用 `--serialization-format auto` 时，只提供对应 schema 的类型包即可；
+转换格式还需要 TypeSupport 的序列化函数。收到没有本机 schema 的格式时停止并报错。
+尚未收到消息、格式未知的话题不会预先创建存储通道。
+DDS、ROS 2 的 reliability/durability 按所有已发现发布者适配，订阅端的 QoS
+不会被当作发布能力。发现发布者、类型或 QoS 变化时共用同一套动态采集流程。
+
+`--domain` 用于 DDS／ROS 2：默认取配置中的 `domain_id`，ROS 2 未配置时使用
+`ROS_DOMAIN_ID`，否则为 0；命令行与配置同时设置时必须一致。Zenoh 的
+`--zenoh-domain` 与配置中的 `limit_domain` 也必须一致。Zenoh 发现和订阅各自
+持有会话，默认读取相同 native 配置；使用客户端配置或自动分配的监听端口。
+如订阅配置包含固定监听端口或固定会话 ID，用 `--zenoh-config <path>` 明确
+指定单独的发现会话配置。
+
+首次收集 2 秒后开始录制，随后复用观察者发现晚加入的发布端。
+Zenoh 实例连续 2 秒没有回复元信息查询时从快照移除。
+`--no-discovery` 关闭后续发现更新；现有网络订阅仍可接收该话题后加入的发布者。
+每次 record 选择一个来源，`-a` 表示该来源的所有话题，`-d` 仍为分包时长。
+`--use-sim-time` 适用于本机、ROS 2 和有逻辑 `/clock` 的 Zenoh 来源。
+
+DDS 观察者仍使用所选 domain 的默认发现配置，采集驱动使用录制端传输配置。
+原生 DDS 采集仍不支持通用 keyed 类型；bag 保留原始话题名，回放到相同原始
+名称的适配不在本次录制改造内。原始 DDS 模式不支持 `/clock` 名称映射。
 
 ---
 

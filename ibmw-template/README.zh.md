@@ -1145,14 +1145,10 @@ inline void from_json(const nlohmann::json& j, SensorReading& v) {
 3. 可拷贝赋值与移动赋值
 4. ADL 可发现的 `to_json(json&, const T&)` 与 `from_json(const json&, T&)`
 
-**Step 2：拿到 nlohmann_json**（IBMW 不会安装它）：
+**Step 2：使用 IBMW SDK 提供的 nlohmann_json：
 
 ```cmake
-include(FetchContent)
-FetchContent_Declare(nlohmann_json
-  URL https://github.com/nlohmann/json/archive/v3.11.3.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(nlohmann_json)
+find_package(ibmw REQUIRED)
 
 target_link_libraries(my_module
   ibmw::api::cpp

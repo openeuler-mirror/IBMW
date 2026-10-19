@@ -2,8 +2,8 @@
 
 ibmw:
   # DDS publishes the stored CDR bytes directly, so no transcode package is
-  # needed. The bag player still expects this setting to be a sequence.
-  bag_playback:
+  # needed. Keep the Core Runtime Graph package list empty for this case.
+  runtime_graph:
     type_support_pkgs: []
 
   extensions:

@@ -312,7 +312,7 @@ void NetExtension::RegisterHttpTransportDriver() {
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(http_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
+      runtime::core::transport::SerializedTransportCapabilityV2{
           .capture_mode = runtime::core::transport::SerializedCaptureMode::kRuntimeTap,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
           .capture_priority = 8,
@@ -328,7 +328,7 @@ void NetExtension::RegisterTcpTransportDriver() {
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(tcp_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
+      runtime::core::transport::SerializedTransportCapabilityV2{
           .capture_mode = runtime::core::transport::SerializedCaptureMode::kRuntimeTap,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
           .capture_priority = 6,
@@ -344,7 +344,7 @@ void NetExtension::RegisterUdpTransportDriver() {
 
   core_ptr_->GetTransportBus().RegisterTransportDriver(
       std::move(udp_transport_driver_ptr), {},
-      runtime::core::transport::SerializedTransportCapabilityV1{
+      runtime::core::transport::SerializedTransportCapabilityV2{
           .capture_mode = runtime::core::transport::SerializedCaptureMode::kRuntimeTap,
           .publish_mode = runtime::core::transport::SerializedPublishMode::kBus,
           .capture_priority = 7,

@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <optional>
+#include <thread>
 
 #include "cpp/module_base.h"
 
@@ -39,6 +40,7 @@ class PublisherModule : public ibmw::Module {
   IBMW_TS_SENDER_ACCESS_MEMBER access_;
   uint32_t msg_count_ = 0;
   std::atomic<bool> running_{false};
+  std::thread publish_thread_;
 };
 
 }  // namespace pubsub_demo

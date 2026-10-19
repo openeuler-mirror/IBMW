@@ -19,16 +19,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # --------------------------------------------------------------------------
 find_package(ibmw 0.1.0 REQUIRED)
 
-# --------------------------------------------------------------------------
-# nlohmann_json — required for JSON type support.
-# --------------------------------------------------------------------------
-include(FetchContent)
-FetchContent_Declare(
-  nlohmann_json
-  URL https://github.com/nlohmann/json/archive/v3.11.3.tar.gz
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(nlohmann_json)
-
 find_package(example_ros2 REQUIRED)
 
 ibmw_add_module(my_module

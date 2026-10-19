@@ -12,10 +12,12 @@
 #include <string>
 #include <vector>
 
-#include "record_playback_ext/discovery/topic_advertisement.h"
+#include "engine/runtime_graph/topic_advertisement.h"
 #include "record_playback_ext/storage/bag_reader.h"
 
 namespace ibmw::extensions::record_playback_extension {
+
+using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 
 struct PlayerOptions {
   size_t read_ahead_queue_size = 1000;
@@ -27,7 +29,7 @@ struct PlayerOptions {
   bool start_paused = false;
   double start_offset_seconds = 0.0;
   std::map<std::string, std::string> runtime_routes;
-  std::filesystem::path runtime_registry_path = "/tmp/ibmw/runtimes";
+  std::filesystem::path runtime_registry_path = ibmw::extension::DefaultRuntimeRegistryPath();
 };
 
 class PlayerControl {

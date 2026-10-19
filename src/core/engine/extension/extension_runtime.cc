@@ -7,19 +7,24 @@
 #include <utility>
 
 #include "engine/engine.h"
-#include "engine/transport/endpoint_qos_provider.h"
 #include "engine/transport/serialized_transport_driver.h"
 #include "engine/transport/transport_driver_tools.h"
+#include "extension_api/ibmw_runtime_graph.h"
 
 namespace ibmw::runtime::core::extension {
 namespace {
 
-class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
+class EngineRuntimeV2 final : public ibmw::extension::RuntimeV2,
+                              public ibmw::extension::RuntimeGraphAccessV1 {
  public:
-  explicit EngineRuntimeV1(Engine& engine) : engine_(engine) {}
+  explicit EngineRuntimeV2(Engine& engine) : engine_(engine) {}
+
+  ibmw::extension::RuntimeGraphV1& GetRuntimeGraph() override {
+    return engine_.GetRuntimeGraphSubsystem();
+  }
 
   uint32_t AbiVersion() const noexcept override {
-    return ibmw::extension::kRuntimeAbiVersionV1;
+    return ibmw::extension::kRuntimeAbiVersionV2;
   }
 
   YAML::Node GetExtensionOptions(std::string_view name) const override {
@@ -55,7 +60,7 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
     return engine_.GetServiceDispatcher().GetRpcAccess().NativeHandle();
   }
 
-  std::vector<ibmw::extension::TransportEndpoint>
+  std::vector<ibmw::extension::TransportEndpointV2>
   GetTransportEndpoints() const override {
     namespace ext = ibmw::extension;
     namespace transport = ibmw::runtime::core::transport;
@@ -85,7 +90,7 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
         bus.GetTransportDriverDispatcher().GetPubTopicDriverInfo();
     const auto subscriber_drivers =
         bus.GetTransportDriverDispatcher().GetSubTopicDriverInfo();
-    std::vector<ext::TransportEndpoint> result;
+    std::vector<ext::TransportEndpointV2> result;
 
     const auto append = [&](const auto& topic_map, const auto& driver_map,
                             bool published) {
@@ -99,7 +104,7 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
           }
         }
         for (const auto* wrapper : wrappers) {
-          ext::TransportEndpoint endpoint{
+          ext::TransportEndpointV2 endpoint{
               .published = published,
               .topic = std::string(topic_name),
               .msg_type = wrapper->info.msg_type,
@@ -109,67 +114,6 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
               .type_support = wrapper->info.msg_type_support_ref,
               .drivers = endpoint_drivers};
 
-          const std::string serialization_type(
-              endpoint.type_support.DefaultSerializationType());
-          const ibmw::transport::TopicDescriptor topic{
-              .topic = endpoint.topic,
-              .msg_type = endpoint.msg_type,
-              .serialization_type = serialization_type};
-          for (const auto& driver_name : endpoint_drivers) {
-            const auto driver = drivers.find(driver_name);
-            if (driver == drivers.end()) {
-              continue;
-            }
-            if (const auto* qos_provider = dynamic_cast<
-                    transport::EndpointQosProvider*>(driver->second)) {
-              auto qos = published
-                             ? qos_provider->PublisherQos(
-                                   endpoint.topic, endpoint.msg_type)
-                             : qos_provider->SubscriberQos(
-                                   endpoint.topic, endpoint.msg_type);
-              if (!qos.Empty()) {
-                endpoint.qos = std::move(qos);
-              }
-            }
-
-            ext::TransportCaptureCapabilityV1 advertised;
-            const auto* capability =
-                bus.GetSerializedTransportCapability(*driver->second);
-            if (capability != nullptr && capability->HasValidContract()) {
-              advertised.abi_version = capability->abi_version;
-              advertised.priority = capability->capture_priority;
-              advertised.supports_topic =
-                  capability->capture_mode !=
-                      transport::SerializedCaptureMode::kNativeSerialized ||
-                  capability->operations.supports_topic(
-                      capability->operations.context, topic);
-              if (capability->capture_mode ==
-                  transport::SerializedCaptureMode::kNativeSerialized) {
-                advertised.mode = ext::CaptureMode::kNativeSerialized;
-              } else if (capability->capture_mode ==
-                         transport::SerializedCaptureMode::kCachedSerialized) {
-                advertised.mode = ext::CaptureMode::kCachedSerialized;
-              }
-              advertised.extension_name = capability->provider_name;
-              advertised.provider_instance_option =
-                  capability->provider_instance_option;
-              advertised.provider_clear_option =
-                  capability->provider_clear_option;
-              advertised.provider_strip_leading_slash_option =
-                  capability->provider_strip_leading_slash_option;
-              const auto extension =
-                  extension_configs.find(advertised.extension_name);
-              const auto config = driver_configs.find(driver_name);
-              if (extension != extension_configs.end() &&
-                  config != driver_configs.end()) {
-                advertised.extension_path = extension->second.first;
-                advertised.extension_options_yaml = extension->second.second;
-                advertised.driver_options_yaml = config->second;
-              }
-            }
-            endpoint.capture_capabilities.emplace(
-                driver_name, std::move(advertised));
-          }
           result.emplace_back(std::move(endpoint));
         }
       }
@@ -177,6 +121,88 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
 
     append(catalog->GetPubTopicIndexMap(), publisher_drivers, true);
     append(catalog->GetSubTopicIndexMap(), subscriber_drivers, false);
+
+    for (const auto& pod : bus.GetTransportDriverDispatcher().GetLoanedPodTopics()) {
+      const auto& info = pod.info;
+      // Typed and POD registrations can describe the same logical publisher.
+      if (catalog->GetSendTypeWrapperPtr(
+              info.msg_type, info.topic_name, info.pkg_path, info.module_name)) {
+        continue;
+      }
+      result.emplace_back(ext::TransportEndpointV2{
+          .published = true,
+          .topic = info.topic_name,
+          .msg_type = info.msg_type,
+          .package_path = info.pkg_path,
+          .module_name = info.module_name,
+          .index = info.index,
+          .type_support = info.msg_type_support_ref,
+          .drivers = {pod.driver}});
+    }
+
+    for (auto& endpoint : result) {
+      const std::string serialization_type(
+          endpoint.type_support.DefaultSerializationType());
+      const ibmw::transport::TopicDescriptor topic{
+          .topic = endpoint.topic,
+          .msg_type = endpoint.msg_type,
+          .serialization_type = serialization_type};
+      for (const auto& driver_name : endpoint.drivers) {
+        // Keep an entry even when a driver cannot report QoS.
+        auto& driver_qos = endpoint.driver_qos[driver_name];
+        const auto driver = drivers.find(driver_name);
+        if (driver == drivers.end()) {
+          continue;
+        }
+        const auto* capability =
+            bus.GetSerializedTransportCapability(*driver->second);
+        const bool valid_capability =
+            capability != nullptr && capability->HasValidContract();
+        const auto qos_query = valid_capability
+                                   ? (endpoint.published
+                                          ? capability->operations.publisher_qos
+                                          : capability->operations.subscriber_qos)
+                                   : nullptr;
+        if (qos_query != nullptr) {
+          driver_qos = qos_query(capability->operations.context,
+                                endpoint.topic, endpoint.msg_type);
+        }
+        // A single transport's QoS is also consumed by bag storage and playback.
+        if (endpoint.drivers.size() == 1) endpoint.qos = driver_qos;
+
+        ext::TransportCaptureCapabilityV1 advertised;
+        if (valid_capability) {
+          advertised.abi_version = capability->abi_version;
+          advertised.priority = capability->capture_priority;
+          advertised.supports_topic =
+              !serialization_type.empty() &&
+              (capability->capture_mode !=
+                   transport::SerializedCaptureMode::kNativeSerialized ||
+               capability->operations.supports_topic(
+                   capability->operations.context, topic));
+          if (capability->capture_mode ==
+              transport::SerializedCaptureMode::kNativeSerialized) {
+            advertised.mode = ext::CaptureMode::kNativeSerialized;
+          } else if (capability->capture_mode ==
+                     transport::SerializedCaptureMode::kCachedSerialized) {
+            advertised.mode = ext::CaptureMode::kCachedSerialized;
+          }
+          advertised.extension_name = capability->provider_name;
+          advertised.provider_instance_option = capability->provider_instance_option;
+          advertised.provider_clear_option = capability->provider_clear_option;
+          advertised.provider_strip_leading_slash_option =
+              capability->provider_strip_leading_slash_option;
+          const auto extension = extension_configs.find(advertised.extension_name);
+          const auto config = driver_configs.find(driver_name);
+          if (extension != extension_configs.end() && config != driver_configs.end()) {
+            advertised.extension_path = extension->second.first;
+            advertised.extension_options_yaml = extension->second.second;
+            advertised.driver_options_yaml = config->second;
+          }
+        }
+        endpoint.capture_capabilities.emplace(driver_name, std::move(advertised));
+      }
+    }
     return result;
   }
 
@@ -319,6 +345,8 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
           return Subsystem::kModule;
         case ibmw::extension::RuntimeSubsystem::kAll:
           return Subsystem::kCount;
+        case ibmw::extension::RuntimeSubsystem::kRuntimeGraph:
+          return Subsystem::kRuntimeGraph;
       }
       return Subsystem::kCount;
     }();
@@ -334,9 +362,9 @@ class EngineRuntimeV1 final : public ibmw::extension::RuntimeV1 {
 
 }  // namespace
 
-std::unique_ptr<ibmw::extension::RuntimeV1> MakeExtensionRuntimeV1(
+std::unique_ptr<ibmw::extension::RuntimeV2> MakeExtensionRuntimeV2(
     Engine& engine) {
-  return std::make_unique<EngineRuntimeV1>(engine);
+  return std::make_unique<EngineRuntimeV2>(engine);
 }
 
 }  // namespace ibmw::runtime::core::extension
