@@ -525,5 +525,82 @@ TEST(ShmRegressionTest, ConnectionDoesNotRetainSegmentFd) {
   EXPECT_EQ(CountOpenFds() - before, 2 * 10);
 }
 
+// RG-14 (found by the extension tests) A lossless subscriber's queue capacity
+// covers samples parked for an unacknowledged new segment too: a publisher
+// whose pool grows while the ring is full blocks instead of buffering more.
+TEST(ShmRegressionTest, LosslessCapacityIncludesPendingSegments) {
+  auto url = UniqueUrl("rg14");
+  PublisherOptions po;
+  po.too_slow = TooSlowPolicy::kWaitForConsumer;
+  po.block_timeout = 50ms;
+  po.pools = {{64, 16}};
+  Publisher pub(url, po);
+  Subscriber sub(url, SubscriberOptions{4, QueueFullPolicy::kBlockProducer, 4});
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  auto publish = [&](uint32_t size, uint64_t seq) {
+    auto l = pub.Loan(size);
+    ASSERT_TRUE(l.ok()) << ErrorName(l.error());
+    test::FillPattern(*l, size, seq);
+    pub.Publish(*l);
+  };
+  for (uint64_t s = 1; s <= 4; ++s) publish(64, s);  // ring full
+  // Each new size class creates a segment the subscriber has not mapped yet.
+  for (uint64_t s = 5; s <= 8; ++s) publish(static_cast<uint32_t>(64u << (s - 4)), s);
+  auto st = pub.Stats();
+  EXPECT_EQ(st.deliveries, 4u);
+  EXPECT_EQ(st.block_timeouts, 4u);
+  for (uint64_t s = 1; s <= 4; ++s) {
+    auto t = sub.Take();
+    ASSERT_TRUE(t.ok());
+    EXPECT_EQ(CheckPattern(*t, 64), s);
+    sub.Release(*t);
+  }
+  EXPECT_FALSE(sub.Take().ok());
+}
+
+// RG-15 (found by PS-16 repeats) Take() loaded the read index before the write
+// index; an evicting publisher can advance both in between, so a healthy ring
+// looked more than capacity behind and the subscriber dropped it as corrupt.
+TEST(ShmRegressionTest, EvictionRaceIsNotCorruption) {
+  auto url = UniqueUrl("rg15");
+  Publisher pub(url);
+  Subscriber sub(url, SubscriberOptions{2, QueueFullPolicy::kDiscardOldest, 4});
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  constexpr int kThreads = 2, kPerThread = 100000;
+  std::atomic<bool> done{false};
+  std::atomic<uint64_t> taken{0};
+  std::thread consumer([&] {
+    while (!done.load()) {
+      auto t = sub.Take();
+      if (!t) continue;
+      sub.Release(*t);
+      taken.fetch_add(1);
+    }
+  });
+  std::vector<std::thread> producers;
+  for (int t = 0; t < kThreads; ++t) {
+    producers.emplace_back([&] {
+      for (int i = 0; i < kPerThread; ++i) {
+        auto l = pub.Loan(64);
+        if (!l) {
+          --i;
+          continue;
+        }
+        pub.Publish(*l);
+      }
+    });
+  }
+  for (auto& p : producers) p.join();
+  EXPECT_TRUE(WaitFor([&] {
+    auto st = pub.Stats();
+    return taken.load() + st.evictions == st.deliveries;
+  }));
+  done = true;
+  consumer.join();
+  EXPECT_EQ(sub.Stats().corrupted_connections, 0u);
+  EXPECT_EQ(pub.Stats().corrupted_connections, 0u);
+  EXPECT_EQ(sub.Stats().connections, 1u);
+}
+
 }  // namespace
 }  // namespace ibmw::selfdev::shm

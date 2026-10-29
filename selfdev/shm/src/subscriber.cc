@@ -365,6 +365,10 @@ Result<const void*> SubscriberImpl::Take() noexcept {
         break;
       }
       if (w - r > c.capacity) {
+        // r was loaded before w, and an evicting publisher may have advanced
+        // both in between. Only a read index loaded after w is bounded by it.
+        uint64_t r2 = h->delivery_read.load(std::memory_order_acquire);
+        if (r2 >= w || w - r2 <= c.capacity) continue;
         MarkCorruptLocked(c);
         break;
       }

@@ -288,6 +288,8 @@ TEST(ShmPubSubTest, DiscoveryOrderAndIsolation) {
 }
 
 // PS-12 Steady-state publishing recycles chunks: no pool growth, no leaks.
+// Each sample is consumed before the next is published, so none may be lost
+// (a sample parked for a new segment's ack arrives once the ack is in).
 TEST(ShmPubSubTest, ChunkRecycling) {
   auto url = UniqueUrl("ps12");
   Publisher pub(url);
@@ -300,28 +302,25 @@ TEST(ShmPubSubTest, ChunkRecycling) {
     ASSERT_TRUE(l.ok()) << i << " " << ErrorName(l.error());
     FillPattern(*l, 512, i);
     pub.Publish(*l);
-    while (auto t = sub.Take()) {
-      EXPECT_NE(CheckPattern(*t, 512), ~0ull);
-      sub.Release(*t);
-      ++received;
-    }
+    bool got = false;
+    ASSERT_TRUE(WaitFor([&] {
+      while (auto t = sub.Take()) {
+        EXPECT_EQ(CheckPattern(*t, 512), static_cast<uint64_t>(i));
+        sub.Release(*t);
+        ++received;
+        got = true;
+      }
+      return got;
+    })) << "sample " << i << " never arrived";
   }
-  // Chunks parked for a segment ack are flushed by the control thread.
-  WaitFor([&] {
-    while (auto t = sub.Take()) {
-      sub.Release(*t);
-      ++received;
-    }
-    auto s = pub.Stats();
-    return static_cast<uint64_t>(received) + s.evictions == s.deliveries;
-  });
   auto st = pub.Stats();
   // Queue (4) + held (4) + loans (8) bounds the live chunks; growth roughly
   // doubles, so a handful of segments at most.
   EXPECT_LE(st.segments, 4u);
   EXPECT_EQ(st.bad_returns, 0u);
-  EXPECT_GT(received, kMessages / 2);
-  EXPECT_EQ(static_cast<uint64_t>(received) + st.evictions, st.deliveries);
+  EXPECT_EQ(st.evictions, 0u);
+  EXPECT_EQ(received, kMessages);
+  EXPECT_EQ(st.deliveries, static_cast<uint64_t>(kMessages));
 }
 
 // PS-13 max_held: Take refuses beyond the limit until something is released.
@@ -419,6 +418,9 @@ TEST(ShmPubSubTest, ConcurrentThreads) {
   std::atomic<bool> done{false};
   std::atomic<uint64_t> taken{0}, corrupt{0};
   auto consume = [&](Subscriber& s) {
+    // Samples may still sit in the publisher's pending list (segment not yet
+    // acked) after the producers finish, so run until the main thread has
+    // seen the accounting settle instead of stopping on !HasData().
     while (!done.load() || s.HasData()) {
       auto t = s.Take();
       if (!t) {
@@ -449,6 +451,10 @@ TEST(ShmPubSubTest, ConcurrentThreads) {
     });
   }
   for (auto& p : producers) p.join();
+  EXPECT_TRUE(WaitFor([&] {
+    auto st = pub.Stats();
+    return taken.load() + st.evictions == st.deliveries;
+  }));
   done = true;
   c1.join();
   c2.join();
@@ -457,6 +463,9 @@ TEST(ShmPubSubTest, ConcurrentThreads) {
   EXPECT_EQ(st.publishes, published.load());
   EXPECT_EQ(corrupt.load(), 0u);
   EXPECT_EQ(st.bad_returns, 0u);
+  EXPECT_EQ(st.corrupted_connections, 0u);
+  EXPECT_EQ(s1.Stats().corrupted_connections, 0u);
+  EXPECT_EQ(s2.Stats().corrupted_connections, 0u);
   EXPECT_EQ(taken.load() + st.evictions, st.deliveries);
 }
 

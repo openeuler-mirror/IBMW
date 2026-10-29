@@ -477,7 +477,16 @@ PublisherImpl::Delivery PublisherImpl::DeliverLocked(PubConn& conn, uint64_t han
     }
   } else {
     // Subscriber has not mapped this segment yet: hold the chunk privately.
-    if (conn.pending.size() >= conn.capacity) {
+    // For a lossless subscriber the ring and the private list share one
+    // capacity, otherwise a growing pool would buffer up to twice the queue
+    // without blocking. A segment ack flushes and wakes blocked producers.
+    size_t queued = conn.pending.size();
+    if (conn.blocking && conn.state == PubConn::State::kActive) {
+      uint64_t r = conn.hdr->delivery_read.load(std::memory_order_acquire);
+      uint64_t w = conn.delivery_write;
+      queued += (r <= w && w - r <= conn.capacity) ? static_cast<size_t>(w - r) : conn.capacity;
+    }
+    if (queued >= conn.capacity) {
       if (conn.blocking) return flushed ? Delivery::kFullFlushed : Delivery::kFull;
       ReclaimLocked(conn, conn.pending.front());
       conn.pending.pop_front();
