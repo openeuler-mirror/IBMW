@@ -66,6 +66,16 @@ class GatedExecutor {
     std::lock_guard lock(mutex_);
     return tasks_.size();
   }
+  // Destroys queued tasks without running them (an executor shutting down).
+  void DiscardAll() {
+    std::deque<executor::Task> dropped;
+    {
+      std::lock_guard lock(mutex_);
+      dropped.swap(tasks_);
+    }
+  }
+  // Makes the transport believe it is shut down from this executor.
+  void PretendCurrent() { pretend_current_ = true; }
   executor::ExecutorHandle Handle() { return executor::ExecutorHandle(&base_); }
 
  private:
@@ -76,12 +86,16 @@ class GatedExecutor {
   std::deque<executor::Task> tasks_;
   bool released_ = false;
   bool stop_ = false;
+  std::atomic<bool> pretend_current_{false};
   std::thread worker_;
   ibmw_executor_base_t base_{
       .type = [](void*) { return ibmw::util::ToIbmwStringView("gated"); },
       .name = [](void*) { return ibmw::util::ToIbmwStringView("gated"); },
       .is_thread_safe = [](void*) { return true; },
-      .is_in_current_executor = [](void* ctx) { return std::this_thread::get_id() == Self(ctx)->worker_.get_id(); },
+      .is_in_current_executor =
+          [](void* ctx) {
+            return Self(ctx)->pretend_current_.load() || std::this_thread::get_id() == Self(ctx)->worker_.get_id();
+          },
       .supports_timed_dispatch = [](void*) { return false; },
       .dispatch =
           [](void* ctx, ibmw_function_base_t* task) {
@@ -173,6 +187,45 @@ TEST(InProcessTransportTest, ShutdownDrainsQueuedAsyncDeliveries) {
   EXPECT_EQ(shutdown.wait_for(5s), std::future_status::ready);
   EXPECT_EQ(f.calls.load(), 1);
   EXPECT_EQ(f.last_value.load(), 7);
+}
+
+// A delivery the executor discards after an incomplete drain (here: shutdown
+// from the subscriber executor) releases its token after the transport is
+// destroyed; the counter must outlive the transport (run under ASan).
+TEST(InProcessTransportTest, DiscardedDeliveryAfterTransportDestroyedIsSafe) {
+  GatedExecutor executor;
+  {
+    auto f = std::make_unique<Fixture>();
+    f->transport.RegisterGetExecutorFunc([&](std::string_view) { return executor.Handle(); });
+    f->transport.SetTransportCatalog(&f->catalog);
+    f->transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false, subscriber_executor: gated}"));
+    f->Subscribe(Info("pkg", "sub", IntTypeSupport<0>()));
+    f->transport.Start();
+    f->Publish(Info("pkg", "pub", IntTypeSupport<0>()), 7);
+    ASSERT_EQ(executor.Queued(), 1u);
+
+    executor.PretendCurrent();
+    f->transport.Shutdown();  // drain skipped
+  }
+  executor.DiscardAll();
+  SUCCEED();
+}
+
+TEST(InProcessTransportTest, PublishWithoutSubscribersTakesNoToken) {
+  GatedExecutor executor;
+  Fixture f;
+  f.transport.RegisterGetExecutorFunc([&](std::string_view) { return executor.Handle(); });
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false, subscriber_executor: gated}"));
+  f.Subscribe(Info("pkg", "sub", IntTypeSupport<0>()));
+  f.transport.Start();
+  auto other = Info("pkg", "pub", IntTypeSupport<0>());
+  other.topic_name = "/nobody";
+  f.Publish(other, 1);
+  EXPECT_EQ(executor.Queued(), 0u);
+  // Nothing in flight: Shutdown returns without waiting.
+  auto shutdown = std::async(std::launch::async, [&] { f.transport.Shutdown(); });
+  EXPECT_EQ(shutdown.wait_for(1s), std::future_status::ready);
 }
 
 TEST(InProcessTransportTest, CrossPackageCopyRequiresSharedTypeSupport) {

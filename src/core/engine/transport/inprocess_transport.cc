@@ -87,13 +87,24 @@ void InProcessTransport::Start() {
       "Method can only be called when state is 'Init'.");
 }
 
+InProcessTransport::~InProcessTransport() {
+  if (inflight_->value.load(std::memory_order_acquire) == 0) {
+    delete inflight_;
+  }
+  // Otherwise discarded delivery tasks may still release their token: the
+  // small counter block is deliberately leaked (already reported by
+  // DrainInflight()).
+}
+
 void InProcessTransport::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
   if (subscribe_executor_ref_) DrainInflight();
 
-  subscribe_index_map_.clear();
+  // subscribe_index_map_ is immutable after Start() and is read by Send()
+  // before it takes its in-flight token, so it is only released with the
+  // driver itself.
 
   get_executor_func_ = nullptr;
 }
@@ -106,13 +117,13 @@ void InProcessTransport::DrainInflight() {
   }
   // Pairs with the seq_cst increment in Send(): either Send() observes
   // kShutdown, or this load observes its increment.
-  if (inflight_.load(std::memory_order_seq_cst) == 0) return;
+  if (inflight_->value.load(std::memory_order_seq_cst) == 0) return;
   const auto deadline = std::chrono::steady_clock::now() + kShutdownDrainTimeout;
-  while (inflight_.load(std::memory_order_acquire) != 0) {
+  while (inflight_->value.load(std::memory_order_acquire) != 0) {
     if (std::chrono::steady_clock::now() >= deadline) {
       MW_ERROR("Local transport shutdown timed out with {} delivery(ies) "
                "still pending on executor '{}'.",
-               inflight_.load(std::memory_order_relaxed), options_.subscriber_executor);
+               inflight_->value.load(std::memory_order_relaxed), options_.subscriber_executor);
       return;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -171,9 +182,6 @@ bool InProcessTransport::OnMessage(const MessageHandlerWrapper& message_handler)
 
 void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
   try {
-    std::optional<InflightToken> send_token;
-    if (subscribe_executor_ref_) send_token.emplace(inflight_, std::memory_order_seq_cst);
-
     if (state_.load() != State::kStart) [[unlikely]] {
       MW_WARN("Method can only be called when state is 'Start'.");
       return;
@@ -189,6 +197,17 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
     auto subscribe_index_map_find_topic_itr = subscribe_index_map_find_msg_itr->second.find(pub_info.topic_name);
     if (subscribe_index_map_find_topic_itr == subscribe_index_map_find_msg_itr->second.end()) [[unlikely]]
       return;
+
+    // Only deliveries need the in-flight token (catalog handlers, executor
+    // tasks), so publishing without subscribers stays free of it. The
+    // seq_cst increment followed by the state re-check pairs with the
+    // exchange + load in Shutdown()/DrainInflight().
+    std::optional<InflightToken> send_token;
+    if (subscribe_executor_ref_) {
+      send_token.emplace(*inflight_, std::memory_order_seq_cst);
+      if (state_.load() != State::kStart) [[unlikely]]
+        return;
+    }
 
     // Determine the serialization type
     auto serialization_type = msg_wrapper.ctx_ref.GetSerializationType();
@@ -290,7 +309,7 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
           if (subscribe_executor_ref_) {
             subscribe_executor_ref_.Dispatch(
                 [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
-                 token = InflightToken(inflight_, std::memory_order_relaxed)]() mutable {
+                 token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
                   msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
                 });
           } else {
@@ -334,7 +353,7 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
           if (subscribe_executor_ref_) {
             subscribe_executor_ref_.Dispatch(
                 [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
-                 token = InflightToken(inflight_, std::memory_order_relaxed)]() mutable {
+                 token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
                   msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
                 });
           } else {

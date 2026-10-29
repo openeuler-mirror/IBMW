@@ -87,6 +87,39 @@ TEST_F(InProcessServiceTest, NonStdExceptionFromServiceFuncIsContained) {
   EXPECT_EQ(**result, static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
 }
 
+// COMM-015: a server that keeps the answer callback and then throws gets
+// exactly one completion (the error) and its record must not linger; a late
+// answer is ignored.
+TEST_F(InProcessServiceTest, ThrowAfterKeepingCallbackCompletesOnceAndReleasesRecord) {
+  std::shared_ptr<ServiceMessageFrame> pending;
+  SetUpService([&pending](const std::shared_ptr<ServiceMessageFrame>& frame) {
+    pending = frame;
+    throw std::runtime_error("boom");
+  });
+
+  int completions = 0;
+  uint32_t last_code = 0;
+  std::weak_ptr<ServiceMessageFrame> weak_frame;
+  {
+    auto frame = std::make_shared<ServiceMessageFrame>(ServiceMessageFrame{
+        .info = client_info_, .req_ptr = &req_, .rsp_ptr = &rsp_, .ctx_ref = client_ctx_});
+    frame->callback = [&](ibmw::rpc::Status status) {
+      ++completions;
+      last_code = status.Code();
+    };
+    weak_frame = frame;
+    driver_->Call(frame);
+  }
+  EXPECT_EQ(completions, 1);
+  EXPECT_EQ(last_code, static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
+  // Only the driver's record could still keep the client frame alive.
+  EXPECT_TRUE(weak_frame.expired());
+
+  ASSERT_TRUE(pending);
+  pending->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+  EXPECT_EQ(completions, 1);
+}
+
 // COMM-010: a server answering after the driver was shut down and destroyed
 // must not touch the driver; the client still gets the answer.
 TEST_F(InProcessServiceTest, LateAnswerAfterDriverDestroyedIsSafe) {

@@ -2,6 +2,9 @@
 // All rights reserved.
 
 #include "engine/service/inprocess_service.h"
+
+#include <optional>
+
 #include "engine/service/service_driver_tools.h"
 #include "base/string_util.h"
 #include "base/url_parser.h"
@@ -81,8 +84,9 @@ void InProcessServiceDriver::Shutdown() {
 
   service_func_register_index_.clear();
 
-  // Pending callbacks keep their own reference.
-  cb_ctx_ptr_.reset();
+  // cb_ctx_ptr_ is deliberately kept until the driver is destroyed: a Call
+  // racing with Shutdown may still read it. Pending callbacks hold their own
+  // reference, so late answers stay safe after the driver is gone.
 
   get_executor_func_ = nullptr;
 }
@@ -123,12 +127,29 @@ bool InProcessServiceDriver::RegisterClientFunc(
 
 void InProcessServiceDriver::Call(
     const std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
+  // Once the call is recorded, every failure completion must claim the
+  // record first, so that the result is delivered exactly once whichever of
+  // the server answer, the timeout or the failure path gets there first
+  // (COMM-015).
+  // cb_ctx_ptr_ lives as long as the driver, so a raw pointer is enough here.
+  CallbackContext* cb_ctx = nullptr;
+  std::optional<uint32_t> recorded_req_id;
+  auto fail = [&](uint32_t code) {
+    if (!recorded_req_id) {
+      CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(code));
+      return;
+    }
+    if (auto record = cb_ctx->client_tool.GetRecord(*recorded_req_id))
+      CallResultCallback(**record, ibmw::rpc::Status(code));
+  };
+
   try {
     if (state_.load() != State::kStart) [[unlikely]] {
       MW_WARN("Method can only be called when state is 'Start'.");
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
       return;
     }
+    cb_ctx = cb_ctx_ptr_.get();
 
     // Check ctx
     std::string_view service_pkg_path, service_module_name;
@@ -268,12 +289,13 @@ void InProcessServiceDriver::Call(
       uint32_t cur_req_id = req_id_++;
       auto record_ptr = client_call_wrapper_ptr;
 
-      bool ret = cb_ctx_ptr_->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
+      bool ret = cb_ctx->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
       if (!ret) [[unlikely]] {
         MW_ERROR("Failed to record msg.");
         CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
         return;
       }
+      recorded_req_id = cur_req_id;
 
       // Note: ctx_ptr is captured for lifetime — the server may access the
       // context asynchronously.  service_invoke_wrapper_ptr is NOT captured
@@ -295,7 +317,7 @@ void InProcessServiceDriver::Call(
     uint32_t cur_req_id = req_id_++;
     auto record_ptr = client_call_wrapper_ptr;
 
-    bool ret = cb_ctx_ptr_->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
+    bool ret = cb_ctx->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
 
     if (!ret) [[unlikely]] {
       // It is unlikely to appear generally
@@ -303,6 +325,7 @@ void InProcessServiceDriver::Call(
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
       return;
     }
+    recorded_req_id = cur_req_id;
 
     // client req serialization
     std::string serialization_type(client_call_wrapper_ptr->ctx_ref.GetSerializationType());
@@ -314,7 +337,7 @@ void InProcessServiceDriver::Call(
           "Req serialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
           serialization_type, client_info.pkg_path, client_info.module_name, client_info.func_name);
 
-      CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED));
+      fail(IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED);
       return;
     }
 
@@ -333,7 +356,7 @@ void InProcessServiceDriver::Call(
           "Rsp deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
           serialization_type, service_info.pkg_path, service_info.module_name, service_info.func_name);
 
-      CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DESERIALIZATION_FAILED));
+      fail(IBMW_RPC_STATUS_CLI_DESERIALIZATION_FAILED);
       return;
     }
 
@@ -364,13 +387,13 @@ void InProcessServiceDriver::Call(
     // Call service rpc
     service_func_wrapper_ptr->service_func(service_invoke_wrapper_ptr);
   } catch (const std::exception& e) {
-    // Includes exceptions thrown by service_func itself. CallResultCallback()
-    // is a no-op if a result was already delivered.
+    // Includes exceptions thrown by service_func itself, which may still own
+    // the answer callback: fail() only completes if it wins the record.
     MW_ERROR("Local service call failed: {}", e.what());
-    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
+    fail(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR);
   } catch (...) {
     MW_ERROR("Local service call failed with a non-std exception.");
-    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
+    fail(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR);
   }
 }
 

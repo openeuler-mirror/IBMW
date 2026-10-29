@@ -235,36 +235,44 @@ CachedTransportSubscriptionRegistry::Attach(
     std::lock_guard lock(mutex_);
     handlers_.emplace_back(std::move(handler));
   }
-  MW_ASSERT(
-      driver.OnMessage(*handler_ptr),
-      "Driver '{}' rejected cached serialized subscription for '{}'.",
-      driver.Name(), advertisement.topic.topic);
-  auto loaned_handler = std::make_unique<
-      ibmw::runtime::core::transport::LoanedMessageHandlerWrapper>();
-  loaned_handler->info = handler_ptr->info;
-  loaned_handler->callback =
-      [state, info = loaned_handler->info](
-          const ibmw_transport_context_base_t* context,
-          const void* payload,
-          size_t payload_size,
-          std::function<void()>&& release) {
-        static_cast<void>(payload_size);
-        ibmw::runtime::core::transport::MessageFrame frame{
-            .info = info,
-            .msg_ptr = payload,
-            .ctx_ref = ibmw::transport::ContextRef(context)};
-        DeliverFrame(state, frame, true, std::move(release));
-      };
-  auto* loaned_handler_ptr = loaned_handler.get();
-  {
-    std::lock_guard lock(mutex_);
-    loaned_handlers_.emplace_back(std::move(loaned_handler));
-  }
-  // Kept even if rejected: a driver may have stored the callback anyway.
-  static_cast<void>(driver.AttachLoaned(*loaned_handler_ptr));
-  {
-    std::lock_guard lock(mutex_);
-    states_.emplace(subscription_key, state);
+  try {
+    MW_ASSERT(
+        driver.OnMessage(*handler_ptr),
+        "Driver '{}' rejected cached serialized subscription for '{}'.",
+        driver.Name(), advertisement.topic.topic);
+    auto loaned_handler = std::make_unique<
+        ibmw::runtime::core::transport::LoanedMessageHandlerWrapper>();
+    loaned_handler->info = handler_ptr->info;
+    loaned_handler->callback =
+        [state, info = loaned_handler->info](
+            const ibmw_transport_context_base_t* context,
+            const void* payload,
+            size_t payload_size,
+            std::function<void()>&& release) {
+          static_cast<void>(payload_size);
+          ibmw::runtime::core::transport::MessageFrame frame{
+              .info = info,
+              .msg_ptr = payload,
+              .ctx_ref = ibmw::transport::ContextRef(context)};
+          DeliverFrame(state, frame, true, std::move(release));
+        };
+    auto* loaned_handler_ptr = loaned_handler.get();
+    {
+      std::lock_guard lock(mutex_);
+      loaned_handlers_.emplace_back(std::move(loaned_handler));
+    }
+    // Kept even if rejected: a driver may have stored the callback anyway.
+    static_cast<void>(driver.AttachLoaned(*loaned_handler_ptr));
+    {
+      std::lock_guard lock(mutex_);
+      states_.emplace(subscription_key, state);
+    }
+  } catch (...) {
+    // The driver may still hold (and call) the handlers: make sure a failed
+    // subscription never reaches the user callback.
+    std::lock_guard lock(state->mutex);
+    state->active = false;
+    throw;
   }
   return state;
 }
