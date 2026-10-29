@@ -166,9 +166,11 @@ void MqttRpcDriver::Shutdown() {
 
   UnSubscribeMqttTopic();
 
-  client_tool_ptr_.reset();
-
+  // Wait for in-flight response handlers before releasing the client tool
+  // they use (TRANS-015).
   msg_handle_catalog_ptr_->Shutdown();
+
+  client_tool_ptr_.reset();
 }
 
 bool MqttRpcDriver::RegisterServiceFunc(
@@ -660,9 +662,15 @@ void MqttRpcDriver::Call(
 
     MW_TRACE("Mqtt publish to '{}'", mqtt_pub_topic);
     int rc = MQTTAsync_sendMessage(client_, mqtt_pub_topic.data(), &pubmsg, NULL);
-    MW_CHECK_WARN(rc == MQTTASYNC_SUCCESS,
-                     "publish mqtt msg failed, topic: {}, code: {}",
-                     mqtt_pub_topic, rc);
+    if (rc != MQTTASYNC_SUCCESS) [[unlikely]] {
+      MW_WARN("publish mqtt msg failed, topic: {}, code: {}", mqtt_pub_topic, rc);
+      // Fail the call now instead of leaving it to the timeout (or forever
+      // when no timeout executor is configured) (TRANS-014). The record may
+      // already be gone if a timeout raced us.
+      if (auto record = client_tool_ptr_->GetRecord(cur_req_id)) {
+        CallResultCallback(**record, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED));
+      }
+    }
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
   }
