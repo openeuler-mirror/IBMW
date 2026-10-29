@@ -21,6 +21,7 @@ class ServerSession : public Session {
   int ParseRecvMessage(std::string_view in) override;
 
   void OnFullRequest(const RequestPtr& request_ptr);
+  [[nodiscard]] size_t MaxRequestBodySize() const { return settings_.max_request_body_size; }
   [[nodiscard]] std::forward_list<RequestPtr> GetFullRequestList();
 
  private:

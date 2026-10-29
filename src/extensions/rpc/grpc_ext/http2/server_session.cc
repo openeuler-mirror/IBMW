@@ -38,6 +38,7 @@ int OnFrameNotSendCallback(nghttp2_session* session, const nghttp2_frame* frame,
 }  // namespace
 
 int ServerSession::InitSession(Http2Settings settings) {
+  settings_ = settings;
   nghttp2_session_callbacks* callbacks = nullptr;
   auto new_ok = nghttp2_session_callbacks_new(&callbacks);
   if (new_ok != 0) {
@@ -311,7 +312,16 @@ int OnDataChunkRecvCallback(nghttp2_session* session, uint8_t flags, int32_t str
     return 0;
   }
 
-  auto request = stream->GetRequest();
+  const auto& request = stream->GetRequest();
+  if (len > server_session->MaxRequestBodySize() - request->GetBody().GetReadableSize()) [[unlikely]] {
+    // EXT-002: refuse the stream and drop what it buffered; later frames of
+    // the stream find no stream and are ignored.
+    MW_WARN("Request body of stream {} exceeds {} bytes, stream reset.", stream_id,
+            server_session->MaxRequestBodySize());
+    server_session->SubmitReset(stream_id, NGHTTP2_ENHANCE_YOUR_CALM);
+    server_session->RemoveStream(stream_id);
+    return 0;
+  }
   request->Write(data, len);
 
   return 0;

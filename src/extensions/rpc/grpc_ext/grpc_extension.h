@@ -19,6 +19,8 @@ class GrpcExtension : public ExtensionBase {
     uint32_t thread_num = 2;
     std::string listen_ip = "";
     uint16_t listen_port = 0;
+    // Largest accepted request body (bytes) of the server.
+    uint32_t max_request_body_size = 16U << 20;
   };
 
  public:

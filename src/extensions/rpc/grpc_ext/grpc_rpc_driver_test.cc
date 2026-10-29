@@ -4,9 +4,11 @@
 // Regression tests for the gRPC service path (EXT-004): an answer given
 // inline or from another thread is never lost, a missing answer ends the
 // request by timeout, and a late answer is harmless.
+// EXT-002: an oversized request body is refused before it reaches the service.
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -98,7 +100,7 @@ void Answer(const std::shared_ptr<ServiceMessageFrame>& frame, uint32_t code) {
 // One driver serving "cdr:/test/svc" and calling itself over loopback.
 class GrpcRpcDriverTest : public ::testing::Test {
  protected:
-  void SetUpDriver(runtime::core::service::ServiceFunc func) {
+  void SetUpDriver(runtime::core::service::ServiceFunc func, size_t max_request_body_size = 16U << 20) {
     const uint16_t port = FreeTcpPort();
     svr_ = std::make_shared<server::AsioHttp2Server>(io_.Io());
     pool_ = std::make_shared<client::AsioHttp2ClientPool>(io_.Io());
@@ -117,7 +119,8 @@ class GrpcRpcDriverTest : public ::testing::Test {
     ASSERT_TRUE(driver_->RegisterServiceFunc(service_));
     ASSERT_TRUE(driver_->RegisterClientFunc(client_));
 
-    svr_->Initialize(server::ServerOptions{.ep = {asio::ip::address_v4::loopback(), port}});
+    svr_->Initialize(server::ServerOptions{.ep = {asio::ip::address_v4::loopback(), port},
+                                           .http2_settings = {.max_request_body_size = max_request_body_size}});
     svr_->Start();
     pool_->Initialize(client::ClientPoolOptions{});
     pool_->Start();
@@ -226,6 +229,32 @@ TEST_F(GrpcRpcDriverTest, MissingAnswerTimesOutAndLateAnswerIsHarmless) {
   code = Call(2, &rsp, 300ms);
   ASSERT_TRUE(code) << "server no longer answers";
   EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+}
+
+// A gRPC body is a 5 byte prefix plus the payload: "7" fits in 8 bytes,
+// "1234567890" does not.
+TEST_F(GrpcRpcDriverTest, OversizedRequestIsRefusedAndServerStaysHealthy) {
+  std::atomic<int> served{0};
+  SetUpDriver(
+      [&served](const std::shared_ptr<ServiceMessageFrame>& frame) {
+        ++served;
+        *static_cast<int*>(frame->rsp_ptr) = *static_cast<const int*>(frame->req_ptr) + 1;
+        Answer(frame, IBMW_RPC_STATUS_OK);
+      },
+      8);
+  int rsp = 0;
+  auto code = Call(1234567890, &rsp, 1s);
+  ASSERT_TRUE(code) << "no answer";
+  EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+  EXPECT_EQ(served.load(), 0);
+
+  for (int i = 0; i < 5; ++i) {
+    code = Call(7, &rsp);
+    ASSERT_TRUE(code) << "server no longer answers";
+    ASSERT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+    EXPECT_EQ(rsp, 8);
+  }
+  EXPECT_EQ(served.load(), 5);
 }
 
 }  // namespace

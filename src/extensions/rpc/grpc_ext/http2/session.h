@@ -54,6 +54,10 @@ class Session {
   struct Http2Settings {
     uint32_t max_concurrent_streams = 100;
     uint32_t initial_window_size = (1U << 31) - 1;
+    // Server only: a request whose body grows past this is reset
+    // (ENHANCE_YOUR_CALM). A connection can buffer up to
+    // max_concurrent_streams times this.
+    size_t max_request_body_size = 16U << 20;
   };
 
  public:

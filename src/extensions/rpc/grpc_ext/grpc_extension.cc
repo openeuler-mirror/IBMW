@@ -26,6 +26,7 @@ struct convert<ibmw::extensions::grpc_extension::GrpcExtension::Options> {
     if (!rhs.listen_ip.empty() && rhs.listen_port != 0) {
       node["listen_ip"] = rhs.listen_ip;
       node["listen_port"] = rhs.listen_port;
+      node["max_request_body_size"] = rhs.max_request_body_size;
     }
 
     return node;
@@ -42,6 +43,9 @@ struct convert<ibmw::extensions::grpc_extension::GrpcExtension::Options> {
 
     if (node["listen_port"])
       rhs.listen_port = node["listen_port"].as<uint16_t>();
+
+    if (node["max_request_body_size"])
+      rhs.max_request_body_size = node["max_request_body_size"].as<uint32_t>();
 
     return true;
   }
@@ -107,6 +111,7 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
           .http2_settings = {
               .max_concurrent_streams = 100,
               .initial_window_size = (1U << 31) - 1,
+              .max_request_body_size = options_.max_request_body_size,
           }});
       http2_svr_ptr_->Start();
     });
