@@ -113,7 +113,11 @@ void TimeManipulatorExecutor::Initialize(std::string_view name,
 
           while (!task_list.empty()) {
             auto itr = task_list.begin();
-            auto& cur_list = timing_wheel_vec_[ii].wheel[itr->tick_count % timing_wheel_vec_[ii].scale];
+            // Slot of the task within this level: its tick in units of the
+            // level below (scale / size), as in DispatchAt().
+            const auto& level = timing_wheel_vec_[ii];
+            auto& cur_list =
+                timing_wheel_vec_[ii].wheel[(itr->tick_count / (level.scale / level.wheel.size())) % level.wheel.size()];
             cur_list.splice(cur_list.end(), task_list, itr);
           }
         }});
@@ -129,7 +133,13 @@ void TimeManipulatorExecutor::Start() {
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
 
-  timer_thread_ptr_ = std::make_unique<std::thread>(std::bind(&TimeManipulatorExecutor::TimerLoop, this));
+  // EXT-017: the start point is known before any thread reads it.
+  const auto start_sys_tp = std::chrono::system_clock::now();
+  const auto start_std_tp = std::chrono::steady_clock::now();
+  start_time_point_.store(ibmw::common::util::GetTimestampNs(start_sys_tp), std::memory_order_relaxed);
+
+  timer_thread_ptr_ = std::make_unique<std::thread>(
+      [this, start_sys_tp, start_std_tp] { TimerLoop(start_sys_tp, start_std_tp); });
 
   start_flag_.wait(false);
 }
@@ -142,8 +152,12 @@ void TimeManipulatorExecutor::Shutdown() {
     timer_thread_ptr_->join();
 
   timer_thread_ptr_.reset();
-  timing_task_map_.clear();
-  timing_wheel_vec_.clear();
+  {
+    // DispatchAt() checks the state under this lock.
+    std::unique_lock<std::shared_mutex> lck(tick_mutex_);
+    timing_task_map_.clear();
+    timing_wheel_vec_.clear();
+  }
   get_executor_func_ = nullptr;
 }
 
@@ -168,42 +182,49 @@ std::chrono::system_clock::time_point TimeManipulatorExecutor::Now() const noexc
   std::shared_lock<std::shared_mutex> lck(tick_mutex_);
 
   return ibmw::common::util::GetTimePointFromTimestampNs(
-      current_tick_count_ * dt_count_ + start_time_point_);
+      current_tick_count_ * dt_count_ + start_time_point_.load(std::memory_order_relaxed));
 }
 
 void TimeManipulatorExecutor::DispatchAt(
     std::chrono::system_clock::time_point tp, ibmw::executor::Task&& task) noexcept {
   try {
-    uint64_t virtual_tp = ibmw::common::util::GetTimestampNs(tp) - start_time_point_;
+    const uint64_t tp_ns = ibmw::common::util::GetTimestampNs(tp);
+    const uint64_t start_ns = start_time_point_.load(std::memory_order_relaxed);
 
     std::unique_lock<std::shared_mutex> lck(tick_mutex_);
 
-    if (virtual_tp < current_tick_count_ * dt_count_) {
+    if (state_.load(std::memory_order_relaxed) == State::kShutdown) [[unlikely]] {
+      MW_WARN("Time manipulator executor '{}' is shut down, timed task dropped.", name_);
+      return;
+    }
+
+    // EXT-017: compare before subtracting; a time point before the start is due.
+    if (tp_ns < start_ns || tp_ns - start_ns < current_tick_count_ * dt_count_) {
       lck.unlock();
       bind_executor_ref_.Dispatch(std::move(task));
       return;
     }
 
-    // Current time point time_point_
-    uint64_t temp_current_tick_count = current_tick_count_;
-    uint64_t diff_tick_count = virtual_tp / dt_count_ - current_tick_count_;
+    // The slot of every level is derived from the target tick (the same
+    // placement the borrow step uses when moving tasks down a level).
+    const uint64_t task_tick = (tp_ns - start_ns) / dt_count_;
+    uint64_t target_tick = task_tick;
+    uint64_t diff_tick_count = target_tick - current_tick_count_;
 
     const size_t len = options_.wheel_size.size();
     for (size_t ii = 0; ii < len; ++ii) {
       if (diff_tick_count < options_.wheel_size[ii]) {
-        auto pos = (diff_tick_count + temp_current_tick_count) % options_.wheel_size[ii];
+        auto pos = target_tick % options_.wheel_size[ii];
 
         // TODO: Sorting tasks based on time and inserting them into it
-        timing_wheel_vec_[ii].wheel[pos].emplace_back(
-            TaskWithTimestamp{virtual_tp / dt_count_, std::move(task)});
+        timing_wheel_vec_[ii].wheel[pos].emplace_back(TaskWithTimestamp{task_tick, std::move(task)});
         return;
       }
       diff_tick_count /= options_.wheel_size[ii];
-      temp_current_tick_count /= options_.wheel_size[ii];
+      target_tick /= options_.wheel_size[ii];
     }
 
-    timing_task_map_[diff_tick_count + temp_current_tick_count].emplace_back(
-        TaskWithTimestamp{virtual_tp / dt_count_, std::move(task)});
+    timing_task_map_[target_tick].emplace_back(TaskWithTimestamp{task_tick, std::move(task)});
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
   }
@@ -252,7 +273,8 @@ double TimeManipulatorExecutor::GetTimeRatio() const {
   return 1.0 / real_ratio_;
 }
 
-void TimeManipulatorExecutor::TimerLoop() {
+void TimeManipulatorExecutor::TimerLoop(std::chrono::system_clock::time_point start_sys_tp,
+                                        std::chrono::steady_clock::time_point start_std_tp) {
   std::string threadname = name_;
 
   try {
@@ -264,14 +286,8 @@ void TimeManipulatorExecutor::TimerLoop() {
                Name(), e.what());
   }
 
-  auto last_loop_sys_tp = std::chrono::system_clock::now();
-  auto last_loop_std_tp = std::chrono::steady_clock::now();
-
-  // Record the initial time
-  start_time_point_ =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          (options_.use_system_clock ? last_loop_sys_tp.time_since_epoch() : last_loop_std_tp.time_since_epoch()))
-          .count();
+  auto last_loop_sys_tp = start_sys_tp;
+  auto last_loop_std_tp = start_std_tp;
 
   start_flag_.store(true);
   start_flag_.notify_all();

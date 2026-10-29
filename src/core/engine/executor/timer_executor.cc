@@ -108,9 +108,12 @@ void TimerExecutor::Initialize(std::string_view name,
 
           while (!task_list.empty()) {
             auto itr = task_list.begin();
+            // Slot of the task within this level: its tick in units of the
+            // level below (scale / size), as in DispatchAt().
+            const auto& level = timing_wheel_vec_[ii];
             auto& cur_list =
                 timing_wheel_vec_[ii]
-                    .wheel[itr->tick_count % timing_wheel_vec_[ii].wheel.size()];
+                    .wheel[(itr->tick_count / (level.scale / level.wheel.size())) % level.wheel.size()];
             cur_list.splice(cur_list.end(), task_list, itr);
           }
         }});

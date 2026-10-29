@@ -12,6 +12,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -79,6 +80,40 @@ TEST(ExecutorRobustness, TimerExecutorRejectsDegenerateOptions) {
   ExpectTimerInitThrows("wheel_size: []");
   ExpectTimerInitThrows("wheel_size: [100, 0]");
   ExpectTimerInitThrows("wheel_size: [1]");
+}
+
+// Wheels of 4 and 4 ticks: targets land on level 0, level 1 and the
+// overflow map; every task runs within one tick after its target.
+TEST(ExecutorRobustness, TimerExecutorRunsTasksOnEveryLevelAtTheirTick) {
+  executor::TimerExecutor exe;
+  exe.SetLogger(MakeLogger());
+  exe.RegisterGetExecutorFunc([](std::string_view) { return ibmw::executor::ExecutorHandle(); });
+  exe.Initialize("timer_levels", YAML::Load("{dt_us: 1000, wheel_size: [4, 4]}"));
+  exe.Start();
+
+  const std::vector<int> offsets_ms = {5, 7, 9, 15, 16, 17, 21, 31, 33, 47, 64, 70, 150};
+  std::mutex mutex;
+  std::vector<std::pair<int, std::chrono::nanoseconds>> runs;  // (offset, run time - target)
+  const auto base = exe.Now();
+  for (int offset : offsets_ms) {
+    const auto target = base + std::chrono::milliseconds(offset);
+    exe.DispatchAt(target, ibmw::executor::Task([&, offset, target] {
+      std::lock_guard lock(mutex);
+      runs.emplace_back(offset, exe.Now() - target);
+    }));
+  }
+  for (int i = 0; i < 100; ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::lock_guard lock(mutex);
+    if (runs.size() == offsets_ms.size()) break;
+  }
+  exe.Shutdown();
+  ASSERT_EQ(runs.size(), offsets_ms.size());
+  for (size_t i = 0; i < runs.size(); ++i) {
+    EXPECT_EQ(runs[i].first, offsets_ms[i]) << "out of order at " << i;
+    EXPECT_GE(runs[i].second, std::chrono::nanoseconds(0)) << "offset " << runs[i].first << " ms ran early";
+    EXPECT_LE(runs[i].second, std::chrono::milliseconds(2)) << "offset " << runs[i].first << " ms ran late";
+  }
 }
 
 TEST(ExecutorRobustness, RotateFileLoggerDestructsAfterFailedSyncInitialize) {

@@ -24,6 +24,9 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
     std::vector<size_t> wheel_size = {100, 360};  // 1 h
     std::string thread_sched_policy;
     std::vector<uint32_t> thread_bind_cpu;
+    // Clock the ticks are paced by. Virtual time always starts at the
+    // system time of Start(), so Now() and DispatchAt() use the system clock
+    // domain either way.
     bool use_system_clock = false;
   };
 
@@ -63,7 +66,8 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   double GetTimeRatio() const;
 
  private:
-  void TimerLoop();
+  void TimerLoop(std::chrono::system_clock::time_point start_sys_tp,
+                 std::chrono::steady_clock::time_point start_std_tp);
 
   struct TaskWithTimestamp {
     uint64_t tick_count;  // Tick count since start_time
@@ -107,7 +111,8 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   bool ratio_direction_ = true;
   uint32_t real_ratio_ = 1;
 
-  uint64_t start_time_point_ = 0;
+  // Set before the timer thread starts; read by DispatchAt() from any thread.
+  std::atomic<uint64_t> start_time_point_ = 0;
   std::atomic_bool start_flag_ = false;
 
   mutable std::shared_mutex tick_mutex_;
