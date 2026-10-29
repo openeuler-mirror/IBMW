@@ -16,6 +16,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -74,7 +75,7 @@ class IoThreads {
   std::vector<std::thread> threads_;
 };
 
-TEST(NetMetaFilterTest, ReservedKeysAreRejectedExceptPublisherStamps) {
+TEST(NetMetaFilterTest, ReservedKeysAreRejectedExceptSenderStamps) {
   EXPECT_TRUE(IsPeerMetaKeyAllowed("x-custom"));
   EXPECT_TRUE(IsPeerMetaKeyAllowed(""));
   EXPECT_TRUE(IsPeerMetaKeyAllowed("ibmw"));
@@ -82,7 +83,7 @@ TEST(NetMetaFilterTest, ReservedKeysAreRejectedExceptPublisherStamps) {
   EXPECT_FALSE(IsPeerMetaKeyAllowed(IBMW_TRANSPORT_CONTEXT_KEY_SERIALIZATION_TYPE));
   EXPECT_FALSE(IsPeerMetaKeyAllowed(IBMW_TRANSPORT_CONTEXT_KEY_TO_ADDR));
   EXPECT_FALSE(IsPeerMetaKeyAllowed(IBMW_RPC_CONTEXT_KEY_FUNCTION_NAME));
-  EXPECT_FALSE(IsPeerMetaKeyAllowed(IBMW_RPC_CONTEXT_KEY_REQUEST_ID));
+  EXPECT_TRUE(IsPeerMetaKeyAllowed(IBMW_RPC_CONTEXT_KEY_REQUEST_ID));
   EXPECT_TRUE(IsPeerMetaKeyAllowed(IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ));
   EXPECT_TRUE(IsPeerMetaKeyAllowed(IBMW_TRANSPORT_CONTEXT_KEY_PUB_TIMESTAMP));
 }
@@ -195,7 +196,13 @@ TEST(NetTcpServerTest, OversizedMessageClosesSession) {
   asio::write(sock, asio::buffer(TcpFrame(std::string(17, 'x'))));
   char c;
   boost::system::error_code ec;
-  sock.read_some(asio::buffer(&c, 1), ec);  // server closes the session
+  bool closed = false;
+  sock.async_read_some(asio::buffer(&c, 1), [&](const boost::system::error_code& e, size_t) {
+    ec = e;
+    closed = true;
+  });
+  cli_io.run_for(10s);  // the server closes the session
+  ASSERT_TRUE(closed) << "server kept the session open";
   EXPECT_TRUE(ec);
   EXPECT_FALSE(received.WaitFor(1, 100ms));
   svr->Shutdown();
@@ -298,31 +305,60 @@ class HttpRpcDriverTest : public ::testing::Test {
     if (driver_) driver_->Shutdown();
   }
 
+  // One keep-alive connection; every exchange has a deadline, so a hung
+  // server fails the test instead of blocking it.
+  class Client {
+   public:
+    explicit Client(uint16_t port) : sock_(io_) { sock_.connect(Tcp::endpoint(kLoopback, port)); }
+
+    std::optional<http::response<http::string_body>> Send(
+        const std::string& body,
+        const std::vector<std::pair<std::string, std::string>>& headers = {},
+        http::verb verb = http::verb::post) {
+      http::request<http::string_body> req{verb, "/rpc/test/svc", 11};
+      req.set(http::field::host, "127.0.0.1");
+      req.set(http::field::content_type, "application/json");
+      req.keep_alive(true);
+      for (const auto& [k, v] : headers) req.set(k, v);
+      req.body() = body;
+      req.prepare_payload();
+
+      http::response<http::string_body> rsp;
+      boost::system::error_code ec;
+      bool done = false;
+      http::async_write(sock_, req, [&](const boost::system::error_code& e, size_t) {
+        if (e) {
+          ec = e;
+          done = true;
+          return;
+        }
+        http::async_read(sock_, buffer_, rsp, [&](const boost::system::error_code& e2, size_t) {
+          ec = e2;
+          done = true;
+        });
+      });
+      io_.restart();
+      io_.run_for(10s);
+      if (!done || ec) {
+        ADD_FAILURE() << (done ? ec.message() : "no answer within 10s");
+        return std::nullopt;
+      }
+      return rsp;
+    }
+
+   private:
+    asio::io_context io_;
+    Tcp::socket sock_;
+    boost::beast::flat_buffer buffer_;
+  };
+
   http::response<http::string_body> Post(
       const std::string& body,
       std::vector<std::pair<std::string, std::string>> headers = {},
       http::verb verb = http::verb::post) {
-    asio::io_context cli_io;
-    Tcp::socket sock(cli_io);
-    sock.connect(Tcp::endpoint(kLoopback, port_));
-    // A hung server fails the test instead of blocking it.
-    struct timeval tv{.tv_sec = 10, .tv_usec = 0};
-    setsockopt(sock.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    http::request<http::string_body> req{verb, "/rpc/test/svc", 11};
-    req.set(http::field::host, "127.0.0.1");
-    req.set(http::field::content_type, "application/json");
-    for (const auto& [k, v] : headers) req.set(k, v);
-    req.body() = body;
-    req.prepare_payload();
-    http::write(sock, req);
-
-    boost::beast::flat_buffer buffer;
-    http::response<http::string_body> rsp;
-    boost::system::error_code ec;
-    http::read(sock, buffer, rsp, ec);
-    EXPECT_FALSE(ec) << ec.message();
-    return rsp;
+    Client client(port_);
+    auto rsp = client.Send(body, headers, verb);
+    return rsp ? std::move(*rsp) : http::response<http::string_body>{};
   }
 
   IoThreads io_;
@@ -340,22 +376,25 @@ void Answer(const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& 
 }
 
 TEST_F(HttpRpcDriverTest, AnswersAndFiltersReservedHeaders) {
-  std::string driver_meta, custom_meta, function_meta, serialization_meta;
+  std::string driver_meta, custom_meta, function_meta, serialization_meta, request_id_meta;
   SetUpDriver([&](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
     driver_meta = frame->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_DRIVER);
     function_meta = frame->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_FUNCTION_NAME);
     custom_meta = frame->ctx_ref.GetMetaValue("x-custom");
     serialization_meta = frame->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE);
+    request_id_meta = frame->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_REQUEST_ID);
     *static_cast<int*>(frame->rsp_ptr) = *static_cast<const int*>(frame->req_ptr) * 2;
     Answer(frame, IBMW_RPC_STATUS_OK);
   });
-  auto rsp = Post("21", {{"ibmw-driver", "evil"}, {"ibmw-function_name", "evil"}, {"ibmw-serialization_type", "evil"}, {"x-custom", "v"}});
+  auto rsp = Post("21", {{"ibmw-driver", "evil"}, {"ibmw-function_name", "evil"}, {"ibmw-serialization_type", "evil"}, {"x-custom", "v"},
+                   {"ibmw-request_id", "123"}});
   EXPECT_EQ(rsp.result(), http::status::ok);
   EXPECT_EQ(rsp.body(), "42");
   EXPECT_EQ(driver_meta, std::string(driver_->Name()));
   EXPECT_EQ(function_meta, "pb:/test/svc");
   EXPECT_EQ(custom_meta, "v");
   EXPECT_EQ(serialization_meta, "json");
+  EXPECT_EQ(request_id_meta, "123");  // correlation stamp passes through
   // TRANS-017: no CORS unless configured.
   EXPECT_EQ(rsp.find(http::field::access_control_allow_origin), rsp.end());
 }
@@ -399,8 +438,57 @@ TEST_F(HttpRpcDriverTest, MissingAnswerTimesOutAndLateAnswerIsIgnored) {
   ASSERT_TRUE(frame);
   Answer(frame, IBMW_RPC_STATUS_OK);  // the request is gone: must not touch it
 
-  // The server is still healthy.
-  SUCCEED();
+  // The server is still healthy: the next request is answered (here by
+  // timeout again, since the service never answers in time).
+  auto next = Post("1", {{"Timeout", "1"}});
+  EXPECT_EQ(next.result(), http::status::internal_server_error);
+}
+
+// Answers given inline, before the handler waits, must never be lost.
+TEST_F(HttpRpcDriverTest, InlineAnswersAreNeverLost) {
+  SetUpDriver([](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    *static_cast<int*>(frame->rsp_ptr) = *static_cast<const int*>(frame->req_ptr) + 1;
+    Answer(frame, IBMW_RPC_STATUS_OK);
+  });
+  Client client(port_);
+  for (int i = 0; i < 2000; ++i) {
+    auto rsp = client.Send(std::to_string(i));
+    ASSERT_TRUE(rsp) << "request " << i;
+    ASSERT_EQ(rsp->body(), std::to_string(i + 1)) << "request " << i;
+  }
+}
+
+// Answers from another thread race the handler's suspension.
+TEST_F(HttpRpcDriverTest, CrossThreadAnswersAreNeverLost) {
+  IoThreads answerer(2);
+  SetUpDriver([&answerer](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    asio::post(*answerer.Io(), [frame] {
+      *static_cast<int*>(frame->rsp_ptr) = *static_cast<const int*>(frame->req_ptr) + 1;
+      Answer(frame, IBMW_RPC_STATUS_OK);
+    });
+  });
+  Client client(port_);
+  for (int i = 0; i < 2000; ++i) {
+    auto rsp = client.Send(std::to_string(i));
+    ASSERT_TRUE(rsp) << "request " << i;
+    ASSERT_EQ(rsp->body(), std::to_string(i + 1)) << "request " << i;
+  }
+}
+
+// "Timeout: 0" (a sub-second client timeout rounded down by older clients)
+// means "not set": an asynchronous answer still arrives.
+TEST_F(HttpRpcDriverTest, ZeroTimeoutHeaderDoesNotFailAsyncAnswers) {
+  IoThreads answerer(1);
+  SetUpDriver([&answerer](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    auto timer = std::make_shared<asio::steady_timer>(*answerer.Io(), 50ms);
+    timer->async_wait([frame, timer](const boost::system::error_code&) {
+      *static_cast<int*>(frame->rsp_ptr) = 7;
+      Answer(frame, IBMW_RPC_STATUS_OK);
+    });
+  });
+  auto rsp = Post("1", {{"Timeout", "0"}});
+  EXPECT_EQ(rsp.result(), http::status::ok);
+  EXPECT_EQ(rsp.body(), "7");
 }
 
 }  // namespace

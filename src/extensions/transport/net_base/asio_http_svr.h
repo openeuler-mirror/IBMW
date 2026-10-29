@@ -616,7 +616,9 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
           auto [end, ec] = std::from_chars(timeout_str.data(), timeout_str.data() + timeout_str.size(), timeout_s);
           constexpr uint64_t kMaxTimeoutS =
               std::chrono::duration_cast<std::chrono::seconds>(std::chrono::nanoseconds::max()).count();
-          if (ec == std::errc() && end == timeout_str.data() + timeout_str.size() && timeout_s < kMaxTimeoutS)
+          // 0 means "not set" (and older clients round sub-second timeouts down to 0).
+          if (ec == std::errc() && end == timeout_str.data() + timeout_str.size() && timeout_s > 0 &&
+              timeout_s < kMaxTimeoutS)
             handle_timeout = std::chrono::seconds(timeout_s);
         }
 

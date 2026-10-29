@@ -3,8 +3,12 @@
 
 #include "net_ext/http/http_rpc_driver.h"
 
+#include <atomic>
 #include <mutex>
+#include <optional>
 #include <regex>
+
+#include <boost/asio/any_completion_handler.hpp>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/service/rpc_status.h"
@@ -262,14 +266,17 @@ bool HttpRpcDriver::RegisterServiceFunc(
       std::shared_ptr<void> service_rsp_ptr = info.rsp_type_support_ref.CreateSharedPtr();
       service_invoke_wrapper_ptr->rsp_ptr = service_rsp_ptr.get();
 
-      // Set callback. The callback may run on any thread and after this
-      // coroutine gave up waiting, so it only touches shared state and wakes
-      // the coroutine through the timer's executor.
+      // The callback may run on any thread, before or after this coroutine
+      // suspends, and after it gave up. All hand-over goes through CallState
+      // under its mutex: whoever finishes the call first (answer or timeout)
+      // takes the suspended coroutine's handler and resumes it. Nothing but
+      // this coroutine touches the timer.
       struct CallState {
         std::mutex mutex;
-        bool finished = false;  // answered, or abandoned by the coroutine
+        std::atomic<bool> finished{false};  // written under mutex; also read as a hint
         uint32_t ret_code = 0;
         std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
+        asio::any_completion_handler<void()> waiter;
       };
       auto call_state = std::make_shared<CallState>();
 
@@ -277,7 +284,16 @@ bool HttpRpcDriver::RegisterServiceFunc(
           timeout >= std::chrono::steady_clock::time_point::max() - std::chrono::steady_clock::now()
               ? std::chrono::steady_clock::time_point::max()
               : std::chrono::steady_clock::now() + timeout;
-      auto sig_timer_ptr = std::make_shared<asio::steady_timer>(*io_ptr_, deadline);
+
+      // Resumes the coroutine on its io_context. If that is already gone the
+      // coroutine frame is leaked: destroying it here would touch dead services.
+      auto resume = [](const std::weak_ptr<asio::io_context>& io_weak, asio::any_completion_handler<void()> waiter) {
+        if (auto io = io_weak.lock()) {
+          asio::post(io->get_executor(), std::move(waiter));
+        } else {
+          new asio::any_completion_handler<void()>(std::move(waiter));
+        }
+      };
 
       service_invoke_wrapper_ptr->callback =
           [service_invoke_wrapper_ptr,
@@ -285,8 +301,12 @@ bool HttpRpcDriver::RegisterServiceFunc(
            service_req_ptr,
            service_rsp_ptr,
            serialization_type{std::move(serialization_type)},
-           sig_timer_ptr,
+           io_weak = std::weak_ptr<asio::io_context>(io_ptr_),
+           resume,
            call_state](ibmw::rpc::Status status) {
+            // Abandoned (timed out): skip the serialization.
+            if (call_state->finished.load(std::memory_order_relaxed)) return;
+
             uint32_t ret_code = 0;
             std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
             if (!status.OK()) [[unlikely]] {
@@ -298,39 +318,65 @@ bool HttpRpcDriver::RegisterServiceFunc(
                 ret_code = IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED;
             }
 
+            asio::any_completion_handler<void()> waiter;
             {
               std::lock_guard lock(call_state->mutex);
-              if (call_state->finished) return;
-              call_state->finished = true;
+              if (call_state->finished.load(std::memory_order_relaxed)) return;
+              call_state->finished.store(true, std::memory_order_relaxed);
               call_state->ret_code = ret_code;
               call_state->rsp_buf = std::move(rsp_buf);
+              waiter = std::move(call_state->waiter);
             }
-            asio::post(sig_timer_ptr->get_executor(), [sig_timer_ptr] { sig_timer_ptr->cancel(); });
+            if (waiter) resume(io_weak, std::move(waiter));
           };
 
       // Call service rpc
       service_func_wrapper.service_func(service_invoke_wrapper_ptr);
 
-      bool timer_expired = false;
-      try {
-        co_await sig_timer_ptr->async_wait(asio::use_awaitable);
-        timer_expired = true;
-      } catch (const boost::system::system_error& e) {
-        if (e.code() != boost::asio::error::operation_aborted) [[unlikely]]
-          MW_ERROR("Http handle for service, async_wait get exception: {}", e.what());
+      // A synchronous answer (the common case) needs no wait at all.
+      if (!call_state->finished.load(std::memory_order_acquire)) {
+        std::optional<asio::steady_timer> timer;
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+          timer.emplace(*io_ptr_, deadline);
+          timer->async_wait([call_state, io_weak = std::weak_ptr<asio::io_context>(io_ptr_), resume](
+                                const boost::system::error_code& ec) {
+            if (ec) return;  // cancelled: the call finished first
+            asio::any_completion_handler<void()> waiter;
+            {
+              std::lock_guard lock(call_state->mutex);
+              if (call_state->finished.load(std::memory_order_relaxed)) return;
+              call_state->finished.store(true, std::memory_order_relaxed);
+              call_state->ret_code = IBMW_RPC_STATUS_TIMEOUT;
+              waiter = std::move(call_state->waiter);
+            }
+            if (waiter) resume(io_weak, std::move(waiter));
+          });
+        }
+
+        // The initiation runs once this coroutine is suspended, so the handler
+        // can be resumed from another thread as soon as it is stored.
+        co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
+            [&call_state, ex = io_ptr_->get_executor()](auto handler) {
+              asio::any_completion_handler<void()> waiter(std::move(handler));
+              {
+                std::lock_guard lock(call_state->mutex);
+                if (!call_state->finished.load(std::memory_order_relaxed)) {
+                  call_state->waiter = std::move(waiter);
+                  return;
+                }
+              }
+              // Finished between the check above and now.
+              asio::post(ex, std::move(waiter));
+            },
+            asio::use_awaitable);
+
+        if (timer) timer->cancel();
       }
 
       uint32_t ret_code = 0;
       std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
       {
         std::lock_guard lock(call_state->mutex);
-        if (!call_state->finished) {
-          // Give up: a late answer is dropped by the callback.
-          call_state->finished = true;
-          call_state->ret_code = timer_expired
-                                     ? static_cast<uint32_t>(IBMW_RPC_STATUS_TIMEOUT)
-                                     : static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR);
-        }
         ret_code = call_state->ret_code;
         rsp_buf = std::move(call_state->rsp_buf);
       }
@@ -495,8 +541,10 @@ void HttpRpcDriver::Call(
             auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();
             if (timeout <= std::chrono::nanoseconds(0))
               timeout = std::chrono::seconds(5);
+            // Rounded up: the header has whole seconds and the server must not
+            // give up before the client does.
             req.set(http::field::timeout,
-                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(timeout).count()));
+                    std::to_string(std::chrono::ceil<std::chrono::seconds>(timeout).count()));
 
             std::string serialization_type(
                 client_call_wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE));

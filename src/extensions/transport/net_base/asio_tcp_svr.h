@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <list>
@@ -171,8 +170,12 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
                   ibmw::common::util::SSToString(remote_ep));
 
               // Registered before Start (same strand as SendMsg); a stale
-              // session with a reused endpoint is replaced.
-              session_ptr_map_.insert_or_assign(remote_ep, session_ptr);
+              // session with a reused endpoint is shut down and replaced.
+              auto [itr, inserted] = session_ptr_map_.try_emplace(remote_ep, session_ptr);
+              if (!inserted) {
+                itr->second->Shutdown();
+                itr->second = session_ptr;
+              }
               session_ptr->Start(remote_ep);
 
             } catch (const std::exception& e) {
@@ -291,6 +294,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
   static constexpr char kHeadByte1 = 'Y';
   static constexpr char kHeadByte2 = 'T';
   static constexpr size_t kEagerRecvSize = 4 * 1024 * 1024;
+  static constexpr size_t kRecvProbeSize = 256 * 1024;
 
   static bool CheckListenAddr(const Tcp::endpoint& ep) {
     try {
@@ -436,12 +440,14 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
                 auto msg_buf = std::make_shared<Streambuf>();
 
-                // Up to kEagerRecvSize is reserved at once; larger messages
-                // grow (doubling) as their bytes arrive, so a bare header
-                // cannot make the server reserve max_recv_size.
+                // Up to kEagerRecvSize is reserved at once. A larger message
+                // first has to deliver kRecvProbeSize real bytes before the rest
+                // is reserved, so a bare header cannot make the server reserve
+                // max_recv_size; the cost is one copy of the probe.
                 size_t remaining = msg_len;
                 while (remaining > 0) {
-                  const size_t chunk = std::min(remaining, std::max(kEagerRecvSize, msg_buf->size()));
+                  const size_t chunk =
+                      (msg_len <= kEagerRecvSize || remaining < msg_len) ? remaining : kRecvProbeSize;
                   read_data_size = co_await boost::asio::async_read(
                       sock_, msg_buf->prepare(chunk),
                       boost::asio::transfer_exactly(chunk),

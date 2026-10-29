@@ -2,6 +2,11 @@
 // All rights reserved.
 
 #include "service_introspection_ext/service_introspection_extension.h"
+
+#include <charconv>
+#include <cstdint>
+#include <string_view>
+
 #include "c/service/rpc_context_base.h"
 #include "cpp/util/json_type_support.h"
 #include "engine/engine.h"
@@ -73,6 +78,17 @@ struct convert<ibmw::extensions::service_introspection_extension::ServiceIntrosp
 }  // namespace YAML
 
 namespace ibmw::extensions::service_introspection_extension {
+
+namespace {
+
+// The ids come from peers (or are missing): never throw on bad input.
+uint64_t ParseSequenceNumber(std::string_view value) {
+  uint64_t result = 0;
+  const auto [end, ec] = std::from_chars(value.data(), value.data() + value.size(), result);
+  return ec == std::errc() && end == value.data() + value.size() ? result : 0;
+}
+
+}  // namespace
 
 ServiceIntrospectionExtension::ServiceIntrospectionExtension() {
   SetExtensionLogger(&g_logger);
@@ -156,7 +172,7 @@ void ServiceIntrospectionExtension::RegisterClientFilter() {
           rpc_msg.service_name = wrapper_ptr->info.func_name;
           rpc_msg.module_name = wrapper_ptr->info.module_name;
           rpc_msg.driver_type = std::string(wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_DRIVER));
-          rpc_msg.sequence_number = std::stoull(std::string(wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_REQUEST_ID)));
+          rpc_msg.sequence_number = ParseSequenceNumber(wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_REQUEST_ID));
           rpc_msg.status_code = status.Code();
 
           std::string_view rpc_serialization_type;
@@ -208,7 +224,7 @@ void ServiceIntrospectionExtension::RegisterServiceFilter() {
           rpc_msg.service_name = wrapper_ptr->info.func_name;
           rpc_msg.module_name = wrapper_ptr->info.module_name;
           rpc_msg.driver_type = std::string(wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_DRIVER));
-          rpc_msg.sequence_number = std::stoull(std::string(wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_RESPONSE_ID)));
+          rpc_msg.sequence_number = ParseSequenceNumber(wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_RESPONSE_ID));
           rpc_msg.status_code = status.Code();
 
           std::string_view rpc_serialization_type;
