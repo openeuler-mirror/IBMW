@@ -61,7 +61,15 @@ while IFS= read -r line || [ -n "$line" ]; do
 done < "$template" > "$config_file"
 
 export LD_LIBRARY_PATH=$root_dir/lib:$root_dir/bin
-exec 3< "$config_file"
-rm -f "$config_file"
-trap - EXIT HUP INT TERM
-exec "$app_path" /proc/self/fd/3
+# Pass the real config path: the engine canonicalizes it and exposes it to
+# extensions, so an unlinked /proc/self/fd/N target cannot be resolved.
+"$app_path" "$config_file" &
+app_pid=$!
+trap 'kill -TERM "$app_pid" 2>/dev/null || true' HUP INT TERM
+status=0
+wait "$app_pid" || status=$?
+while kill -0 "$app_pid" 2>/dev/null; do
+  status=0
+  wait "$app_pid" || status=$?
+done
+exit "$status"
