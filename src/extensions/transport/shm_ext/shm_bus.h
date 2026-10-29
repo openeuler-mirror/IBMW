@@ -74,7 +74,7 @@ class IBMW_SHM_EXPORT ShmOperationGate {
 
   Lease TryAcquire() noexcept;
   void Close() noexcept;
-  bool Accepting() const noexcept { return accepting_.load(std::memory_order_acquire); }
+  bool Accepting() const noexcept { return accepting_.load(std::memory_order_seq_cst); }
   bool WaitIdle(std::chrono::steady_clock::time_point deadline) noexcept;
   size_t Active() const noexcept { return active_.load(std::memory_order_acquire); }
 
@@ -106,14 +106,32 @@ struct ShmBusOptions {
 
 class ShmPublisher;
 
-// Loan bookkeeping for ctx-meta loans lives in a fixed table sized to the
-// per-publisher loan limit, so loaning never allocates. A slot address is
-// the driver token handed out through LoanedSampleHandle.
-struct ShmLoanSlot {
+// Loan bookkeeping for handle loans lives in a fixed table sized to the
+// per-publisher loan limit, so loaning never allocates. The driver token
+// handed out through LoanedSampleHandle is the slot address with the low
+// bits of the slot's loan generation in its alignment bits: a stale copy of
+// a handle given back is refused even after the slot (and the chunk at the
+// same address) is loaned again, unless exactly a multiple of kTagCount
+// loans went through that slot in between.
+struct alignas(64) ShmLoanSlot {
+  static constexpr uintptr_t kTagCount = 64;
+
   ShmPublisher* owner = nullptr;
-  void* chunk = nullptr;  // start of the selfdev user payload (= frame start)
-  std::atomic_bool used{false};
+  // state = generation << 2 | kFree / kBusy / kLoaned.
+  std::atomic_uint32_t state{0};
+  std::atomic<void*> chunk{nullptr};  // start of the selfdev user payload
+
+  void* Chunk() const noexcept { return chunk.load(std::memory_order_relaxed); }
+  // Token of the current loan; only meaningful while the slot is loaned.
+  void* Token() const noexcept {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(this) |
+                                   ((state.load(std::memory_order_relaxed) >> 2) % kTagCount));
+  }
+  static ShmLoanSlot* FromToken(void* token) noexcept {
+    return reinterpret_cast<ShmLoanSlot*>(reinterpret_cast<uintptr_t>(token) & ~(kTagCount - 1));
+  }
 };
+static_assert(alignof(ShmLoanSlot) >= ShmLoanSlot::kTagCount);
 
 class IBMW_SHM_EXPORT ShmPublisher {
  public:
@@ -135,9 +153,10 @@ class IBMW_SHM_EXPORT ShmPublisher {
 
   // Loans with a token slot (for LoanedSampleHandle::driver_token).
   ShmLoanSlot* LoanSlot(size_t size, size_t alignment = shm::kDefaultPayloadAlignment) noexcept;
-  // No-ops for a slot of another publisher or one already given back.
-  void PublishSlot(ShmLoanSlot* slot) noexcept;
-  void ReleaseSlot(ShmLoanSlot* slot) noexcept;
+  // Take a slot token (ShmLoanSlot::Token). No-ops for a token of another
+  // publisher or of a loan already given back.
+  void PublishSlot(void* token) noexcept;
+  void ReleaseSlot(void* token) noexcept;
 
   // Loan size that most recently fitted a framed Send(); grows only.
   size_t SizeHint() const noexcept { return size_hint_.load(std::memory_order_relaxed); }
@@ -153,7 +172,7 @@ class IBMW_SHM_EXPORT ShmPublisher {
  private:
   bool BeginLoan() noexcept;
   void EndLoan() noexcept;
-  void* TakeSlot(ShmLoanSlot* slot) noexcept;
+  void* TakeSlot(void* token) noexcept;
 
   std::string url_;
   std::atomic_size_t size_hint_;
@@ -319,7 +338,9 @@ class IBMW_SHM_EXPORT ShmBus {
   // Phase two: frees everything. Requires a successful phase one. If the bus
   // is destroyed without it and cannot be prepared, publishers, subscriptions,
   // listener threads and the gate are leaked rather than freed under
-  // threads that still use them.
+  // threads that still use them. The bus object's own members (options,
+  // mutexes) still die with it, so an owner that cannot prepare should leak
+  // the whole bus instead of destroying it, as ShmExtension does.
   bool Shutdown() noexcept;
   bool Prepared() const noexcept;
 

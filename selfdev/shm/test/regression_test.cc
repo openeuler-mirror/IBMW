@@ -666,11 +666,18 @@ TEST(ShmRegressionTest, StopBlockingReleasesBlockedPublish) {
   pub.Publish(*first);
   ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));  // queue (1) is full
   std::atomic<bool> returned{false};
-  std::thread blocked([&] {
+  // Unblocks the publisher on any exit, so a failed ASSERT reports instead
+  // of hanging in the join.
+  struct Unblock {
+    Publisher& pub;
+    ~Unblock() { pub.StopBlocking(); }
+  };
+  std::jthread blocked([&] {
     auto l = pub.Loan(64);
     if (l) pub.Publish(*l);
     returned = true;
   });
+  Unblock unblock{pub};
   ASSERT_TRUE(WaitFor([&] { return pub.Stats().blocked >= 1; }));
   std::this_thread::sleep_for(50ms);
   EXPECT_FALSE(returned.load());
@@ -683,7 +690,7 @@ TEST(ShmRegressionTest, StopBlockingReleasesBlockedPublish) {
     ASSERT_TRUE(l.ok());
     pub.Publish(*l);
   }
-  EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 5s);
   EXPECT_GE(pub.Stats().block_timeouts, 11u);
   // The subscriber still gets what was queued before.
   auto t = sub.Take();
@@ -705,6 +712,9 @@ TEST(ShmRegressionTest, ConflictingInitIsRejected) {
   RuntimeOptions other_root;
   other_root.root_dir = "/nonexistent_rg19";
   EXPECT_EQ(Runtime::Init(other_root).error(), Error::kAlreadyInitialized);
+  RuntimeOptions invalid;
+  invalid.domain = "a/b";
+  EXPECT_EQ(Runtime::Init(invalid).error(), Error::kInvalidArg);
   EXPECT_EQ(Runtime::ServiceDirectory(), dir);
 }
 

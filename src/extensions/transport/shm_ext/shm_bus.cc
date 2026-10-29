@@ -65,9 +65,12 @@ ShmOperationGate::Lease ShmOperationGate::TryAcquire() noexcept {
   return Lease(this);
 }
 
+// Decrements under the mutex: WaitIdle checks its predicate under it too, so
+// a waiter that sees zero (and may then destroy the gate) cannot overtake a
+// releaser still touching the gate.
 void ShmOperationGate::Release() noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
   if (active_.fetch_sub(1, std::memory_order_seq_cst) == 1 && !accepting_.load(std::memory_order_seq_cst)) {
-    std::lock_guard<std::mutex> lock(mu_);
     cv_.notify_all();
   }
 }
@@ -112,6 +115,10 @@ ShmPublisher::ShmPublisher(std::string url, const ShmBusOptions& bus_options, co
   for (auto& slot : slots_) slot.owner = this;
 }
 
+namespace {
+constexpr uint32_t kSlotFree = 0, kSlotBusy = 1, kSlotLoaned = 2;
+}  // namespace
+
 bool ShmPublisher::BeginLoan() noexcept {
   outstanding_.fetch_add(1, std::memory_order_seq_cst);
   if (closing_.load(std::memory_order_seq_cst)) {
@@ -121,9 +128,12 @@ bool ShmPublisher::BeginLoan() noexcept {
   return true;
 }
 
+// Under the mutex for the same reason as ShmOperationGate::Release: handle
+// publishes hold no gate lease, so once WaitForLoans sees zero the publisher
+// may be destroyed right away.
 void ShmPublisher::EndLoan() noexcept {
+  std::lock_guard<std::mutex> lock(wait_mu_);
   if (outstanding_.fetch_sub(1, std::memory_order_seq_cst) == 1 && closing_.load(std::memory_order_seq_cst)) {
-    std::lock_guard<std::mutex> lock(wait_mu_);
     wait_cv_.notify_all();
   }
 }
@@ -159,9 +169,12 @@ ShmLoanSlot* ShmPublisher::LoanSlot(size_t size, size_t alignment) noexcept {
   // At most kMaxChunksAllocatedPerPublisher loans exist, so a free slot is
   // always found.
   for (auto& slot : slots_) {
-    bool expected = false;
-    if (slot.used.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-      slot.chunk = chunk;
+    uint32_t s = slot.state.load(std::memory_order_relaxed);
+    if ((s & 3u) != kSlotFree) continue;
+    const uint32_t next = (s & ~3u) + 4u;  // new generation
+    if (slot.state.compare_exchange_strong(s, next | kSlotBusy, std::memory_order_acq_rel)) {
+      slot.chunk.store(chunk, std::memory_order_relaxed);
+      slot.state.store(next | kSlotLoaned, std::memory_order_release);
       return &slot;
     }
   }
@@ -169,22 +182,26 @@ ShmLoanSlot* ShmPublisher::LoanSlot(size_t size, size_t alignment) noexcept {
   return nullptr;
 }
 
-void* ShmPublisher::TakeSlot(ShmLoanSlot* slot) noexcept {
+void* ShmPublisher::TakeSlot(void* token) noexcept {
+  ShmLoanSlot* slot = ShmLoanSlot::FromToken(token);
   if (slot < slots_.data() || slot >= slots_.data() + slots_.size()) return nullptr;
-  // Only one caller gives a slot back; a stale or duplicate handle gets
-  // nothing. chunk is left as is: LoanSlot() overwrites it once used is free.
-  void* chunk = slot->chunk;
-  bool used = true;
-  if (!slot->used.compare_exchange_strong(used, false, std::memory_order_acq_rel)) return nullptr;
+  const uintptr_t tag = reinterpret_cast<uintptr_t>(token) % ShmLoanSlot::kTagCount;
+  // Only one caller gives a loan back; a stale, duplicate or older-generation
+  // token gets nothing. chunk is stable while this generation is loaned: it
+  // is rewritten only after the slot went free, which fails the CAS below.
+  uint32_t s = slot->state.load(std::memory_order_acquire);
+  if ((s & 3u) != kSlotLoaned || (s >> 2) % ShmLoanSlot::kTagCount != tag) return nullptr;
+  void* chunk = slot->chunk.load(std::memory_order_relaxed);
+  if (!slot->state.compare_exchange_strong(s, (s & ~3u) | kSlotFree, std::memory_order_acq_rel)) return nullptr;
   return chunk;
 }
 
-void ShmPublisher::PublishSlot(ShmLoanSlot* slot) noexcept {
-  if (void* chunk = TakeSlot(slot)) Publish(chunk);
+void ShmPublisher::PublishSlot(void* token) noexcept {
+  if (void* chunk = TakeSlot(token)) Publish(chunk);
 }
 
-void ShmPublisher::ReleaseSlot(ShmLoanSlot* slot) noexcept {
-  if (void* chunk = TakeSlot(slot)) Release(chunk);
+void ShmPublisher::ReleaseSlot(void* token) noexcept {
+  if (void* chunk = TakeSlot(token)) Release(chunk);
 }
 
 void ShmPublisher::RaiseSizeHint(size_t size) noexcept {
@@ -535,7 +552,10 @@ ShmPublisher* ShmBus::RegisterPublisher(std::string_view url, size_t size_hint, 
     delivery = delivery_;
   }
   std::unique_lock<std::shared_mutex> lock(pub_mu_);
-  if (pub_closed_) throw std::runtime_error("shm bus is shutting down");
+  // TryPrepareShutdown closes the gate before it snapshots the publishers
+  // under pub_mu_: a publisher added after the close would miss
+  // BeginShutdown, so none is.
+  if (pub_closed_ || !gate_->Accepting()) throw std::runtime_error("shm bus is shutting down");
   if (auto it = publishers_.find(url); it != publishers_.end()) {
     if (created) *created = false;
     return it->second.get();

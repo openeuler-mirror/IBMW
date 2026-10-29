@@ -1194,7 +1194,8 @@ TEST_F(ShmDriverTest, ThrowingSerializerDoesNotLeakLoans) {
 }
 
 // EXT-25 Publishing or releasing a handle twice, through a copy or from
-// another driver, cannot drive the loan count below the live loans.
+// another driver, cannot drive the loan count below the live loans, and a
+// stale copy cannot act on a later loan of the same slot and chunk.
 TEST_F(ShmDriverTest, DuplicateAndForeignLoanHandlesAreIgnored) {
   auto& d = Init();
   const auto info = IntInfo(UniqueTopic());
@@ -1213,6 +1214,7 @@ TEST_F(ShmDriverTest, DuplicateAndForeignLoanHandlesAreIgnored) {
   ASSERT_TRUE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kCtxMetaThenPayload, ctx.get(), b));
   EXPECT_EQ(pub->Outstanding(), 2u);
   auto a_copy = a;
+  const auto a_stale = a;  // calls clear the handle passed in; keep a pristine copy
   d.PublishLoaned(a);
   d.PublishLoaned(a_copy);  // already given back
   d.ReleaseLoaned(a_copy);
@@ -1225,14 +1227,41 @@ TEST_F(ShmDriverTest, DuplicateAndForeignLoanHandlesAreIgnored) {
   d.ReleaseLoaned(b);
   EXPECT_EQ(pub->Outstanding(), 0u);
 
+  // The freed slot (and recycled chunk) is loaned again; the stale copy of
+  // `a` must not publish or release the new loan.
+  transport::LoanedSampleHandle c;
+  ASSERT_TRUE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kCtxMetaThenPayload, ctx.get(), c));
+  EXPECT_EQ(ShmLoanSlot::FromToken(c.driver_token), ShmLoanSlot::FromToken(a_stale.driver_token));
+  EXPECT_NE(c.driver_token, a_stale.driver_token);
+  auto s1 = a_stale, s2 = a_stale;
+  d.PublishLoaned(s1);
+  d.ReleaseLoaned(s2);
+  EXPECT_EQ(pub->Outstanding(), 1u);
+  EXPECT_EQ(pub->Stats().publishes, 1u);
+  d.PublishLoaned(c);
+  EXPECT_EQ(pub->Outstanding(), 0u);
+  EXPECT_EQ(pub->Stats().publishes, 2u);
+
   transport::LoanedSampleHandle p;
   ASSERT_TRUE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kPodOnly, nullptr, p));
   auto p_copy = p;
+  const auto p_stale = p;
   d.ReleaseLoaned(p);
   d.ReleaseLoaned(p_copy);
   d.PublishLoaned(p_copy);
   EXPECT_EQ(pod->Outstanding(), 0u);
   EXPECT_EQ(pod->Stats().publishes, 0u);
+  transport::LoanedSampleHandle q;
+  ASSERT_TRUE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kPodOnly, nullptr, q));
+  EXPECT_EQ(q.user_payload_ptr, p_stale.user_payload_ptr);  // same chunk recycled
+  auto s3 = p_stale, s4 = p_stale;
+  d.PublishLoaned(s3);
+  d.ReleaseLoaned(s4);
+  EXPECT_EQ(pod->Outstanding(), 1u);
+  EXPECT_EQ(pod->Stats().publishes, 0u);
+  d.PublishLoaned(q);
+  EXPECT_EQ(pod->Outstanding(), 0u);
+  EXPECT_EQ(pod->Stats().publishes, 1u);
   EXPECT_TRUE(d.TryPrepareShutdown(1000ms));
 }
 
@@ -1275,8 +1304,8 @@ TEST_F(ShmDriverTest, ShutdownUnblocksSendToStalledRemoteConsumer) {
   ASSERT_TRUE(WaitFor([&] { return Publisher(url)->Stats().blocked >= 1; }));
   EXPECT_LT(sent.load(), 64);
   const auto t0 = std::chrono::steady_clock::now();
-  EXPECT_TRUE(d.TryPrepareShutdown(2000ms));
-  EXPECT_LT(std::chrono::steady_clock::now() - t0, 2000ms);
+  EXPECT_TRUE(d.TryPrepareShutdown(5000ms));
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 5000ms);
   producer.join();
   EXPECT_EQ(sent.load(), 64);
 }

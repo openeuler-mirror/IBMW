@@ -571,15 +571,15 @@ bool ShmTransportDriver::LoanCtxMeta(ShmPublisher* pub, const transport::Transpo
   }
   ShmLoanSlot* slot = pub->LoanSlot(total_size);
   if (slot == nullptr) return false;
-  if (EncodeCtxMetaHeader(slot->chunk, total_size, static_cast<uint32_t>(total_size), serialization_type, kv_map) !=
-      header_size) {
-    pub->ReleaseSlot(slot);
+  if (EncodeCtxMetaHeader(slot->Chunk(), total_size, static_cast<uint32_t>(total_size), serialization_type,
+                          kv_map) != header_size) {
+    pub->ReleaseSlot(slot->Token());
     return false;
   }
-  out_handle.user_payload_ptr = static_cast<char*>(slot->chunk) + header_size;
+  out_handle.user_payload_ptr = static_cast<char*>(slot->Chunk()) + header_size;
   out_handle.user_payload_size = requested_size;
   out_handle.mode = transport::LoanMode::kCtxMetaThenPayloadUnreported;
-  out_handle.driver_token = slot;
+  out_handle.driver_token = slot->Token();
   out_handle.source_driver = this;
   return true;
 }
@@ -619,12 +619,14 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
               info.topic_name, info.msg_type);
       return false;
     }
-    void* chunk = it->second.publisher->Loan(requested_size, it->second.alignment);
-    if (chunk == nullptr) return false;
-    out_handle.user_payload_ptr = chunk;
+    // A slot, like ctx-meta loans: its tagged token tells a stale handle
+    // from a new loan of the same chunk.
+    ShmLoanSlot* slot = it->second.publisher->LoanSlot(requested_size, it->second.alignment);
+    if (slot == nullptr) return false;
+    out_handle.user_payload_ptr = slot->Chunk();
     out_handle.user_payload_size = requested_size;
     out_handle.mode = transport::LoanMode::kPodOnly;
-    out_handle.driver_token = static_cast<void*>(it->second.publisher);
+    out_handle.driver_token = slot->Token();
     out_handle.source_driver = this;
     return true;
   } catch (const std::exception& e) {
@@ -651,8 +653,10 @@ bool ShmTransportDriver::LoanSerialized(ShmPublisher* pub, const transport::Tran
       MW_WARN("LoanSerializedSample: loan of {} bytes returned null on attempt {}", chunk_size, attempt);
       return false;
     }
-    LoanGuard guard([pub, slot] { pub->ReleaseSlot(slot); });
-    ibmw::util::FlatBufferArrayAllocator allocator(static_cast<char*>(slot->chunk) + header_size,
+    void* const token = slot->Token();
+    void* const chunk = slot->Chunk();
+    LoanGuard guard([pub, token] { pub->ReleaseSlot(token); });
+    ibmw::util::FlatBufferArrayAllocator allocator(static_cast<char*>(chunk) + header_size,
                                                    chunk_size - header_size);
     ibmw::util::BufferArray buffer_array(allocator.NativeHandle());
     if (info.msg_type_support_ref.Serialize(serialization_type, msg_ptr, buffer_array.AllocatorNativeHandle(),
@@ -661,14 +665,14 @@ bool ShmTransportDriver::LoanSerialized(ShmPublisher* pub, const transport::Tran
       size_t total_size = 0;
       if (!CheckedAddSize(header_size, payload_size, total_size) ||
           total_size > std::numeric_limits<uint32_t>::max() ||
-          EncodeCtxMetaHeader(slot->chunk, chunk_size, static_cast<uint32_t>(total_size), serialization_type,
+          EncodeCtxMetaHeader(chunk, chunk_size, static_cast<uint32_t>(total_size), serialization_type,
                               kv_map) != header_size) {
         return false;
       }
-      out_handle.user_payload_ptr = static_cast<char*>(slot->chunk) + header_size;
+      out_handle.user_payload_ptr = static_cast<char*>(chunk) + header_size;
       out_handle.user_payload_size = payload_size;
       out_handle.mode = transport::LoanMode::kCtxMetaThenPayloadUnreported;
-      out_handle.driver_token = slot;
+      out_handle.driver_token = token;
       out_handle.source_driver = this;
       guard.Disarm();
       return true;
@@ -750,13 +754,9 @@ size_t ShmTransportDriver::EncodeCtxMetaHeader(
 void ShmTransportDriver::PublishLoaned(transport::LoanedSampleHandle& handle) noexcept {
   if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this) return;
   switch (handle.mode) {
-    case transport::LoanMode::kCtxMetaThenPayloadUnreported: {
-      auto* slot = static_cast<ShmLoanSlot*>(handle.driver_token);
-      slot->owner->PublishSlot(slot);
-      break;
-    }
+    case transport::LoanMode::kCtxMetaThenPayloadUnreported:
     case transport::LoanMode::kPodOnly:
-      static_cast<ShmPublisher*>(handle.driver_token)->Publish(handle.user_payload_ptr);
+      ShmLoanSlot::FromToken(handle.driver_token)->owner->PublishSlot(handle.driver_token);
       break;
     default:
       return;
@@ -767,13 +767,9 @@ void ShmTransportDriver::PublishLoaned(transport::LoanedSampleHandle& handle) no
 void ShmTransportDriver::ReleaseLoaned(transport::LoanedSampleHandle& handle) noexcept {
   if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this) return;
   switch (handle.mode) {
-    case transport::LoanMode::kCtxMetaThenPayloadUnreported: {
-      auto* slot = static_cast<ShmLoanSlot*>(handle.driver_token);
-      slot->owner->ReleaseSlot(slot);
-      break;
-    }
+    case transport::LoanMode::kCtxMetaThenPayloadUnreported:
     case transport::LoanMode::kPodOnly:
-      static_cast<ShmPublisher*>(handle.driver_token)->Release(handle.user_payload_ptr);
+      ShmLoanSlot::FromToken(handle.driver_token)->owner->ReleaseSlot(handle.driver_token);
       break;
     default:
       return;

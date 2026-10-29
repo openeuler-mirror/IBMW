@@ -76,7 +76,9 @@ RuntimeImpl* RuntimeImpl::Instance() noexcept {
 Result<void> RuntimeImpl::Init(const RuntimeOptions& options) {
   std::lock_guard<std::mutex> lock(g_instance_mu);
   if (g_instance != nullptr) {
-    if (ResolveServiceDir(options) == g_instance->ServiceDir()) return {};
+    const std::string dir = ResolveServiceDir(options);
+    if (dir.empty()) return Error::kInvalidArg;
+    if (dir == g_instance->ServiceDir()) return {};
     return Error::kAlreadyInitialized;
   }
   auto* rt = new RuntimeImpl();
