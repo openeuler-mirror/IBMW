@@ -60,6 +60,8 @@ add_subdirectory(publish_tap)
 add_subdirectory(iox_loaned_pod)
 add_subdirectory(iox_loaned_ctx)
 add_subdirectory(iox_send)
+# Self-developed shm transport (shm_ext) running the iox_send modules.
+add_subdirectory(shm_send)
 add_subdirectory(dds_loaned)
 add_subdirectory(dds_send_shm)
 add_subdirectory(dds_send_tcp)
