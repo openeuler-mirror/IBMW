@@ -10,7 +10,6 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
-#include <vector>
 
 #include "cpp/executor/executor.h"
 
@@ -76,18 +75,25 @@ class RpcClientTool {
   std::optional<MsgRecorder> GetRecord(uint32_t req_id) { return state_->Take(req_id); }
 
   // Hands every remaining record to `handle` exactly once, so no call is
-  // dropped without a result. Later timeouts are no-ops. The caller must
-  // ensure Record() and GetRecord() are no longer called (e.g. from the
-  // driver destructor); timeout tasks still running are waited for.
-  void AbandonAll(const TimeoutHandle& handle) {
+  // dropped without a result; an exception from `handle` only affects its
+  // own record. Later timeouts are no-ops and timeout tasks still running
+  // are waited for, so this must not be called from a timeout task.
+  //
+  // Known limitation: concurrent Record()/GetRecord() calls are not
+  // synchronized with this (the map is iterated). Call it from the driver
+  // destructor; the service dispatcher does not yet drain in-flight Call()s
+  // before destroying drivers (pre-existing, tracked separately).
+  void AbandonAll(const TimeoutHandle& handle) noexcept {
     state_->closed.store(true);
     while (state_->running_timeout_tasks.load() != 0) std::this_thread::yield();
 
-    std::vector<MsgRecorder> abandoned;
-    abandoned.reserve(state_->client_msg_recorder_map.size());
-    for (auto& item : state_->client_msg_recorder_map) abandoned.emplace_back(std::move(item.second));
+    for (auto& item : state_->client_msg_recorder_map) {
+      try {
+        handle(std::move(item.second));
+      } catch (...) {
+      }
+    }
     state_->client_msg_recorder_map.clear();
-    for (auto& msg_recorder : abandoned) handle(std::move(msg_recorder));
   }
 
  private:

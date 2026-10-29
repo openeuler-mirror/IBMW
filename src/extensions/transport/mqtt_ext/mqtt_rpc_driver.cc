@@ -157,9 +157,7 @@ void MqttRpcDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
-
-  // Wait a moment  for the connection to be established
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  // The extension already waited (bounded) for the first connect attempt.
 }
 void MqttRpcDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
@@ -180,16 +178,9 @@ void MqttRpcDriver::Shutdown() {
 
 MqttRpcDriver::~MqttRpcDriver() {
   if (!client_tool_ptr_) return;
-  try {
-    client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
-      try {
-        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
-      } catch (...) {
-        MW_ERROR("Client callback threw while the mqtt rpc driver was destroyed.");
-      }
-    });
-  } catch (...) {
-  }
+  client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  });
 }
 
 bool MqttRpcDriver::RegisterServiceFunc(
@@ -197,6 +188,11 @@ bool MqttRpcDriver::RegisterServiceFunc(
   try {
     if (state_.load() != State::kInit) {
       MW_ERROR("Service func can only be registered when state is 'Init'.");
+      return false;
+    }
+    // Before any side effect: no subscription without a catalog handle.
+    if (msg_handle_catalog_ptr_->IsSealed()) {
+      MW_ERROR("Service func can only be registered before the engine starts.");
       return false;
     }
 
@@ -398,6 +394,11 @@ bool MqttRpcDriver::RegisterClientFunc(
   try {
     if (state_.load() != State::kInit) {
       MW_ERROR("Client func can only be registered when state is 'Init'.");
+      return false;
+    }
+    // Before any side effect: no subscription without a catalog handle.
+    if (msg_handle_catalog_ptr_->IsSealed()) {
+      MW_ERROR("Client func can only be registered before the engine starts.");
       return false;
     }
 
@@ -663,8 +664,9 @@ void MqttRpcDriver::Call(
       return;
     }
     recorded_req_id = cur_req_id;
-    // Pairs with the exchange in Shutdown(): a call racing it fails now
-    // instead of waiting for an answer that can no longer be delivered.
+    // Fast fail for a call that raced Shutdown(): it would only wait for an
+    // answer that can no longer be delivered. A call that slips past this
+    // check is completed by its timeout or by the destructor.
     if (state_.load() != State::kStart) [[unlikely]] {
       fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
       return;

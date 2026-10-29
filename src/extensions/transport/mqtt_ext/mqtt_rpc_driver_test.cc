@@ -48,9 +48,23 @@ const ibmw_type_support_base_t* JsonIntTypeSupport() {
 // A driver on a Paho client that never connects: every publish fails.
 class MqttRpcDriverTest : public ::testing::Test {
  protected:
-  void SetUp() override {
-    ASSERT_EQ(MQTTAsync_create(&client_, "tcp://127.0.0.1:1", "ibmw_rpc_test", MQTTCLIENT_PERSISTENCE_NONE, nullptr),
+  void SetUp() override { Init(false); }
+
+  // buffer_offline: publishes are queued by Paho, so calls stay pending.
+  void Init(bool buffer_offline) {
+    MQTTAsync_createOptions create_opts = MQTTAsync_createOptions_initializer;
+    create_opts.sendWhileDisconnected = buffer_offline ? 1 : 0;
+    ASSERT_EQ(MQTTAsync_createWithOptions(&client_, "tcp://127.0.0.1:1", "ibmw_rpc_test", MQTTCLIENT_PERSISTENCE_NONE,
+                                          nullptr, &create_opts),
               MQTTASYNC_SUCCESS);
+    if (buffer_offline) {
+      // Paho queues offline publishes only once a connection is wanted.
+      MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
+      conn_opts.automaticReconnect = 1;
+      conn_opts.minRetryInterval = 60;
+      conn_opts.maxRetryInterval = 60;
+      ASSERT_EQ(MQTTAsync_connect(client_, &conn_opts), MQTTASYNC_SUCCESS);
+    }
     driver_ = std::make_unique<MqttRpcDriver>("ibmw_rpc_test", client_, 1024 * 1024,
                                               std::make_shared<MsgHandleCatalog>());
     driver_->Initialize(YAML::Node());
@@ -65,7 +79,7 @@ class MqttRpcDriverTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    driver_->Shutdown();
+    if (driver_) driver_->Shutdown();
     driver_.reset();
     MQTTAsync_destroy(&client_);
   }
@@ -106,6 +120,39 @@ TEST_F(MqttRpcDriverTest, CallAfterShutdownFailsThroughCallback) {
   ASSERT_EQ(codes->size(), 1u);
   EXPECT_EQ((*codes)[0], static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
   EXPECT_TRUE(weak.expired());
+}
+
+class MqttRpcDriverPendingTest : public MqttRpcDriverTest {
+ protected:
+  void SetUp() override { Init(true); }
+};
+
+// A call still waiting when the driver goes away gets exactly one result.
+TEST_F(MqttRpcDriverPendingTest, DestructorCompletesPendingCallOnce) {
+  std::weak_ptr<runtime::core::service::ServiceMessageFrame> weak;
+  auto codes = CallOnce(&weak);
+  ASSERT_TRUE(codes->empty()) << "publish was expected to be queued";
+  driver_->Shutdown();
+  EXPECT_TRUE(codes->empty());
+  driver_.reset();
+  ASSERT_EQ(codes->size(), 1u);
+  EXPECT_EQ((*codes)[0], static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  EXPECT_TRUE(weak.expired());
+}
+
+// Registrations after the catalog is sealed are rejected.
+TEST_F(MqttRpcDriverTest, RegistrationAfterSealIsRejected) {
+  auto catalog = std::make_shared<MsgHandleCatalog>();
+  MqttRpcDriver driver("ibmw_rpc_test", client_, 1024 * 1024, catalog);
+  driver.Initialize(YAML::Node());
+  catalog->Seal();
+  runtime::core::service::ClientFuncWrapper client;
+  client.info = info_;
+  EXPECT_FALSE(driver.RegisterClientFunc(client));
+  runtime::core::service::ServiceFuncWrapper service;
+  service.info = info_;
+  service.service_func = [](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>&) {};
+  EXPECT_FALSE(driver.RegisterServiceFunc(service));
 }
 
 }  // namespace

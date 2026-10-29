@@ -90,9 +90,7 @@ void MqttTransportDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
-
-  // Wait a moment  for the connection to be established
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  // The extension already waited (bounded) for the first connect attempt.
 }
 
 void MqttTransportDriver::Shutdown() {
@@ -158,6 +156,10 @@ bool MqttTransportDriver::OnMessage(
   try {
     MW_REQUIRE(state_.load() == State::kInit,
                             "Method can only be called when state is 'Init'.");
+    // Checked before any side effect: a rejected registration must not
+    // leave a handler entry or a subscription without a catalog handle.
+    MW_REQUIRE(!msg_handle_catalog_ptr_->IsSealed(),
+               "Mqtt subscriptions can only be registered before the engine starts.");
 
     namespace util = ibmw::common::util;
 

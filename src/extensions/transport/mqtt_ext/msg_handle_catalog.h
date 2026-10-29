@@ -46,6 +46,7 @@ class MsgHandleCatalog {
 
   // Called before the first connect: no handler may be added afterwards.
   void Seal() noexcept { sealed_ = true; }
+  bool IsSealed() const noexcept { return sealed_; }
 
   // Takes ownership of the Paho message and topic buffer and frees them on
   // every path (TRANS-010), including drops, unknown topics, exceptions and

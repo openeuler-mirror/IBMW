@@ -197,7 +197,7 @@ MqttExtension::~MqttExtension() {
     connect_thread_.join();
   }
   if (client_ != nullptr) {
-    // Handlers must be idle before the client (and the drivers) go away.
+    // Stop intake (and wait for running handlers) before destroying the client.
     if (msg_handle_catalog_ptr_) msg_handle_catalog_ptr_->Shutdown();
     MQTTAsync_destroy(&client_);
   }

@@ -38,6 +38,8 @@ class MqttExtension : public ExtensionBase {
     // Check that the broker certificate matches the host name (TLS only).
     bool tls_verify_hostname = true;
     // How long startup waits for the first connect attempt (0: no wait).
+    // The wait runs inside engine start: a shutdown request during it is
+    // served once it ends.
     uint32_t start_connect_wait_ms = 3000;
   };
 
