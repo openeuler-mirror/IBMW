@@ -82,7 +82,8 @@ struct Segment {
 // true, F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_FUTURE_WRITE are applied after the
 // mapping, so later mappings by peers can only be read-only.
 Result<Segment> CreateSegment(const char* name, size_t size, bool seal_write, bool prefault);
-// Maps a received segment; `writable` is false for data segments.
+// Maps a received segment; `writable` is false for data segments. The fd
+// must be a regular file sealed with F_SEAL_SHRINK (kCorrupted otherwise).
 Result<Mapping> MapSegment(int fd, size_t size, bool writable);
 
 // Shared (not FUTEX_PRIVATE) futex; the word may live in a memfd mapping

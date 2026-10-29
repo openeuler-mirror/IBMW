@@ -33,6 +33,10 @@ if(IBMW_BUILD_ICEORYX_EXTENSION)
   add_subdirectory(transport/iceoryx_ext)
 endif()
 
+if(IBMW_BUILD_SHM_EXTENSION)
+  add_subdirectory(transport/shm_ext)
+endif()
+
 # dds_types provides IDL-based type registration (IBMW_DDS_TYPE_NAME) and
 # FastCDR serialization helpers used by both the DDS extension and the
 # Iceoryx extension (Iceoryx pubsub demos register IDL-generated types

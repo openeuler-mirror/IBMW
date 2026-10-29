@@ -29,7 +29,7 @@ Subscriber::Subscriber(std::string_view url, const SubscriberOptions& options) {
 
 Subscriber::~Subscriber() {
   if (!impl_) return;
-  if (auto l = impl_->listener.lock()) l->Detach(impl_.get());
+  if (auto l = impl_->AttachedListener()) l->Detach(impl_.get());
   impl_->Shutdown();
 }
 
@@ -239,14 +239,22 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
     // kernel would refuse a writable mapping anyway.
     auto m = MapSegment(fds[0].Get(), sm.segment_size, false);
     if (!m) return HandleHangup(conn);
+    bool duplicate = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      SubSegment seg;
-      seg.map = std::move(m.value());
-      seg.stride = sm.chunk_stride;
-      seg.count = sm.chunk_count;
-      conn->segments[sm.segment_id] = std::move(seg);
+      // Re-sending a segment id would unmap chunks the user may hold.
+      duplicate = conn->segments.count(sm.segment_id) != 0;
+      if (duplicate) {
+        MarkCorruptLocked(*conn);
+      } else {
+        SubSegment seg;
+        seg.map = std::move(m.value());
+        seg.stride = sm.chunk_stride;
+        seg.count = sm.chunk_count;
+        conn->segments.emplace(sm.segment_id, std::move(seg));
+      }
     }
+    if (duplicate) return HandleHangup(conn);
     SegmentAckMsg ack{{kMsgMagic, MsgType::kSegmentAck}, sm.segment_id};
     if (!SendMessage(conn->sock.Get(), &ack, sizeof(ack), nullptr, 0)) HandleHangup(conn);
     return;
@@ -263,21 +271,42 @@ void SubscriberImpl::HandleHangup(const std::shared_ptr<SubConn>& conn) noexcept
     std::lock_guard<std::mutex> lock(mu_);
     known_paths_.erase(conn->path);
     if (conn->state != SubConn::State::kOrphan) {
-      if (conn->hdr != nullptr) {
-        removed_version_ += conn->hdr->delivery_write.load(std::memory_order_relaxed);
-      }
+      // A publisher that shut down cleanly sets `closed` first and never
+      // reuses its chunks again, so what is queued can still be taken.
+      conn->draining = conn->state == SubConn::State::kActive && conn->hdr != nullptr &&
+                       conn->hdr->closed.load(std::memory_order_acquire) != 0;
       conn->state = SubConn::State::kOrphan;
     }
     // Taken chunks stay readable (mappings live in the connection) until
     // released; then the connection goes away.
-    if (conn->held == 0) RemoveConnLocked(conn.get());
+    PruneOrphansLocked();
   }
   rt_->RemoveFd(conn->sock.Get());
 }
 
 void SubscriberImpl::RemoveConnLocked(const SubConn* conn) noexcept {
   auto it = std::find_if(conns_.begin(), conns_.end(), [conn](auto& c) { return c.get() == conn; });
-  if (it != conns_.end()) conns_.erase(it);
+  if (it == conns_.end()) return;
+  // Keeps Poll()'s version monotonic once the connection is gone.
+  if (conn->hdr != nullptr) removed_version_ += conn->hdr->delivery_write.load(std::memory_order_relaxed);
+  conns_.erase(it);
+}
+
+void SubscriberImpl::PruneOrphansLocked() noexcept {
+  for (size_t i = conns_.size(); i-- > 0;) {
+    SubConn& c = *conns_[i];
+    if (c.state == SubConn::State::kOrphan && !c.draining && c.held == 0) RemoveConnLocked(&c);
+  }
+}
+
+// Data-path counterpart of the publisher's MarkCorruptLocked: stop reading
+// from the connection; the control thread sees the hang-up and cleans up.
+void SubscriberImpl::MarkCorruptLocked(SubConn& conn) noexcept {
+  if (conn.state != SubConn::State::kOrphan) Log("connection corrupted, dropping publisher", url_);
+  ++stats_.corrupted_connections;
+  conn.state = SubConn::State::kOrphan;
+  conn.draining = false;
+  ::shutdown(conn.sock.Get(), SHUT_RDWR);
 }
 
 // --------------------------------------------------------------- data path
@@ -292,10 +321,12 @@ bool SubscriberImpl::Poll(uint64_t* version) const noexcept {
   bool has = false;
   uint64_t v = removed_version_;
   for (auto& c : conns_) {
-    if (c->state != SubConn::State::kActive) continue;
+    if (c->hdr == nullptr) continue;
     uint64_t w = c->hdr->delivery_write.load(std::memory_order_acquire);
     v += w;
-    has = has || c->hdr->delivery_read.load(std::memory_order_acquire) < w;
+    if (c->state == SubConn::State::kActive || c->draining) {
+      has = has || c->hdr->delivery_read.load(std::memory_order_acquire) < w;
+    }
   }
   *version = v;
   return has;
@@ -316,21 +347,31 @@ Result<const void*> SubscriberImpl::Take() noexcept {
   std::lock_guard<std::mutex> lock(mu_);
   if (shutting_down_) return Error::kShuttingDown;
   if (held_.size() >= options_.max_held) return Error::kTooManyHeld;
+  PruneOrphansLocked();
   const size_t n = conns_.size();
   for (size_t k = 0; k < n; ++k) {
     size_t ci = (round_robin_ + k) % n;
     SubConn& c = *conns_[ci];
-    if (c.state != SubConn::State::kActive) continue;
+    const bool active = c.state == SubConn::State::kActive;
+    if (!active && !c.draining) continue;
     ConnHeader* h = c.hdr;
     auto* slots = DeliverySlots(h);
-    for (;;) {
+    // Bounded: the ring indices are publisher-writable.
+    for (uint32_t spin = 0; spin < 4 * c.capacity + 4; ++spin) {
       uint64_t r = h->delivery_read.load(std::memory_order_acquire);
       uint64_t w = h->delivery_write.load(std::memory_order_acquire);
-      if (r >= w) break;
+      if (r >= w) {
+        c.draining = false;  // an orphan's ring never refills
+        break;
+      }
+      if (w - r > c.capacity) {
+        MarkCorruptLocked(c);
+        break;
+      }
       uint64_t v = slots[r % c.delivery_slots].load(std::memory_order_acquire);
       // The CAS decides ownership against a concurrent eviction.
       if (!h->delivery_read.compare_exchange_strong(r, r + 1, std::memory_order_acq_rel)) continue;
-      if (options_.queue_full == QueueFullPolicy::kBlockProducer) SignalSpace(c);
+      if (active && options_.queue_full == QueueFullPolicy::kBlockProducer) SignalSpace(c);
       auto seg = c.segments.find(HandleSegment(v));
       uint32_t idx = HandleIndex(v);
       if (seg == c.segments.end() || idx >= seg->second.count) {
@@ -339,13 +380,19 @@ Result<const void*> SubscriberImpl::Take() noexcept {
       }
       const uint8_t* base = seg->second.map.Data() + idx * seg->second.stride;
       auto* ch = reinterpret_cast<const ChunkHeader*>(base);
-      if (ch->payload_offset < kChunkHeaderSize ||
-          static_cast<uint64_t>(ch->payload_offset) + ch->payload_size > seg->second.stride) {
+      // Read once: the header is in publisher-writable memory.
+      uint32_t offset = __atomic_load_n(&ch->payload_offset, __ATOMIC_RELAXED);
+      uint32_t size = __atomic_load_n(&ch->payload_size, __ATOMIC_RELAXED);
+      if (offset < kChunkHeaderSize || static_cast<uint64_t>(offset) + size > seg->second.stride) {
         PushReturnLocked(c, v);
         continue;
       }
-      const void* payload = base + ch->payload_offset;
-      held_[payload] = Held{conns_[ci], v};
+      const void* payload = base + offset;
+      if (held_.count(payload) != 0) {  // delivered twice while held
+        PushReturnLocked(c, v);
+        continue;
+      }
+      held_.emplace(payload, Held{conns_[ci], v});
       ++c.held;
       ++stats_.takes;
       round_robin_ = (ci + 1) % n;
@@ -356,18 +403,24 @@ Result<const void*> SubscriberImpl::Take() noexcept {
 }
 
 void SubscriberImpl::PushReturnLocked(SubConn& conn, uint64_t handle) noexcept {
+  if (conn.state != SubConn::State::kActive) return;  // the publisher is gone
   ConnHeader* h = conn.hdr;
-  uint64_t w = conn.return_write;
-  uint64_t r = h->return_read.load(std::memory_order_acquire);
-  if (w - r >= conn.return_slots) {
-    // Cannot happen with a well-behaved publisher (ring sized to queue +
-    // held + 1). The chunk is reclaimed when the connection closes.
+  const uint64_t r = h->return_read.load(std::memory_order_acquire);
+  auto* slots = ReturnSlots(h, conn.delivery_slots);
+  auto push = [&](uint64_t v) {
+    if (conn.return_write - r >= conn.return_slots) return false;
+    slots[conn.return_write % conn.return_slots].store(v, std::memory_order_relaxed);
+    ++conn.return_write;
+    return true;
+  };
+  while (!conn.return_backlog.empty() && push(conn.return_backlog.front())) conn.return_backlog.pop_front();
+  if (!conn.return_backlog.empty() || !push(handle)) {
+    // Cannot happen with a well-behaved publisher, which drains before every
+    // delivery. Park the handle so the chunk is not lost.
     ++stats_.return_ring_full;
-    return;
+    if (conn.return_backlog.size() < kMaxReturnBacklog) conn.return_backlog.push_back(handle);
   }
-  ReturnSlots(h, conn.delivery_slots)[w % conn.return_slots].store(handle, std::memory_order_relaxed);
-  conn.return_write = w + 1;
-  h->return_write.store(w + 1, std::memory_order_release);
+  h->return_write.store(conn.return_write, std::memory_order_release);
 }
 
 void SubscriberImpl::Release(const void* user_payload) noexcept {
@@ -379,11 +432,8 @@ void SubscriberImpl::Release(const void* user_payload) noexcept {
   held_.erase(it);
   --conn->held;
   ++stats_.releases;
-  if (conn->state == SubConn::State::kActive) {
-    PushReturnLocked(*conn, handle);
-  } else if (conn->state == SubConn::State::kOrphan && conn->held == 0) {
-    RemoveConnLocked(conn.get());
-  }
+  PushReturnLocked(*conn, handle);
+  if (conn->state == SubConn::State::kOrphan) PruneOrphansLocked();
 }
 
 SubscriberStats SubscriberImpl::Stats() const noexcept {
@@ -393,6 +443,24 @@ SubscriberStats SubscriberImpl::Stats() const noexcept {
   for (auto& c : conns_) s.connections += c->state == SubConn::State::kActive ? 1 : 0;
   s.held = static_cast<uint32_t>(held_.size());
   return s;
+}
+
+std::shared_ptr<ListenerImpl> SubscriberImpl::AttachedListener() const noexcept {
+  std::lock_guard<std::mutex> lock(listener_mu_);
+  return listener_.lock();
+}
+
+bool SubscriberImpl::ClaimListener(const std::shared_ptr<ListenerImpl>& listener) noexcept {
+  std::lock_guard<std::mutex> lock(listener_mu_);
+  auto current = listener_.lock();
+  if (current && current != listener) return false;
+  listener_ = listener;
+  return true;
+}
+
+void SubscriberImpl::ClearListener(const ListenerImpl* listener) noexcept {
+  std::lock_guard<std::mutex> lock(listener_mu_);
+  if (listener_.lock().get() == listener) listener_.reset();
 }
 
 void SubscriberImpl::SetNotifySlot(uint32_t slot) noexcept {

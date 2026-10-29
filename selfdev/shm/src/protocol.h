@@ -17,6 +17,11 @@ inline constexpr uint32_t kConnMagic = 0x4e4e4f43;    // "CONN"
 inline constexpr uint32_t kNotifyMagic = 0x5946544e;  // "NTFY"
 inline constexpr uint32_t kMsgMagic = 0x4d534849;     // "IHSM"
 inline constexpr uint32_t kNoListener = 0xffffffffu;
+// Accepted connections per publisher; further peers are closed at once.
+inline constexpr size_t kMaxConnectionsPerPublisher = 1024;
+// Return handles a subscriber parks while a misbehaving publisher does not
+// drain its return ring; beyond that they are dropped (and counted).
+inline constexpr size_t kMaxReturnBacklog = 4096;
 
 // ---- chunk handle: segment 12 bit | chunk index 20 bit | generation 32 bit
 inline constexpr uint64_t MakeHandle(uint32_t seg, uint32_t idx, uint32_t gen) noexcept {

@@ -22,14 +22,15 @@
 #cmakedefine01 IBMW_HAS_ZENOH
 #cmakedefine01 IBMW_HAS_MQTT
 #cmakedefine01 IBMW_HAS_NET
+#cmakedefine01 IBMW_HAS_SELFDEV_SHM
 
 // Local transport is always present (no IBMW_BUILD_LOCAL_EXTENSION flag).
 #define IBMW_HAS_LOCAL 1
 
 // Derived: shared-memory zero-copy is available when at least one
-// SHM-capable transport is built. Today only iceoryx qualifies; SHM-DDS
-// support is reserved for future implementation.
-#define IBMW_HAS_SHM (IBMW_HAS_ICEORYX || 0 /* IBMW_HAS_SHM_DDS reserved */)
+// SHM-capable transport is built: iceoryx or the self-developed shm
+// transport. SHM-DDS support is reserved for future implementation.
+#define IBMW_HAS_SHM (IBMW_HAS_ICEORYX || IBMW_HAS_SELFDEV_SHM || 0 /* IBMW_HAS_SHM_DDS reserved */)
 
 // Per-TU opt-out for the LoanedSample<T> SHM-presence assert. Exposed
 // as an integer-valued macro because the `defined` operator is illegal

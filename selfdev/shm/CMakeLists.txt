@@ -30,6 +30,7 @@ if(IBMW_BUILD_TESTS)
          test/listener_test.cc
          test/policy_test.cc
          test/robustness_test.cc
+         test/regression_test.cc
     LIBS ibmw::selfdev::shm)
   target_include_directories(ibmw_selfdev_shm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   # Multi-process cases fork/exec this helper.

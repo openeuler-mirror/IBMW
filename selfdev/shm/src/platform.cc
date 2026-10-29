@@ -25,6 +25,9 @@
 #ifndef F_ADD_SEALS
 #define F_ADD_SEALS 1033
 #endif
+#ifndef F_GET_SEALS
+#define F_GET_SEALS 1034
+#endif
 #ifndef F_SEAL_SHRINK
 #define F_SEAL_SHRINK 0x0002
 #endif
@@ -97,7 +100,11 @@ Result<Segment> CreateSegment(const char* name, size_t size, bool seal_write, bo
 Result<Mapping> MapSegment(int fd, size_t size, bool writable) {
   struct stat st {};
   if (::fstat(fd, &st) != 0) return Error::kSystem;
-  if (size == 0 || static_cast<uint64_t>(st.st_size) < size) return Error::kCorrupted;
+  if (!S_ISREG(st.st_mode) || size == 0 || static_cast<uint64_t>(st.st_size) < size) return Error::kCorrupted;
+  // A peer-provided file that can still shrink would turn our accesses into
+  // SIGBUS; only accept memfds sealed against shrinking.
+  int seals = ::fcntl(fd, F_GET_SEALS);
+  if (seals < 0 || (seals & F_SEAL_SHRINK) == 0) return Error::kCorrupted;
   int prot = PROT_READ | (writable ? PROT_WRITE : 0);
   void* p = ::mmap(nullptr, size, prot, MAP_SHARED, fd, 0);
   if (p == MAP_FAILED) return errno == ENOMEM ? Error::kNoMemory : Error::kSystem;

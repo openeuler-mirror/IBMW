@@ -125,6 +125,10 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
 
   mutable std::mutex mu_;
   bool shutting_down_ = false;
+  // Publish() calls waiting for lossless space; Shutdown() waits for them
+  // to leave before the object can be destroyed.
+  uint32_t blocked_publishers_ = 0;
+  std::condition_variable idle_cv_;
   std::vector<std::unique_ptr<PoolSegment>> segments_;
   std::vector<std::vector<uint64_t>> free_;  // per class: (seg << 32) | idx
   std::vector<uint32_t> class_chunks_;       // total chunks per class
@@ -165,6 +169,10 @@ class SubConn : public EventHandler, public std::enable_shared_from_this<SubConn
   uint64_t return_write = 0;
   std::unordered_map<uint32_t, SubSegment> segments;
   uint32_t held = 0;
+  // Orphaned by an orderly publisher shutdown: samples already queued stay
+  // takeable until the ring is empty.
+  bool draining = false;
+  std::deque<uint64_t> return_backlog;  // returns that did not fit the ring
 };
 
 class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
@@ -189,8 +197,13 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
 
   uint64_t Hash() const noexcept { return hash_; }
 
-  // Listener bookkeeping (guarded by the listener).
-  std::weak_ptr<ListenerImpl> listener;
+  // Link to the attached listener; a subscriber has at most one.
+  std::shared_ptr<ListenerImpl> AttachedListener() const noexcept;
+  // Sets the link unless another live listener holds it.
+  bool ClaimListener(const std::shared_ptr<ListenerImpl>& listener) noexcept;
+  // Clears the link if it still points at `listener`.
+  void ClearListener(const ListenerImpl* listener) noexcept;
+
   Subscriber* owner = nullptr;
 
  private:
@@ -198,6 +211,9 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
   void PushReturnLocked(SubConn& conn, uint64_t handle) noexcept;
   void SignalSpace(SubConn& conn) noexcept;
   void RemoveConnLocked(const SubConn* conn) noexcept;
+  // Drops orphaned connections nothing refers to any more.
+  void PruneOrphansLocked() noexcept;
+  void MarkCorruptLocked(SubConn& conn) noexcept;
 
   RuntimeImpl* rt_ = nullptr;
   std::string url_;
@@ -217,6 +233,9 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
   std::atomic<uint32_t> notify_slot_{kNoListener};
   uint64_t removed_version_ = 0;
   SubscriberStats stats_;
+
+  mutable std::mutex listener_mu_;
+  std::weak_ptr<ListenerImpl> listener_;
 };
 
 // ============================================================ listener
@@ -234,6 +253,7 @@ class ListenerImpl : public std::enable_shared_from_this<ListenerImpl> {
  private:
   ListenerImpl() = default;
   void Loop() noexcept;
+  void Cleanup() noexcept;
   void Wake() noexcept;
 
   struct Entry {

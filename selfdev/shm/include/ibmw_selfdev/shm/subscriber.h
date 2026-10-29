@@ -28,7 +28,8 @@ struct SubscriberOptions {
 struct SubscriberStats {
   uint64_t takes = 0;
   uint64_t releases = 0;
-  uint64_t return_ring_full = 0;
+  uint64_t return_ring_full = 0;       // returns parked because the ring was full
+  uint64_t corrupted_connections = 0;  // publishers dropped for protocol violations
   uint32_t connections = 0;  // publishers currently connected and ready
   uint32_t held = 0;
 };
@@ -46,7 +47,8 @@ class Subscriber {
   Error InitError() const noexcept;
 
   bool HasData() const noexcept;
-  // Returns a read-only payload; release it with Release().
+  // Returns a read-only payload; release it with Release(). Payloads must be
+  // released before the Subscriber is destroyed: destruction unmaps them.
   Result<const void*> Take() noexcept;
   void Release(const void* user_payload) noexcept;
 

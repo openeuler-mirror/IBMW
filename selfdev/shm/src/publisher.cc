@@ -151,7 +151,7 @@ PublisherImpl::~PublisherImpl() = default;
 void PublisherImpl::Shutdown() noexcept {
   std::vector<std::shared_ptr<PubConn>> conns;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::mutex> lock(mu_);
     if (shutting_down_) return;
     shutting_down_ = true;
     conns = conns_;
@@ -160,6 +160,8 @@ void PublisherImpl::Shutdown() noexcept {
       c->state = PubConn::State::kClosed;
       WakeSpace(*c);
     }
+    // Blocked Publish() calls see shutting_down_ on their next retry.
+    idle_cv_.wait(lock, [this] { return blocked_publishers_ == 0; });
   }
   ::unlink(socket_path_.c_str());
   rt_->Call([&] {
@@ -407,6 +409,10 @@ void PublisherImpl::WakeSpace(PubConn& conn) noexcept {
 
 bool PublisherImpl::PushRingLocked(PubConn& conn, uint64_t handle, bool* full) noexcept {
   *full = false;
+  // Draining before every push bounds the subscriber's return ring: it never
+  // holds more than queue capacity + held handles (see design doc 3.4).
+  DrainReturnsLocked(conn);
+  if (conn.state != PubConn::State::kActive) return false;
   ConnHeader* h = conn.hdr;
   uint64_t w = conn.delivery_write;
   uint64_t r = h->delivery_read.load(std::memory_order_acquire);
@@ -514,8 +520,12 @@ void PublisherImpl::Publish(void* user_payload) noexcept {
         }
       }
     }
-    if (waiting.empty()) DropRefLocked(seg, idx);
-    if (!waiting.empty()) ++stats_.blocked;
+    if (waiting.empty()) {
+      DropRefLocked(seg, idx);
+    } else {
+      ++stats_.blocked;
+      ++blocked_publishers_;
+    }
   }
   for (auto& c : wake) WakeListener(*c);
   if (waiting.empty()) return;
@@ -560,6 +570,8 @@ void PublisherImpl::Publish(void* user_payload) noexcept {
   }
   std::lock_guard<std::mutex> lock(mu_);
   DropRefLocked(seg, idx);
+  // Notify under the lock: once it is released Shutdown() may destroy us.
+  if (--blocked_publishers_ == 0) idle_cv_.notify_all();
 }
 
 bool PublisherImpl::HasSubscribers() const noexcept {
@@ -600,6 +612,10 @@ void PublisherImpl::OnEvent(uint32_t /*events*/) noexcept {
     {
       std::lock_guard<std::mutex> lock(mu_);
       if (shutting_down_) return;
+      if (conns_.size() >= kMaxConnectionsPerPublisher) {
+        Log("rejected peer: too many connections", url_);
+        continue;
+      }
       conns_.push_back(conn);
     }
     if (!rt_->AddFd(fd, EPOLLIN | EPOLLRDHUP, conn)) {
@@ -705,6 +721,8 @@ void PublisherImpl::HandleMessage(const std::shared_ptr<PubConn>& conn, const ui
     int fd = conn->conn_seg.fd.Get();
     bool ok = SendMessage(conn->sock.Get(), &wm, sizeof(wm), &fd, 1);
     for (auto& s : segments_) ok = ok && SendSegmentLocked(*conn, *s);
+    // The subscriber holds its own descriptor now; keep only the mapping.
+    conn->conn_seg.fd.Reset();
     if (!ok) {
       MarkCorruptLocked(*conn);
       return;

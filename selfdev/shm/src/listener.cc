@@ -52,12 +52,14 @@ Result<std::shared_ptr<ListenerImpl>> ListenerImpl::Create(const ListenerOptions
   self->notify_->sleeping.store(0, std::memory_order_relaxed);
   std::promise<std::thread::id> started;
   auto f = started.get_future();
-  auto* raw = self.get();
-  self->thread_ = std::thread([raw, &started] {
-    std::string name = raw->options_.thread_name.substr(0, 15);
+  // The thread owns a reference: a callback may destroy the Listener, after
+  // which the loop still has to unwind on this object.
+  self->thread_ = std::thread([keep = self, &started] {
+    std::string name = keep->options_.thread_name.substr(0, 15);
     ::pthread_setname_np(::pthread_self(), name.c_str());
     started.set_value(std::this_thread::get_id());
-    raw->Loop();
+    keep->Loop();
+    keep->Cleanup();
   });
   self->thread_id_ = f.get();
   return self;
@@ -70,10 +72,18 @@ void ListenerImpl::Stop() noexcept {
   stop_.store(true, std::memory_order_seq_cst);
   Wake();
   if (std::this_thread::get_id() == thread_id_) {
-    thread_.detach();  // destroyed from its own callback
+    // Destroyed from its own callback: the loop exits after the callback
+    // returns and cleans up there.
+    thread_.detach();
   } else {
     thread_.join();
   }
+}
+
+// Runs on the listener thread once the loop has exited, so the notify slot
+// is only reused after this thread stopped touching it.
+void ListenerImpl::Cleanup() noexcept {
+  notify_->sleeping.store(0, std::memory_order_relaxed);
   std::vector<Entry> entries;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -81,7 +91,7 @@ void ListenerImpl::Stop() noexcept {
   }
   for (auto& e : entries) {
     e.impl->SetNotifySlot(kNoListener);
-    e.impl->listener.reset();
+    e.impl->ClearListener(this);
   }
   rt_->FreeListenerSlot(slot_);
 }
@@ -97,14 +107,13 @@ Result<void> ListenerImpl::Attach(Subscriber& sub, Listener::Callback cb, void* 
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (stop_.load()) return Error::kShuttingDown;
-    if (auto other = impl->listener.lock(); other && other.get() != this) return Error::kInvalidArg;
     for (auto& e : entries_) {
       if (e.impl == impl) return Error::kInvalidArg;
     }
     if (entries_.size() >= options_.capacity) return Error::kNoMemory;
+    if (!impl->ClaimListener(shared_from_this())) return Error::kInvalidArg;  // attached elsewhere
     // ~0: fire once if data is already waiting at attach time.
     entries_.push_back(Entry{&sub, impl, cb, ctx, ~0ull});
-    impl->listener = weak_from_this();
   }
   impl->SetNotifySlot(slot_);
   Wake();
@@ -118,7 +127,7 @@ void ListenerImpl::Detach(SubscriberImpl* sub) noexcept {
   if (it == entries_.end()) return;
   impl = std::move(it->impl);
   entries_.erase(it);
-  impl->listener.reset();
+  impl->ClearListener(this);
   if (std::this_thread::get_id() != thread_id_) {
     cv_.wait(lock, [&] { return dispatching_ != sub; });
   }
@@ -182,7 +191,6 @@ void ListenerImpl::Loop() noexcept {
       if (stop_.load(std::memory_order_relaxed)) break;
     }
   }
-  notify_->sleeping.store(0, std::memory_order_relaxed);
 }
 
 }  // namespace detail

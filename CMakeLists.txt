@@ -118,6 +118,7 @@ cmake_dependent_option(IBMW_BUILD_NET_EXTENSION "IBMW build net extension." OFF 
 cmake_dependent_option(IBMW_BUILD_MQTT_EXTENSION "IBMW build mqtt extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ZENOH_EXTENSION "IBMW build zenoh extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ICEORYX_EXTENSION "IBMW build iceoryx extension." OFF "IBMW_BUILD_RUNTIME" OFF)
+cmake_dependent_option(IBMW_BUILD_SHM_EXTENSION "IBMW build self-developed zero-copy shm extension (iceoryx replacement, no RouDi)." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_RETAINED_LOAN_E2E "IBMW build retained-loan iceoryx E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
 option(IBMW_ICEORYX_USE_PACKAGE "Use a prebuilt target iceoryx package instead of FetchContent." OFF)
 cmake_dependent_option(IBMW_BUILD_OPENTELEMETRY_EXTENSION "IBMW build opentelemetry extension." OFF "IBMW_BUILD_RUNTIME" OFF)
@@ -491,6 +492,17 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # ============================================================================
 # Add subdirectory
 # ============================================================================
+# Self-developed components must exist before src/ links them.
+if(IBMW_BUILD_SHM_EXTENSION)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "IBMW_BUILD_SHM_EXTENSION requires Linux (memfd/futex/epoll).")
+  endif()
+  set(IBMW_SELFDEV_SHM ON)
+endif()
+if(IBMW_SELFDEV_SHM)
+  add_subdirectory(selfdev)
+endif()
+
 add_subdirectory(src)
 add_subdirectory(tools)
 
@@ -637,6 +649,7 @@ list(
   IBMW_BUILD_MQTT_EXTENSION
   IBMW_BUILD_ZENOH_EXTENSION
   IBMW_BUILD_ICEORYX_EXTENSION
+  IBMW_BUILD_SHM_EXTENSION
   IBMW_BUILD_OPENTELEMETRY_EXTENSION
   IBMW_BUILD_ECHO_EXTENSION
   IBMW_BUILD_ROS2_EXTENSION
