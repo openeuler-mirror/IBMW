@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <list>
@@ -35,7 +36,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
   struct Options {
     /// Listening address
-    Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4(), 57634};
+    Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4::loopback(), 57634};
 
     /// Maximum number of connections
     size_t max_session_num = 1000000;
@@ -116,6 +117,24 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
   void Start() {
     MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    acceptor_.open(options_.ep.protocol(), ec);
+    if (!ec) acceptor_.set_option(Tcp::acceptor::reuse_address(true), ec);
+    if (!ec) acceptor_.bind(options_.ep, ec);
+    if (!ec) acceptor_.listen(Tcp::acceptor::max_listen_connections, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      acceptor_.close(ignored);
+      MW_THROW("Tcp svr failed to listen on {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
+    MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
 
@@ -123,11 +142,6 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          acceptor_.open(options_.ep.protocol());
-          acceptor_.set_option(Tcp::acceptor::reuse_address(true));
-          acceptor_.bind(options_.ep);
-          acceptor_.listen();
-
           while (state_.load() == State::kStart) {
             try {
               // If the number of connections reaches the upper limit, wait for a while before trying
@@ -143,12 +157,23 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
               co_await acceptor_.async_accept(session_ptr->Socket(),
                                               boost::asio::use_awaitable);
+
+              // The peer may already be gone: skip it instead of throwing.
+              boost::system::error_code ec;
+              auto remote_ep = session_ptr->Socket().remote_endpoint(ec);
+              if (ec) {
+                MW_TRACE("Tcp svr accepted connection is already closed: {}", ec.message());
+                session_ptr->Socket().close(ec);
+                continue;
+              }
               MW_TRACE(
                   "Tcp svr accept a new connection, remote addr is {}",
-                  ibmw::common::util::SSToString(session_ptr->Socket().remote_endpoint()));
-              session_ptr->Start();
+                  ibmw::common::util::SSToString(remote_ep));
 
-              session_ptr_map_.emplace(session_ptr->Socket().remote_endpoint(), session_ptr);
+              // Registered before Start (same strand as SendMsg); a stale
+              // session with a reused endpoint is replaced.
+              session_ptr_map_.insert_or_assign(remote_ep, session_ptr);
+              session_ptr->Start(remote_ep);
 
             } catch (const std::exception& e) {
               MW_TRACE(
@@ -265,6 +290,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
   static constexpr size_t kHeadSize = 6;
   static constexpr char kHeadByte1 = 'Y';
   static constexpr char kHeadByte2 = 'T';
+  static constexpr size_t kEagerRecvSize = 4 * 1024 * 1024;
 
   static bool CheckListenAddr(const Tcp::endpoint& ep) {
     try {
@@ -312,12 +338,13 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
       session_options_ptr_ = session_options_ptr;
     }
 
-    void Start() {
+    void Start(const Tcp::endpoint& remote_ep) {
       MW_REQUIRE(
           std::atomic_exchange(&state_, SessionState::kStart) == SessionState::kInit,
           "Method can only be called when state is 'Init'.");
 
-      remote_addr_ = ibmw::common::util::SSToString(sock_.remote_endpoint());
+      remote_ep_ = remote_ep;
+      remote_addr_ = ibmw::common::util::SSToString(remote_ep_);
 
       auto self = shared_from_this();
 
@@ -409,18 +436,29 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
                 auto msg_buf = std::make_shared<Streambuf>();
 
-                read_data_size = co_await boost::asio::async_read(
-                    sock_, msg_buf->prepare(msg_len),
-                    boost::asio::transfer_exactly(msg_len),
-                    boost::asio::use_awaitable);
-                MW_TRACE("Tcp svr session async read {} bytes from {}.",
-                            read_data_size, RemoteAddr());
-                tick_has_data_ = true;
+                // Up to kEagerRecvSize is reserved at once; larger messages
+                // grow (doubling) as their bytes arrive, so a bare header
+                // cannot make the server reserve max_recv_size.
+                size_t remaining = msg_len;
+                while (remaining > 0) {
+                  const size_t chunk = std::min(remaining, std::max(kEagerRecvSize, msg_buf->size()));
+                  read_data_size = co_await boost::asio::async_read(
+                      sock_, msg_buf->prepare(chunk),
+                      boost::asio::transfer_exactly(chunk),
+                      boost::asio::use_awaitable);
+                  MW_TRACE("Tcp svr session async read {} bytes from {}.",
+                              read_data_size, RemoteAddr());
+                  tick_has_data_ = true;
+                  msg_buf->commit(chunk);
+                  remaining -= chunk;
+                }
 
-                msg_buf->commit(msg_len);
+                // The handler may run after this session is gone.
                 boost::asio::post(
                     *io_ptr_,
-                    [this, msg_buf]() { (*msg_handle_ptr_)(Socket().remote_endpoint(), msg_buf); });
+                    [msg_handle_ptr = msg_handle_ptr_, remote_ep = remote_ep_, msg_buf]() {
+                      (*msg_handle_ptr)(remote_ep, msg_buf);
+                    });
               }
             } catch (const std::exception& e) {
               MW_WARN(
@@ -498,7 +536,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
           } catch (const std::exception& e) {
             MW_TRACE(
                 "Tcp svr session stop get exception at step {}, remote addr {}, exception info: {}",
-                RemoteAddr(), stop_step, e.what());
+                stop_step, RemoteAddr(), e.what());
             ++stop_step;
           }
         }
@@ -578,6 +616,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
     std::atomic<SessionState> state_ = SessionState::kPreInit;
 
     // misc
+    Tcp::endpoint remote_ep_;
     std::string remote_addr_;
     std::atomic_bool tick_has_data_ = false;
     std::list<std::shared_ptr<Streambuf>> data_list_;

@@ -6,6 +6,7 @@
 #include "cpp/util/type_support.h"
 #include "net_ext/global.h"
 #include "base/url_encode.h"
+#include "net_ext/meta_filter.h"
 
 namespace YAML {
 template <>
@@ -205,17 +206,19 @@ bool HttpTransportDriver::OnMessage(
       // context
       auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
 
-      ctx_ptr->SetSerializationType(serialization_type);
-
-      // Read other fields from http header into context
+      // Read other fields from http header into context; framework fields are
+      // set afterwards so a peer cannot override them.
       for (auto const& field : req) {
+        auto key = ibmw::common::util::HttpHeaderDecode(
+            ibmw::common::net::ToStdStringView(field.name_string()));
+        if (!IsPeerMetaKeyAllowed(key)) continue;
         ctx_ptr->SetMetaValue(
-            ibmw::common::util::HttpHeaderDecode(
-                ibmw::common::net::ToStdStringView(field.name_string())),
+            key,
             ibmw::common::util::HttpHeaderDecode(
                 ibmw::common::net::ToStdStringView(field.value())));
       }
 
+      ctx_ptr->SetSerializationType(serialization_type);
       ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
 
       // Get message buf

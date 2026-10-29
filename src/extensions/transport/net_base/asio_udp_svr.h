@@ -33,7 +33,7 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
 
   struct Options {
     /// Listening address
-    Udp::endpoint ep = Udp::endpoint{boost::asio::ip::address_v4(), 53927};
+    Udp::endpoint ep = Udp::endpoint{boost::asio::ip::address_v4::loopback(), 53927};
 
     /// Maximum number of connections
     size_t max_session_num = 1000000;
@@ -111,6 +111,22 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
 
   void Start() {
     MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    sock_.open(options_.ep.protocol(), ec);
+    if (!ec) sock_.bind(options_.ep, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      sock_.close(ignored);
+      MW_THROW("udp svr failed to bind {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
+    MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
 
@@ -118,9 +134,6 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          sock_.open(options_.ep.protocol());
-          sock_.bind(options_.ep);
-
           while (state_.load() == State::kStart) {
             try {
               // If the number of connections reaches the upper limit, wait for a while before trying
@@ -146,7 +159,7 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
                 session_ptr = finditr->second;
               } else {
                 session_ptr = std::make_shared<Session>(
-                    io_ptr_, logger_ptr_, msg_handle_ptr_);
+                    io_ptr_, logger_ptr_, msg_handle_ptr_, remote_ep);
                 session_ptr->Initialize(session_options_ptr_);
                 session_ptr->Start();
                 session_ptr_map_.emplace(remote_ep, session_ptr);
@@ -256,12 +269,14 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
    public:
     Session(const std::shared_ptr<IOCtx>& io_ptr,
             const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr,
-            const std::shared_ptr<MsgHandle>& msg_handle_ptr)
+            const std::shared_ptr<MsgHandle>& msg_handle_ptr,
+            const Udp::endpoint& remote_ep)
         : io_ptr_(io_ptr),
           session_mgr_strand_(boost::asio::make_strand(*io_ptr_)),
           timer_(session_mgr_strand_),
           logger_ptr_(logger_ptr),
-          msg_handle_ptr_(msg_handle_ptr) {}
+          msg_handle_ptr_(msg_handle_ptr),
+          remote_ep_(remote_ep) {}
 
     ~Session() = default;
 

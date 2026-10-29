@@ -23,6 +23,10 @@ class HttpRpcDriver : public runtime::core::service::ServiceDriver {
       std::string func_name;
     };
     std::vector<ServerOptions> servers_options;
+
+    // Origins allowed to call the services from a browser; "*" allows any.
+    // Empty (default): no CORS headers are sent.
+    std::vector<std::string> cors_allow_origins;
   };
 
  public:
@@ -54,6 +58,11 @@ class HttpRpcDriver : public runtime::core::service::ServiceDriver {
       const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept override;
 
  private:
+  // Sets Access-Control-Allow-Origin if the request origin is allowed.
+  bool SetCorsAllowOrigin(
+      const boost::beast::http::request<boost::beast::http::dynamic_body>& req,
+      boost::beast::http::response<boost::beast::http::dynamic_body>& rsp) const;
+
   enum class State : uint32_t {
     kPreInit,
     kInit,

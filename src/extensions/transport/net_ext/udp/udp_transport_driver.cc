@@ -9,6 +9,7 @@
 #include "net_ext/global.h"
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
+#include "net_ext/meta_filter.h"
 #include "base/url_parser.h"
 
 namespace YAML {
@@ -177,16 +178,17 @@ bool UdpTransportDriver::OnMessage(
       buf_oper.GetString(util::BufferLenType::kUInt8);
 
       std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
-      ctx_ptr->SetSerializationType(serialization_type);
-
-      // Get context
+      // Get context; framework fields are set afterwards so a peer cannot
+      // override them.
       size_t ctx_num = buf_oper.GetUint8();
       for (size_t ii = 0; ii < ctx_num; ++ii) {
         auto key = buf_oper.GetString(util::BufferLenType::kUInt16);
         auto val = buf_oper.GetString(util::BufferLenType::kUInt16);
+        if (!IsPeerMetaKeyAllowed(key)) continue;
         ctx_ptr->SetMetaValue(key, val);
       }
 
+      ctx_ptr->SetSerializationType(serialization_type);
       ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
 
       // Get message buf

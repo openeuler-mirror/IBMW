@@ -4,8 +4,10 @@
 #pragma once
 
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
@@ -54,7 +56,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
   struct Options {
     /// Listening address
-    Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4(), 50080};
+    Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4::loopback(), 50080};
 
     /// Maximum number of connections
     size_t max_session_num = 1000000;
@@ -134,6 +136,24 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
   void Start() {
     MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    acceptor_.open(options_.ep.protocol(), ec);
+    if (!ec) acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true), ec);
+    if (!ec) acceptor_.bind(options_.ep, ec);
+    if (!ec) acceptor_.listen(boost::asio::ip::tcp::acceptor::max_listen_connections, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      acceptor_.close(ignored);
+      MW_THROW("Http svr failed to listen on {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
+    MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
 
@@ -141,11 +161,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          acceptor_.open(options_.ep.protocol());
-          acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-          acceptor_.bind(options_.ep);
-          acceptor_.listen();
-
           while (state_.load() == State::kStart) {
             try {
               // If the number of connections reaches the upper limit, wait for a while before trying
@@ -592,12 +607,17 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
         Response<RspBodyType> handle_rsp{boost::beast::http::status::ok, req.version()};
         HttpHandleStatus handle_status;
 
-        auto handle_timeout = std::chrono::seconds::max();
+        // seconds::max() would overflow the nanoseconds parameter.
+        auto handle_timeout = std::chrono::nanoseconds::max();
         auto req_timeout_itr = req.find(boost::beast::http::field::timeout);
         if (req_timeout_itr != req.end()) {
-          auto timeout_str = req_timeout_itr->value();
-          if (ibmw::common::util::IsDigitStr(ToStdStringView(timeout_str)))
-            handle_timeout = std::chrono::seconds(atoi(timeout_str.data()));
+          auto timeout_str = ToStdStringView(req_timeout_itr->value());
+          uint64_t timeout_s = 0;
+          auto [end, ec] = std::from_chars(timeout_str.data(), timeout_str.data() + timeout_str.size(), timeout_s);
+          constexpr uint64_t kMaxTimeoutS =
+              std::chrono::duration_cast<std::chrono::seconds>(std::chrono::nanoseconds::max()).count();
+          if (ec == std::errc() && end == timeout_str.data() + timeout_str.size() && timeout_s < kMaxTimeoutS)
+            handle_timeout = std::chrono::seconds(timeout_s);
         }
 
         std::string err_info;

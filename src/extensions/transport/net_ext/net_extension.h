@@ -23,20 +23,23 @@ class NetExtension : public ExtensionBase {
   struct Options {
     uint32_t thread_num = 2;
 
+    // Loopback unless configured: exposing a listener is an explicit choice.
+    static constexpr const char* kDefaultListenIp = "127.0.0.1";
+
     struct HttpOptions {
-      std::string listen_ip = "0.0.0.0";
+      std::string listen_ip = kDefaultListenIp;
       uint16_t listen_port;
     };
     std::optional<HttpOptions> http_options;
 
     struct TcpOptions {
-      std::string listen_ip = "0.0.0.0";
+      std::string listen_ip = kDefaultListenIp;
       uint16_t listen_port;
     };
     std::optional<TcpOptions> tcp_options;
 
     struct UdpOptions {
-      std::string listen_ip = "0.0.0.0";
+      std::string listen_ip = kDefaultListenIp;
       uint16_t listen_port;
       uint32_t max_pkg_size = 1024;
     };

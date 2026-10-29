@@ -49,21 +49,21 @@ struct convert<ibmw::extensions::net_extension::NetExtension::Options> {
 
     if (node["http_options"]) {
       rhs.http_options = Options::HttpOptions{
-          .listen_ip = node["http_options"]["listen_ip"].as<std::string>(),
+          .listen_ip = node["http_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["http_options"]["listen_port"].as<uint16_t>(),
       };
     }
 
     if (node["tcp_options"]) {
       rhs.tcp_options = Options::TcpOptions{
-          .listen_ip = node["tcp_options"]["listen_ip"].as<std::string>(),
+          .listen_ip = node["tcp_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["tcp_options"]["listen_port"].as<uint16_t>(),
       };
     }
 
     if (node["udp_options"]) {
       rhs.udp_options = Options::UdpOptions{
-          .listen_ip = node["udp_options"]["listen_ip"].as<std::string>(),
+          .listen_ip = node["udp_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["udp_options"]["listen_port"].as<uint16_t>(),
       };
       if (node["udp_options"]["max_pkg_size"]) {
