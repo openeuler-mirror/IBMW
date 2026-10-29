@@ -22,6 +22,9 @@ struct RuntimeOptions {
 // Per-process runtime: owns the control thread (epoll, no timeout) and the
 // listener notification segment. There is no daemon. Init() is optional;
 // the first Publisher/Subscriber/Listener initialises it with defaults.
+// Init() on a running runtime succeeds if it resolves to the same service
+// directory (root, owner, domain) and fails with kAlreadyInitialized
+// otherwise, so a conflicting domain is never silently ignored.
 class Runtime {
  public:
   static Result<void> Init(const RuntimeOptions& options);

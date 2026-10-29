@@ -66,10 +66,15 @@ class Publisher {
   Error InitError() const noexcept;
 
   Result<void*> Loan(uint32_t payload_size, uint32_t alignment = kDefaultPayloadAlignment) noexcept;
-  // Publishes a loaned chunk and gives up the loan. Never copies.
-  void Publish(void* user_payload) noexcept;
-  // Returns a loaned chunk without publishing it.
-  void Release(void* user_payload) noexcept;
+  // Publishes a loaned chunk and gives up the loan. Never copies. False (and
+  // nothing happens) if user_payload is not a chunk currently on loan.
+  bool Publish(void* user_payload) noexcept;
+  // Returns a loaned chunk without publishing it. False as for Publish().
+  bool Release(void* user_payload) noexcept;
+  // Ends lossless blocking for good: blocked Publish() calls return now and
+  // later ones skip full lossless subscribers (counted as block_timeouts).
+  // For shutdown when a remote consumer may never drain its queue.
+  void StopBlocking() noexcept;
 
   bool HasSubscribers() const noexcept;
   PublisherStats Stats() const noexcept;

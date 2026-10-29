@@ -172,7 +172,7 @@ TEST(ShmPlatformTest, ResultAndErrorNames) {
   EXPECT_FALSE(bad);
   EXPECT_EQ(bad.error(), Error::kNoMemory);
   EXPECT_STREQ(ErrorName(Error::kTooManyLoans), "too_many_loans");
-  for (int e = 0; e <= static_cast<int>(Error::kSystem); ++e) {
+  for (int e = 0; e <= static_cast<int>(Error::kAlreadyInitialized); ++e) {
     EXPECT_STRNE(ErrorName(static_cast<Error>(e)), "unknown");
   }
   Result<void> v;

@@ -602,5 +602,111 @@ TEST(ShmRegressionTest, EvictionRaceIsNotCorruption) {
   EXPECT_EQ(sub.Stats().connections, 1u);
 }
 
+// RG-16 (second review, H1) The subscriber reports the payload size it
+// validated in Take(); rewriting the header afterwards (the publisher can,
+// it is publisher-writable memory) does not change it.
+TEST(ShmRegressionTest, PayloadSizeIsTheValidatedSize) {
+  auto url = UniqueUrl("rg16");
+  Publisher pub(url);
+  Subscriber sub(url);
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  auto l = pub.Loan(100);
+  ASSERT_TRUE(l.ok());
+  void* chunk = *l;
+  auto* h = const_cast<ChunkHeader*>(ChunkView::FromUserPayload(chunk).Header());
+  pub.Publish(chunk);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto t = sub.Take();
+  ASSERT_TRUE(t.ok());
+  EXPECT_EQ(sub.PayloadSize(*t), 100u);
+  const ChunkHeader saved = *h;
+  h->payload_size = 1u << 30;
+  h->back_offset = 0xdeadbeef;
+  EXPECT_EQ(sub.PayloadSize(*t), 100u);
+  *h = saved;
+  sub.Release(*t);
+  EXPECT_EQ(sub.PayloadSize(*t), 0u);
+  int local = 0;
+  EXPECT_EQ(sub.PayloadSize(&local), 0u);
+  EXPECT_EQ(sub.PayloadSize(nullptr), 0u);
+}
+
+// RG-17 (second review, M1) Publish/Release report whether they ended a
+// loan, so a caller counting its loans cannot be driven out of step.
+TEST(ShmRegressionTest, PublishReleaseReportUnknownChunks) {
+  Publisher pub(UniqueUrl("rg17"));
+  auto a = pub.Loan(64);
+  auto b = pub.Loan(64);
+  ASSERT_TRUE(a.ok() && b.ok());
+  EXPECT_TRUE(pub.Release(*a));
+  EXPECT_FALSE(pub.Release(*a));
+  EXPECT_FALSE(pub.Publish(*a));
+  EXPECT_TRUE(pub.Publish(*b));
+  EXPECT_FALSE(pub.Publish(*b));
+  EXPECT_FALSE(pub.Release(*b));
+  int local = 0;
+  EXPECT_FALSE(pub.Publish(&local));
+  EXPECT_FALSE(pub.Release(&local));
+  EXPECT_FALSE(pub.Publish(nullptr));
+  EXPECT_EQ(pub.Stats().publishes, 1u);
+}
+
+// RG-18 (second review, M2) StopBlocking releases a Publish waiting without
+// timeout on a lossless subscriber that never takes, and later publishes do
+// not block either.
+TEST(ShmRegressionTest, StopBlockingReleasesBlockedPublish) {
+  auto url = UniqueUrl("rg18");
+  PublisherOptions po;
+  po.too_slow = TooSlowPolicy::kWaitForConsumer;
+  Publisher pub(url, po);
+  Subscriber sub(url, SubscriberOptions{1, QueueFullPolicy::kBlockProducer, 4});
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  auto first = pub.Loan(64);
+  ASSERT_TRUE(first.ok());
+  pub.Publish(*first);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));  // queue (1) is full
+  std::atomic<bool> returned{false};
+  std::thread blocked([&] {
+    auto l = pub.Loan(64);
+    if (l) pub.Publish(*l);
+    returned = true;
+  });
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().blocked >= 1; }));
+  std::this_thread::sleep_for(50ms);
+  EXPECT_FALSE(returned.load());
+  pub.StopBlocking();
+  blocked.join();
+  EXPECT_GE(pub.Stats().block_timeouts, 1u);
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int i = 0; i < 10; ++i) {
+    auto l = pub.Loan(64);
+    ASSERT_TRUE(l.ok());
+    pub.Publish(*l);
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 1s);
+  EXPECT_GE(pub.Stats().block_timeouts, 11u);
+  // The subscriber still gets what was queued before.
+  auto t = sub.Take();
+  ASSERT_TRUE(t.ok());
+  sub.Release(*t);
+}
+
+// RG-19 (second review, M5) Init() on a running runtime with a different
+// domain fails instead of silently keeping the first one.
+TEST(ShmRegressionTest, ConflictingInitIsRejected) {
+  ASSERT_TRUE(Runtime::IsInitialized());
+  const std::string dir = Runtime::ServiceDirectory();
+  EXPECT_TRUE(Runtime::Init(RuntimeOptions{}).ok());
+  RuntimeOptions other;
+  other.domain = "rg19_other";
+  auto r = Runtime::Init(other);
+  ASSERT_FALSE(r.ok());
+  EXPECT_EQ(r.error(), Error::kAlreadyInitialized);
+  RuntimeOptions other_root;
+  other_root.root_dir = "/nonexistent_rg19";
+  EXPECT_EQ(Runtime::Init(other_root).error(), Error::kAlreadyInitialized);
+  EXPECT_EQ(Runtime::ServiceDirectory(), dir);
+}
+
 }  // namespace
 }  // namespace ibmw::selfdev::shm

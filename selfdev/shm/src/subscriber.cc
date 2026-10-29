@@ -46,6 +46,10 @@ void Subscriber::Release(const void* user_payload) noexcept {
   if (impl_ && user_payload != nullptr) impl_->Release(user_payload);
 }
 
+size_t Subscriber::PayloadSize(const void* user_payload) const noexcept {
+  return impl_ ? impl_->PayloadSize(user_payload) : 0;
+}
+
 SubscriberStats Subscriber::Stats() const noexcept { return impl_ ? impl_->Stats() : SubscriberStats{}; }
 
 namespace detail {
@@ -396,7 +400,7 @@ Result<const void*> SubscriberImpl::Take() noexcept {
         PushReturnLocked(c, v);
         continue;
       }
-      held_.emplace(payload, Held{conns_[ci], v});
+      held_.emplace(payload, Held{conns_[ci], v, size});
       ++c.held;
       ++stats_.takes;
       round_robin_ = (ci + 1) % n;
@@ -438,6 +442,12 @@ void SubscriberImpl::Release(const void* user_payload) noexcept {
   ++stats_.releases;
   PushReturnLocked(*conn, handle);
   if (conn->state == SubConn::State::kOrphan) PruneOrphansLocked();
+}
+
+size_t SubscriberImpl::PayloadSize(const void* user_payload) const noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = held_.find(user_payload);
+  return it == held_.end() ? 0 : it->second.size;
 }
 
 SubscriberStats SubscriberImpl::Stats() const noexcept {

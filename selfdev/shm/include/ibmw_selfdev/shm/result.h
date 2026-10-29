@@ -22,6 +22,7 @@ enum class Error : uint8_t {
   kTimeout,
   kCorrupted,       // peer wrote an out-of-range value into shared memory
   kSystem,          // unexpected syscall failure; see errno in the log
+  kAlreadyInitialized,  // Runtime::Init with options that differ from the running runtime
 };
 
 const char* ErrorName(Error e) noexcept;

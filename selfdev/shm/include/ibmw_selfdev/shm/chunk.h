@@ -33,7 +33,9 @@ struct ChunkHeader {
 };
 static_assert(sizeof(ChunkHeader) == kChunkHeaderSize);
 
-// Read-only view of a chunk given its user payload pointer. O(1).
+// Read-only view of a chunk given its user payload pointer. O(1). Publisher
+// side only: a subscriber must not trust headers in publisher-writable memory
+// (see Subscriber::PayloadSize).
 class ChunkView {
  public:
   static ChunkView FromUserPayload(const void* user_payload) noexcept;

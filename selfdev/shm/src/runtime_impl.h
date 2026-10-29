@@ -81,6 +81,8 @@ class RuntimeImpl {
  private:
   RuntimeImpl() = default;
   Result<void> Start(const RuntimeOptions& options);
+  // root + owner + domain after environment overrides; "" if invalid.
+  static std::string ResolveServiceDir(const RuntimeOptions& options);
   void Loop();
   void HandleInotify();
   void RunCommands();

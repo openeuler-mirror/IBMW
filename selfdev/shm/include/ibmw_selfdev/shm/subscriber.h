@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string_view>
@@ -51,6 +52,10 @@ class Subscriber {
   // released before the Subscriber is destroyed: destruction unmaps them.
   Result<const void*> Take() noexcept;
   void Release(const void* user_payload) noexcept;
+  // Size of a held payload as validated by Take() against the chunk stride;
+  // 0 if the payload is not held. Use this instead of ChunkView on the
+  // subscriber side: chunk headers stay writable by the publisher.
+  size_t PayloadSize(const void* user_payload) const noexcept;
 
   SubscriberStats Stats() const noexcept;
 

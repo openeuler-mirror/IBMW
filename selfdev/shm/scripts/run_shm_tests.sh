@@ -25,6 +25,7 @@
 #   JOBS         build parallelism       (default: nproc)
 #   GTEST_FILTER extra gtest filter      (default: *)
 #   TEST_TIMEOUT seconds per test stage   (default: 1800; a hang fails the stage)
+#   TSAN_CC/TSAN_CXX compilers for tsan  (default: newest gcc-12+ found)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,19 +48,60 @@ fi
 GTEST_ARG=()
 [[ -n "${GTEST_SRC:-}" ]] && GTEST_ARG=("-Dgoogletest_LOCAL_SOURCE=${GTEST_SRC}")
 
+# TSan must intercept pthread_cond_clockwait (used by libstdc++ for
+# condition_variable::wait_until on steady_clock); GCC 11's libtsan does not,
+# which hides unlocks and yields false "double lock"/race reports. Prefer the
+# newest GCC that has it; override with TSAN_CC/TSAN_CXX.
+pick_tsan_compiler() {
+  local v
+  # A single override is paired with its sibling so C and C++ never mix
+  # compiler versions (and their libtsan runtimes).
+  if [[ -n "${TSAN_CXX:-}" && -z "${TSAN_CC:-}" ]]; then
+    case "${TSAN_CXX}" in
+      *clang++*) TSAN_CC="${TSAN_CXX/clang++/clang}" ;;
+      *g++*)     TSAN_CC="${TSAN_CXX/g++/gcc}" ;;
+      *)         TSAN_CC=cc ;;
+    esac
+  fi
+  if [[ -n "${TSAN_CC:-}" && -z "${TSAN_CXX:-}" ]]; then
+    case "${TSAN_CC}" in
+      *clang*) TSAN_CXX="${TSAN_CC/clang/clang++}" ;;
+      *gcc*)   TSAN_CXX="${TSAN_CC/gcc/g++}" ;;
+      *)       TSAN_CXX=c++ ;;
+    esac
+  fi
+  [[ -n "${TSAN_CXX:-}" ]] && return
+  for v in 14 13 12; do
+    if command -v "g++-${v}" >/dev/null && command -v "gcc-${v}" >/dev/null; then
+      TSAN_CC="gcc-${v}"; TSAN_CXX="g++-${v}"; return
+    fi
+  done
+  TSAN_CC=cc; TSAN_CXX=c++
+  TSAN_FALLBACK=1
+}
+TSAN_FALLBACK=0
+pick_tsan_compiler
+# GCC 12+ warns (-Wtsan) that TSan does not model atomic_thread_fence; the
+# fences only order futex sleep/wake announcements, so keep it a warning.
+TSAN_EXTRA=""
+if echo 'int main(){}' | "${TSAN_CXX}" -x c++ -Wno-error=tsan -Werror -fsyntax-only - >/dev/null 2>&1; then
+  TSAN_EXTRA="-Wno-error=tsan"
+fi
+
 mkdir -p "${OUT_DIR}"
 declare -A RESULT
 FAILED=0
 
 log() { printf '\n==== [shm] %s ====\n' "$*"; }
 
-# build <name> <build-type> <extra cxx flags> <extra linker flags>
+# build <name> <build-type> <extra cxx flags> <extra linker flags> [extra cmake args...]
 build() {
   local name=$1 type=$2 cxx=$3 ld=$4 dir="${BUILD_ROOT}/$1"
+  shift 4
   log "configure+build ${name} (${type} ${cxx})"
   cmake -S "${SELFDEV_DIR}" -B "${dir}" -DCMAKE_BUILD_TYPE="${type}" -DIBMW_BUILD_TESTS=ON \
         -DIBMW_SELFDEV_SHM=ON -DIBMW_SELFDEV_SHM_BENCH=ON "${GTEST_ARG[@]}" \
-        -DCMAKE_CXX_FLAGS="${cxx}" -DCMAKE_EXE_LINKER_FLAGS="${ld}" >"${OUT_DIR}/${name}.configure.log" 2>&1 &&
+        -DCMAKE_CXX_FLAGS="${cxx}" -DCMAKE_EXE_LINKER_FLAGS="${ld}" "$@" >"${OUT_DIR}/${name}.configure.log" 2>&1 &&
   cmake --build "${dir}" -j "${JOBS}" >"${OUT_DIR}/${name}.build.log" 2>&1
   local rc=$?
   if [[ ${rc} -ne 0 ]]; then
@@ -96,7 +138,10 @@ stage() {
     ubsan)  build ubsan RelWithDebInfo "-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" \
               "-fsanitize=undefined" &&
             UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1" run_tests ubsan ubsan || rc=1 ;;
-    tsan)   build tsan RelWithDebInfo "-fsanitize=thread -fno-omit-frame-pointer" "-fsanitize=thread" &&
+    tsan)   [[ ${TSAN_FALLBACK} -eq 1 ]] &&
+              echo "warning: no gcc-12+ found, tsan uses cc/c++; GCC 11 libtsan reports false races (set TSAN_CC/TSAN_CXX)"
+            build tsan RelWithDebInfo "-fsanitize=thread -fno-omit-frame-pointer ${TSAN_EXTRA}" "-fsanitize=thread" \
+              -DCMAKE_C_COMPILER="${TSAN_CC}" -DCMAKE_CXX_COMPILER="${TSAN_CXX}" &&
             TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1" run_tests tsan tsan || rc=1 ;;
     repeat) build release Release "" "" &&
             run_tests repeat release --gtest_repeat="${REPEAT}" --gtest_shuffle || rc=1 ;;

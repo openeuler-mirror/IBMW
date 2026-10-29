@@ -83,8 +83,9 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
   ~PublisherImpl() override;
 
   Result<void*> Loan(uint32_t payload_size, uint32_t alignment) noexcept;
-  void Publish(void* user_payload) noexcept;
-  void Release(void* user_payload) noexcept;
+  bool Publish(void* user_payload) noexcept;
+  bool Release(void* user_payload) noexcept;
+  void StopBlocking() noexcept;
   bool HasSubscribers() const noexcept;
   PublisherStats Stats() const noexcept;
   void Shutdown() noexcept;
@@ -125,6 +126,7 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
 
   mutable std::mutex mu_;
   bool shutting_down_ = false;
+  bool stop_blocking_ = false;  // see Publisher::StopBlocking()
   // Publish() calls waiting for lossless space; Shutdown() waits for them
   // to leave before the object can be destroyed.
   uint32_t blocked_publishers_ = 0;
@@ -185,6 +187,7 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
   bool Poll(uint64_t* version) const noexcept;
   Result<const void*> Take() noexcept;
   void Release(const void* user_payload) noexcept;
+  size_t PayloadSize(const void* user_payload) const noexcept;
   SubscriberStats Stats() const noexcept;
   void SetNotifySlot(uint32_t slot) noexcept;
   void Shutdown() noexcept;
@@ -227,6 +230,7 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
   struct Held {
     std::shared_ptr<SubConn> conn;
     uint64_t handle;
+    uint32_t size;  // validated in Take()
   };
   std::unordered_map<const void*, Held> held_;
   std::set<std::string> known_paths_;

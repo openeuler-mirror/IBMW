@@ -35,6 +35,7 @@ const char* ErrorName(Error e) noexcept {
     case Error::kTimeout: return "timeout";
     case Error::kCorrupted: return "corrupted";
     case Error::kSystem: return "system";
+    case Error::kAlreadyInitialized: return "already_initialized";
   }
   return "unknown";
 }
@@ -74,7 +75,10 @@ RuntimeImpl* RuntimeImpl::Instance() noexcept {
 
 Result<void> RuntimeImpl::Init(const RuntimeOptions& options) {
   std::lock_guard<std::mutex> lock(g_instance_mu);
-  if (g_instance != nullptr) return {};
+  if (g_instance != nullptr) {
+    if (ResolveServiceDir(options) == g_instance->ServiceDir()) return {};
+    return Error::kAlreadyInitialized;
+  }
   auto* rt = new RuntimeImpl();
   auto r = rt->Start(options);
   if (!r) {
@@ -106,10 +110,7 @@ std::string RuntimeImpl::HashPrefix(uint64_t hash) {
   return buf;
 }
 
-Result<void> RuntimeImpl::Start(const RuntimeOptions& options) {
-  options_ = options;
-  group_ = options.group;
-  euid_ = ::geteuid();
+std::string RuntimeImpl::ResolveServiceDir(const RuntimeOptions& options) {
   std::string root = options.root_dir;
   if (root.empty()) {
     const char* env = std::getenv("IBMW_SHM_ROOT");
@@ -117,9 +118,17 @@ Result<void> RuntimeImpl::Start(const RuntimeOptions& options) {
   }
   std::string domain = options.domain.empty() ? "default" : options.domain;
   if (const char* env = std::getenv("IBMW_SHM_DOMAIN"); env != nullptr && *env != '\0') domain = env;
-  if (domain.find('/') != std::string::npos || domain.size() > 32) return Error::kInvalidArg;
-  std::string owner = group_ ? "g" + std::to_string(*group_) : std::to_string(euid_);
-  service_dir_ = root + "/ibmw_shm." + owner + "." + domain;
+  if (domain.find('/') != std::string::npos || domain.size() > 32) return {};
+  std::string owner = options.group ? "g" + std::to_string(*options.group) : std::to_string(::geteuid());
+  return root + "/ibmw_shm." + owner + "." + domain;
+}
+
+Result<void> RuntimeImpl::Start(const RuntimeOptions& options) {
+  options_ = options;
+  group_ = options.group;
+  euid_ = ::geteuid();
+  service_dir_ = ResolveServiceDir(options);
+  if (service_dir_.empty()) return Error::kInvalidArg;
   if (!MakeDirectory(service_dir_, group_ ? 0770 : 0700, group_)) return Error::kPermission;
 
   auto notify = CreateSegment("ibmw_shm_notify", kNotifySegmentSize, false, true);

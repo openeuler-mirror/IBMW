@@ -40,12 +40,16 @@ Result<void*> Publisher::Loan(uint32_t payload_size, uint32_t alignment) noexcep
   return impl_->Loan(payload_size, alignment);
 }
 
-void Publisher::Publish(void* user_payload) noexcept {
-  if (impl_ && user_payload != nullptr) impl_->Publish(user_payload);
+bool Publisher::Publish(void* user_payload) noexcept {
+  return impl_ && user_payload != nullptr && impl_->Publish(user_payload);
 }
 
-void Publisher::Release(void* user_payload) noexcept {
-  if (impl_ && user_payload != nullptr) impl_->Release(user_payload);
+void Publisher::StopBlocking() noexcept {
+  if (impl_) impl_->StopBlocking();
+}
+
+bool Publisher::Release(void* user_payload) noexcept {
+  return impl_ && user_payload != nullptr && impl_->Release(user_payload);
 }
 
 bool Publisher::HasSubscribers() const noexcept { return impl_ && impl_->HasSubscribers(); }
@@ -376,13 +380,14 @@ Result<void*> PublisherImpl::Loan(uint32_t payload_size, uint32_t alignment) noe
   return static_cast<void*>(base + offset);
 }
 
-void PublisherImpl::Release(void* user_payload) noexcept {
+bool PublisherImpl::Release(void* user_payload) noexcept {
   std::lock_guard<std::mutex> lock(mu_);
   uint32_t seg, idx;
-  if (!LocateLocked(user_payload, &seg, &idx)) return;
-  if (segments_[seg]->state[idx] != static_cast<uint8_t>(ChunkState::kLoaned)) return;
+  if (!LocateLocked(user_payload, &seg, &idx)) return false;
+  if (segments_[seg]->state[idx] != static_cast<uint8_t>(ChunkState::kLoaned)) return false;
   --loans_;
   DropRefLocked(seg, idx);
+  return true;
 }
 
 // -------------------------------------------------------------- delivery
@@ -484,7 +489,11 @@ PublisherImpl::Delivery PublisherImpl::DeliverLocked(PubConn& conn, uint64_t han
     if (conn.blocking && conn.state == PubConn::State::kActive) {
       uint64_t r = conn.hdr->delivery_read.load(std::memory_order_acquire);
       uint64_t w = conn.delivery_write;
-      queued += (r <= w && w - r <= conn.capacity) ? static_cast<size_t>(w - r) : conn.capacity;
+      if (r > w || w - r > conn.capacity) {  // same clamp as PushRingLocked
+        MarkCorruptLocked(conn);
+        return Delivery::kSkipped;
+      }
+      queued += static_cast<size_t>(w - r);
     }
     if (queued >= conn.capacity) {
       if (conn.blocking) return flushed ? Delivery::kFullFlushed : Delivery::kFull;
@@ -500,16 +509,16 @@ PublisherImpl::Delivery PublisherImpl::DeliverLocked(PubConn& conn, uint64_t han
   return ready || flushed ? Delivery::kDelivered : Delivery::kQueued;
 }
 
-void PublisherImpl::Publish(void* user_payload) noexcept {
+bool PublisherImpl::Publish(void* user_payload) noexcept {
   std::vector<std::shared_ptr<PubConn>> wake;
   std::vector<std::shared_ptr<PubConn>> waiting;
   uint32_t seg = 0, idx = 0;
   uint64_t handle = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!LocateLocked(user_payload, &seg, &idx)) return;
+    if (!LocateLocked(user_payload, &seg, &idx)) return false;
     auto& s = *segments_[seg];
-    if (s.state[idx] != static_cast<uint8_t>(ChunkState::kLoaned)) return;
+    if (s.state[idx] != static_cast<uint8_t>(ChunkState::kLoaned)) return false;
     s.state[idx] = static_cast<uint8_t>(ChunkState::kPublished);
     --loans_;
     ++stats_.publishes;
@@ -523,8 +532,16 @@ void PublisherImpl::Publish(void* user_payload) noexcept {
       for (auto& c : conns_) {
         switch (DeliverLocked(*c, handle)) {
           case Delivery::kDelivered: wake.push_back(c); break;
-          case Delivery::kFullFlushed: wake.push_back(c); waiting.push_back(c); break;
-          case Delivery::kFull: waiting.push_back(c); break;
+          case Delivery::kFullFlushed:
+            wake.push_back(c);
+            [[fallthrough]];
+          case Delivery::kFull:
+            if (stop_blocking_) {
+              ++stats_.block_timeouts;
+            } else {
+              waiting.push_back(c);
+            }
+            break;
           default: break;
         }
       }
@@ -537,7 +554,7 @@ void PublisherImpl::Publish(void* user_payload) noexcept {
     }
   }
   for (auto& c : wake) WakeListener(*c);
-  if (waiting.empty()) return;
+  if (waiting.empty()) return true;
 
   // Lossless subscribers are full: wait for space without holding the lock.
   const bool forever = options_.block_timeout.count() <= 0;
@@ -551,7 +568,8 @@ void PublisherImpl::Publish(void* user_payload) noexcept {
       Delivery d;
       {
         std::lock_guard<std::mutex> lock(mu_);
-        d = shutting_down_ ? Delivery::kSkipped : DeliverLocked(c, handle);
+        if (stop_blocking_ && !shutting_down_) ++stats_.block_timeouts;
+        d = shutting_down_ || stop_blocking_ ? Delivery::kSkipped : DeliverLocked(c, handle);
       }
       if (d == Delivery::kFullFlushed) WakeListener(c);
       if (d != Delivery::kFull && d != Delivery::kFullFlushed) {
@@ -581,6 +599,13 @@ void PublisherImpl::Publish(void* user_payload) noexcept {
   DropRefLocked(seg, idx);
   // Notify under the lock: once it is released Shutdown() may destroy us.
   if (--blocked_publishers_ == 0) idle_cv_.notify_all();
+  return true;
+}
+
+void PublisherImpl::StopBlocking() noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
+  stop_blocking_ = true;
+  for (auto& c : conns_) WakeSpace(*c);
 }
 
 bool PublisherImpl::HasSubscribers() const noexcept {
