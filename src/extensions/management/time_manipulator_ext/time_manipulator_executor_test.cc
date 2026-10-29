@@ -89,7 +89,8 @@ TEST_F(TimeManipulatorExecutorTest, DispatchAfterShutdownIsDropped) {
 }
 
 // Wheels of 4 and 4 ticks: targets land on level 0, level 1 and the
-// overflow map. Every task must run at its own tick (Now() while it runs).
+// overflow map. Every task must run at its own tick: Now() while it runs is
+// the end of that tick (the tick is advanced before its tasks run).
 TEST_F(TimeManipulatorExecutorTest, TasksOnEveryLevelRunAtTheirTick) {
   Init("{bind_executor: x, dt_us: 1000, wheel_size: [4, 4], init_ratio: 0}");
   executor_.Start();  // paused: the schedule is built against a fixed Now()
@@ -114,10 +115,66 @@ TEST_F(TimeManipulatorExecutorTest, TasksOnEveryLevelRunAtTheirTick) {
       << "only " << runs.size() << " of " << offsets_ms.size() << " tasks ran";
   for (size_t i = 0; i < runs.size(); ++i) {
     EXPECT_EQ(runs[i].first, offsets_ms[i]) << "out of order at " << i;
-    // Run at the tick containing the target: at most one dt early, never late.
-    EXPECT_LE(runs[i].second, 0ns) << "offset " << runs[i].first << " ms ran late";
-    EXPECT_GT(runs[i].second, -1ms) << "offset " << runs[i].first << " ms ran early";
+    EXPECT_EQ(runs[i].second, 1ms) << "offset " << runs[i].first << " ms ran at the wrong tick";
   }
+}
+
+// Tasks dispatched from tasks running at every tick, so that DispatchAt()
+// also runs right before the higher levels and the far map are pulled down
+// (the levels below about to wrap): every target must run at its own tick.
+TEST(TimeManipulatorExecutorPlacement, TasksDispatchedAtAnyTickRunAtTheirTick) {
+  for (const char* wheel : {"[4, 4]", "[2, 3, 2]"}) {
+    InlineExecutor inline_executor;
+    TimeManipulatorExecutor executor;
+    executor.RegisterGetExecutorFunc([&](std::string_view) { return inline_executor.Handle(); });
+    executor.Initialize("tm", YAML::Load(std::string("{bind_executor: x, dt_us: 1000, init_ratio: 0, wheel_size: ") +
+                                         wheel + "}"));
+    executor.Start();
+
+    constexpr int kDispatchers = 30;
+    constexpr int kTargets = 30;
+    std::mutex mutex;
+    std::condition_variable cv;
+    int done = 0;
+    std::vector<std::chrono::nanoseconds> wrong;  // lateness of tasks not run at their tick
+    const auto base = executor.Now();
+    for (int d = 0; d < kDispatchers; ++d) {
+      executor.DispatchAt(base + std::chrono::milliseconds(d), [&] {
+        const auto now = executor.Now();  // runs on the timer thread: time stands still
+        for (int k = 0; k < kTargets; ++k) {
+          const auto target = now + std::chrono::milliseconds(k);
+          executor.DispatchAt(target, [&, target] {
+            std::lock_guard lock(mutex);
+            if (executor.Now() - target != 1ms) wrong.push_back(executor.Now() - target);
+            ++done;
+            cv.notify_all();
+          });
+        }
+      });
+    }
+    executor.SetTimeRatio(1.0);
+
+    std::unique_lock lock(mutex);
+    ASSERT_TRUE(cv.wait_for(lock, 10s, [&] { return done == kDispatchers * kTargets; }))
+        << wheel << ": only " << done << " of " << kDispatchers * kTargets << " tasks ran";
+    EXPECT_TRUE(wrong.empty()) << wheel << ": " << wrong.size() << " tasks ran at the wrong tick, e.g. "
+                               << std::chrono::duration_cast<std::chrono::microseconds>(wrong.front()).count()
+                               << " us after the target";
+    lock.unlock();
+    executor.Shutdown();
+  }
+}
+
+TEST(TimeManipulatorExecutorPlacement, DispatchBeforeStartIsDropped) {
+  InlineExecutor inline_executor;
+  TimeManipulatorExecutor executor;
+  executor.RegisterGetExecutorFunc([&](std::string_view) { return inline_executor.Handle(); });
+  executor.Initialize("tm", YAML::Load("{bind_executor: x, dt_us: 1000}"));
+  bool ran = false;
+  executor.DispatchAt(std::chrono::system_clock::now(), [&ran] { ran = true; });
+  executor.Start();
+  executor.Shutdown();
+  EXPECT_FALSE(ran);
 }
 
 }  // namespace

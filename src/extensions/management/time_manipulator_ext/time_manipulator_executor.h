@@ -79,6 +79,8 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   struct TimingWheelTool {
     uint64_t current_pos;
     uint64_t scale;
+    uint64_t unit;   // ticks per slot (the scale of the level below)
+    uint64_t limit;  // first tick that does not fit into this level yet (levels >= 1)
     std::vector<TaskList> wheel;
     std::function<void()> borrow_func;
 
@@ -120,6 +122,7 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   std::vector<TimingWheelTool> timing_wheel_vec_;
   uint64_t timing_task_map_pos_ = 0;
   std::unordered_map<uint64_t, TaskList> timing_task_map_;
+  uint64_t timing_task_map_unit_ = 1;  // ticks per far map key
 
   std::unique_ptr<std::thread> timer_thread_ptr_;
 };

@@ -116,6 +116,51 @@ TEST(ExecutorRobustness, TimerExecutorRunsTasksOnEveryLevelAtTheirTick) {
   }
 }
 
+// Tasks dispatched from tasks running at every tick, so that DispatchAt()
+// also runs right before the higher levels and the far map are pulled down:
+// every target must run at its own tick (Now() is the end of that tick).
+TEST(ExecutorRobustness, TimerExecutorPlacesTasksDispatchedAtAnyTick) {
+  for (const char* wheel : {"[4, 4]", "[2, 3, 2]"}) {
+    executor::TimerExecutor exe;
+    exe.SetLogger(MakeLogger());
+    exe.RegisterGetExecutorFunc([](std::string_view) { return ibmw::executor::ExecutorHandle(); });
+    exe.Initialize("timer_any_tick", YAML::Load(std::string("{dt_us: 1000, wheel_size: ") + wheel + "}"));
+    exe.Start();
+
+    constexpr int kDispatchers = 30;
+    constexpr int kTargets = 30;
+    std::mutex mutex;
+    int done = 0;
+    std::vector<std::chrono::nanoseconds> wrong;  // lateness of tasks not run at their tick
+    auto dispatch_targets = [&] {
+      const auto now = exe.Now();  // runs on the timer thread: time stands still
+      for (int k = 0; k < kTargets; ++k) {
+        const auto target = now + std::chrono::milliseconds(k);
+        exe.DispatchAt(target, ibmw::executor::Task([&, target] {
+          std::lock_guard lock(mutex);
+          if (exe.Now() - target != std::chrono::milliseconds(1)) wrong.push_back(exe.Now() - target);
+          ++done;
+        }));
+      }
+    };
+    // The dispatchers are scheduled from the timer thread too, so that none
+    // of them is due before it is placed.
+    exe.DispatchAt(exe.Now() + std::chrono::milliseconds(20), ibmw::executor::Task([&] {
+      const auto now = exe.Now();
+      for (int d = 0; d < kDispatchers; ++d)
+        exe.DispatchAt(now + std::chrono::milliseconds(d), ibmw::executor::Task(dispatch_targets));
+    }));
+    for (int i = 0; i < 250; ++i) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      std::lock_guard lock(mutex);
+      if (done == kDispatchers * kTargets) break;
+    }
+    exe.Shutdown();
+    EXPECT_EQ(done, kDispatchers * kTargets) << wheel;
+    EXPECT_TRUE(wrong.empty()) << wheel << ": " << wrong.size() << " tasks ran at the wrong tick";
+  }
+}
+
 TEST(ExecutorRobustness, RotateFileLoggerDestructsAfterFailedSyncInitialize) {
   static const ibmw_executor_base_t kDummy{};
   const auto log_dir = std::filesystem::temp_directory_path() /
