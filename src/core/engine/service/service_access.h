@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <unordered_set>
 
 #include "c/service/rpc_handle_base.h"
@@ -69,15 +70,21 @@ class ServiceAccess {
       const void* req_ptr,
       void* rsp_ptr,
       ibmw_function_base_t* callback) noexcept {
-    service_driver_dispatcher_.Call(
-        CallAccessInfoWrapper{
-            .pkg_path = pkg_path_,
-            .module_name = module_name_,
-            .func_name = func_name,
-            .ctx_ptr = ctx_ptr,
-            .req_ptr = req_ptr,
-            .rsp_ptr = rsp_ptr,
-            .callback = callback});
+    // The dispatcher reports failures through the callback; this only guards
+    // against allocation failure before it could take the callback over.
+    try {
+      service_driver_dispatcher_.Call(
+          CallAccessInfoWrapper{
+              .pkg_path = pkg_path_,
+              .module_name = module_name_,
+              .func_name = func_name,
+              .ctx_ptr = ctx_ptr,
+              .req_ptr = req_ptr,
+              .rsp_ptr = rsp_ptr,
+              .callback = callback});
+    } catch (...) {
+      std::fprintf(stderr, "IBMW: service call setup failed before dispatch.\n");
+    }
   }
 
   void MergeServerContextToClientContext(

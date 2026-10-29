@@ -257,11 +257,47 @@ bool ServiceDriverDispatcher::RegisterClientFunc(RegisterClientFuncAccessInfoWra
   return ret;
 }
 
+// Reached from noexcept C ABI entry points: every failure is reported through
+// the client callback (exactly once) instead of an exception.
 void ServiceDriverDispatcher::Call(CallAccessInfoWrapper&& wrapper) {
-  MW_REQUIRE(state_.load() == State::kStart, "Method can only be called when state is 'Start'.");
-
-  auto func_name = util::ToStdStringView(wrapper.func_name);
   auto client_callback_ptr = std::make_shared<ibmw::rpc::ClientCallback>(wrapper.callback);
+
+  if (state_.load() != State::kStart) [[unlikely]] {
+    MW_WARN("Service call '{}' rejected: service dispatcher is not started.",
+            util::ToStdStringView(wrapper.func_name));
+    (*client_callback_ptr)(IBMW_RPC_STATUS_CLI_NOT_READY);
+    return;
+  }
+
+  std::shared_ptr<ServiceMessageFrame> client_call_wrapper_ptr;
+  try {
+    CallImpl(wrapper, client_callback_ptr, client_call_wrapper_ptr);
+  } catch (const std::exception& e) {
+    MW_ERROR("Service call '{}' failed: {}", util::ToStdStringView(wrapper.func_name), e.what());
+    FailCall(client_callback_ptr, client_call_wrapper_ptr);
+  } catch (...) {
+    MW_ERROR("Service call '{}' failed with a non-std exception.", util::ToStdStringView(wrapper.func_name));
+    FailCall(client_callback_ptr, client_call_wrapper_ptr);
+  }
+}
+
+// Before the frame owns the callback, call it directly; afterwards go through
+// CallResultCallback(), which is a no-op if a result was already delivered.
+void ServiceDriverDispatcher::FailCall(
+    const std::shared_ptr<ibmw::rpc::ClientCallback>& client_callback_ptr,
+    const std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
+  if (client_call_wrapper_ptr && client_call_wrapper_ptr->callback) {
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  } else if (client_callback_ptr) {
+    (*client_callback_ptr)(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+  }
+}
+
+void ServiceDriverDispatcher::CallImpl(
+    CallAccessInfoWrapper& wrapper,
+    std::shared_ptr<ibmw::rpc::ClientCallback>& client_callback_ptr,
+    std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr) {
+  auto func_name = util::ToStdStringView(wrapper.func_name);
   auto& client_callback = *client_callback_ptr;
   ibmw::rpc::ContextRef ctx_ref(wrapper.ctx_ptr);
 
@@ -307,7 +343,7 @@ void ServiceDriverDispatcher::Call(CallAccessInfoWrapper&& wrapper) {
   const auto& filter_collector = client_filter_bus_ptr_->GetFilterCollector(func_name);
 
   // Create a wrapper
-  auto client_call_wrapper_ptr = std::make_shared<ServiceMessageFrame>(
+  client_call_wrapper_ptr = std::make_shared<ServiceMessageFrame>(
       ServiceMessageFrame{
           .info = client_func_wrapper_ptr->info,
           .req_ptr = wrapper.req_ptr,

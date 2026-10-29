@@ -67,7 +67,22 @@ class InProcessServiceDriver : public ServiceDriver {
 
   std::atomic_uint32_t req_id_ = 0;
 
-  std::unique_ptr<util::RpcClientTool<std::shared_ptr<ServiceMessageFrame>>> client_tool_ptr_;
+  // What the server-side result callbacks need. Shared by the driver and every
+  // pending callback (instead of capturing `this`), so a server that answers
+  // after Shutdown() or after the driver is destroyed touches no freed memory.
+  struct CallbackContext {
+    std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr;
+    util::RpcClientTool<std::shared_ptr<ServiceMessageFrame>> client_tool;
+
+    const ibmw::common::util::LoggerWrapper& GetLogger() const { return *logger_ptr; }
+
+    void OnDirectResult(uint32_t req_id, ibmw::rpc::Status status);
+    void OnSerializedResult(uint32_t cur_req_id,
+                            const std::weak_ptr<ServiceMessageFrame>& service_invoke_weak,
+                            const std::string& serialization_type,
+                            ibmw::rpc::Status status);
+  };
+  std::shared_ptr<CallbackContext> cb_ctx_ptr_;
 
   using ServiceFuncIndexMap =
       std::unordered_map<

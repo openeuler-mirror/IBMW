@@ -38,8 +38,8 @@ void InProcessServiceDriver::Initialize(YAML::Node options_node) {
   if (options_node && !options_node.IsNull())
     options_ = options_node.as<Options>();
 
-  client_tool_ptr_ =
-      std::make_unique<util::RpcClientTool<std::shared_ptr<ServiceMessageFrame>>>();
+  cb_ctx_ptr_ = std::make_shared<CallbackContext>();
+  cb_ctx_ptr_->logger_ptr = logger_ptr_;
 
   if (!options_.timeout_executor.empty()) {
     MW_REQUIRE(
@@ -52,8 +52,8 @@ void InProcessServiceDriver::Initialize(YAML::Node options_node) {
         timeout_executor,
         "Get timeout executor '{}' failed.", options_.timeout_executor);
 
-    client_tool_ptr_->RegisterTimeoutExecutor(timeout_executor);
-    client_tool_ptr_->RegisterTimeoutHandle(
+    cb_ctx_ptr_->client_tool.RegisterTimeoutExecutor(timeout_executor);
+    cb_ctx_ptr_->client_tool.RegisterTimeoutHandle(
         [](std::shared_ptr<ServiceMessageFrame>&& client_call_wrapper_ptr) {
           CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_TIMEOUT));
         });
@@ -61,7 +61,9 @@ void InProcessServiceDriver::Initialize(YAML::Node options_node) {
     MW_TRACE("Local service driver enable the timeout function, use '{}' as timeout executor.",
                 options_.timeout_executor);
   } else {
-    MW_TRACE("Local service driver does not enable the timeout function.");
+    // Without a timeout executor a pending call is only completed by the
+    // server's answer: a server that never answers keeps the caller waiting.
+    MW_WARN("Local service driver has no 'timeout_executor': RPC timeouts are not enforced.");
   }
 
   options_node = options_;
@@ -79,7 +81,8 @@ void InProcessServiceDriver::Shutdown() {
 
   service_func_register_index_.clear();
 
-  client_tool_ptr_.reset();
+  // Pending callbacks keep their own reference.
+  cb_ctx_ptr_.reset();
 
   get_executor_func_ = nullptr;
 }
@@ -259,13 +262,13 @@ void InProcessServiceDriver::Call(
       service_invoke_wrapper_ptr->req_ptr = client_call_wrapper_ptr->req_ptr;
       service_invoke_wrapper_ptr->rsp_ptr = client_call_wrapper_ptr->rsp_ptr;
 
-      // Record request for timeout protection (same-package calls previously
-      // had no timeout, so a hung server handler would block the client forever).
+      // Record the request; it is timeout-protected only when a
+      // timeout_executor is configured (see Initialize()).
       auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();
       uint32_t cur_req_id = req_id_++;
       auto record_ptr = client_call_wrapper_ptr;
 
-      bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::move(record_ptr));
+      bool ret = cb_ctx_ptr_->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
       if (!ret) [[unlikely]] {
         MW_ERROR("Failed to record msg.");
         CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
@@ -277,14 +280,8 @@ void InProcessServiceDriver::Call(
       // to avoid a shared_ptr circular reference (the server holds it alive
       // via the shared_ptr passed to service_func).
       service_invoke_wrapper_ptr->callback =
-          [this, ctx_ptr, cur_req_id](ibmw::rpc::Status status) {
-            auto msg_recorder = client_tool_ptr_->GetRecord(cur_req_id);
-            if (!msg_recorder) [[unlikely]] {
-              MW_TRACE("Can not get req id {} from recorder (timeout or duplicate).", cur_req_id);
-              return;
-            }
-            auto client_call_wrapper_ptr = std::move(*msg_recorder);
-            CallResultCallback(*client_call_wrapper_ptr, status);
+          [cb_ctx_ptr{cb_ctx_ptr_}, ctx_ptr, cur_req_id](ibmw::rpc::Status status) {
+            cb_ctx_ptr->OnDirectResult(cur_req_id, status);
           };
 
       service_func_wrapper_ptr->service_func(service_invoke_wrapper_ptr);
@@ -298,7 +295,7 @@ void InProcessServiceDriver::Call(
     uint32_t cur_req_id = req_id_++;
     auto record_ptr = client_call_wrapper_ptr;
 
-    bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::move(record_ptr));
+    bool ret = cb_ctx_ptr_->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
 
     if (!ret) [[unlikely]] {
       // It is unlikely to appear generally
@@ -354,76 +351,100 @@ void InProcessServiceDriver::Call(
     // leak.  With weak_ptr, the message frame is freed when the server drops it.
     std::weak_ptr<ServiceMessageFrame> service_invoke_weak = service_invoke_wrapper_ptr;
     service_invoke_wrapper_ptr->callback =
-        [this,
+        [cb_ctx_ptr{cb_ctx_ptr_},
          service_invoke_weak,
          ctx_ptr,
          cur_req_id,
          service_req_ptr,
          service_rsp_ptr,
          serialization_type{std::move(serialization_type)}](ibmw::rpc::Status status) {
-          auto msg_recorder = client_tool_ptr_->GetRecord(cur_req_id);
-          if (!msg_recorder) [[unlikely]] {
-            // No record is found, which means that the call has timed out. The record has been deleted after the timeout process is gone.
-            MW_TRACE("Can not get req id {} from recorder.", cur_req_id);
-            return;
-          }
-
-          auto service_invoke_wrapper_ptr = service_invoke_weak.lock();
-          if (!service_invoke_wrapper_ptr) [[unlikely]] {
-            MW_ERROR("Service message frame expired before callback for req id {}.", cur_req_id);
-            auto client_call_wrapper_ptr = std::move(*msg_recorder);
-            CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
-            return;
-          }
-
-          // Get the record
-          auto client_call_wrapper_ptr = std::move(*msg_recorder);
-          const auto& client_info = client_call_wrapper_ptr->info;
-
-          const auto& service_info = service_invoke_wrapper_ptr->info;
-
-          // service rsp serialization
-          auto buffer_array_view_ptr = TrySerializeRspWithCache(*service_invoke_wrapper_ptr, serialization_type);
-          if (!buffer_array_view_ptr) [[unlikely]] {
-            // Serialization failed
-            MW_ERROR(
-                "Rsp serialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
-                serialization_type, service_info.pkg_path, service_info.module_name, service_info.func_name);
-
-            CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED));
-
-            return;
-          }
-
-          // client rsp deserialization
-          bool deserialize_ret = client_info.rsp_type_support_ref.Deserialize(
-              serialization_type,
-              *(buffer_array_view_ptr->NativeHandle()),
-              client_call_wrapper_ptr->rsp_ptr);
-
-          if (!deserialize_ret) {
-            // Deserialization failed
-            MW_ERROR(
-                "Req deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
-                serialization_type, client_info.pkg_path, client_info.module_name, client_info.func_name);
-
-            CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED));
-
-            return;
-          }
-
-          // cache client rsp deserialization buf
-          client_call_wrapper_ptr->rsp_serialization_cache.emplace(serialization_type, buffer_array_view_ptr);
-
-          // Calling callback
-          CallResultCallback(*client_call_wrapper_ptr, status);
+          cb_ctx_ptr->OnSerializedResult(cur_req_id, service_invoke_weak, serialization_type, status);
         };
 
     // Call service rpc
     service_func_wrapper_ptr->service_func(service_invoke_wrapper_ptr);
   } catch (const std::exception& e) {
-    MW_ERROR("{}", e.what());
+    // Includes exceptions thrown by service_func itself. CallResultCallback()
+    // is a no-op if a result was already delivered.
+    MW_ERROR("Local service call failed: {}", e.what());
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
+  } catch (...) {
+    MW_ERROR("Local service call failed with a non-std exception.");
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
   }
+}
+
+void InProcessServiceDriver::CallbackContext::OnDirectResult(uint32_t req_id, ibmw::rpc::Status status) {
+  auto msg_recorder = client_tool.GetRecord(req_id);
+  if (!msg_recorder) [[unlikely]] {
+    MW_TRACE("Can not get req id {} from recorder (timeout or duplicate).", req_id);
+    return;
+  }
+  auto client_call_wrapper_ptr = std::move(*msg_recorder);
+  CallResultCallback(*client_call_wrapper_ptr, status);
+}
+
+void InProcessServiceDriver::CallbackContext::OnSerializedResult(
+    uint32_t cur_req_id,
+    const std::weak_ptr<ServiceMessageFrame>& service_invoke_weak,
+    const std::string& serialization_type,
+    ibmw::rpc::Status status) {
+  auto msg_recorder = client_tool.GetRecord(cur_req_id);
+  if (!msg_recorder) [[unlikely]] {
+    // No record is found, which means that the call has timed out. The record has been deleted after the timeout process is gone.
+    MW_TRACE("Can not get req id {} from recorder.", cur_req_id);
+    return;
+  }
+
+  auto service_invoke_wrapper_ptr = service_invoke_weak.lock();
+  if (!service_invoke_wrapper_ptr) [[unlikely]] {
+    MW_ERROR("Service message frame expired before callback for req id {}.", cur_req_id);
+    auto client_call_wrapper_ptr = std::move(*msg_recorder);
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
+    return;
+  }
+
+  // Get the record
+  auto client_call_wrapper_ptr = std::move(*msg_recorder);
+  const auto& client_info = client_call_wrapper_ptr->info;
+
+  const auto& service_info = service_invoke_wrapper_ptr->info;
+
+  // service rsp serialization
+  auto buffer_array_view_ptr = TrySerializeRspWithCache(*service_invoke_wrapper_ptr, serialization_type);
+  if (!buffer_array_view_ptr) [[unlikely]] {
+    // Serialization failed
+    MW_ERROR(
+        "Rsp serialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
+        serialization_type, service_info.pkg_path, service_info.module_name, service_info.func_name);
+
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED));
+
+    return;
+  }
+
+  // client rsp deserialization
+  bool deserialize_ret = client_info.rsp_type_support_ref.Deserialize(
+      serialization_type,
+      *(buffer_array_view_ptr->NativeHandle()),
+      client_call_wrapper_ptr->rsp_ptr);
+
+  if (!deserialize_ret) {
+    // Deserialization failed
+    MW_ERROR(
+        "Req deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
+        serialization_type, client_info.pkg_path, client_info.module_name, client_info.func_name);
+
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED));
+
+    return;
+  }
+
+  // cache client rsp deserialization buf
+  client_call_wrapper_ptr->rsp_serialization_cache.emplace(serialization_type, buffer_array_view_ptr);
+
+  // Calling callback
+  CallResultCallback(*client_call_wrapper_ptr, status);
 }
 
 void InProcessServiceDriver::RegisterGetExecutorFunc(

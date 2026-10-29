@@ -227,13 +227,21 @@ CachedTransportSubscriptionRegistry::Attach(
         DeliverFrame(state, frame, false, std::move(release));
       };
 
+  // The driver keeps references to the handlers, so they are owned by this
+  // source before the driver sees them: a later throw (rejection, bad_alloc)
+  // must not destroy a handler the driver may still call.
+  auto* handler_ptr = handler.get();
+  {
+    std::lock_guard lock(mutex_);
+    handlers_.emplace_back(std::move(handler));
+  }
   MW_ASSERT(
-      driver.OnMessage(*handler),
+      driver.OnMessage(*handler_ptr),
       "Driver '{}' rejected cached serialized subscription for '{}'.",
       driver.Name(), advertisement.topic.topic);
   auto loaned_handler = std::make_unique<
       ibmw::runtime::core::transport::LoanedMessageHandlerWrapper>();
-  loaned_handler->info = handler->info;
+  loaned_handler->info = handler_ptr->info;
   loaned_handler->callback =
       [state, info = loaned_handler->info](
           const ibmw_transport_context_base_t* context,
@@ -247,14 +255,16 @@ CachedTransportSubscriptionRegistry::Attach(
             .ctx_ref = ibmw::transport::ContextRef(context)};
         DeliverFrame(state, frame, true, std::move(release));
       };
-  const bool loaned_attached = driver.AttachLoaned(*loaned_handler);
+  auto* loaned_handler_ptr = loaned_handler.get();
+  {
+    std::lock_guard lock(mutex_);
+    loaned_handlers_.emplace_back(std::move(loaned_handler));
+  }
+  // Kept even if rejected: a driver may have stored the callback anyway.
+  static_cast<void>(driver.AttachLoaned(*loaned_handler_ptr));
   {
     std::lock_guard lock(mutex_);
     states_.emplace(subscription_key, state);
-    handlers_.emplace_back(std::move(handler));
-    if (loaned_attached) {
-      loaned_handlers_.emplace_back(std::move(loaned_handler));
-    }
   }
   return state;
 }

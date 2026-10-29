@@ -6,6 +6,7 @@
 #include <atomic>
 
 #include "c/util/function_base.h"
+#include "cpp/service/rpc_handle.h"
 #include "engine/service/service_driver.h"
 #include "engine/service/service_framework_async_filter.h"
 #include "base/log_util.h"
@@ -96,6 +97,12 @@ class ServiceDriverDispatcher {
   FuncDriverInfoMap GetServersDriverInfo() const;
 
  private:
+  void CallImpl(CallAccessInfoWrapper& wrapper,
+                std::shared_ptr<ibmw::rpc::ClientCallback>& client_callback_ptr,
+                std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr);
+  void FailCall(const std::shared_ptr<ibmw::rpc::ClientCallback>& client_callback_ptr,
+                const std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr) noexcept;
+
   std::vector<ServiceDriver*> GetDriversByRules(
       std::string_view func_name,
       const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
