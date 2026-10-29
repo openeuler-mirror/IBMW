@@ -4,7 +4,10 @@
 #include "engine/transport/inprocess_transport.h"
 #include "engine/transport/transport_driver_tools.h"
 
+#include <chrono>
 #include <memory>
+#include <optional>
+#include <thread>
 
 namespace YAML {
 template <>
@@ -34,6 +37,26 @@ struct convert<ibmw::runtime::core::transport::InProcessTransport::Options> {
 }  // namespace YAML
 
 namespace ibmw::runtime::core::transport {
+
+namespace {
+
+// Copying a message with the subscriber package's type support is only sound
+// when both packages provably share the implementation; msg_type names alone
+// do not guarantee an identical layout (COMM-007).
+bool SameCopyImplementation(const ibmw::util::TypeSupportRef& pub, const ibmw::util::TypeSupportRef& sub) {
+  const auto* p = pub.NativeHandle();
+  const auto* s = sub.NativeHandle();
+  if (p == s) return true;
+  if (p == nullptr || s == nullptr) return false;
+  if (p->copy == s->copy && p->ctx == s->ctx) return true;
+  if (p->custom_type_support_ptr == nullptr || s->custom_type_support_ptr == nullptr) return false;
+  const void* p_custom = p->custom_type_support_ptr(p->ctx);
+  return p_custom != nullptr && p_custom == s->custom_type_support_ptr(s->ctx);
+}
+
+constexpr auto kShutdownDrainTimeout = std::chrono::seconds(5);
+
+}  // namespace
 
 void InProcessTransport::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
@@ -68,9 +91,49 @@ void InProcessTransport::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
+  if (subscribe_executor_ref_) DrainInflight();
+
   subscribe_index_map_.clear();
 
   get_executor_func_ = nullptr;
+}
+
+void InProcessTransport::DrainInflight() {
+  if (subscribe_executor_ref_.IsInCurrentExecutor()) {
+    MW_WARN("Local transport shut down from its subscriber executor; queued "
+            "deliveries are not drained.");
+    return;
+  }
+  // Pairs with the seq_cst increment in Send(): either Send() observes
+  // kShutdown, or this load observes its increment.
+  if (inflight_.load(std::memory_order_seq_cst) == 0) return;
+  const auto deadline = std::chrono::steady_clock::now() + kShutdownDrainTimeout;
+  while (inflight_.load(std::memory_order_acquire) != 0) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      MW_ERROR("Local transport shutdown timed out with {} delivery(ies) "
+               "still pending on executor '{}'.",
+               inflight_.load(std::memory_order_relaxed), options_.subscriber_executor);
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+void InProcessTransport::ReportIncompatibleCopy(
+    const TransportInfo& pub_info, std::string_view sub_pkg_path) noexcept {
+  try {
+    std::string key = pub_info.topic_name + '\n' + pub_info.pkg_path + '\n' + std::string(sub_pkg_path);
+    {
+      std::lock_guard lock(incompatible_copy_mutex_);
+      if (!incompatible_copy_reported_.insert(std::move(key)).second) return;
+    }
+    MW_ERROR(
+        "Local transport drops '{}' ({}) from pkg '{}' to pkg '{}': the type "
+        "supports differ and support no serialization, so a direct copy is "
+        "not known to be layout-compatible.",
+        pub_info.topic_name, pub_info.msg_type, pub_info.pkg_path, sub_pkg_path);
+  } catch (...) {
+  }
 }
 
 bool InProcessTransport::RegisterSendType(
@@ -108,6 +171,9 @@ bool InProcessTransport::OnMessage(const MessageHandlerWrapper& message_handler)
 
 void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
   try {
+    std::optional<InflightToken> send_token;
+    if (subscribe_executor_ref_) send_token.emplace(inflight_, std::memory_order_seq_cst);
+
     if (state_.load() != State::kStart) [[unlikely]] {
       MW_WARN("Method can only be called when state is 'Start'.");
       return;
@@ -183,12 +249,17 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
 
       // Determine whether to use copy or serialization for message delivery.
       // Use copy when: (a) pub and sub are in the same package, OR
-      // (b) the type support does not support serialization (e.g., ROS2 native
-      // types that rely on DDS-level serialization rather than ibmw-level).
-      // In case (b), both packages share the same underlying type definition
-      // so direct memory copy is safe and correct.
-      bool use_copy = (cur_sub_pkg_path == pub_info.pkg_path) ||
-                      (pub_info.msg_type_support_ref.SerializationTypesSupportedNum() == 0);
+      // (b) the type support does not support serialization. Case (b) is
+      // only sound when both packages share the copy implementation;
+      // otherwise the message is dropped rather than copied with a possibly
+      // different layout.
+      const bool same_pkg = (cur_sub_pkg_path == pub_info.pkg_path);
+      bool use_copy = same_pkg || !type_supports_serialization;
+      if (!same_pkg && use_copy &&
+          !SameCopyImplementation(pub_info.msg_type_support_ref, tpl_sub_info.msg_type_support_ref)) [[unlikely]] {
+        ReportIncompatibleCopy(pub_info, cur_sub_pkg_path);
+        continue;
+      }
 
       if (use_copy) {
         // Copy-based delivery: create a new message and copy data directly.
@@ -218,7 +289,8 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
 
           if (subscribe_executor_ref_) {
             subscribe_executor_ref_.Dispatch(
-                [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)}]() mutable {
+                [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
+                 token = InflightToken(inflight_, std::memory_order_relaxed)]() mutable {
                   msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
                 });
           } else {
@@ -261,7 +333,8 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
 
           if (subscribe_executor_ref_) {
             subscribe_executor_ref_.Dispatch(
-                [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)}]() mutable {
+                [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
+                 token = InflightToken(inflight_, std::memory_order_relaxed)]() mutable {
                   msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
                 });
           } else {
