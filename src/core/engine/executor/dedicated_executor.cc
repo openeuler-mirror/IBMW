@@ -161,7 +161,10 @@ void DedicatedExecutor::Dispatch(ibmw::executor::Task&& task) noexcept {
   {
     std::unique_lock<std::mutex> lck(mutex_);
     // Re-check under the lock: the worker drains the queue after shutdown.
-    if (state_.load(std::memory_order_relaxed) == State::kShutdown) [[unlikely]] return;
+    if (state_.load(std::memory_order_relaxed) == State::kShutdown) [[unlikely]] {
+      MW_WARN("Worker thread executor '{}' is shutting down, the task is dropped.", name_);
+      return;
+    }
     queue_.emplace(std::move(task));
     ++queue_task_num_;
     cond_.notify_one();

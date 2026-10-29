@@ -222,6 +222,22 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   #endif
 }
 
+namespace {
+volatile sig_atomic_t g_crash_signo = 0;
+
+// Watchdog for a hung crash report: terminate with the original signal (now
+// SIG_DFL thanks to SA_RESETHAND) so the core dump and exit status are kept.
+void CrashReportTimeout(int) {
+  const int signo = g_crash_signo;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, signo);
+  (void)sigprocmask(SIG_UNBLOCK, &set, nullptr);
+  raise(signo);
+  _exit(EXIT_FAILURE);
+}
+}  // namespace
+
   #ifdef __GNUC__
 __attribute__((noreturn))
   #endif
@@ -237,11 +253,13 @@ CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
   // HandleSignal() allocates, symbolizes and logs, none of which is
   // async-signal-safe: if the crash happened while malloc or the log lock was
   // held it would hang forever. Bound it with a watchdog (SIGALRM is left
-  // unblocked by InstallHandlers and terminates by default).
-  struct sigaction dfl;
-  std::memset(&dfl, 0, sizeof dfl);
-  dfl.sa_handler = SIG_DFL;
-  (void)sigaction(SIGALRM, &dfl, nullptr);
+  // unblocked by InstallHandlers).
+  g_crash_signo = signo;
+  struct sigaction on_timeout;
+  std::memset(&on_timeout, 0, sizeof on_timeout);
+  on_timeout.sa_handler = &CrashReportTimeout;
+  sigemptyset(&on_timeout.sa_mask);
+  (void)sigaction(SIGALRM, &on_timeout, nullptr);
   alarm(10);
 
   HandleSignal(signo, info, _ctx);

@@ -6,8 +6,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -45,11 +43,10 @@ namespace ibmw::runtime::core::configurator {
 
 namespace {
 
+// A single path component: no separators, no NUL, not "." or "..".
 bool IsSafeFileNameComponent(std::string_view name) {
   if (name.empty() || name == "." || name == "..") return false;
-  return std::all_of(name.begin(), name.end(), [](char c) {
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' || c == '-';
-  });
+  return name.find_first_of(std::string_view("/\\\0", 3)) == std::string_view::npos;
 }
 
 // Recreates `path` as a regular file readable only by the owner; returns 0 or
@@ -196,7 +193,7 @@ const ConfiguratorAccess& ConfigSubsystem::GetConfiguratorAccess(
 
     // module_name comes from the plugin; it must not escape temp_cfg_path.
     MW_REQUIRE(IsSafeFileNameComponent(module_info.module_name),
-               "Invalid module name '{}' for temp cfg file, only [A-Za-z0-9_.-] is allowed.",
+               "Invalid module name '{}' for temp cfg file: must not contain path separators.",
                module_info.module_name);
 
     std::filesystem::path temp_cfg_file_path =

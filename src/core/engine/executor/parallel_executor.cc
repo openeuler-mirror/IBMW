@@ -161,6 +161,18 @@ void ParallelExecutor::Shutdown() {
     if (itr->joinable()) itr->join();
     threads_.erase(itr++);
   }
+
+  // A Dispatch() that passed its state check may have queued a task after the
+  // workers' final try_pop; run such stragglers here rather than drop them.
+  // (Lifecycle-only: keeps Dispatch() free of extra synchronization.)
+  const auto* prev_executor = tl_current_executor_;
+  tl_current_executor_ = this;
+  ibmw::executor::Task task;
+  while (qu_.try_pop(task)) {
+    task();
+    --queue_task_num_;
+  }
+  tl_current_executor_ = prev_executor;
 }
 
 bool ParallelExecutor::IsInCurrentExecutor() const noexcept {

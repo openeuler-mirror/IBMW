@@ -83,6 +83,14 @@ void TimeManipulatorExecutor::Initialize(std::string_view name,
   dt_count_ = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(options_.dt).count());
 
+  // Same constraints as the core TimerExecutor: dt and wheel sizes are divisors.
+  MW_REQUIRE(dt_count_ > 0, "Time manipulator executor '{}': dt_us must be greater than 0.", name_);
+  MW_REQUIRE(!options_.wheel_size.empty(),
+             "Time manipulator executor '{}': wheel_size must not be empty.", name_);
+  for (size_t sz : options_.wheel_size) {
+    MW_REQUIRE(sz >= 2, "Time manipulator executor '{}': every wheel_size entry must be at least 2.", name_);
+  }
+
   uint64_t cur_scale = 1;
   for (size_t ii = 0; ii < options_.wheel_size.size(); ++ii) {
     uint64_t start_pos = (ii == 0) ? 0 : 1;

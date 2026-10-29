@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <fcntl.h>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -25,11 +27,14 @@ using namespace ibmw::runtime::core;
 
 namespace {
 
-// SIGINT/SIGTERM are blocked in every thread and consumed by one sigwait()
-// thread, so Engine::Shutdown() (logging, promises, full teardown on a second
-// signal) never runs in async-signal context.
+// SIGINT/SIGTERM only write the signal number to a self-pipe (async-signal
+// safe). A watcher thread turns that into Engine::Shutdown() (logging,
+// promises, full teardown on a second signal), so it never runs in
+// async-signal context. No signal mask is changed, so threads created earlier
+// and child processes keep the default signal behaviour.
 std::mutex g_core_mutex;
 Engine* global_core_ptr = nullptr;
+int g_signal_pipe[2] = {-1, -1};
 
 class ScopedSignalCore {
  public:
@@ -45,31 +50,54 @@ class ScopedSignalCore {
   }
 };
 
-sigset_t ShutdownSignalSet() {
-  sigset_t set;
-  sigemptyset(&set);
-  sigaddset(&set, SIGINT);
-  sigaddset(&set, SIGTERM);
-  return set;
+void OnShutdownSignal(int sig) {
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(sig);
+  // Non-blocking: if the pipe is full a shutdown request is already pending.
+  [[maybe_unused]] auto ret = write(g_signal_pipe[1], &byte, 1);
+  errno = saved_errno;
 }
 
-// Must run before any other thread is created so that all threads inherit the mask.
+// No engine (yet / anymore): die from the signal like the default disposition
+// would, so the parent sees WIFSIGNALED.
+[[noreturn]] void DieFromSignal(int sig) {
+  std::signal(sig, SIG_DFL);
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+  raise(sig);
+  _exit(128 + sig);
+}
+
 bool StartSignalThread() {
-  const sigset_t set = ShutdownSignalSet();
-  if (pthread_sigmask(SIG_BLOCK, &set, nullptr) != 0) return false;
-  std::thread([set] {
-    while (true) {
-      int sig = 0;
-      if (sigwait(&set, &sig) != 0) continue;
-      std::lock_guard<std::mutex> lck(g_core_mutex);
-      if (global_core_ptr == nullptr) {
-        // No engine (yet / anymore): behave like the default disposition.
-        _exit(128 + sig);
+  if (pipe2(g_signal_pipe, O_CLOEXEC) != 0) return false;
+  const int flags = fcntl(g_signal_pipe[1], F_GETFL);
+  if (flags < 0 || fcntl(g_signal_pipe[1], F_SETFL, flags | O_NONBLOCK) != 0) return false;
+
+  try {
+    std::thread([] {
+      while (true) {
+        unsigned char byte = 0;
+        const ssize_t n = read(g_signal_pipe[0], &byte, 1);
+        if (n != 1) {
+          if (n < 0 && errno == EINTR) continue;
+          return;
+        }
+        std::lock_guard<std::mutex> lck(g_core_mutex);
+        if (global_core_ptr == nullptr) DieFromSignal(byte);
+        global_core_ptr->Shutdown();
       }
-      global_core_ptr->Shutdown();
-    }
-  }).detach();
-  return true;
+    }).detach();
+  } catch (const std::exception&) {
+    return false;
+  }
+
+  struct sigaction sa {};
+  sa.sa_handler = &OnShutdownSignal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  return sigaction(SIGINT, &sa, nullptr) == 0 && sigaction(SIGTERM, &sa, nullptr) == 0;
 }
 
 }  // namespace

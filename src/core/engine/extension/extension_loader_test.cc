@@ -188,10 +188,12 @@ TEST(DynamicLibPath, ResolvesFullPathWithoutThrowing) {
   EXPECT_EQ(by_path.GetLibFullPath(),
             std::filesystem::canonical(EXTENSION_V2_FIXTURE_PATH).string());
 
+#if defined(__GLIBC__)  // soname of a library resolved through the search path
   ibmw::common::util::DynamicLib by_name;
   ASSERT_TRUE(by_name.Load("libm.so.6"));
   EXPECT_TRUE(std::filesystem::path(by_name.GetLibFullPath()).is_absolute()) << by_name.GetLibFullPath();
   EXPECT_TRUE(std::filesystem::exists(by_name.GetLibFullPath())) << by_name.GetLibFullPath();
+#endif
 }
 
 // CORE-026: a lib whose extension name does not match the config must have its

@@ -125,6 +125,8 @@ void ExecutorBus::Shutdown() {
   // Reverse creation order: an executor bound to another one (strand on a
   // thread pool, timer on a bound executor) is created after it, so it must
   // stop and be destroyed first. A strand outliving its io_context is a UAF.
+  // Consequence: a task still draining in an earlier executor that dispatches
+  // into a later one is rejected (logged), since that one is already stopped.
   for (auto itr = executor_vec_.rbegin(); itr != executor_vec_.rend(); ++itr) {
     (*itr)->Shutdown();
   }

@@ -210,9 +210,9 @@ class Engine {
   std::thread async_shutdown_thread_;  // Stored to avoid dangling detached thread
 
   // Hook catalog — ordered map so hooks fire in deterministic order.
-  // Lifecycle-only: callers iterate a snapshot so hooks run without the lock.
+  // Lifecycle-only: callers iterate a snapshot (under hooks_mutex_) so hooks
+  // run without the lock.
   std::vector<HookTask> SnapshotHooks(HookPoint point) const;
-  mutable std::mutex hooks_mutex_;
   std::map<HookPoint, std::vector<HookTask>> hooks_;
 
   // Subsystem table — populated in BuildSubsystemTable().
@@ -220,7 +220,6 @@ class Engine {
 
   // Initialization order (indices into subsystems_), derived by ResolveInitOrder().
   std::vector<size_t> init_order_;
-  std::vector<size_t> shutdown_order_;
 
   // Bus instances.
   configurator::ConfigSubsystem config_subsystem_;
@@ -236,6 +235,12 @@ class Engine {
   transport::TransportBus transport_bus_;
   parameter::ParameterStore parameter_store_;
   module::ModuleBus module_bus_;
+
+  // Appended after the pre-existing members on purpose: engine.h is installed
+  // and has inline accessors, so existing member offsets must not move.
+  mutable std::mutex hooks_mutex_;
+  // Stop order (indices into subsystems_), derived by ResolveInitOrder().
+  std::vector<size_t> shutdown_order_;
 };
 
 }  // namespace ibmw::runtime::core

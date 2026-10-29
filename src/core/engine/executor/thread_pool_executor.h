@@ -88,6 +88,9 @@ class ThreadPoolExecutor : public ExecutorBase {
   std::mutex exit_mutex_;
   std::condition_variable exit_cv_;
   uint32_t running_threads_ = 0;
+  // YAML option 'shutdown_grace_ms' (kept out of Options so the installed
+  // layout of existing members does not change). Negative: wait forever.
+  int32_t shutdown_grace_ms_ = 1000;
 };
 
 }  // namespace ibmw::runtime::core::executor

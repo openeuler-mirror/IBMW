@@ -14,7 +14,9 @@
   #include <windows.h>
 #else
   #include <dlfcn.h>
-  #include <link.h>
+  #if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
+    #include <link.h>
+  #endif
 #endif
 
 namespace ibmw::common::util {

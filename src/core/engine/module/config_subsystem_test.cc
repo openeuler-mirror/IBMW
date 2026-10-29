@@ -62,9 +62,21 @@ TEST_F(ConfigSubsystemTempCfgTest, RejectsModuleNameWithPathSeparators) {
   EXPECT_FALSE(fs::exists(dir_ / "evil.yaml"));
 }
 
+TEST_F(ConfigSubsystemTempCfgTest, AcceptsNonAsciiModuleNameWithoutSeparators) {
+  YAML::Node root;
+  root["ibmw"]["config"]["temp_cfg_path"] = (dir_ / "tmp").string();
+  root["mod:v2 \xc3\xa9"]["key"] = 3;
+  ConfigSubsystem cfg;
+  cfg.SetLogger(std::make_shared<ibmw::common::util::LoggerWrapper>());
+  cfg.Initialize(root);
+  EXPECT_NO_THROW(cfg.GetConfiguratorAccess(Info("mod:v2 \xc3\xa9")));
+  EXPECT_TRUE(fs::exists(dir_ / "tmp" / "temp_cfg_file_for_mod:v2 \xc3\xa9.yaml"));
+}
+
 TEST_F(ConfigSubsystemTempCfgTest, WritesOwnerOnlyFile) {
-  ::umask(022);
+  const mode_t old_mask = ::umask(022);
   cfg_.GetConfiguratorAccess(Info("good_mod"));
+  ::umask(old_mask);
   const auto file = dir_ / "tmp" / "temp_cfg_file_for_good_mod.yaml";
   struct stat st {};
   ASSERT_EQ(::lstat(file.c_str(), &st), 0);

@@ -6,8 +6,11 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -80,14 +83,33 @@ TEST(ExecutorRobustness, TimerExecutorRejectsDegenerateOptions) {
 
 TEST(ExecutorRobustness, RotateFileLoggerDestructsAfterFailedSyncInitialize) {
   static const ibmw_executor_base_t kDummy{};
+  const auto log_dir = std::filesystem::temp_directory_path() /
+                       ("ibmw_logger_test_" + std::to_string(::getpid()));
   {
     logger::RotateFileLoggerDriver drv;
     drv.RegisterGetExecutorFunc(
         [](std::string_view) { return ibmw::executor::ExecutorHandle(&kDummy); });
     // enable_sync without sync_executor_name fails before the log file is opened.
-    EXPECT_ANY_THROW(drv.Initialize(YAML::Load("{enable_sync: true, path: /tmp/ibmw_logger_test}")));
+    EXPECT_ANY_THROW(drv.Initialize(YAML::Load("{enable_sync: true, path: " + log_dir.string() + "}")));
   }  // ~RotateFileLoggerDriver must not fclose(nullptr)
-  SUCCEED();
+  std::filesystem::remove_all(log_dir);
+}
+
+// With 'shutdown_grace_ms: -1' Shutdown() drains everything queued behind a
+// slow task instead of stopping the io_context after the grace period.
+TEST(ExecutorRobustness, ThreadPoolShutdownGraceIsConfigurable) {
+  executor::ThreadPoolExecutor exe;
+  exe.SetLogger(MakeLogger());
+  YAML::Node options = YAML::Load("{thread_num: 1, shutdown_grace_ms: -1}");
+  exe.Initialize("pool_grace", options);
+  EXPECT_EQ(options["shutdown_grace_ms"].as<int32_t>(), -1);
+  exe.Start();
+
+  std::atomic_uint32_t ran{0};
+  exe.Dispatch(ibmw::executor::Task([] { std::this_thread::sleep_for(std::chrono::milliseconds(1200)); }));
+  for (int i = 0; i < 10; ++i) exe.Dispatch(ibmw::executor::Task([&ran] { ++ran; }));
+  exe.Shutdown();
+  EXPECT_EQ(ran.load(), 10u);
 }
 
 // CORE-027: a DispatchAt() timer far in the future must not keep Shutdown()
