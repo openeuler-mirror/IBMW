@@ -8,6 +8,7 @@
 #include <future>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include "dynamiclatch.h"
 #include "record_playback_ext/global.h"
@@ -754,13 +755,49 @@ void RecordAction::CloseRecord() {
     writer_->close();
 }
 
+namespace {
+
+// Upper bound for everything copied into one bag's extra_file folder: the
+// copy is meant for configuration files, not for whole data directories.
+constexpr uintmax_t kMaxExtraFileBytes = 256ULL << 20;
+
+struct ExtraFileEntry {
+  std::filesystem::path rel;  // relative to the copied directory
+  bool is_dir;
+};
+
+// Lists the tree under `root` without following symbolic links; returns
+// false (with a warning) if it holds more than `budget` bytes.
+bool CollectExtraFileTree(const std::filesystem::path& root, uintmax_t budget,
+                          std::vector<ExtraFileEntry>& entries, uintmax_t& total) {
+  for (auto it = std::filesystem::recursive_directory_iterator(root);
+       it != std::filesystem::recursive_directory_iterator(); ++it) {
+    const auto status = it->symlink_status();
+    if (std::filesystem::is_symlink(status)) {
+      MW_WARN("Extra file '{}' is a symbolic link, skip copying.", it->path().string());
+      continue;
+    }
+    if (std::filesystem::is_directory(status)) {
+      entries.push_back({it->path().lexically_relative(root), true});
+    } else if (std::filesystem::is_regular_file(status)) {
+      total += it->file_size();
+      if (total > budget) {
+        MW_WARN("Extra file path '{}' exceeds the {} bytes limit, skip copying.", root.string(), budget);
+        return false;
+      }
+      entries.push_back({it->path().lexically_relative(root), false});
+    } else {
+      MW_WARN("Extra file '{}' is neither regular file nor directory, skip copying.", it->path().string());
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 void RecordAction::CopyExtraFilePathToNewFolder() {
   extra_file_path_ = real_bag_path_ / "extra_file";
-
-  if (std::filesystem::exists(extra_file_path_)) {
-    MW_WARN("Extra file path '{}' has already existed, skip copying.", extra_file_path_.string());
-    return;
-  }
+  uintmax_t copied = 0;
 
   for (const auto& file_path_str : options_.extra_file_path) {
     if (file_path_str.empty()) [[unlikely]] {
@@ -768,35 +805,54 @@ void RecordAction::CopyExtraFilePathToNewFolder() {
       continue;
     }
 
-    std::filesystem::path src_path = std::filesystem::absolute(file_path_str);
-    if (!std::filesystem::exists(src_path)) {
-      MW_WARN("Extra file path '{}' does not exist, skip copying.", src_path.string());
-      continue;
-    }
-
     try {
+      // The configured path itself may be a link; its target is copied.
+      std::filesystem::path src_path = std::filesystem::weakly_canonical(std::filesystem::absolute(file_path_str));
+      if (!std::filesystem::exists(src_path)) {
+        MW_WARN("Extra file path '{}' does not exist, skip copying.", src_path.string());
+        continue;
+      }
+      const auto name = src_path.filename();
+      if (name.empty() || name == "." || name == "..") {
+        MW_WARN("Extra file path '{}' has no file name, skip copying.", src_path.string());
+        continue;
+      }
+      // Each entry gets its own name below extra_file: an entry with the
+      // same name as an earlier one is not copied over it.
+      const std::filesystem::path dest = extra_file_path_ / name;
+      if (std::filesystem::exists(std::filesystem::symlink_status(dest))) {
+        MW_WARN("Extra file '{}' has already existed, skip copying '{}'.", dest.string(), src_path.string());
+        continue;
+      }
+
       if (std::filesystem::is_directory(src_path)) {
-        std::filesystem::path dest_dir = extra_file_path_ / src_path.filename();
-        if (std::filesystem::exists(dest_dir)) {
-          std::filesystem::remove_all(dest_dir);
+        std::vector<ExtraFileEntry> entries;
+        uintmax_t total = copied;
+        if (!CollectExtraFileTree(src_path, kMaxExtraFileBytes, entries, total)) continue;
+        std::filesystem::create_directories(dest);
+        for (const auto& entry : entries) {
+          if (entry.is_dir) {
+            std::filesystem::create_directories(dest / entry.rel);
+          } else {
+            std::filesystem::copy_file(src_path / entry.rel, dest / entry.rel);
+          }
         }
-        std::filesystem::create_directories(dest_dir);
-        std::filesystem::copy(
-            src_path,
-            dest_dir,
-            std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
+        copied = total;
       } else if (std::filesystem::is_regular_file(src_path)) {
-        std::filesystem::path dest_file = extra_file_path_ / src_path.filename();
-        std::filesystem::create_directories(dest_file.parent_path());
-        std::filesystem::copy_file(
-            src_path,
-            dest_file,
-            std::filesystem::copy_options::overwrite_existing);
+        const uintmax_t size = std::filesystem::file_size(src_path);
+        if (size > kMaxExtraFileBytes - copied) {
+          MW_WARN("Extra file path '{}' exceeds the {} bytes limit, skip copying.", src_path.string(),
+                  kMaxExtraFileBytes);
+          continue;
+        }
+        std::filesystem::create_directories(extra_file_path_);
+        std::filesystem::copy_file(src_path, dest);
+        copied += size;
       } else {
         MW_WARN("Extra file path '{}' is neither regular file nor directory, skip copying.", src_path.string());
       }
     } catch (const std::filesystem::filesystem_error& e) {
-      MW_WARN("Copy extra file path '{}' failed: {}", src_path.string(), e.what());
+      MW_WARN("Copy extra file path '{}' failed: {}", file_path_str, e.what());
     }
   }
 }

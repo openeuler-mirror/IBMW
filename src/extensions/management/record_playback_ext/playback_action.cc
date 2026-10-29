@@ -373,6 +373,10 @@ void PlaybackAction::StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_d
 
   auto task_state = task_state_;
   MW_ASSERT(task_state != nullptr, "Playback task state is not initialized.");
+  // Double buffering (EXT-031, intended): two scheduling chains, each batch's
+  // last task reads and schedules the next one. Reads are serialized by
+  // db_mutex_, so the chains get consecutive batches without overlap, and one
+  // batch is always queued ahead: reading never delays the next publish.
   AddPlaybackTasks(task_state);
   AddPlaybackTasks(task_state);
 }
