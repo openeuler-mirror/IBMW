@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
@@ -869,6 +870,33 @@ std::optional<uint64_t> ExtractSimTime(
   return std::nullopt;
 }
 
+// Writes `root` to a new file in the temporary directory, created exclusively
+// (O_EXCL, mode 0600) under an unpredictable name: another local user can
+// neither plant a file or symlink at the path nor read the config (EXT-045).
+std::filesystem::path WriteTemporaryConfig(const std::string& prefix, const YAML::Node& root, const char* what) {
+  std::stringstream text;
+  text << root;
+  const std::string data = text.str();
+  constexpr int kSuffixLen = 5;  // ".yaml"
+  std::string path = (std::filesystem::temp_directory_path() / (prefix + "-XXXXXX.yaml")).string();
+  const int fd = ::mkstemps(path.data(), kSuffixLen);
+  MW_ASSERT(fd >= 0, "Cannot create temporary {} config: {}", what, std::strerror(errno));
+  size_t written = 0;
+  while (written < data.size()) {
+    const ssize_t n = ::write(fd, data.data() + written, data.size() - written);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    written += static_cast<size_t>(n);
+  }
+  const bool ok = written == data.size() && ::close(fd) == 0;
+  if (!ok) {
+    if (written != data.size()) ::close(fd);
+    ::unlink(path.c_str());
+  }
+  MW_ASSERT(ok, "Failed to write temporary {} config.", what);
+  return path;
+}
+
 std::filesystem::path WriteRecorderConfig(const RecordConnection& connection, std::string log_level) {
   auto root = YAML::Clone(connection.runtime_config);
   std::transform(log_level.begin(), log_level.end(), log_level.begin(),
@@ -877,14 +905,7 @@ std::filesystem::path WriteRecorderConfig(const RecordConnection& connection, st
   YAML::Node backend;
   backend["type"] = "console";
   root["ibmw"]["logging"]["backends"].push_back(backend);
-  const auto path = std::filesystem::temp_directory_path() /
-                    ("ibmw-bag-recorder-" + std::to_string(::getpid()) + ".yaml");
-  std::ofstream output(path, std::ios::trunc);
-  MW_ASSERT(output.is_open(), "Cannot write temporary Recorder config.");
-  output << root;
-  output.close();
-  MW_ASSERT(output.good(), "Failed to write temporary Recorder config.");
-  return path;
+  return WriteTemporaryConfig("ibmw-bag-recorder", root, "Recorder");
 }
 
 using PlaybackDriverSet = std::set<std::string>;
@@ -1242,15 +1263,7 @@ std::filesystem::path WritePlayerConfig(
   }
   ibmw["messaging"] = messaging;
 
-  const auto config_path = std::filesystem::temp_directory_path() /
-                           ("ibmw-bag-player-" +
-                            std::to_string(::getpid()) + ".yaml");
-  std::ofstream output(config_path, std::ios::trunc);
-  MW_ASSERT(output.is_open(), "Cannot write temporary Player config.");
-  output << root;
-  output.close();
-  MW_ASSERT(output.good(), "Failed to write temporary Player config.");
-  return config_path;
+  return WriteTemporaryConfig("ibmw-bag-player", root, "Player");
 }
 
 void LoadPlayerTypeSupportPackages(
