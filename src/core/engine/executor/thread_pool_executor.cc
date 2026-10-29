@@ -73,6 +73,7 @@ void ThreadPoolExecutor::Initialize(std::string_view name,
       asio::executor_work_guard<asio::io_context::executor_type>>(
       io_ptr_->get_executor());
 
+  running_threads_ = options_.thread_num;
   for (uint32_t ii = 0; ii < options_.thread_num; ++ii) {
     threads_.emplace_back([this, ii] {
       tl_current_executor_ = this;
@@ -98,6 +99,9 @@ void ThreadPoolExecutor::Initialize(std::string_view name,
       }
 
       tl_current_executor_ = nullptr;
+
+      std::lock_guard<std::mutex> lck(exit_mutex_);
+      if (--running_threads_ == 0) exit_cv_.notify_all();
     });
   }
 
@@ -115,6 +119,21 @@ void ThreadPoolExecutor::Shutdown() {
     return;
 
   if (work_guard_ptr_) work_guard_ptr_->reset();
+
+  // Queued handlers (and tasks they chain) get a grace period to finish. A
+  // pending DispatchAt() timer would otherwise keep run() alive until it
+  // expires, so after the grace period the io_context is stopped and such
+  // not-yet-due timer tasks are discarded.
+  if (io_ptr_) {
+    static constexpr auto kShutdownGracePeriod = std::chrono::seconds(1);
+    std::unique_lock<std::mutex> lck(exit_mutex_);
+    if (!exit_cv_.wait_for(lck, kShutdownGracePeriod, [this] { return running_threads_ == 0; })) {
+      lck.unlock();
+      MW_WARN("Async pool executor '{}' still has pending work after shutdown grace period, "
+              "stopping it; not-yet-due timer tasks are discarded.", name_);
+      io_ptr_->stop();
+    }
+  }
 
   for (auto itr = threads_.begin(); itr != threads_.end();) {
     if (itr->joinable()) itr->join();

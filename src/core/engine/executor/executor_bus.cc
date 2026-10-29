@@ -122,13 +122,16 @@ void ExecutorBus::Shutdown() {
 
   // Shut down executors FIRST, before destroying access wrappers.
   // Executors may still have in-flight tasks that reference access wrappers.
-  for (auto& itr : executor_vec_) {
-    itr->Shutdown();
+  // Reverse creation order: an executor bound to another one (strand on a
+  // thread pool, timer on a bound executor) is created after it, so it must
+  // stop and be destroyed first. A strand outliving its io_context is a UAF.
+  for (auto itr = executor_vec_.rbegin(); itr != executor_vec_.rend(); ++itr) {
+    (*itr)->Shutdown();
   }
 
   executor_bus_access_map_.clear();
   executor_access_map_.clear();
-  executor_vec_.clear();
+  while (!executor_vec_.empty()) executor_vec_.pop_back();
   executor_gen_func_map_.clear();
 }
 

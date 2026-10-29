@@ -100,10 +100,12 @@ void PackageLoader::LoadPkg(std::string_view pkg_path,
 
     auto module_info = module_ptr->info(module_ptr->ctx);
     auto real_module_name = ibmw::util::ToStdStringView(module_info.module_name);
-    MW_REQUIRE(
-        real_module_name == module_name,
-        "Require module name '{}', but get module name '{}' in lib {}.",
-        module_name, real_module_name, pkg_path_);
+    if (real_module_name != module_name) [[unlikely]] {
+      const std::string real_name(real_module_name);  // info may die with the module
+      DestroyModule(module_ptr);
+      MW_THROW("Require module name '{}', but get module name '{}' in lib {}.",
+               module_name, real_name, pkg_path_);
+    }
 
     loaded_module_name_vec_.emplace_back(module_name);
     module_ptr_map_.emplace(module_name, module_ptr);

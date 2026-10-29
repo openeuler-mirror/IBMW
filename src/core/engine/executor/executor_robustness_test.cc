@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -15,6 +16,8 @@
 #include "engine/logger/rotate_file_logger_driver.h"
 
 #include "engine/executor/dedicated_executor.h"
+#include "engine/executor/executor_bus.h"
+#include "engine/executor/thread_pool_executor.h"
 #include "engine/executor/timer_executor.h"
 #include "engine/executor/watchdog_executor.h"
 
@@ -85,6 +88,62 @@ TEST(ExecutorRobustness, RotateFileLoggerDestructsAfterFailedSyncInitialize) {
     EXPECT_ANY_THROW(drv.Initialize(YAML::Load("{enable_sync: true, path: /tmp/ibmw_logger_test}")));
   }  // ~RotateFileLoggerDriver must not fclose(nullptr)
   SUCCEED();
+}
+
+// CORE-027: a DispatchAt() timer far in the future must not keep Shutdown()
+// blocked until it expires; queued immediate tasks still run.
+TEST(ExecutorRobustness, ThreadPoolShutdownDoesNotWaitForFarTimers) {
+  executor::ThreadPoolExecutor exe;
+  exe.SetLogger(MakeLogger());
+  exe.Initialize("pool_far_timer", YAML::Load("thread_num: 2"));
+  exe.Start();
+
+  std::atomic_bool far_ran{false};
+  std::atomic_uint32_t ran{0};
+  exe.DispatchAt(exe.Now() + std::chrono::hours(1), ibmw::executor::Task([&] { far_ran = true; }));
+  for (int i = 0; i < 100; ++i) exe.Dispatch(ibmw::executor::Task([&ran] { ++ran; }));
+
+  const auto begin = std::chrono::steady_clock::now();
+  exe.Shutdown();
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(5));
+  EXPECT_EQ(ran.load(), 100u);
+  EXPECT_FALSE(far_ran.load());
+}
+
+// Without pending timers Shutdown() returns as soon as the queue drains.
+TEST(ExecutorRobustness, ThreadPoolShutdownWithoutTimersIsImmediate) {
+  executor::ThreadPoolExecutor exe;
+  exe.SetLogger(MakeLogger());
+  exe.Initialize("pool_no_timer", YAML::Load("thread_num: 2"));
+  exe.Start();
+  const auto begin = std::chrono::steady_clock::now();
+  exe.Shutdown();
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::milliseconds(500));
+}
+
+// CORE-029: a strand bound to a thread pool must be shut down and destroyed
+// before that pool's io_context (verified by ASan); queued strand work drains.
+TEST(ExecutorRobustness, ExecutorBusTearsDownStrandBeforeItsThreadPool) {
+  std::atomic_uint32_t ran{0};
+  {
+    executor::ExecutorBus bus;
+    bus.SetLogger(MakeLogger());
+    bus.Initialize(YAML::Load(R"(
+executors:
+  - name: pool
+    type: thread_pool
+    options: {thread_num: 2}
+  - name: serial
+    type: strand
+    options: {bind_thread_pool_executor_name: pool}
+)"));
+    bus.Start();
+    auto strand = bus.GetExecutor("serial");
+    ASSERT_TRUE(strand);
+    for (int i = 0; i < 1000; ++i) strand.Dispatch(ibmw::executor::Task([&ran] { ++ran; }));
+    bus.Shutdown();
+  }
+  EXPECT_EQ(ran.load(), 1000u);
 }
 
 }  // namespace

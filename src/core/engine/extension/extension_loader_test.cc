@@ -4,7 +4,9 @@
 #include <dlfcn.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -176,6 +178,98 @@ TEST(ExtensionLoaderAbi, DestroyThrowLeaksDsoAndClearsLoaderState) {
   ASSERT_NE(still_mapped, nullptr) << dlerror();
   EXPECT_EQ(CreateCount(still_mapped.get()), 1U);
 #endif
+}
+
+// CORE-016: the resolved library path never throws and is absolute, for both
+// explicit paths and bare names resolved through the loader search path.
+TEST(DynamicLibPath, ResolvesFullPathWithoutThrowing) {
+  ibmw::common::util::DynamicLib by_path;
+  ASSERT_TRUE(by_path.Load(EXTENSION_V2_FIXTURE_PATH));
+  EXPECT_EQ(by_path.GetLibFullPath(),
+            std::filesystem::canonical(EXTENSION_V2_FIXTURE_PATH).string());
+
+  ibmw::common::util::DynamicLib by_name;
+  ASSERT_TRUE(by_name.Load("libm.so.6"));
+  EXPECT_TRUE(std::filesystem::path(by_name.GetLibFullPath()).is_absolute()) << by_name.GetLibFullPath();
+  EXPECT_TRUE(std::filesystem::exists(by_name.GetLibFullPath())) << by_name.GetLibFullPath();
+}
+
+// CORE-026: a lib whose extension name does not match the config must have its
+// extension destroyed instead of leaked together with the DSO.
+TEST(ExtensionBusLifecycle, NameMismatchDestroysLoadedExtension) {
+  auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
+  ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t created_before = CreateCount(library.get());
+  const uint32_t destroyed_before = InitializationCount(library.get(), "IbmwExtFixtureDestroyCount");
+
+  Engine engine;
+  ExtensionBus bus;
+  bus.RegisterCorePtr(&engine);
+  YAML::Node options;
+  options["items"][0]["name"] = "some-other-name";
+  options["items"][0]["path"] = EXTENSION_V2_FIXTURE_PATH;
+  EXPECT_ANY_THROW(bus.Initialize(options));
+
+  EXPECT_EQ(CreateCount(library.get()), created_before + 1U);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureDestroyCount"), destroyed_before + 1U);
+  bus.Shutdown();
+}
+
+class CountingExtension final : public ibmw::EngineExtensionBase {
+ public:
+  CountingExtension(std::string name, bool init_ok) : name_(std::move(name)), init_ok_(init_ok) {}
+  std::string_view Name() const noexcept override { return name_; }
+  bool Initialize(Engine*) noexcept override { return init_ok_; }
+  void Shutdown() noexcept override { ++shutdown_count; }
+  int shutdown_count = 0;
+
+ private:
+  std::string name_;
+  bool init_ok_;
+};
+
+YAML::Node DirectExtensionOptions(std::initializer_list<const char*> names) {
+  YAML::Node options;
+  size_t i = 0;
+  for (const char* name : names) {
+    options["items"][i]["name"] = name;
+    options["items"][i]["path"] = "";
+    ++i;
+  }
+  return options;
+}
+
+// CORE-026: directly registered extensions are shut down too, exactly once,
+// in reverse initialization order.
+TEST(ExtensionBusLifecycle, ShutsDownDirectlyRegisteredExtensions) {
+  Engine engine;
+  ExtensionBus bus;
+  CountingExtension first("first", true);
+  CountingExtension second("second", true);
+  bus.RegisterCorePtr(&engine);
+  bus.RegisterExtension(&first);
+  bus.RegisterExtension(&second);
+  ASSERT_NO_THROW(bus.Initialize(DirectExtensionOptions({"first", "second"})));
+  bus.Shutdown();
+  bus.Shutdown();
+  EXPECT_EQ(first.shutdown_count, 1);
+  EXPECT_EQ(second.shutdown_count, 1);
+}
+
+// An extension whose Initialize() fails gets one Shutdown() to release what it
+// acquired, and is not visited again by the bus Shutdown().
+TEST(ExtensionBusLifecycle, FailedInitializeIsShutDownOnce) {
+  Engine engine;
+  ExtensionBus bus;
+  CountingExtension good("good", true);
+  CountingExtension bad("bad", false);
+  bus.RegisterCorePtr(&engine);
+  bus.RegisterExtension(&good);
+  bus.RegisterExtension(&bad);
+  EXPECT_ANY_THROW(bus.Initialize(DirectExtensionOptions({"good", "bad"})));
+  bus.Shutdown();
+  EXPECT_EQ(good.shutdown_count, 1);
+  EXPECT_EQ(bad.shutdown_count, 1);
 }
 
 }  // namespace

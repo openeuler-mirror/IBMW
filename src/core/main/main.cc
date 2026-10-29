@@ -10,8 +10,10 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <pthread.h>
 #include <unistd.h>
 
 #include "engine/engine.h"
@@ -21,15 +23,56 @@
 
 using namespace ibmw::runtime::core;
 
+namespace {
+
+// SIGINT/SIGTERM are blocked in every thread and consumed by one sigwait()
+// thread, so Engine::Shutdown() (logging, promises, full teardown on a second
+// signal) never runs in async-signal context.
+std::mutex g_core_mutex;
 Engine* global_core_ptr = nullptr;
 
-void SignalHandler(int sig) {
-  if (global_core_ptr && (sig == SIGINT || sig == SIGTERM)) {
-    global_core_ptr->Shutdown();
-    return;
+class ScopedSignalCore {
+ public:
+  explicit ScopedSignalCore(Engine* core) { Set(core); }
+  ~ScopedSignalCore() { Set(nullptr); }  // also on exception unwind
+  ScopedSignalCore(const ScopedSignalCore&) = delete;
+  ScopedSignalCore& operator=(const ScopedSignalCore&) = delete;
+
+ private:
+  static void Set(Engine* core) {
+    std::lock_guard<std::mutex> lck(g_core_mutex);
+    global_core_ptr = core;
   }
-  raise(sig);
+};
+
+sigset_t ShutdownSignalSet() {
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, SIGINT);
+  sigaddset(&set, SIGTERM);
+  return set;
 }
+
+// Must run before any other thread is created so that all threads inherit the mask.
+bool StartSignalThread() {
+  const sigset_t set = ShutdownSignalSet();
+  if (pthread_sigmask(SIG_BLOCK, &set, nullptr) != 0) return false;
+  std::thread([set] {
+    while (true) {
+      int sig = 0;
+      if (sigwait(&set, &sig) != 0) continue;
+      std::lock_guard<std::mutex> lck(g_core_mutex);
+      if (global_core_ptr == nullptr) {
+        // No engine (yet / anymore): behave like the default disposition.
+        _exit(128 + sig);
+      }
+      global_core_ptr->Shutdown();
+    }
+  }).detach();
+  return true;
+}
+
+}  // namespace
 
 void PrintVersion() {
   std::cout << "ibmw " << util::GetIbmwVersion() << std::endl;
@@ -55,16 +98,16 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
     return 1;
   }
 
-  if (register_signal) {
-    signal(SIGINT, SignalHandler);
-    signal(SIGTERM, SignalHandler);
+  if (register_signal && !StartSignalThread()) {
+    std::cerr << "Error: failed to set up SIGINT/SIGTERM handling.\n";
+    return 1;
   }
 
   std::cout << "IBMW v" << util::GetIbmwVersion() << " starting..." << std::endl;
 
   try {
     Engine core;
-    global_core_ptr = &core;
+    ScopedSignalCore signal_core(&core);
 
     Engine::Options options;
     options.cfg_file_path = cfg_file_path;
@@ -91,8 +134,6 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
       core.Shutdown();
       fu.wait();
     }
-
-    global_core_ptr = nullptr;
   } catch (const std::exception& e) {
     std::cout << "IBMW fatal: " << e.what() << std::endl;
     return -1;

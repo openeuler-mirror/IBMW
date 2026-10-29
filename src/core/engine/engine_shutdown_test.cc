@@ -9,6 +9,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "engine/engine.h"
@@ -63,8 +64,15 @@ class ShutdownTestSubsystem final : public ISubsystem {
         events_(events),
         throw_on_shutdown_(throw_on_shutdown) {}
 
-  void Initialize(YAML::Node) override { state_.store(State::kInit); }
+  void Initialize(YAML::Node) override {
+    if (throw_on_init_) {
+      events_->push_back(name_ + ".init");
+      throw std::runtime_error(name_ + " init failed");
+    }
+    state_.store(State::kInit);
+  }
   void Start() override { state_.store(State::kStart); }
+  void ThrowOnInit() { throw_on_init_ = true; }
   void Shutdown() override {
     events_->push_back(name_);
     if (throw_on_shutdown_) throw std::runtime_error(name_ + " failed");
@@ -75,6 +83,7 @@ class ShutdownTestSubsystem final : public ISubsystem {
   std::string name_;
   std::vector<std::string>* events_;
   bool throw_on_shutdown_;
+  bool throw_on_init_ = false;
 };
 
 }  // namespace
@@ -102,6 +111,7 @@ drivers:
     ASSERT_NE(transport_pos, engine.subsystems_.end());
     engine.init_order_ = {
         static_cast<size_t>(transport_pos - engine.subsystems_.begin())};
+    engine.shutdown_order_ = engine.init_order_;
   }
 
   static void ConfigureSubsystems(Engine& engine, ISubsystem* first,
@@ -111,6 +121,35 @@ drivers:
     engine.subsystems_[0].pre_shutdown = {};
     engine.subsystems_[1].pre_shutdown = {};
     engine.init_order_ = {0, 1};
+    engine.shutdown_order_ = {1, 0};
+  }
+
+  static size_t IndexOf(const Engine& engine, Subsystem id) {
+    const auto it = std::find_if(engine.subsystems_.begin(), engine.subsystems_.end(),
+                                 [id](const auto& entry) { return entry.id == id; });
+    return static_cast<size_t>(it - engine.subsystems_.begin());
+  }
+
+  static size_t StopRank(const Engine& engine, Subsystem id) {
+    const auto idx = IndexOf(engine, id);
+    return static_cast<size_t>(
+        std::find(engine.shutdown_order_.begin(), engine.shutdown_order_.end(), idx) -
+        engine.shutdown_order_.begin());
+  }
+
+  static Engine::SubsystemEntry& Entry(Engine& engine, Subsystem id) {
+    return engine.subsystems_[IndexOf(engine, id)];
+  }
+
+  static void SetInitOrder(Engine& engine, std::vector<size_t> order) {
+    engine.init_order_ = order;
+    engine.shutdown_order_.assign(order.rbegin(), order.rend());
+  }
+
+  static size_t ShutdownOrderSize(const Engine& engine) { return engine.shutdown_order_.size(); }
+
+  static size_t HookCount(const Engine& engine, HookPoint point) {
+    return engine.SnapshotHooks(point).size();
   }
 
   static bool ImplCompleted(const Engine& engine) {
@@ -202,6 +241,63 @@ TEST_F(EngineShutdownFixture, StoppingHookCanCallPublicShutdown) {
   EXPECT_EQ(hook_calls.load(), 1);
   EXPECT_EQ(state->prepare_calls.load(), 1);
   EXPECT_EQ(state->shutdown_calls.load(), 1);
+}
+
+// CORE-025: extensions initialize right after the configurator, but must stop
+// after everything that uses them and before the logger / executors.
+TEST_F(EngineShutdownFixture, ExtensionStopsBeforeLoggerAndExecutors) {
+  Engine engine;
+  const auto ext = StopRank(engine, Subsystem::kExtension);
+  EXPECT_LT(StopRank(engine, Subsystem::kModule), ext);
+  EXPECT_LT(StopRank(engine, Subsystem::kTransport), ext);
+  EXPECT_LT(StopRank(engine, Subsystem::kService), ext);
+  EXPECT_LT(ext, StopRank(engine, Subsystem::kLogger));
+  EXPECT_LT(ext, StopRank(engine, Subsystem::kExecutor));
+  EXPECT_LT(ext, StopRank(engine, Subsystem::kMainThread));
+  EXPECT_LT(ext, StopRank(engine, Subsystem::kWatchdog));
+  EXPECT_EQ(StopRank(engine, Subsystem::kConfigurator), ShutdownOrderSize(engine) - 1);
+}
+
+// CORE-011: the subsystem whose Initialize() throws is rolled back too, in
+// shutdown order, and the engine ends up stopped.
+TEST_F(EngineShutdownFixture, InitFailureRollsBackFailingSubsystem) {
+  std::vector<std::string> events;
+  ShutdownTestSubsystem ok("ok", &events, false);
+  ShutdownTestSubsystem bad("bad", &events, false);
+  bad.ThrowOnInit();
+  Engine engine;
+  auto& ok_entry = Entry(engine, Subsystem::kMainThread);
+  auto& bad_entry = Entry(engine, Subsystem::kWatchdog);
+  ok_entry.instance = &ok;
+  bad_entry.instance = &bad;
+  SetInitOrder(engine, {IndexOf(engine, Subsystem::kConfigurator),
+                        IndexOf(engine, Subsystem::kMainThread),
+                        IndexOf(engine, Subsystem::kWatchdog)});
+
+  EXPECT_ANY_THROW(engine.Initialize({.config_node = YAML::Load("ibmw: {}")}));
+  EXPECT_EQ(events, (std::vector<std::string>{"bad.init", "bad", "ok"}));
+  EXPECT_EQ(engine.GetPhase(), Phase::kStopped);
+}
+
+// CORE-010: hooks may be registered (e.g. by extensions) while another thread
+// snapshots the same hook point.
+TEST_F(EngineShutdownFixture, ConcurrentHookRegistrationIsSafe) {
+  Engine engine;
+  const auto point = BeforePhase(Phase::kStart);
+  std::atomic_bool stop = false;
+  std::thread reader([&] {
+    while (!stop.load()) (void)HookCount(engine, point);
+  });
+  std::vector<std::thread> writers;
+  for (int t = 0; t < 4; ++t) {
+    writers.emplace_back([&] {
+      for (int i = 0; i < 1000; ++i) engine.RegisterHook(point, [] {});
+    });
+  }
+  for (auto& w : writers) w.join();
+  stop = true;
+  reader.join();
+  EXPECT_EQ(HookCount(engine, point), 4000u);
 }
 
 }  // namespace ibmw::runtime::core

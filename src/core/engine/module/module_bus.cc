@@ -272,7 +272,14 @@ void ModuleBus::Shutdown() {
     }
 
     MW_TRACE("Start shutdown module '{}'.", module_name);
-    find_itr->second->module_ptr->stop(find_itr->second->module_ptr->ctx);
+    // One misbehaving module must not keep the remaining ones running.
+    try {
+      find_itr->second->module_ptr->stop(find_itr->second->module_ptr->ctx);
+    } catch (const std::exception& e) {
+      MW_ERROR("Shutdown module '{}' threw: {}", module_name, e.what());
+    } catch (...) {
+      MW_ERROR("Shutdown module '{}' threw an unknown exception.", module_name);
+    }
     MW_TRACE("Shutdown module '{}'.", module_name);
   }
 

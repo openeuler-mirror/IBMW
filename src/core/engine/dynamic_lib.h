@@ -14,6 +14,7 @@
   #include <windows.h>
 #else
   #include <dlfcn.h>
+  #include <link.h>
 #endif
 
 namespace ibmw::common::util {
@@ -63,12 +64,17 @@ class DynamicLib {
 
     if (nullptr == handle_) return false;
 
-  #if defined(RTLD_DI_ORIGIN)
-    char buf[1024] = {};
-    if (dlinfo(handle_, RTLD_DI_ORIGIN, &buf) == 0) {
-      lib_full_path_ = std::filesystem::canonical(std::filesystem::path(buf) / lib_name_).string();
-    } else {
-      lib_full_path_ = lib_name_;
+  #if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
+    // RTLD_DI_* are enumerators on glibc, so test for the libc, not the macro.
+    // l_name is the path the loader actually opened (after search-path
+    // resolution). Never throw here: dlopen has already succeeded.
+    lib_full_path_ = lib_name_;
+    struct link_map* lm = nullptr;
+    if (dlinfo(handle_, RTLD_DI_LINKMAP, &lm) == 0 && lm != nullptr && lm->l_name != nullptr &&
+        lm->l_name[0] != '\0') {
+      std::error_code ec;
+      auto full_path = std::filesystem::canonical(std::filesystem::path(lm->l_name), ec);
+      lib_full_path_ = ec ? std::string(lm->l_name) : full_path.string();
     }
   #else
     try {

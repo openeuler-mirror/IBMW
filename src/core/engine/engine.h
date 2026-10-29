@@ -148,6 +148,8 @@ class Engine {
   template <typename... Args>
     requires std::constructible_from<HookTask, Args...>
   void RegisterHook(HookPoint point, Args&&... args) {
+    // Extensions may register from any thread, including from inside a hook.
+    std::lock_guard<std::mutex> lck(hooks_mutex_);
     hooks_[point].emplace_back(std::forward<Args>(args)...);
   }
 
@@ -208,6 +210,9 @@ class Engine {
   std::thread async_shutdown_thread_;  // Stored to avoid dangling detached thread
 
   // Hook catalog — ordered map so hooks fire in deterministic order.
+  // Lifecycle-only: callers iterate a snapshot so hooks run without the lock.
+  std::vector<HookTask> SnapshotHooks(HookPoint point) const;
+  mutable std::mutex hooks_mutex_;
   std::map<HookPoint, std::vector<HookTask>> hooks_;
 
   // Subsystem table — populated in BuildSubsystemTable().
@@ -215,6 +220,7 @@ class Engine {
 
   // Initialization order (indices into subsystems_), derived by ResolveInitOrder().
   std::vector<size_t> init_order_;
+  std::vector<size_t> shutdown_order_;
 
   // Bus instances.
   configurator::ConfigSubsystem config_subsystem_;

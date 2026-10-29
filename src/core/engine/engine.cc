@@ -290,16 +290,44 @@ void Engine::ResolveInitOrder() {
   MW_REQUIRE(init_order_.size() == n,
              "Dependency cycle detected among subsystems! Only {} of {} resolved.",
              init_order_.size(), n);
+
+  // Shutdown order: reverse topological order, except that extensions must
+  // initialize early (they register drivers via hooks) yet stop before the
+  // logger/executors they hold handles to. Move Extension right before Logger,
+  // which is still after everything that depends on it (e.g. Container).
+  shutdown_order_.assign(init_order_.rbegin(), init_order_.rend());
+  const auto ext_it = id_to_idx.find(static_cast<uint8_t>(Subsystem::kExtension));
+  const auto log_it = id_to_idx.find(static_cast<uint8_t>(Subsystem::kLogger));
+  if (ext_it != id_to_idx.end() && log_it != id_to_idx.end()) {
+    auto ext_pos = std::find(shutdown_order_.begin(), shutdown_order_.end(), ext_it->second);
+    auto log_pos = std::find(shutdown_order_.begin(), shutdown_order_.end(), log_it->second);
+    if (log_pos < ext_pos) std::rotate(log_pos, ext_pos, ext_pos + 1);
+  }
+
+  // Every subsystem must stop before the subsystems it depends on.
+  std::vector<size_t> stop_rank(n);
+  for (size_t r = 0; r < n; ++r) stop_rank[shutdown_order_[r]] = r;
+  for (size_t i = 0; i < n; ++i) {
+    for (auto dep : subsystems_[i].depends_on) {
+      MW_REQUIRE(stop_rank[i] < stop_rank[id_to_idx[static_cast<uint8_t>(dep)]],
+                 "Subsystem '{}' would stop after its dependency.", subsystems_[i].name);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // RunHooks — fire all callbacks registered at the given hook point.
 // ---------------------------------------------------------------------------
 
-void Engine::RunHooks(HookPoint point) {
+std::vector<Engine::HookTask> Engine::SnapshotHooks(HookPoint point) const {
+  std::lock_guard<std::mutex> lck(hooks_mutex_);
   auto it = hooks_.find(point);
-  if (it == hooks_.end()) return;
-  for (const auto& fn : it->second) fn();
+  if (it == hooks_.end()) return {};
+  return it->second;
+}
+
+void Engine::RunHooks(HookPoint point) {
+  for (const auto& fn : SnapshotHooks(point)) fn();
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +342,8 @@ void Engine::RunHooks(HookPoint point) {
 //   5. Run post_init() hook
 //   6. Fire After(kInitialize, subsystem) hooks
 //
-// On failure, rolls back all previously-initialized subsystems in reverse.
+// On failure, rolls back the failed and all previously-initialized subsystems
+// in shutdown order.
 // ---------------------------------------------------------------------------
 
 void Engine::Initialize(const Options& options) {
@@ -358,41 +387,51 @@ void Engine::Initialize(const Options& options) {
       RunHooks(After(Phase::kInitialize, entry.id));
       ++initialized_count;
     }
+
+    // Validate the config file after all subsystems have registered their keys.
+    CheckCfgFile();
+
+    // After all subsystems are initialized (so transport_bus knows its active
+    // drivers AND module_bus has loaded all packages and recorded all
+    // directly-registered modules), broadcast every used transport driver
+    // pointer into every module known to the bus via typed-slot dispatch.
+    // Modules opt in via the IBMW_USE_DRIVER / IBMW_USE_DRIVERS macros;
+    // modules that don't opt in see no effect (the base-class
+    // SetDriverSlot no-op runs).
+    //
+    // Targets BOTH pkg-loaded modules AND standalone-mode modules
+    // registered via ModuleBus::RegisterModule, so standalone main.cc is
+    // identical to pkg mode from the developer's perspective.
+    for (auto* td : transport_bus_.GetUsedTransportDriver()) {
+      module_bus_.BroadcastDriverSlot(td->Slot(), static_cast<void*>(td));
+    }
   } catch (...) {
-    // Rollback: shut down all previously-initialized subsystems in reverse order.
-    size_t failed_pos = init_order_[initialized_count];
-    MW_WARN("Initialization failed at subsystem '{}'; rolling back {} initialized subsystem(s).",
-            subsystems_[failed_pos].name, initialized_count);
-    for (size_t i = initialized_count; i > 0; --i) {
-      size_t rollback_pos = init_order_[i - 1];
-      auto& rb_entry = subsystems_[rollback_pos];
+    // Rollback in shutdown order, including the subsystem that failed: it may
+    // already own threads or resources. Subsystem Shutdown() is idempotent and
+    // state-guarded, so it is safe on a partially initialized instance.
+    const size_t rollback_count = std::min(initialized_count + 1, init_order_.size());
+    if (initialized_count < init_order_.size()) {
+      MW_WARN("Initialization failed at subsystem '{}'; rolling back {} subsystem(s).",
+              subsystems_[init_order_[initialized_count]].name, rollback_count);
+    } else {
+      MW_WARN("Post-initialization step failed; rolling back {} subsystem(s).", rollback_count);
+    }
+    std::vector<bool> to_rollback(subsystems_.size(), false);
+    for (size_t i = 0; i < rollback_count; ++i) to_rollback[init_order_[i]] = true;
+    for (size_t pos : shutdown_order_) {
+      if (!to_rollback[pos]) continue;
+      auto& rb_entry = subsystems_[pos];
       try {
         if (rb_entry.pre_shutdown) rb_entry.pre_shutdown();
         rb_entry.instance->Shutdown();
       } catch (const std::exception& e) {
         MW_ERROR("Rollback shutdown of '{}' failed: {}", rb_entry.name, e.what());
+      } catch (...) {
+        MW_ERROR("Rollback shutdown of '{}' failed: unknown exception", rb_entry.name);
       }
     }
     phase_.store(Phase::kStopped, std::memory_order_release);
     throw;
-  }
-
-  // Validate the config file after all subsystems have registered their keys.
-  CheckCfgFile();
-
-  // After all subsystems are initialized (so transport_bus knows its active
-  // drivers AND module_bus has loaded all packages and recorded all
-  // directly-registered modules), broadcast every used transport driver
-  // pointer into every module known to the bus via typed-slot dispatch.
-  // Modules opt in via the IBMW_USE_DRIVER / IBMW_USE_DRIVERS macros;
-  // modules that don't opt in see no effect (the base-class
-  // SetDriverSlot no-op runs).
-  //
-  // Targets BOTH pkg-loaded modules AND standalone-mode modules
-  // registered via ModuleBus::RegisterModule, so standalone main.cc is
-  // identical to pkg mode from the developer's perspective.
-  for (auto* td : transport_bus_.GetUsedTransportDriver()) {
-    module_bus_.BroadcastDriverSlot(td->Slot(), static_cast<void*>(td));
   }
 }
 
@@ -438,7 +477,7 @@ void Engine::StartImpl() {
 }
 
 // ---------------------------------------------------------------------------
-// ShutdownImpl — iterate the subsystem table in REVERSE topological order.
+// ShutdownImpl — iterate the subsystem table in shutdown_order_ (reverse topological, Extension before Logger).
 // ---------------------------------------------------------------------------
 
 bool Engine::ShutdownImpl() {
@@ -487,19 +526,17 @@ bool Engine::ShutdownImpl() {
   };
   const auto run_shutdown_hooks = [this, &run_stage](HookPoint point,
                                                      std::string_view name) {
-    const auto hooks = hooks_.find(point);
-    if (hooks == hooks_.end()) return;
-    for (size_t i = 0; i < hooks->second.size(); ++i) {
-      run_stage(std::string(name) + " hook #" + std::to_string(i),
-                hooks->second[i]);
+    const auto hooks = SnapshotHooks(point);
+    for (size_t i = 0; i < hooks.size(); ++i) {
+      run_stage(std::string(name) + " hook #" + std::to_string(i), hooks[i]);
     }
   };
 
   run_shutdown_hooks(BeforePhase(Phase::kStopping), "before stopping phase");
 
-  // Reverse iteration through init_order_ for proper dependency-respecting shutdown.
-  for (auto it = init_order_.rbegin(); it != init_order_.rend(); ++it) {
-    auto& entry = subsystems_[*it];
+  // Dependency-respecting shutdown order (see ResolveInitOrder()).
+  for (size_t pos : shutdown_order_) {
+    auto& entry = subsystems_[pos];
     run_shutdown_hooks(Before(Phase::kStopping, entry.id),
                        std::string("before ") + std::string(entry.name));
     if (entry.pre_shutdown) {
@@ -667,9 +704,11 @@ void Engine::CheckCfgFile() const {
 // ---------------------------------------------------------------------------
 
 std::string Engine::GenInitializationReport() const {
-  MW_REQUIRE(phase_.load(std::memory_order_acquire) == Phase::kStart ||
-                 phase_.load(std::memory_order_acquire) == Phase::kRunning,
-             "Initialization report can only be generated after initialization is complete.");
+  // main.cc dumps the report between Initialize() and Start(), where the
+  // phase is still kInitialize.
+  const Phase phase = phase_.load(std::memory_order_acquire);
+  MW_REQUIRE(phase == Phase::kInitialize || phase == Phase::kStart || phase == Phase::kRunning,
+             "Initialization report can only be generated after initialization.");
 
   std::list<std::pair<std::string, std::string>> report;
 

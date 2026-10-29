@@ -14,6 +14,7 @@ namespace {
 uint32_t g_create_count = 0U;
 uint32_t g_engine_init_count = 0U;
 uint32_t g_runtime_init_count = 0U;
+uint32_t g_destroy_count = 0U;
 
 class FixtureExtension final : public ibmw::EngineExtensionBase {
  public:
@@ -44,6 +45,7 @@ void Destroy(const ibmw::EngineExtensionBase* extension) {
   (void)extension;
   throw std::runtime_error("fixture destroy failed");
 #else
+  ++g_destroy_count;
   delete extension;
 #endif
 }
@@ -54,6 +56,10 @@ extern "C" {
 
 IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureCreateCount() {
   return g_create_count;
+}
+
+IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureDestroyCount() {
+  return g_destroy_count;
 }
 
 IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureEngineInitCount() {

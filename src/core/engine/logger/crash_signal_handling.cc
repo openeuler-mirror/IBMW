@@ -227,6 +227,23 @@ __attribute__((noreturn))
   #endif
 void
 CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
+  // Async-signal-safe part first: the crash is reported even if the
+  // symbolized trace below never completes.
+  char msg[] = "IBMW crash signal: 00\n";
+  msg[sizeof(msg) - 4] = static_cast<char>('0' + (signo / 10) % 10);
+  msg[sizeof(msg) - 3] = static_cast<char>('0' + signo % 10);
+  (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
+
+  // HandleSignal() allocates, symbolizes and logs, none of which is
+  // async-signal-safe: if the crash happened while malloc or the log lock was
+  // held it would hang forever. Bound it with a watchdog (SIGALRM is left
+  // unblocked by InstallHandlers and terminates by default).
+  struct sigaction dfl;
+  std::memset(&dfl, 0, sizeof dfl);
+  dfl.sa_handler = SIG_DFL;
+  (void)sigaction(SIGALRM, &dfl, nullptr);
+  alarm(10);
+
   HandleSignal(signo, info, _ctx);
 
   // Forward the signal (SA_RESETHAND makes it use default on re-raise).
@@ -261,6 +278,7 @@ void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
     action.sa_flags = static_cast<int>(SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESETHAND);
     sigfillset(&action.sa_mask);
     sigdelset(&action.sa_mask, sig);
+    sigdelset(&action.sa_mask, SIGALRM);  // crash-report watchdog, see SigHandler
     action.sa_sigaction = &SigHandler;
 
     if (sigaction(sig, &action, nullptr) < 0) {

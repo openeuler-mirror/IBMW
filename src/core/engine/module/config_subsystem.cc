@@ -3,8 +3,16 @@
 
 #include "engine/module/config_subsystem.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <sstream>
 
 #include "engine/yaml_tools.h"
 #include "base/string_util.h"
@@ -34,6 +42,39 @@ struct convert<ibmw::runtime::core::configurator::ConfigSubsystem::Options> {
 }  // namespace YAML
 
 namespace ibmw::runtime::core::configurator {
+
+namespace {
+
+bool IsSafeFileNameComponent(std::string_view name) {
+  if (name.empty() || name == "." || name == "..") return false;
+  return std::all_of(name.begin(), name.end(), [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.' || c == '-';
+  });
+}
+
+// Recreates `path` as a regular file readable only by the owner; returns 0 or
+// an errno. The old entry is unlinked first (unlink never follows symlinks) and
+// O_EXCL | O_NOFOLLOW refuses anything planted in between, so a symlink cannot
+// redirect the write.
+int WritePrivateFile(const std::filesystem::path& path, const std::string& content) {
+  if (::unlink(path.c_str()) != 0 && errno != ENOENT) return errno;
+  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0) return errno;
+  size_t written = 0;
+  while (written < content.size()) {
+    const ssize_t n = ::write(fd, content.data() + written, content.size() - written);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) {
+      const int err = (n < 0) ? errno : EIO;
+      ::close(fd);
+      return err;
+    }
+    written += static_cast<size_t>(n);
+  }
+  return ::close(fd) == 0 ? 0 : errno;
+}
+
+}  // namespace
 
 void ConfigSubsystem::Initialize(
     const std::filesystem::path& cfg_file_path) {
@@ -153,16 +194,20 @@ const ConfiguratorAccess& ConfigSubsystem::GetConfiguratorAccess(
     root_options_node[module_info.module_name] =
         ori_root_options_node[module_info.module_name];
 
+    // module_name comes from the plugin; it must not escape temp_cfg_path.
+    MW_REQUIRE(IsSafeFileNameComponent(module_info.module_name),
+               "Invalid module name '{}' for temp cfg file, only [A-Za-z0-9_.-] is allowed.",
+               module_info.module_name);
+
     std::filesystem::path temp_cfg_file_path =
         options_.temp_cfg_path /
         ("temp_cfg_file_for_" + module_info.module_name + ".yaml");
-    std::ofstream ofs;
-    ofs.open(temp_cfg_file_path, std::ios::trunc);
-    MW_REQUIRE(ofs.is_open(), "Can not open temp cfg file '{}'.", temp_cfg_file_path.string());
-    ofs << root_options_node[module_info.module_name];
-    ofs.flush();
-    ofs.clear();
-    ofs.close();
+
+    std::stringstream ss;
+    ss << root_options_node[module_info.module_name];
+    const int err = WritePrivateFile(temp_cfg_file_path, ss.str());
+    MW_REQUIRE(err == 0, "Can not write temp cfg file '{}': {}.",
+               temp_cfg_file_path.string(), std::strerror(err));
 
     auto emplace_ret = cfg_access_map_.emplace(
         module_info.module_name,
