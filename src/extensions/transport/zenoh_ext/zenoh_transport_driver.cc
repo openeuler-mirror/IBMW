@@ -238,13 +238,12 @@ bool ZenohTransportDriver::OnMessage(
             std::vector<char> serialized_data(serialized_size);
 
             // read data from payload
-            z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size);
+            serialized_data.resize(
+                z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size));
 
-            // get real size of serialized data
-            util::ConstBufferOperator buf_oper_tmp(serialized_data.data(), 4);
-            uint32_t serialized_size_with_len = buf_oper_tmp.GetUint32();
-
-            util::ConstBufferOperator buf_oper(serialized_data.data() + 4, serialized_size_with_len);
+            // The length prefix comes from the peer: validate it against the bytes actually received.
+            auto frame = util::GetLengthPrefixedPayload(serialized_data.data(), serialized_data.size());
+            util::ConstBufferOperator buf_oper(frame.data(), frame.size());
 
             // get serialization type
             std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));

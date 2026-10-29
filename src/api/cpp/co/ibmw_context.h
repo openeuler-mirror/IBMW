@@ -388,7 +388,9 @@ class IbmwExecutor {
       executor_ref_.Dispatch([receiver_ptr{std::move(receiver_ptr)}, executor_ref{executor_ref_}]() mutable {
         auto previous_thread_ctx = ibmw::context::details::g_thread_ctx;
         ibmw::context::details::g_thread_ctx.exe = executor_ref;
-        auto* receiver = receiver_ptr.release();
+        // Keep ownership in receiver_ptr: the heap receiver is freed with the task
+        // (release() here leaked one Receiver per scheduled task).
+        auto* receiver = receiver_ptr.get();
         try {
           unifex::set_value(std::move(*receiver));
         } catch (...) {
@@ -444,7 +446,9 @@ class IbmwExecutor {
       executor_ref_.DispatchAfter(dt_, [receiver_ptr{std::move(receiver_ptr)}, executor_ref{executor_ref_}]() mutable {
         auto previous_thread_ctx = ibmw::context::details::g_thread_ctx;
         ibmw::context::details::g_thread_ctx.exe = executor_ref;
-        auto* receiver = receiver_ptr.release();
+        // Keep ownership in receiver_ptr: the heap receiver is freed with the task
+        // (release() here leaked one Receiver per scheduled task).
+        auto* receiver = receiver_ptr.get();
         try {
           unifex::set_value(std::move(*receiver));
         } catch (...) {
@@ -505,7 +509,9 @@ class IbmwExecutor {
       executor_ref_.DispatchAt(tp_, [receiver_ptr{std::move(receiver_ptr)}, executor_ref{executor_ref_}]() mutable {
         auto previous_thread_ctx = ibmw::context::details::g_thread_ctx;
         ibmw::context::details::g_thread_ctx.exe = executor_ref;
-        auto* receiver = receiver_ptr.release();
+        // Keep ownership in receiver_ptr: the heap receiver is freed with the task
+        // (release() here leaked one Receiver per scheduled task).
+        auto* receiver = receiver_ptr.get();
         try {
           unifex::set_value(std::move(*receiver));
         } catch (...) {

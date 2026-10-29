@@ -107,7 +107,7 @@ class BufferOperator {
   BufferOperator &operator=(const BufferOperator &) = delete;
 
   size_t Skip(size_t len) {
-    if (cur_ + len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     cur_ += len;
     return cur_ - start_;
@@ -120,35 +120,35 @@ class BufferOperator {
   }
 
   void SetUint8(uint8_t n) {
-    if (cur_ + sizeof(n) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(n)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     *cur_ = n;
     cur_ += sizeof(n);
   }
 
   void SetUint16(uint16_t n) {
-    if (cur_ + sizeof(n) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(n)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     SetBufFromUint16(cur_, n);
     cur_ += sizeof(n);
   }
 
   void SetUint32(uint32_t n) {
-    if (cur_ + sizeof(n) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(n)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     SetBufFromUint32(cur_, n);
     cur_ += sizeof(n);
   }
 
   void SetUint64(uint64_t n) {
-    if (cur_ + sizeof(n) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(n)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     SetBufFromUint64(cur_, n);
     cur_ += sizeof(n);
   }
 
   void SetBuffer(const char *data, size_t len) {
-    if (cur_ + len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
 
     memcpy(cur_, data, len);
@@ -162,7 +162,7 @@ class BufferOperator {
   void SetString(std::string_view s, BufferLenType len_type = BufferLenType::kUInt64) {
     size_t str_len = s.size();
 
-    if (cur_ + static_cast<size_t>(len_type) + str_len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (static_cast<size_t>(len_type) + str_len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
 
     switch (len_type) {
@@ -219,7 +219,7 @@ class ConstBufferOperator {
   ConstBufferOperator &operator=(const ConstBufferOperator &) = delete;
 
   size_t Skip(size_t len) {
-    if (cur_ + len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     cur_ += len;
     return cur_ - start_;
@@ -232,7 +232,7 @@ class ConstBufferOperator {
   }
 
   uint8_t GetUint8() {
-    if (cur_ + sizeof(uint8_t) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(uint8_t)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     uint8_t n = *cur_;
     cur_ += sizeof(uint8_t);
@@ -240,7 +240,7 @@ class ConstBufferOperator {
   }
 
   uint16_t GetUint16() {
-    if (cur_ + sizeof(uint16_t) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(uint16_t)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     uint16_t n = GetUint16FromBuf(cur_);
     cur_ += sizeof(uint16_t);
@@ -248,7 +248,7 @@ class ConstBufferOperator {
   }
 
   uint32_t GetUint32() {
-    if (cur_ + sizeof(uint32_t) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(uint32_t)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     uint32_t n = GetUint32FromBuf(cur_);
     cur_ += sizeof(uint32_t);
@@ -256,7 +256,7 @@ class ConstBufferOperator {
   }
 
   uint64_t GetUint64() {
-    if (cur_ + sizeof(uint64_t) > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (sizeof(uint64_t)) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     uint64_t n = GetUint64FromBuf(cur_);
     cur_ += sizeof(uint64_t);
@@ -264,7 +264,7 @@ class ConstBufferOperator {
   }
 
   std::span<const char> GetBuffer(size_t len) {
-    if (cur_ + len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     std::span<const char> buffer(cur_, cur_ + len);
     cur_ += len;
@@ -272,7 +272,7 @@ class ConstBufferOperator {
   }
 
   void GetBuffer(char *dst, size_t len) {
-    if (cur_ + len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
     memcpy(dst, cur_, len);
     cur_ += len;
@@ -292,12 +292,15 @@ class ConstBufferOperator {
         break;
       case BufferLenType::kUInt64:
         str_len = GetUint64();
+        // Wire-controlled 64-bit length: reject before `cur_ + str_len` can wrap.
+        if (str_len > GetRemainingSize()) [[unlikely]]
+          throw BufferOutOfBoundsException();
         break;
       default:
         throw std::runtime_error("Invalid buffer len type.");
     }
 
-    if (cur_ + str_len > end_) [[unlikely]]
+    if (reinterpret_cast<uintptr_t>(cur_) + (str_len) > reinterpret_cast<uintptr_t>(end_)) [[unlikely]]
       throw BufferOutOfBoundsException();
 
     std::string_view s(cur_, str_len);
@@ -318,4 +321,16 @@ class ConstBufferOperator {
   const char *const end_;
   const char *cur_;
 };
+
+/// Parse the `[uint32 len][len bytes]` framing written by
+/// `BufferOperator::SetUint32(len)` followed by the payload. Returns the
+/// payload view, or throws BufferOutOfBoundsException when the buffer is
+/// shorter than the prefix or the declared length exceeds the received bytes
+/// (the length field comes from the wire and must never be trusted).
+inline std::span<const char> GetLengthPrefixedPayload(const char *ptr, size_t len) {
+  ConstBufferOperator prefix(ptr, len);
+  const uint32_t payload_len = prefix.GetUint32();
+  return prefix.GetBuffer(payload_len);
+}
+
 }  // namespace ibmw::common::util

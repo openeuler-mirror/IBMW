@@ -171,12 +171,12 @@ bool ZenohRpcDriver::RegisterServiceFunc(
         std::vector<char> serialized_data(serialized_size);
 
         // read data from payload
-        z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size);
+        serialized_data.resize(
+            z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size));
 
-        util::ConstBufferOperator buf_oper_tmp(serialized_data.data(), 4);
-        uint32_t pkg_size_with_len = buf_oper_tmp.GetUint32();
-
-        util::ConstBufferOperator buf_oper(serialized_data.data() + 4, pkg_size_with_len);
+        // The length prefix comes from the peer: validate it against the bytes actually received.
+        auto frame = util::GetLengthPrefixedPayload(serialized_data.data(), serialized_data.size());
+        util::ConstBufferOperator buf_oper(frame.data(), frame.size());
 
         // deserialize type
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
@@ -481,12 +481,12 @@ bool ZenohRpcDriver::RegisterClientFunc(
         z_bytes_reader_t reader = z_bytes_get_reader(payload);
         std::vector<char> serialized_data(serialized_size);
 
-        z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size);
+        serialized_data.resize(
+            z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size));
 
-        util::ConstBufferOperator buf_oper_tmp(serialized_data.data(), 4);
-        uint32_t data_size_with_len = buf_oper_tmp.GetUint32();
-
-        util::ConstBufferOperator buf_oper(serialized_data.data() + 4, data_size_with_len);
+        // The length prefix comes from the peer: validate it against the bytes actually received.
+        auto frame = util::GetLengthPrefixedPayload(serialized_data.data(), serialized_data.size());
+        util::ConstBufferOperator buf_oper(frame.data(), frame.size());
 
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
         uint32_t req_id = buf_oper.GetUint32();
