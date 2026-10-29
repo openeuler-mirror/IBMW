@@ -61,9 +61,12 @@ namespace ibmw::runtime::core::logger {
 
 RotateFileLoggerDriver::~RotateFileLoggerDriver() {
   if (options_.enable_sync) {
-    (void)fflush(file_);
-    (void)fclose(file_);
-    file_ = nullptr;
+    // file_ stays null if Initialize() failed or was never called.
+    if (file_ != nullptr) {
+      (void)fflush(file_);
+      (void)fclose(file_);
+      file_ = nullptr;
+    }
     return;
   }
   if (ofs_.is_open()) {
