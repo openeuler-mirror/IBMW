@@ -3,17 +3,21 @@
 
 #include "grpc_ext/grpc_rpc_driver.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <regex>
 #include <unordered_map>
 #include <vector>
 
 #include <boost/asio.hpp>
+#include <boost/asio/any_completion_handler.hpp>
 
 #include "c/service/rpc_context_base.h"
 #include "c/service/rpc_status_base.h"
@@ -269,58 +273,132 @@ bool GrpcRpcDriver::RegisterServiceFunc(
       auto service_rsp_ptr = service_info.rsp_type_support_ref.CreateSharedPtr();
       service_invoke_wrapper_ptr->rsp_ptr = service_rsp_ptr.get();
 
-      // Set the callback
-      auto ret_code_ptr = std::make_shared<uint32_t>(0);
-      auto sig_timer_ptr = std::make_shared<boost::asio::steady_timer>(*io_ptr_, chrono::nanoseconds::max());
-      auto rsp_ptr = rsp;
+      // The callback may run on any thread, before or after this coroutine
+      // suspends, and after it gave up. All hand-over goes through CallState
+      // under its mutex: whoever finishes the call first (answer or timeout)
+      // takes the suspended coroutine's handler and resumes it. Only this
+      // coroutine touches the timer and the http2 response (EXT-004).
+      struct CallState {
+        std::mutex mutex;
+        std::atomic<bool> finished{false};  // written under mutex; also read as a hint
+        uint32_t ret_code = 0;
+        std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
+        boost::asio::any_completion_handler<void()> waiter;
+      };
+      auto call_state = std::make_shared<CallState>();
+
+      const auto deadline =
+          timeout >= chrono::steady_clock::time_point::max() - chrono::steady_clock::now()
+              ? chrono::steady_clock::time_point::max()
+              : chrono::steady_clock::now() + timeout;
+
+      // Resumes the coroutine on its io_context. If that is already gone the
+      // coroutine frame is leaked: destroying it here would touch dead services.
+      auto resume = [](const std::weak_ptr<boost::asio::io_context>& io_weak,
+                       boost::asio::any_completion_handler<void()> waiter) {
+        if (auto io = io_weak.lock()) {
+          boost::asio::post(io->get_executor(), std::move(waiter));
+        } else {
+          new boost::asio::any_completion_handler<void()>(std::move(waiter));
+        }
+      };
+
       service_invoke_wrapper_ptr->callback =
           [service_invoke_wrapper_ptr,
-           serialization_type = ctx_ptr->GetSerializationType(),
-           rsp_ptr,
-           ret_code_ptr,
-           sig_timer_ptr](ibmw::rpc::Status status) {
+           ctx_ptr,
+           service_req_ptr,
+           service_rsp_ptr,
+           serialization_type = std::string(ctx_ptr->GetSerializationType()),
+           io_weak = std::weak_ptr<boost::asio::io_context>(io_ptr_),
+           resume,
+           call_state](ibmw::rpc::Status status) {
+            // Abandoned (timed out): skip the serialization.
+            if (call_state->finished.load(std::memory_order_relaxed)) return;
+
+            uint32_t ret_code = 0;
+            std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
             if (!status.OK()) [[unlikely]] {
-              *ret_code_ptr = status.Code();
-              sig_timer_ptr->expires_at(chrono::steady_clock::time_point::min());
-              return;
+              ret_code = status.Code();
+            } else {
+              rsp_buf = ibmw::runtime::core::service::TrySerializeRspWithCache(*service_invoke_wrapper_ptr, serialization_type);
+              if (!rsp_buf) [[unlikely]]
+                ret_code = IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED;
             }
 
-            // Serialize the response
-            auto buffer_array_view_ptr =
-                ibmw::runtime::core::service::TrySerializeRspWithCache(*service_invoke_wrapper_ptr, serialization_type);
-            if (!buffer_array_view_ptr) [[unlikely]] {
-              *ret_code_ptr = IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED;
-              sig_timer_ptr->expires_at(chrono::steady_clock::time_point::min());
-              return;
+            boost::asio::any_completion_handler<void()> waiter;
+            {
+              std::lock_guard lock(call_state->mutex);
+              if (call_state->finished.load(std::memory_order_relaxed)) return;
+              call_state->finished.store(true, std::memory_order_relaxed);
+              call_state->ret_code = ret_code;
+              call_state->rsp_buf = std::move(rsp_buf);
+              waiter = std::move(call_state->waiter);
             }
-
-            // Fill the response data
-            auto prefix = grpc::EncodeGrpcMessagePrefix(grpc::GrpcMessagePrefix{
-                .compression_flag = 0,
-                .message_length = static_cast<uint32_t>(buffer_array_view_ptr->BufferSize())});
-            rsp_ptr->Write(prefix);
-            for (size_t i = 0; i < buffer_array_view_ptr->Size(); ++i) {
-              auto buffer_array_view = buffer_array_view_ptr->Data()[i];
-              rsp_ptr->Write(reinterpret_cast<const uint8_t*>(buffer_array_view.data), buffer_array_view.len);
-            }
-
-            rsp_ptr->AddTrailer("grpc-status", "0");
-
-            sig_timer_ptr->expires_at(chrono::steady_clock::time_point::min());
+            if (waiter) resume(io_weak, std::move(waiter));
           };  // service_invoke_wrapper_ptr->callback
 
       service_func(service_invoke_wrapper_ptr);
 
-      try {
-        co_await sig_timer_ptr->async_wait(boost::asio::use_awaitable);
-      } catch (const boost::system::system_error& e) {
-        if (e.code() != boost::asio::error::operation_aborted) [[unlikely]] {
-          MW_ERROR("Http2 handle for service, async_wait get exception: {}", e.what());
-          *ret_code_ptr = ibmw_rpc_status_code_t::IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR;
+      // A synchronous answer (the common case) needs no wait at all.
+      if (!call_state->finished.load(std::memory_order_acquire)) {
+        std::optional<boost::asio::steady_timer> timer;
+        if (deadline != chrono::steady_clock::time_point::max()) {
+          timer.emplace(*io_ptr_, deadline);
+          timer->async_wait([call_state, io_weak = std::weak_ptr<boost::asio::io_context>(io_ptr_), resume](
+                                const boost::system::error_code& ec) {
+            if (ec) return;  // cancelled: the call finished first
+            boost::asio::any_completion_handler<void()> waiter;
+            {
+              std::lock_guard lock(call_state->mutex);
+              if (call_state->finished.load(std::memory_order_relaxed)) return;
+              call_state->finished.store(true, std::memory_order_relaxed);
+              call_state->ret_code = IBMW_RPC_STATUS_TIMEOUT;
+              waiter = std::move(call_state->waiter);
+            }
+            if (waiter) resume(io_weak, std::move(waiter));
+          });
         }
+
+        // The initiation runs once this coroutine is suspended, so the handler
+        // can be resumed from another thread as soon as it is stored.
+        co_await boost::asio::async_initiate<decltype(boost::asio::use_awaitable), void()>(
+            [&call_state, ex = io_ptr_->get_executor()](auto handler) {
+              boost::asio::any_completion_handler<void()> waiter(std::move(handler));
+              {
+                std::lock_guard lock(call_state->mutex);
+                if (!call_state->finished.load(std::memory_order_relaxed)) {
+                  call_state->waiter = std::move(waiter);
+                  return;
+                }
+              }
+              // Finished between the check above and now.
+              boost::asio::post(ex, std::move(waiter));
+            },
+            boost::asio::use_awaitable);
+
+        if (timer) timer->cancel();
       }
 
-      MW_REQUIRE(*ret_code_ptr == 0, "Handle rpc failed, ret_code: {}", *ret_code_ptr);
+      uint32_t ret_code = 0;
+      std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
+      {
+        std::lock_guard lock(call_state->mutex);
+        ret_code = call_state->ret_code;
+        rsp_buf = std::move(call_state->rsp_buf);
+      }
+
+      MW_REQUIRE(ret_code == 0, "Handle rpc failed, ret_code: {}", ret_code);
+
+      // Fill the response data
+      auto prefix = grpc::EncodeGrpcMessagePrefix(grpc::GrpcMessagePrefix{
+          .compression_flag = 0,
+          .message_length = static_cast<uint32_t>(rsp_buf->BufferSize())});
+      rsp->Write(prefix);
+      for (size_t i = 0; i < rsp_buf->Size(); ++i) {
+        auto buffer_view = rsp_buf->Data()[i];
+        rsp->Write(reinterpret_cast<const uint8_t*>(buffer_view.data), buffer_view.len);
+      }
+      rsp->AddTrailer("grpc-status", "0");
 
       co_return;
     };  // http_handle
