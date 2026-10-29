@@ -102,9 +102,10 @@ inline std::string JoinMap(const std::map<StringType, StringType>& kvmap,
 template <class StringType = std::string_view>
   requires(std::is_same_v<StringType, std::string_view> ||
            std::is_same_v<StringType, std::string>)
-inline const StringType& GetMapItemWithDef(const std::map<StringType, StringType>& m,
-                                           const StringType& key,
-                                           const StringType& defval = "") {
+// Returns by value: the default argument is a temporary that dies with the call.
+inline StringType GetMapItemWithDef(const std::map<StringType, StringType>& m,
+                                    const StringType& key,
+                                    const StringType& defval = "") {
   auto finditr = m.find(key);
   return (finditr != m.end()) ? (finditr->second) : defval;
 }

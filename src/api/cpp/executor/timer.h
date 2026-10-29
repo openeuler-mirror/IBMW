@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 
@@ -25,18 +26,18 @@ class TimerBase {
 
   virtual void ExecuteTask() = 0;
 
-  void Cancel() { cancelled_ = true; }
+  void Cancel() { cancelled_.store(true, std::memory_order_release); }
 
-  [[nodiscard]] bool IsCancelled() const { return cancelled_; }
+  [[nodiscard]] bool IsCancelled() const { return cancelled_.load(std::memory_order_acquire); }
 
   [[nodiscard]] std::chrono::nanoseconds Period() const { return period_; }
 
   [[nodiscard]] std::chrono::system_clock::time_point NextCallTime() const {
-    return next_call_time_;
+    return next_call_time_.load(std::memory_order_acquire);
   }
 
   [[nodiscard]] std::chrono::nanoseconds TimeUntilNextCall() const {
-    return next_call_time_ - executor_.Now();
+    return NextCallTime() - executor_.Now();
   }
 
   [[nodiscard]] ExecutorHandle Executor() const { return executor_; }
@@ -44,8 +45,10 @@ class TimerBase {
  protected:
   ExecutorHandle executor_;
   std::chrono::nanoseconds period_;
-  std::chrono::system_clock::time_point next_call_time_;
-  bool cancelled_ = true;
+  // Written by Reset()/Cancel() on user threads and by the timer loop on the
+  // executor thread.
+  std::atomic<std::chrono::system_clock::time_point> next_call_time_{};
+  std::atomic<bool> cancelled_{true};
 };
 
 template <typename TaskType>
@@ -63,10 +66,11 @@ class Timer : public TimerBase, public std::enable_shared_from_this<Timer<TaskTy
   Timer& operator=(const Timer&) = delete;
 
   void Reset() override {
-    cancelled_ = false;
-    next_call_time_ = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+    const auto next = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
         executor_.Now() + period_);
-    ExecuteLoop();
+    next_call_time_.store(next, std::memory_order_release);
+    cancelled_.store(false, std::memory_order_release);
+    ExecuteLoop(next);
   }
 
   void ExecuteTask() override {
@@ -80,37 +84,47 @@ class Timer : public TimerBase, public std::enable_shared_from_this<Timer<TaskTy
   [[nodiscard]] const TaskType& Task() const { return task_; }
 
  private:
-  void ExecuteLoop() {
-    auto shared_this = this->shared_from_this();
-    executor_.DispatchAt(next_call_time_, [shared_this, planned_time = next_call_time_]() {
-      if (shared_this->IsCancelled()) {
+  // The loop only holds a weak reference: once the last user handle is gone the
+  // Timer is destroyed (~Timer cancels) instead of rescheduling itself forever.
+  void ExecuteLoop(std::chrono::system_clock::time_point planned_time) {
+    auto weak_this = this->weak_from_this();
+    MW_ASSERT(!weak_this.expired(), "Timer must be owned by a std::shared_ptr (use CreateTimer).");
+    executor_.DispatchAt(planned_time, [weak_this = std::move(weak_this), planned_time]() {
+      auto shared_this = weak_this.lock();
+      if (!shared_this || shared_this->IsCancelled()) {
         return;
       }
 
       // Skip current execution if timer was reset or restarted
-      if (planned_time != shared_this->next_call_time_) {
+      if (planned_time != shared_this->NextCallTime()) {
         return;
       }
 
       shared_this->ExecuteTask();
 
       auto now = shared_this->executor_.Now();
-      shared_this->next_call_time_ = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-          shared_this->next_call_time_ + shared_this->period_);
+      auto next = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+          planned_time + shared_this->period_);
 
       // If now is ahead of the next call time, skip some times.
-      if (shared_this->next_call_time_ < now) {
+      if (next < now) {
         if (shared_this->period_ == std::chrono::nanoseconds::zero()) {
-          shared_this->next_call_time_ = now;
+          next = now;
         } else {
-          auto now_ahead = now - shared_this->next_call_time_;
+          auto now_ahead = now - next;
           auto skip_count = 1 + ((now_ahead - std::chrono::nanoseconds(1)) / shared_this->period_);
-          shared_this->next_call_time_ = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-              shared_this->next_call_time_ + (skip_count * shared_this->period_));
+          next = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+              next + (skip_count * shared_this->period_));
         }
       }
 
-      shared_this->ExecuteLoop();
+      // A concurrent Reset() owns the schedule from here on; do not start a second chain.
+      auto expected = planned_time;
+      if (!shared_this->next_call_time_.compare_exchange_strong(expected, next, std::memory_order_acq_rel)) {
+        return;
+      }
+
+      shared_this->ExecuteLoop(next);
     });
   }
 
@@ -118,8 +132,10 @@ class Timer : public TimerBase, public std::enable_shared_from_this<Timer<TaskTy
   TaskType task_;
 };
 
+// The returned handle owns the timer: once the last copy is released the timer
+// stops. Keep it (e.g. as a member) for as long as the timer should run.
 template <typename TaskType>
-std::shared_ptr<TimerBase> CreateTimer(ExecutorHandle executor, std::chrono::nanoseconds period,
+[[nodiscard]] std::shared_ptr<TimerBase> CreateTimer(ExecutorHandle executor, std::chrono::nanoseconds period,
                                        TaskType&& task, bool auto_start = true) {
   MW_ASSERT(executor, "Executor is null.");
   MW_ASSERT(executor.SupportsTimedDispatch(), "Executor does not support timer scheduling.");

@@ -120,6 +120,11 @@ class Module {
                 Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
                 "Setup module get exception: {}", e.what());
             return false;
+          } catch (...) {
+            MW_LOG(
+                Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
+                "Setup module get unknown exception.");
+            return false;
           }
         },
         .run = [](void* ctx) -> bool {
@@ -132,6 +137,11 @@ class Module {
                 Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
                 "Run module get exception: {}", e.what());
             return false;
+          } catch (...) {
+            MW_LOG(
+                Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
+                "Run module get unknown exception.");
+            return false;
           }
         },
         .stop = [](void* ctx) {
@@ -143,7 +153,11 @@ class Module {
             MW_LOG(
                 Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
                 "Stop module get exception: {}", e.what());
-          }  //
+          } catch (...) {
+            MW_LOG(
+                Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
+                "Stop module get unknown exception.");
+          }
         },
         .ctx = ctx};
   }

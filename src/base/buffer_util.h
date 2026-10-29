@@ -289,6 +289,11 @@ class ConstBufferOperator {
         break;
       case BufferLenType::kUInt32:
         str_len = GetUint32();
+        // On 32-bit targets a wire u32 can wrap the uintptr bound check below.
+        if constexpr (sizeof(uintptr_t) < 8) {
+          if (str_len > GetRemainingSize()) [[unlikely]]
+            throw BufferOutOfBoundsException();
+        }
         break;
       case BufferLenType::kUInt64:
         str_len = GetUint64();
@@ -330,6 +335,10 @@ class ConstBufferOperator {
 inline std::span<const char> GetLengthPrefixedPayload(const char *ptr, size_t len) {
   ConstBufferOperator prefix(ptr, len);
   const uint32_t payload_len = prefix.GetUint32();
+  // Explicit check (once per message): on 32-bit targets a wire u32 could wrap
+  // GetBuffer's uintptr bound check.
+  if (payload_len > prefix.GetRemainingSize()) [[unlikely]]
+    throw BufferOutOfBoundsException();
   return prefix.GetBuffer(payload_len);
 }
 

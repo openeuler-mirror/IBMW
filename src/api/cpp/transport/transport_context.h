@@ -36,19 +36,37 @@ class Context {
             .ctx = this}) {}
   ~Context() = default;
 
+  // The map must be rebuilt on this object's own pool: copying/moving it would
+  // keep (or default) the allocator, and the source's pool dies with the source.
   Context(const Context& other)
-      : meta_data_map_(other.meta_data_map_),
+      : meta_data_map_(MakeMetaDataMap(
+#if IBMW_HAS_STD_MEMORY_RESOURCE
+            &default_pool_
+#endif
+            )),
         type_(other.type_),
         base_(ibmw_transport_context_base_t{
             .ops = GenOpsBase(),
-            .ctx = this}) {}
+            .ctx = this}) {
+    for (const auto& [key, value] : other.meta_data_map_) {
+      meta_data_map_.emplace(key, value);
+    }
+  }
 
   Context(Context&& other) noexcept
-      : meta_data_map_(std::move(other.meta_data_map_)),
+      : meta_data_map_(MakeMetaDataMap(
+#if IBMW_HAS_STD_MEMORY_RESOURCE
+            &default_pool_
+#endif
+            )),
         type_(other.type_),
         base_(ibmw_transport_context_base_t{
             .ops = GenOpsBase(),
-            .ctx = this}) {}
+            .ctx = this}) {
+    for (auto& [key, value] : other.meta_data_map_) {
+      meta_data_map_.emplace(key, std::move(value));
+    }
+  }
 
   Context& operator=(const Context& other) = delete;
   Context& operator=(Context&& other) = delete;

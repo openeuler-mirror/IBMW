@@ -298,6 +298,22 @@ class AccessBase {
   std::shared_ptr<Context> default_ctx_ptr_;
 };
 
+namespace details {
+// Shared + set-once completion for blocking RPC calls: a provider that completes
+// twice (or after the caller has returned) must neither terminate in the
+// noexcept invoker nor touch a dead stack promise.
+struct SyncCallResult {
+  std::promise<ibmw::rpc::Status> promise;
+  std::future<ibmw::rpc::Status> future = promise.get_future();
+  std::atomic_flag done = ATOMIC_FLAG_INIT;
+
+  void Set(ibmw::rpc::Status st) {
+    if (!done.test_and_set(std::memory_order_acq_rel)) promise.set_value(st);
+  }
+  ibmw::rpc::Status Get() { return future.get(); }
+};
+}  // namespace details
+
 class SyncAccessBase : public AccessBase {
  public:
   SyncAccessBase(ServiceRef service_ref, std::string_view rpc_type, std::string_view service_name)
@@ -311,33 +327,26 @@ class SyncAccessBase : public AccessBase {
       ibmw::rpc::ContextRef ctx_ref,
       const ReqType& req,
       RspType& rsp) {
-    std::promise<ibmw::rpc::Status> result_promise;
+    auto result = std::make_shared<details::SyncCallResult>();
+    auto on_done = [result](uint32_t code) { result->Set(ibmw::rpc::Status(code)); };
 
     if (ctx_ref) {
       ctx_ref.SetFunctionName(full_func_name);
-
-      service_ref_.Call(
-          full_func_name, ctx_ref, &req, &rsp,
-          [&result_promise](uint32_t code) {
-            result_promise.set_value(ibmw::rpc::Status(code));
-          });
-
-      return result_promise.get_future().get();
+      service_ref_.Call(full_func_name, ctx_ref, &req, &rsp, std::move(on_done));
+      return result->Get();
     }
 
     auto ctx_ptr = NewContextSharedPtr();
     ctx_ptr->SetFunctionName(full_func_name);
-
-    service_ref_.Call(
-        full_func_name, *ctx_ptr, &req, &rsp,
-        [&result_promise](uint32_t code) {
-          result_promise.set_value(ibmw::rpc::Status(code));
-        });
-
-    return result_promise.get_future().get();
+    service_ref_.Call(full_func_name, *ctx_ptr, &req, &rsp, std::move(on_done));
+    return result->Get();
   }
+
 };
 
+// NOTE: req/rsp are passed to the provider by address. For AsyncAccessBase and
+// FutureAccessBase the caller must keep both alive until the callback runs /
+// the future becomes ready.
 class AsyncAccessBase : public AccessBase {
  public:
   AsyncAccessBase(ServiceRef service_ref, std::string_view rpc_type, std::string_view service_name)
@@ -396,7 +405,8 @@ class FutureAccessBase : public AccessBase {
 
       service_ref_.Call(
           full_func_name, ctx_ref, &req, &rsp,
-          [status_promise{std::move(status_promise)}](uint32_t code) mutable {
+          [status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
+            if (std::exchange(done, true)) return;  // ignore duplicate completion
             status_promise.set_value(ibmw::rpc::Status(code));
           });
 
@@ -408,7 +418,8 @@ class FutureAccessBase : public AccessBase {
 
     service_ref_.Call(
         full_func_name, *ctx_ptr, &req, &rsp,
-        [ctx_ptr, status_promise{std::move(status_promise)}](uint32_t code) mutable {
+        [ctx_ptr, status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
+          if (std::exchange(done, true)) return;  // ignore duplicate completion
           status_promise.set_value(ibmw::rpc::Status(code));
         });
 

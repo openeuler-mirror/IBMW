@@ -565,7 +565,7 @@ timed dispatch, timers, coroutines, and real-time scheduling.
 - `core_.GetExecutor().GetExecutor("name")` -- obtaining executor handles
 - `executor.Dispatch(task)` / `executor.DispatchAfter(duration, task)`
 - Strand executor for serialized (thread-safe) execution
-- `ibmw::executor::CreateTimer(executor, interval, callback)` -- recurring timers
+- `ibmw::executor::CreateTimer(executor, interval, callback)` -- recurring timers (keep the returned handle; the timer stops when it is released)
 - `co_await co::Schedule(executor)` -- coroutine scheduling
 - Real-time: `SCHED_FIFO`, `SCHED_RR` policies with CPU binding
 

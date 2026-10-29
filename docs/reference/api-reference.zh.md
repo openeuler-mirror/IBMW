@@ -153,8 +153,13 @@ using ExecutorTask = ibmw::util::Function<ibmw_function_executor_task_ops_t>;
 #### 自由函数
 
 ```cpp
-Timer<ExecutorTask> CreateTimer(ExecutorHandle executor);
+template <typename TaskType>
+[[nodiscard]] std::shared_ptr<TimerBase> CreateTimer(ExecutorHandle executor,
+                                                     std::chrono::nanoseconds period,
+                                                     TaskType&& task, bool auto_start = true);
 ```
+
+返回的 `shared_ptr` 持有定时器；最后一个副本释放后定时器即停止。
 
 ---
 

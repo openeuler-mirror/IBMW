@@ -113,8 +113,13 @@ class Function<Ops> {
   template <class T,
             class = std::enable_if_t<CheckImplicitlyConvertible<T>(Indices{})>>
   Function& operator=(T&& action) {
-    this->~Function();
-    new (this) Function(std::forward<T>(action));
+    // Reset first so that a throwing construction leaves *this empty
+    // (destroy + placement-new of the whole object left a dangling ops on throw).
+    *this = nullptr;
+    if constexpr (std::is_assignable<T, std::nullptr_t>::value) {
+      if (action == nullptr) return *this;
+    }
+    ConstructorImpl<T>(std::forward<T>(action), Indices{});
     return *this;
   }
 
@@ -140,7 +145,13 @@ class Function<Ops> {
   void ConstructorImpl(T&& action, std::index_sequence<Idx...>) {
     using Decayed = std::decay_t<T>;
 
-    if constexpr (sizeof(Decayed) <= sizeof(base_.object_buf)) {
+    // object_buf sits at offset 0, so it is aligned like the whole struct.
+    // Inline placement is deliberately not restricted to nothrow-movable
+    // closures: e.g. a captured `const std::string` has a potentially-throwing
+    // move, and moving such closures to the heap would cost an allocation per
+    // task. A throw during relocation terminates (in practice: only on OOM).
+    if constexpr (sizeof(Decayed) <= sizeof(base_.object_buf) &&
+                  alignof(Decayed) <= alignof(ibmw_function_base_t)) {
       static constexpr OpsType kOps = {
           .invoker = [](void* object, std::tuple_element_t<Idx, ArgsTuple>... args) noexcept -> R {
             if constexpr (std::is_void_v<R>) {
@@ -154,8 +165,8 @@ class Function<Ops> {
                 static_cast<Decayed*>(from)->~Decayed(); },
           .destroyer = [](void* object) noexcept { static_cast<Decayed*>(object)->~Decayed(); }};
 
-      base_.ops = &kOps;
       new (&(base_.object_buf)) Decayed(std::forward<T>(action));
+      base_.ops = &kOps;
     } else {
       using Stored = Decayed*;
 
@@ -172,14 +183,16 @@ class Function<Ops> {
           },
           .destroyer = [](void* object) noexcept { delete *static_cast<Stored*>(object); }};
 
-      base_.ops = &kOps;
       new (&(base_.object_buf)) Stored(new Decayed(std::forward<T>(action)));
+      base_.ops = &kOps;
     }
   }
 
  private:
   mutable ibmw_function_base_t base_;
 };
+
+static_assert(offsetof(ibmw_function_base_t, object_buf) == 0);
 
 namespace details {
 

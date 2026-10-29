@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -28,10 +29,16 @@
   /* Static cache of created module instances, keyed by module name. Used by */                \
   /* __IbmwPkgSetDriverSlot to dispatch driver pointers without re-running   */                \
   /* the factory. Lives for the lifetime of the dynamic library.             */                \
-  static std::unordered_map<std::string, ibmw::Module*>& __ibmw_pkg_module_instances__() {     \
-    static std::unordered_map<std::string, ibmw::Module*> instances;                            \
+  static std::unordered_map<std::string, ibmw::Module*>& __ibmw_pkg_module_instances__() {       \
+    static std::unordered_map<std::string, ibmw::Module*> instances;                             \
     return instances;                                                                            \
-  }                                                                                             \
+  }                                                                                              \
+                                                                                                 \
+  /* Guards the instance cache: the host may create/destroy modules from several threads. */     \
+  static std::mutex& __ibmw_pkg_module_instances_mutex__() {                                     \
+    static std::mutex mtx;                                                                       \
+    return mtx;                                                                                  \
+  }                                                                                              \
                                                                                                  \
   static size_t __IbmwPkgGetModuleNum() {                                                       \
     return __ibmw_module_register_array_size__;                                                 \
@@ -49,31 +56,48 @@
     return module_name_list;                                                                    \
   }                                                                                             \
                                                                                                  \
-  static const ibmw_module_base_t* __IbmwPkgCreateModule(ibmw_string_view_t module_name) {      \
-    std::string_view module_name_str = ibmw::util::ToStdStringView(module_name);                \
-    for (size_t idx = 0; idx < __ibmw_module_register_array_size__; ++idx) {                    \
-      std::string_view cur_module_name_str = std::get<0>(__ibmw_module_register_array__[idx]);  \
-      if (module_name_str == cur_module_name_str) {                                             \
-        ibmw::Module* module_ptr = (std::get<1>(__ibmw_module_register_array__[idx]))();        \
-        __ibmw_pkg_module_instances__()[std::string(module_name_str)] = module_ptr;             \
-        return module_ptr->NativeHandle();                                                      \
-      }                                                                                         \
-    }                                                                                           \
-    return nullptr;                                                                             \
-  }                                                                                             \
+  static const ibmw_module_base_t* __IbmwPkgCreateModule(ibmw_string_view_t module_name) {       \
+    std::string_view module_name_str = ibmw::util::ToStdStringView(module_name);                 \
+    for (size_t idx = 0; idx < __ibmw_module_register_array_size__; ++idx) {                     \
+      std::string_view cur_module_name_str = std::get<0>(__ibmw_module_register_array__[idx]);   \
+      if (module_name_str == cur_module_name_str) {                                              \
+        /* extern "C" boundary: a throwing factory must not unwind into the host. */             \
+        ibmw::Module* module_ptr = nullptr;                                                      \
+        try {                                                                                    \
+          module_ptr = (std::get<1>(__ibmw_module_register_array__[idx]))();                     \
+        } catch (...) {                                                                          \
+          return nullptr;                                                                        \
+        }                                                                                        \
+        if (module_ptr == nullptr) return nullptr;                                               \
+        try {                                                                                    \
+          std::lock_guard<std::mutex> lck(__ibmw_pkg_module_instances_mutex__());                \
+          __ibmw_pkg_module_instances__()[std::string(module_name_str)] = module_ptr;            \
+        } catch (...) {                                                                          \
+          delete module_ptr;                                                                     \
+          return nullptr;                                                                        \
+        }                                                                                        \
+        return module_ptr->NativeHandle();                                                       \
+      }                                                                                          \
+    }                                                                                            \
+    return nullptr;                                                                              \
+  }                                                                                              \
                                                                                                  \
-  static void __IbmwPkgDestroyModule(const ibmw_module_base_t* module_ptr) {                    \
-    auto* mod = static_cast<ibmw::Module*>(module_ptr->ctx);                                    \
-    /* Drop from instance cache before delete; SetDriverSlot post-shutdown becomes safe-no-op. */ \
-    for (auto it = __ibmw_pkg_module_instances__().begin();                                     \
-         it != __ibmw_pkg_module_instances__().end(); ++it) {                                   \
-      if (it->second == mod) {                                                                  \
-        __ibmw_pkg_module_instances__().erase(it);                                              \
-        break;                                                                                   \
-      }                                                                                         \
-    }                                                                                           \
-    delete mod;                                                                                 \
-  }                                                                                             \
+  static void __IbmwPkgDestroyModule(const ibmw_module_base_t* module_ptr) {                     \
+    if (module_ptr == nullptr) return;                                                           \
+    auto* mod = static_cast<ibmw::Module*>(module_ptr->ctx);                                     \
+    {                                                                                            \
+      /* Drop from instance cache before delete; SetDriverSlot post-shutdown becomes safe-no-op. */\
+      std::lock_guard<std::mutex> lck(__ibmw_pkg_module_instances_mutex__());                    \
+      for (auto it = __ibmw_pkg_module_instances__().begin();                                    \
+           it != __ibmw_pkg_module_instances__().end(); ++it) {                                  \
+        if (it->second == mod) {                                                                 \
+          __ibmw_pkg_module_instances__().erase(it);                                             \
+          break;                                                                                 \
+        }                                                                                        \
+      }                                                                                          \
+    }                                                                                            \
+    delete mod;                                                                                  \
+  }                                                                                              \
                                                                                                  \
   /* Typed-slot dispatch: forwards each (slot_id, driver_ptr) pair to the    */                \
   /* matching module instance's SetDriverSlot override. Modules opt in via   */                \
@@ -85,9 +109,17 @@
     for (size_t idx = 0; idx < __ibmw_module_register_array_size__; ++idx) {                    \
       std::string_view cur_module_name_str = std::get<0>(__ibmw_module_register_array__[idx]);  \
       if (module_name_str == cur_module_name_str) {                                             \
-        auto cache_itr = __ibmw_pkg_module_instances__().find(std::string(module_name_str));   \
-        if (cache_itr != __ibmw_pkg_module_instances__().end() && cache_itr->second) {        \
-          cache_itr->second->SetDriverSlot(slot_id, driver_ptr);                                \
+        /* Look up under the lock, call outside it: the user override may     */                \
+        /* create/destroy modules. The host serializes this with destroy.     */                \
+        try {                                                                                   \
+          ibmw::Module* module_ptr = nullptr;                                                   \
+          {                                                                                     \
+            std::lock_guard<std::mutex> lck(__ibmw_pkg_module_instances_mutex__());              \
+            auto cache_itr = __ibmw_pkg_module_instances__().find(std::string(module_name_str)); \
+            if (cache_itr != __ibmw_pkg_module_instances__().end()) module_ptr = cache_itr->second; \
+          }                                                                                     \
+          if (module_ptr) module_ptr->SetDriverSlot(slot_id, driver_ptr);                       \
+        } catch (...) {                                                                         \
         }                                                                                       \
         return;                                                                                 \
       }                                                                                         \

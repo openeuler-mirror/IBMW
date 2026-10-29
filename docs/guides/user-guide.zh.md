@@ -515,7 +515,7 @@ bash start_pubsub_local.sh
 - `core_.GetExecutor().GetExecutor("name")` —— 获取 Executor 句柄
 - `executor.Dispatch(task)` / `executor.DispatchAfter(duration, task)`
 - Strand Executor 实现串行（线程安全）执行
-- `ibmw::executor::CreateTimer(executor, interval, callback)` —— 周期 Timer
+- `ibmw::executor::CreateTimer(executor, interval, callback)` —— 周期 Timer（须保存返回的句柄，句柄释放后定时器停止）
 - `co_await co::Schedule(executor)` —— 协程调度
 - 实时：`SCHED_FIFO`、`SCHED_RR` 调度策略 + CPU 绑定
 

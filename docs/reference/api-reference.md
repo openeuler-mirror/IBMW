@@ -153,8 +153,13 @@ using ExecutorTask = ibmw::util::Function<ibmw_function_executor_task_ops_t>;
 #### Free Function
 
 ```cpp
-Timer<ExecutorTask> CreateTimer(ExecutorHandle executor);
+template <typename TaskType>
+[[nodiscard]] std::shared_ptr<TimerBase> CreateTimer(ExecutorHandle executor,
+                                                     std::chrono::nanoseconds period,
+                                                     TaskType&& task, bool auto_start = true);
 ```
+
+The returned `shared_ptr` owns the timer; the timer stops once the last copy is released.
 
 ---
 
