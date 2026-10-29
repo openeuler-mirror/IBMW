@@ -32,6 +32,14 @@ using namespace ibmw::runtime::core::runtime_graph;
 namespace {
 
 constexpr size_t kMaxQueuedMessages = 1024;
+// Byte budget per session queue, so 1024 large frames cannot pin gigabytes
+// behind a slow consumer. A single frame above the budget is still queued
+// when the queue is empty, so oversized topics keep flowing.
+constexpr size_t kMaxQueuedBytes = 64u * 1024u * 1024u;
+// Frames up to this size are allocated at once (no extra copies); larger
+// declared sizes grow with the bytes actually received, so a peer cannot make
+// us allocate 256 MiB with a 24-byte header.
+constexpr size_t kEagerPayloadAlloc = 4u * 1024u * 1024u;
 
 using TapWireHeader = RuntimeStreamHeader;
 
@@ -105,6 +113,30 @@ ReceiveResult ReceiveAll(int fd, void* data, size_t size) {
       continue;
     }
     return {.status = ReceiveStatus::kError, .error_number = errno};
+  }
+  return {};
+}
+
+ReceiveResult ReceivePayload(int fd, std::vector<uint8_t>& out, size_t size) {
+  if (size <= kEagerPayloadAlloc) {
+    out.resize(size);
+    return ReceiveAll(fd, out.data(), size);
+  }
+  out.clear();
+  size_t received = 0;
+  while (received < size) {
+    // Geometric growth: total copying stays below 2x the payload.
+    const size_t target =
+        std::min(size, std::max(kEagerPayloadAlloc, received * 2));
+    out.resize(target);
+    const auto result = ReceiveAll(fd, out.data() + received, target - received);
+    if (result.status != ReceiveStatus::kOk) {
+      // EOF in the middle of a payload is a truncated frame.
+      return result.status == ReceiveStatus::kEof
+                 ? ReceiveResult{.status = ReceiveStatus::kTruncated}
+                 : result;
+    }
+    received = target;
   }
   return {};
 }
@@ -199,6 +231,7 @@ struct RuntimeTapServer::Session {
   std::mutex stop_mutex;
   std::condition_variable cv;
   std::deque<ibmw::transport::SerializedMessage> queue;
+  size_t queued_bytes = 0;
   uint64_t dropped_total = 0;
   uint64_t reported_dropped_total = 0;
   std::string stream_error;
@@ -272,6 +305,7 @@ struct RuntimeTapServer::Session {
             if (!queue.empty()) {
               message.emplace(std::move(queue.front()));
               queue.pop_front();
+              queued_bytes -= std::min(queued_bytes, message->PayloadSize());
             } else if (
                 (stopping.load() || !stream_error.empty()) &&
                 dropped_total == reported_dropped_total) {
@@ -347,16 +381,19 @@ struct RuntimeTapServer::Session {
   }
 
   void Enqueue(ibmw::transport::SerializedMessage message) {
+    const size_t bytes = message.PayloadSize();
     std::lock_guard lock(mutex);
     if (!accepting.load()) {
       return;
     }
-    if (queue.size() >= kMaxQueuedMessages) {
+    if (queue.size() >= kMaxQueuedMessages ||
+        (!queue.empty() && bytes > kMaxQueuedBytes - std::min(queued_bytes, kMaxQueuedBytes))) {
       ++dropped_total;
       cv.notify_one();
       return;
     }
     queue.emplace_back(std::move(message));
+    queued_bytes += bytes;
     cv.notify_one();
   }
 
@@ -740,12 +777,12 @@ void UnixRuntimeTapClient::ReadLoop(
           "Runtime tap payload is too large.");
 
       std::string json_data(json_size, '\0');
-      std::vector<uint8_t> payload(static_cast<size_t>(payload_size));
+      std::vector<uint8_t> payload;
       const auto json_result =
           ReceiveAll(fd, json_data.data(), json_data.size());
       const auto payload_result =
           json_result.status == ReceiveStatus::kOk
-              ? ReceiveAll(fd, payload.data(), payload.size())
+              ? ReceivePayload(fd, payload, static_cast<size_t>(payload_size))
               : ReceiveResult{.status = ReceiveStatus::kTruncated};
       if (json_result.status != ReceiveStatus::kOk ||
           payload_result.status != ReceiveStatus::kOk) {

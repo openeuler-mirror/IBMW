@@ -203,5 +203,52 @@ TEST_F(RuntimeGraphIntegrationTest, ReceivesTapWithoutRecordExtension) {
       (registration.runtime_id + ".json")));
 }
 
+TEST_F(RuntimeGraphIntegrationTest, ReceivesLargeTapPayloadIntact) {
+  const auto registration = Initialize(true, [](Engine& engine) {
+    const auto* publisher = engine.GetTransportBus().GetTransportCatalog()
+        ->GetSendTypeWrapperPtr("json:fixture.Message", "/test", "core", "test");
+    ASSERT_NE(publisher, nullptr);
+    auto stopped = engine.AsyncStart();
+    const auto& registration = engine.GetRuntimeGraphSubsystem().Registration();
+    ASSERT_EQ(registration.topics.size(), 1u);
+    const auto& topic = registration.topics.front();
+    ASSERT_TRUE(topic.capture_capabilities.contains("runtime-tap"));
+
+    std::promise<ibmw::transport::SerializedMessage> received;
+    auto message = received.get_future();
+    topic_io::UnixRuntimeTapClient client(registration.control_socket);
+    client.StartTap(topic, [&received](auto&& value) {
+      received.set_value(std::move(value));
+    });
+
+    // COMM-008: above the eager-allocation threshold the reader grows the
+    // buffer as bytes arrive; the payload must still arrive intact.
+    std::string payload(9 * 1024 * 1024 + 123, '\0');
+    for (size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<char>('a' + i % 26);
+    ibmw::transport::Context context;
+    transport::MessageFrame frame{
+        .info = publisher->info,
+        .ctx_ref = ibmw::transport::ContextRef(context)};
+    frame.serialization_cache.emplace("json",
+        std::make_shared<ibmw::util::BufferArrayView>(payload.data(), payload.size()));
+    engine.GetTransportBus().Send(std::move(frame));
+
+    const auto ready = message.wait_for(std::chrono::seconds(10));
+    EXPECT_EQ(ready, std::future_status::ready);
+    if (ready == std::future_status::ready) {
+      const auto value = message.get();
+      EXPECT_EQ(value.topic.topic, "/test");
+      EXPECT_TRUE(value.payload->JoinToString() == payload);
+    }
+    EXPECT_NO_THROW(client.StopTap());
+    engine.Shutdown();
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  });
+  EXPECT_FALSE(std::filesystem::exists(registration.control_socket));
+  EXPECT_FALSE(std::filesystem::exists(
+      ibmw::extension::RuntimeRegistryDirectory(directory_) /
+      (registration.runtime_id + ".json")));
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::runtime_graph

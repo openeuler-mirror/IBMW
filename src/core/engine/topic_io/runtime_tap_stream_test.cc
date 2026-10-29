@@ -237,5 +237,63 @@ publishers:
   EXPECT_TRUE(stopped);
 }
 
+TEST(RuntimeTapStreamTest, QueueRespectsByteBudget) {
+  // COMM-009: 20 x 4 MiB frames queued before the reader connects must be
+  // capped by the 64 MiB byte budget (16 frames), not only by the count limit.
+  std::string directory = "/tmp/ibmw-tap-budget-XXXXXX";
+  ASSERT_NE(::mkdtemp(directory.data()), nullptr);
+  DirectPublishTap tap;
+  RuntimeTapServer server(tap, "runtime", directory);
+  server.Start();
+  TopicAdvertisement advertisement;
+  advertisement.runtime_id = "runtime";
+  advertisement.publisher_id = "module-7";
+  advertisement.topic = {.topic = "/bytes", .msg_type = "test:Bytes", .serialization_type = "cdr"};
+  const auto session = server.StartSession(advertisement);
+  std::string bytes(4 * 1024 * 1024, 'p');
+  for (int i = 0; i < 20; ++i) {
+    ibmw::transport::Context context;
+    ibmw::extension::MessageView view{
+        .topic = "/bytes", .msg_type = "test:Bytes", .module_name = "module", .endpoint_index = 7,
+        .context = ibmw::transport::ContextRef(context), .available_serialization_types = {"cdr"},
+        .acquire_serialized = [&](std::string_view) {
+          return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
+        }};
+    tap.callback(view);
+  }
+
+  runtime_graph::RuntimeFileDescriptor fd(::socket(AF_UNIX, SOCK_STREAM, 0));
+  ASSERT_GE(fd.Get(), 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  ASSERT_LT(session.stream_socket.size(), sizeof(address.sun_path));
+  std::strcpy(address.sun_path, session.stream_socket.c_str());
+  ASSERT_EQ(::connect(fd.Get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  timeval timeout{.tv_sec = 1, .tv_usec = 0};
+  ASSERT_EQ(::setsockopt(fd.Get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+  size_t messages = 0;
+  bool saw_drop_report = false;
+  std::string frame;
+  while (true) {
+    runtime_graph::RuntimeStreamHeader header{};
+    if (::recv(fd.Get(), &header, sizeof(header), MSG_WAITALL) != sizeof(header)) break;
+    const size_t metadata_size = ntohl(header.json_size);
+    const size_t payload_size = be64toh(header.payload_size);
+    frame.resize(metadata_size + payload_size);
+    ASSERT_EQ(::recv(fd.Get(), frame.data(), frame.size(), MSG_WAITALL), static_cast<ssize_t>(frame.size()));
+    if (frame.find("\"dropped\"") < metadata_size) {
+      saw_drop_report = true;
+    } else {
+      EXPECT_EQ(payload_size, bytes.size());
+      ++messages;
+    }
+  }
+  EXPECT_EQ(messages, 16u);
+  EXPECT_TRUE(saw_drop_report);
+  EXPECT_TRUE(server.StopSession(session.session_id));
+  server.Shutdown();
+  std::filesystem::remove_all(directory);
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::topic_io
