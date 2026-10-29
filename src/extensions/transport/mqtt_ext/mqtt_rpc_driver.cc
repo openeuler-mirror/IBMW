@@ -174,7 +174,22 @@ void MqttRpcDriver::Shutdown() {
   msg_handle_catalog_ptr_->Shutdown();
 
   // client_tool_ptr_ stays until destruction: Call() and late handlers may
-  // still reach it after Shutdown.
+  // still reach it after Shutdown. Calls still waiting then get their result
+  // from the destructor.
+}
+
+MqttRpcDriver::~MqttRpcDriver() {
+  if (!client_tool_ptr_) return;
+  try {
+    client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
+      try {
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+      } catch (...) {
+        MW_ERROR("Client callback threw while the mqtt rpc driver was destroyed.");
+      }
+    });
+  } catch (...) {
+  }
 }
 
 bool MqttRpcDriver::RegisterServiceFunc(
@@ -531,7 +546,10 @@ void MqttRpcDriver::Call(
       if (auto record = client_tool_ptr_->GetRecord(*recorded_req_id))
         CallResultCallback(**record, ibmw::rpc::Status(code));
     } catch (...) {
-      MW_ERROR("Client callback threw while reporting a failed call.");
+      try {
+        MW_ERROR("Client callback threw while reporting a failed call.");
+      } catch (...) {
+      }
     }
   };
 
@@ -645,6 +663,12 @@ void MqttRpcDriver::Call(
       return;
     }
     recorded_req_id = cur_req_id;
+    // Pairs with the exchange in Shutdown(): a call racing it fails now
+    // instead of waiting for an answer that can no longer be delivered.
+    if (state_.load() != State::kStart) [[unlikely]] {
+      fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+      return;
+    }
 
     std::vector<char> msg_buf_vec(mqtt_pkg_size);
 

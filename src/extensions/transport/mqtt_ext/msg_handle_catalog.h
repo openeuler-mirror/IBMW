@@ -25,21 +25,27 @@ class MsgHandleCatalog {
 
   MsgHandleCatalog() = default;
   ~MsgHandleCatalog() {
-    // A task the executor still holds (shutdown skipped the drain) releases
-    // its count later: the state then outlives the catalog (leaked).
-    if (state_->active.load(std::memory_order_acquire) == 0) delete state_;
+    // The catalog holds one count itself; whoever drops the last count frees
+    // the state, so a task the executor still holds (shutdown skipped the
+    // drain) can release its count after the catalog is gone.
+    state_->shutdown.store(true);
+    if (state_->active.fetch_sub(1, std::memory_order_acq_rel) == 1) delete state_;
   }
 
   MsgHandleCatalog(const MsgHandleCatalog&) = delete;
   MsgHandleCatalog& operator=(const MsgHandleCatalog&) = delete;
 
   // Must be called before the client can deliver messages: the map is not
-  // synchronized and is read-only afterwards.
+  // synchronized and is read-only once sealed.
   template <typename... Args>
     requires std::constructible_from<MsgHandleFunc, Args...>
   void RegisterMsgHandle(std::string_view topic, Args&&... args) {
+    MW_REQUIRE(!sealed_, "Mqtt msg handle for '{}' registered after the client was connected.", topic);
     msg_handle_map_.emplace(topic, std::forward<Args>(args)...);
   }
+
+  // Called before the first connect: no handler may be added afterwards.
+  void Seal() noexcept { sealed_ = true; }
 
   // Takes ownership of the Paho message and topic buffer and frees them on
   // every path (TRANS-010), including drops, unknown topics, exceptions and
@@ -95,13 +101,15 @@ class MsgHandleCatalog {
       MW_WARN("Mqtt msg catalog shut down from its callback executor; running handlers are not drained.");
       return;
     }
-    // Pairs with the seq_cst increment in HandleServerMsg().
-    if (state_->active.load() <= self) return;
+    // Pairs with the seq_cst increment in HandleServerMsg(). One count is
+    // the catalog's own.
+    const int idle = 1 + self;
+    if (state_->active.load() <= idle) return;
     auto next_warn = std::chrono::steady_clock::now() + kSlowShutdownWarn;
-    while (state_->active.load(std::memory_order_acquire) > self) {
+    while (state_->active.load(std::memory_order_acquire) > idle) {
       if (std::chrono::steady_clock::now() >= next_warn) {
         MW_WARN("Mqtt msg catalog shutdown is waiting for {} message handler(s).",
-                state_->active.load(std::memory_order_relaxed) - self);
+                state_->active.load(std::memory_order_relaxed) - idle);
         next_warn += kSlowShutdownWarn;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -124,7 +132,7 @@ class MsgHandleCatalog {
   // Separately allocated so that a task released after the catalog is gone
   // still has valid memory to touch.
   struct alignas(64) SharedState {
-    std::atomic<int> active{0};
+    std::atomic<int> active{1};  // the catalog's own count
     std::atomic<bool> shutdown{false};
   };
 
@@ -148,7 +156,7 @@ class MsgHandleCatalog {
     InflightGuard& operator=(InflightGuard&&) = delete;
     // The decrement is the last access: Shutdown() may return right after it.
     ~InflightGuard() {
-      if (state_) state_->active.fetch_sub(1, std::memory_order_release);
+      if (state_ && state_->active.fetch_sub(1, std::memory_order_acq_rel) == 1) delete state_;
     }
     SharedState* State() const noexcept { return state_; }
 
@@ -181,6 +189,7 @@ class MsgHandleCatalog {
   static inline thread_local const SharedState* tl_running_ = nullptr;
 
   SharedState* const state_ = new SharedState();
+  bool sealed_ = false;
 
   using UriMsgHandleMap = std::unordered_map<std::string, MsgHandleFunc, ibmw::common::util::StringHash, std::equal_to<>>;
   UriMsgHandleMap msg_handle_map_;

@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 #include "cpp/executor/executor.h"
 
@@ -56,6 +58,12 @@ class RpcClientTool {
         if (!state) [[unlikely]]
           return;
 
+        // Pairs with AbandonAll(): either it sees this task or the task sees
+        // the closed flag (the counter lives on the timeout path only).
+        TimeoutTaskGuard running(*state);
+        if (state->closed.load()) [[unlikely]]
+          return;
+
         auto msg_recorder_op = state->Take(req_id);
         if (msg_recorder_op && state->timeout_handle) [[unlikely]]
           state->timeout_handle(std::move(*msg_recorder_op));
@@ -67,12 +75,29 @@ class RpcClientTool {
 
   std::optional<MsgRecorder> GetRecord(uint32_t req_id) { return state_->Take(req_id); }
 
+  // Hands every remaining record to `handle` exactly once, so no call is
+  // dropped without a result. Later timeouts are no-ops. The caller must
+  // ensure Record() and GetRecord() are no longer called (e.g. from the
+  // driver destructor); timeout tasks still running are waited for.
+  void AbandonAll(const TimeoutHandle& handle) {
+    state_->closed.store(true);
+    while (state_->running_timeout_tasks.load() != 0) std::this_thread::yield();
+
+    std::vector<MsgRecorder> abandoned;
+    abandoned.reserve(state_->client_msg_recorder_map.size());
+    for (auto& item : state_->client_msg_recorder_map) abandoned.emplace_back(std::move(item.second));
+    state_->client_msg_recorder_map.clear();
+    for (auto& msg_recorder : abandoned) handle(std::move(msg_recorder));
+  }
+
  private:
   using ClientMsgRecorderMap = tbb::concurrent_hash_map<uint32_t, MsgRecorder>;
 
   struct State {
     TimeoutHandle timeout_handle;
     ClientMsgRecorderMap client_msg_recorder_map;
+    std::atomic<bool> closed{false};
+    std::atomic<int> running_timeout_tasks{0};
 
     std::optional<MsgRecorder> Take(uint32_t req_id) {
       typename ClientMsgRecorderMap::accessor ac;
@@ -87,6 +112,17 @@ class RpcClientTool {
 
       return result;
     }
+  };
+
+  class TimeoutTaskGuard {
+   public:
+    explicit TimeoutTaskGuard(State& state) noexcept : state_(state) { state_.running_timeout_tasks.fetch_add(1); }
+    ~TimeoutTaskGuard() { state_.running_timeout_tasks.fetch_sub(1, std::memory_order_release); }
+    TimeoutTaskGuard(const TimeoutTaskGuard&) = delete;
+    TimeoutTaskGuard& operator=(const TimeoutTaskGuard&) = delete;
+
+   private:
+    State& state_;
   };
 
   std::shared_ptr<State> state_;

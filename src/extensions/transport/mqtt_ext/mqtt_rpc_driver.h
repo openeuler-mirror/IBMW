@@ -47,7 +47,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver,
         max_pkg_size_(max_pkg_size),
         msg_handle_catalog_ptr_(msg_handle_catalog_ptr) {}
 
-  ~MqttRpcDriver() override = default;
+  ~MqttRpcDriver() override;
 
   std::string_view Name() const noexcept override { return "mqtt"; }
 

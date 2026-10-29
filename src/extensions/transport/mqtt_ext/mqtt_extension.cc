@@ -31,6 +31,7 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
     node["keep_alive_s"] = rhs.keep_alive_s;
     node["clean_session"] = rhs.clean_session;
     node["tls_verify_hostname"] = rhs.tls_verify_hostname;
+    node["start_connect_wait_ms"] = rhs.start_connect_wait_ms;
 
     return node;
   }
@@ -75,6 +76,8 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
       rhs.clean_session = node["clean_session"].as<bool>();
     if (node["tls_verify_hostname"])
       rhs.tls_verify_hostname = node["tls_verify_hostname"].as<bool>();
+    if (node["start_connect_wait_ms"])
+      rhs.start_connect_wait_ms = node["start_connect_wait_ms"].as<uint32_t>();
 
     return true;
   }
@@ -149,17 +152,20 @@ bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
   // is registered by then (the catalog map is not synchronized), and with
   // clean_session=false the broker may deliver queued messages right after
   // CONNACK. Subscriptions are made on connect (and after every reconnect),
-  // without blocking Paho callback threads (TRANS-012).
+  // without blocking Paho callback threads (TRANS-012). Startup waits
+  // (bounded) for the outcome of the first attempt, so that modules starting
+  // next do not publish into a connection that is not there yet.
   core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStart),
                           [this] {
+                            msg_handle_catalog_ptr_->Seal();
                             {
                               std::lock_guard<std::mutex> lock(conn_mutex_);
                               started_ = true;
-                              if (connected_) RunReconnectHooksLocked();
                             }
                             if (!connect_thread_.joinable())
                               connect_thread_ = std::thread([this] { ConnectLoop(); });
                             RequestConnect(false);
+                            WaitFirstConnectAttempt();
                           });
 
   core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStopping),
@@ -190,7 +196,11 @@ MqttExtension::~MqttExtension() {
     conn_cv_.notify_all();
     connect_thread_.join();
   }
-  if (client_ != nullptr) MQTTAsync_destroy(&client_);
+  if (client_ != nullptr) {
+    // Handlers must be idle before the client (and the drivers) go away.
+    if (msg_handle_catalog_ptr_) msg_handle_catalog_ptr_->Shutdown();
+    MQTTAsync_destroy(&client_);
+  }
 }
 
 void MqttExtension::OnShutdown() {
@@ -337,6 +347,16 @@ void MqttExtension::RequestConnect(bool delayed) {
   conn_cv_.notify_all();
 }
 
+void MqttExtension::WaitFirstConnectAttempt() {
+  if (options_.start_connect_wait_ms == 0) return;
+  std::unique_lock<std::mutex> lock(conn_mutex_);
+  if (!conn_cv_.wait_for(lock, std::chrono::milliseconds(options_.start_connect_wait_ms),
+                         [this] { return first_attempt_done_ || stop_flag_.load(); })) {
+    MW_WARN("Mqtt broker '{}' did not answer within {} ms; starting without a connection.",
+            options_.broker_addr, options_.start_connect_wait_ms);
+  }
+}
+
 void MqttExtension::ConnectLoop() {
   std::unique_lock<std::mutex> lock(conn_mutex_);
   while (true) {
@@ -353,6 +373,7 @@ void MqttExtension::ConnectLoop() {
     }
     if (rc != MQTTASYNC_SUCCESS) {
       MW_ERROR("Failed to start connection, rc: {}", rc);
+      MarkAttemptDone();
       RequestConnect(true);
     }
     lock.lock();
@@ -361,14 +382,27 @@ void MqttExtension::ConnectLoop() {
 
 void MqttExtension::OnConnected() {
   MW_INFO("Connect to mqtt broker success.");
-  std::lock_guard<std::mutex> lock(conn_mutex_);
-  connected_ = true;
-  if (started_) RunReconnectHooksLocked();
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    connected_ = true;
+    first_attempt_done_ = true;
+    if (started_) RunReconnectHooksLocked();
+  }
+  conn_cv_.notify_all();
 }
 
 void MqttExtension::OnConnectFailed(const char *message) {
   MW_WARN("Failed to connect mqtt broker: {}", message);
+  MarkAttemptDone();
   if (!stop_flag_.load()) RequestConnect(true);
+}
+
+void MqttExtension::MarkAttemptDone() {
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    first_attempt_done_ = true;
+  }
+  conn_cv_.notify_all();
 }
 
 void MqttExtension::OnConnectLost(const char *cause) {

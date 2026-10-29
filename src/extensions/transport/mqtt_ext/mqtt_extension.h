@@ -37,6 +37,8 @@ class MqttExtension : public ExtensionBase {
     bool clean_session = true;
     // Check that the broker certificate matches the host name (TLS only).
     bool tls_verify_hostname = true;
+    // How long startup waits for the first connect attempt (0: no wait).
+    uint32_t start_connect_wait_ms = 3000;
   };
 
  public:
@@ -61,6 +63,8 @@ class MqttExtension : public ExtensionBase {
   int StartConnect();
   void RequestConnect(bool delayed);
   void ConnectLoop();
+  void WaitFirstConnectAttempt();
+  void MarkAttemptDone();
   void OnConnected();
   void OnConnectFailed(const char *message);
   void OnConnectLost(const char *cause);
@@ -83,6 +87,7 @@ class MqttExtension : public ExtensionBase {
   bool connect_requested_ = false;
   std::chrono::steady_clock::time_point next_attempt_;
   bool connected_ = false;
+  bool first_attempt_done_ = false;
   bool started_ = false;
   // Hooks call into drivers owned by the transport/service buses, which are
   // destroyed before this extension: disabled when the engine starts stopping.

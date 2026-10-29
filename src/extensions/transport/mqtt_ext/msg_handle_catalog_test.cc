@@ -273,6 +273,15 @@ TEST(MqttMsgHandleCatalog, QueuedMessageAfterCatalogDestroyedIsSafe) {
   EXPECT_EQ(calls.load(), 0);
 }
 
+// The map is read without a lock once the client connects.
+TEST(MqttMsgHandleCatalog, RegistrationAfterSealIsRejected) {
+  MsgHandleCatalog catalog;
+  catalog.RegisterMsgHandle("t", [](MQTTAsync_message*) {});
+  catalog.Seal();
+  EXPECT_ANY_THROW(catalog.RegisterMsgHandle("u", [](MQTTAsync_message*) {}));
+  Deliver(catalog, "u");  // unknown topic: freed and ignored
+}
+
 TEST(MqttMsgHandleCatalog, MessagesAfterShutdownAreDropped) {
   MsgHandleCatalog catalog;
   int calls = 0;
