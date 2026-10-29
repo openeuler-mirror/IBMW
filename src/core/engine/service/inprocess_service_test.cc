@@ -87,6 +87,21 @@ TEST_F(InProcessServiceTest, NonStdExceptionFromServiceFuncIsContained) {
   EXPECT_EQ(**result, static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
 }
 
+// A client callback that throws while a failure is reported (from the catch
+// of the noexcept Call) must not terminate the process.
+TEST_F(InProcessServiceTest, ThrowingClientCallbackOnFailureIsContained) {
+  SetUpService([](const std::shared_ptr<ServiceMessageFrame>&) { throw std::runtime_error("boom"); });
+  int completions = 0;
+  auto frame = std::make_shared<ServiceMessageFrame>(ServiceMessageFrame{
+      .info = client_info_, .req_ptr = &req_, .rsp_ptr = &rsp_, .ctx_ref = client_ctx_});
+  frame->callback = [&completions](ibmw::rpc::Status) {
+    ++completions;
+    throw std::runtime_error("client boom");
+  };
+  driver_->Call(frame);
+  EXPECT_EQ(completions, 1);
+}
+
 // COMM-015: a server that keeps the answer callback and then throws gets
 // exactly one completion (the error) and its record must not linger; a late
 // answer is ignored.

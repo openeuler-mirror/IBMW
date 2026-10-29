@@ -134,13 +134,19 @@ void InProcessServiceDriver::Call(
   // cb_ctx_ptr_ lives as long as the driver, so a raw pointer is enough here.
   CallbackContext* cb_ctx = nullptr;
   std::optional<uint32_t> recorded_req_id;
-  auto fail = [&](uint32_t code) {
-    if (!recorded_req_id) {
-      CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(code));
-      return;
+  // Also used from the catch blocks of this noexcept function: a throwing
+  // client callback must not terminate the process.
+  auto fail = [&](uint32_t code) noexcept {
+    try {
+      if (!recorded_req_id) {
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(code));
+        return;
+      }
+      if (auto record = cb_ctx->client_tool.GetRecord(*recorded_req_id))
+        CallResultCallback(**record, ibmw::rpc::Status(code));
+    } catch (...) {
+      MW_ERROR("Client callback threw while reporting a failed call.");
     }
-    if (auto record = cb_ctx->client_tool.GetRecord(*recorded_req_id))
-      CallResultCallback(**record, ibmw::rpc::Status(code));
   };
 
   try {

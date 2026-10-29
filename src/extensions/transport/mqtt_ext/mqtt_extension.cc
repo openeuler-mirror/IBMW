@@ -30,6 +30,7 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
     node["username"] = rhs.username;
     node["keep_alive_s"] = rhs.keep_alive_s;
     node["clean_session"] = rhs.clean_session;
+    node["tls_verify_hostname"] = rhs.tls_verify_hostname;
 
     return node;
   }
@@ -72,6 +73,8 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
 
     if (node["clean_session"])
       rhs.clean_session = node["clean_session"].as<bool>();
+    if (node["tls_verify_hostname"])
+      rhs.tls_verify_hostname = node["tls_verify_hostname"].as<bool>();
 
     return true;
   }
@@ -111,6 +114,9 @@ bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
     return false;
   }
 
+  // From here on a failure must not leave a client whose callbacks point
+  // at this object (OnShutdown does not run after a failed OnInit).
+  try {
   MQTTAsync_setCallbacks(
       client_,
       this,
@@ -139,13 +145,21 @@ bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
                                                  runtime::core::Subsystem::kTransport),
                           [this] { RegisterMqttTransportDriver(); });
 
-  // Subscriptions are made once the engine starts (and after every
-  // reconnect), without blocking Paho callback threads (TRANS-012).
+  // The first connect is made once the engine starts: every message handler
+  // is registered by then (the catalog map is not synchronized), and with
+  // clean_session=false the broker may deliver queued messages right after
+  // CONNACK. Subscriptions are made on connect (and after every reconnect),
+  // without blocking Paho callback threads (TRANS-012).
   core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStart),
                           [this] {
-                            std::lock_guard<std::mutex> lock(conn_mutex_);
-                            started_ = true;
-                            if (connected_) RunReconnectHooksLocked();
+                            {
+                              std::lock_guard<std::mutex> lock(conn_mutex_);
+                              started_ = true;
+                              if (connected_) RunReconnectHooksLocked();
+                            }
+                            if (!connect_thread_.joinable())
+                              connect_thread_ = std::thread([this] { ConnectLoop(); });
+                            RequestConnect(false);
                           });
 
   core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStopping),
@@ -154,13 +168,29 @@ bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
                             hooks_enabled_ = false;
                           });
 
-  connect_thread_ = std::thread([this] { ConnectLoop(); });
-  RequestConnect(false);
-
   extension_options_node = options_;
   core_ptr_->GetExtensionBus().UpdateExtensionOptionsNode(Name(), extension_options_node);
+  } catch (...) {
+    MQTTAsync_destroy(&client_);
+    client_ = nullptr;
+    throw;
+  }
 
   return true;
+}
+
+MqttExtension::~MqttExtension() {
+  // Normally done by OnShutdown; covers an engine that never shut down.
+  if (connect_thread_.joinable()) {
+    stop_flag_ = true;
+    {
+      std::lock_guard<std::mutex> lock(conn_mutex_);
+      hooks_enabled_ = false;
+    }
+    conn_cv_.notify_all();
+    connect_thread_.join();
+  }
+  if (client_ != nullptr) MQTTAsync_destroy(&client_);
 }
 
 void MqttExtension::OnShutdown() {
@@ -178,6 +208,9 @@ void MqttExtension::OnShutdown() {
 
   // Wait (bounded) for the disconnect to complete before destroying the
   // client, instead of destroying it under an in-flight disconnect (TRANS-011).
+  // Paho (1.3.x) runs these callbacks with its global mqttasync_mutex held and
+  // MQTTAsync_destroy takes that mutex and frees the pending command, so no
+  // Done() can run after destroy returns. Re-check this on a Paho upgrade.
   struct DisconnectWait {
     std::mutex mutex;
     std::condition_variable cv;
@@ -368,6 +401,9 @@ void MqttExtension::SetSSL(MQTTAsync_connectOptions &conn_opts, MQTTAsync_SSLOpt
   // check if set ca file
   MW_REQUIRE(!options_.truststore.empty(), "Use ssl/mqtts must set truststore");
   ssl_opts.trustStore = options_.truststore.c_str();
+  // Paho defaults to no host name check: any certificate from the trusted CA
+  // would be accepted for any broker.
+  ssl_opts.verify = options_.tls_verify_hostname ? 1 : 0;
 
   bool has_cert = !options_.client_cert.empty();
   bool has_key = !options_.client_key.empty();

@@ -35,11 +35,13 @@ class MqttExtension : public ExtensionBase {
     std::string password;
     uint32_t keep_alive_s = 20;
     bool clean_session = true;
+    // Check that the broker certificate matches the host name (TLS only).
+    bool tls_verify_hostname = true;
   };
 
  public:
   MqttExtension();
-  ~MqttExtension() override = default;
+  ~MqttExtension() override;
 
   std::string_view Name() const noexcept override { return "mqtt_extension"; }
 

@@ -3,6 +3,7 @@
 
 #include "mqtt_ext/mqtt_rpc_driver.h"
 
+#include <optional>
 #include <regex>
 
 #include "cpp/service/rpc_handle.h"
@@ -167,10 +168,13 @@ void MqttRpcDriver::Shutdown() {
   UnSubscribeMqttTopic();
 
   // Wait for in-flight response handlers before releasing the client tool
-  // they use (TRANS-015).
+  // they use (TRANS-015). The catalog is shared with the transport driver:
+  // whichever shuts down first stops intake for both, so answers arriving
+  // after that end their calls by timeout.
   msg_handle_catalog_ptr_->Shutdown();
 
-  client_tool_ptr_.reset();
+  // client_tool_ptr_ stays until destruction: Call() and late handlers may
+  // still reach it after Shutdown.
 }
 
 bool MqttRpcDriver::RegisterServiceFunc(
@@ -512,6 +516,25 @@ bool MqttRpcDriver::IsClientReady(std::string_view, std::string_view function) c
 
 void MqttRpcDriver::Call(
     const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
+  // Once the call is recorded, a failure must claim the record first so the
+  // result is delivered exactly once, whichever of the answer, the timeout or
+  // this path gets there first.
+  std::optional<uint32_t> recorded_req_id;
+  // Also used from the catch blocks of this noexcept function: a throwing
+  // client callback must not terminate the process.
+  auto fail = [&](uint32_t code) noexcept {
+    try {
+      if (!recorded_req_id) {
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(code));
+        return;
+      }
+      if (auto record = client_tool_ptr_->GetRecord(*recorded_req_id))
+        CallResultCallback(**record, ibmw::rpc::Status(code));
+    } catch (...) {
+      MW_ERROR("Client callback threw while reporting a failed call.");
+    }
+  };
+
   try {
     if (state_.load() != State::kStart) [[unlikely]] {
       MW_WARN("Method can only be called when state is 'Start'.");
@@ -621,6 +644,7 @@ void MqttRpcDriver::Call(
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
       return;
     }
+    recorded_req_id = cur_req_id;
 
     std::vector<char> msg_buf_vec(mqtt_pkg_size);
 
@@ -667,12 +691,14 @@ void MqttRpcDriver::Call(
       // Fail the call now instead of leaving it to the timeout (or forever
       // when no timeout executor is configured) (TRANS-014). The record may
       // already be gone if a timeout raced us.
-      if (auto record = client_tool_ptr_->GetRecord(cur_req_id)) {
-        CallResultCallback(**record, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED));
-      }
+      fail(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED);
     }
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
+    fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+  } catch (...) {
+    MW_ERROR("Mqtt rpc call failed with a non-std exception.");
+    fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
   }
 }
 
