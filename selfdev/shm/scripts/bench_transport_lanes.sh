@@ -6,8 +6,9 @@
 #   iox_send      iceoryx (RouDi) via ibmw::transport::Send()
 #   shm_send      the self-developed shm transport (shm_ext), same modules
 #   dds_send_shm  Fast DDS SHM transport (reference, needs a DDS build)
-# This is a benchmark, not a test: it prints medians per lane and payload and
-# never fails on numbers, only when a lane produces no samples.
+# This is a benchmark, not a test: it prints medians per lane and payload,
+# marks runs that produced no samples as NO SAMPLES (e.g. iox_send at 4MB with
+# the default RouDi pool) and always exits 0.
 #
 # Build (once): configure IBMW with IBMW_BUILD_EXAMPLES=ON IBMW_BUILD_BENCHMARKS=ON
 # IBMW_BUILD_ICEORYX_EXTENSION=ON IBMW_BUILD_SHM_EXTENSION=ON (and
@@ -47,7 +48,8 @@ ROUNDS="${ROUNDS:-3}"
 DURATION_SEC="${DURATION_SEC:-20}"
 CPU_WARM="${CPU_WARM:-6}"
 CPU_WINDOW="${CPU_WINDOW:-20}"
-PIN=()
+# `env` as a no-op prefix keeps the command line valid without pinning.
+PIN=(env)
 [[ -n "${PIN_CPUS:-}" ]] && PIN=(taskset -c "${PIN_CPUS}")
 
 mkdir -p "${OUT_DIR}/runs"
@@ -117,7 +119,12 @@ cpu_probe() {
   # Match on the command line: the engine renames threads, including main's comm.
   local pattern="/(iox-roudi|${lane}_(publisher|subscriber)_app)( |$)"
   for role in publisher subscriber; do
+    # A backup left by an interrupted run is the pristine file: restore it
+    # instead of backing up the patched one.
+    [[ -f "${OUT_DIR}/${lane}_${role}.yaml.bak" ]] &&
+      mv "${OUT_DIR}/${lane}_${role}.yaml.bak" "${dir}/cfg/${lane}/${role}.yaml"
     cp "${dir}/cfg/${lane}/${role}.yaml" "${OUT_DIR}/${lane}_${role}.yaml.bak"
+    CPU_RESTORE+=("${OUT_DIR}/${lane}_${role}.yaml.bak:${dir}/cfg/${lane}/${role}.yaml")
     sed -i -E "s/^(\s*)payload_bytes:.*/\1payload_bytes: ${payload}/; s/^(\s*)duration_sec:.*/\1duration_sec: $((CPU_WARM + CPU_WINDOW + 10))/" \
       "${dir}/cfg/${lane}/${role}.yaml"
   done
@@ -125,18 +132,39 @@ cpu_probe() {
               awk '{s += $1} END {print s + 0}'; }
   (cd "${dir}" && DURATION=$((CPU_WARM + CPU_WINDOW + 5)) "${PIN[@]}" "./start_${lane}.sh") >"${OUT_DIR}/cpu_${lane}_${payload}.log" 2>&1 &
   runner=$!
+  CPU_RUNNER=${runner}
   sleep "${CPU_WARM}"
   t0=$(ticks); s0=$(date +%s.%N)
   sleep "${CPU_WINDOW}"
   t1=$(ticks); s1=$(date +%s.%N)
   n=$(pgrep -fc -- "${pattern}")
   wait "${runner}" 2>/dev/null
-  for role in publisher subscriber; do
-    mv "${OUT_DIR}/${lane}_${role}.yaml.bak" "${dir}/cfg/${lane}/${role}.yaml"
-  done
+  CPU_RUNNER=""
+  restore_cpu_configs
   awk -v a="${t0}" -v b="${t1}" -v hz="$(getconf CLK_TCK)" -v s0="${s0}" -v s1="${s1}" -v l="${lane}" -v p="${payload}" -v n="${n}" \
     'BEGIN {printf "%s,%d,%d,%.2f\n", l, p, n, 100 * (b - a) / hz / (s1 - s0)}'
 }
+
+# Undo cpu_probe's config patch and stop its lane, also on Ctrl-C / kill.
+CPU_RESTORE=()
+CPU_RUNNER=""
+restore_cpu_configs() {
+  local item
+  if [[ -n "${CPU_RUNNER}" ]]; then
+    # The runner is a subshell; signal its start_<lane>.sh too, whose EXIT
+    # trap stops the publisher/subscriber (and RouDi).
+    pkill -TERM -P "${CPU_RUNNER}" 2>/dev/null
+    kill -TERM "${CPU_RUNNER}" 2>/dev/null
+    wait "${CPU_RUNNER}" 2>/dev/null
+    CPU_RUNNER=""
+  fi
+  for item in "${CPU_RESTORE[@]}"; do
+    [[ -f "${item%%:*}" ]] && mv "${item%%:*}" "${item#*:}"
+  done
+  CPU_RESTORE=()
+}
+trap restore_cpu_configs EXIT
+trap 'exit 130' INT TERM
 
 cpu_stage() {
   local round payload lane
