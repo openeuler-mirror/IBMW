@@ -387,7 +387,17 @@ bool GrpcRpcDriver::RegisterServiceFunc(
         rsp_buf = std::move(call_state->rsp_buf);
       }
 
-      MW_REQUIRE(ret_code == 0, "Handle rpc failed, ret_code: {}", ret_code);
+      // A failed call (also a timeout) still ends the stream, with a
+      // trailers-only gRPC error, so the client neither waits for its own
+      // timeout nor keeps the stream open.
+      if (ret_code != 0) [[unlikely]] {
+        MW_WARN("Handle rpc failed, ret_code: {}", ret_code);
+        rsp->AddTrailer("grpc-status", ret_code == IBMW_RPC_STATUS_TIMEOUT                    ? "4"    // DEADLINE_EXCEEDED
+                                       : ret_code == IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED ? "13"   // INTERNAL
+                                                                                              : "2");  // UNKNOWN
+        rsp->AddTrailer("grpc-message", "ibmw rpc status " + std::to_string(ret_code));
+        co_return;
+      }
 
       // Fill the response data
       auto prefix = grpc::EncodeGrpcMessagePrefix(grpc::GrpcMessagePrefix{

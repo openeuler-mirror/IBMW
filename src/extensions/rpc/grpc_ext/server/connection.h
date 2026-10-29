@@ -118,7 +118,24 @@ class Connection : public std::enable_shared_from_this<Connection> {
                     [this, self, req_ptr = std::move(req_ptr), rsp_ptr = std::move(rsp_ptr), handle]() mutable -> Awaitable<void> {
                       // Send request to thread pool
                       co_await asio::post(asio::bind_executor(io_ptr_->get_executor(), asio::use_awaitable));
-                      co_await handle(req_ptr, rsp_ptr);
+                      bool failed = false;
+                      try {
+                        co_await handle(req_ptr, rsp_ptr);
+                      } catch (const std::exception& e) {
+                        MW_WARN("Http handle failed, remote addr {}, exception info: {}", RemoteAddr(), e.what());
+                        failed = true;
+                      } catch (...) {
+                        MW_WARN("Http handle failed, remote addr {}, unknown exception.", RemoteAddr());
+                        failed = true;
+                      }
+                      if (failed) {
+                        // Answer instead of leaving the stream open until the
+                        // connection closes; a partly written response is dropped.
+                        rsp_ptr = std::make_shared<Response>(0);
+                        rsp_ptr->SetStreamId(req_ptr->GetStreamId());
+                        rsp_ptr->AddHeader("content-type", "application/grpc");
+                        rsp_ptr->AddTrailer("grpc-status", "13");  // INTERNAL
+                      }
 
                       // Submit response to http2 session in socket_strand_
                       co_await asio::post(asio::bind_executor(socket_strand_, asio::use_awaitable));

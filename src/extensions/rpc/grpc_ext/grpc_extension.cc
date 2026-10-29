@@ -82,6 +82,9 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
   if (extension_options_node && !extension_options_node.IsNull()) {
     options_ = extension_options_node.as<Options>();
   }
+  // A gRPC message has a 5-byte prefix: a smaller limit rejects every request.
+  MW_REQUIRE(options_.max_request_body_size >= 5, "Grpc max_request_body_size must be at least 5, got {}.",
+             options_.max_request_body_size);
 
   asio_executor_ptr_ = std::make_shared<ibmw::common::net::AsioExecutor>(options_.thread_num);
 

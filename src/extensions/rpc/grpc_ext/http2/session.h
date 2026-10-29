@@ -41,8 +41,13 @@ class Stream {
   [[nodiscard]] const ResponsePtr& GetResponse() const { return response_ptr_; }
   ResponsePtr GetMutableResponse() { return std::move(response_ptr_); }
 
+  // Client side: the response was handed over (end of stream received).
+  void SetResponseComplete() { response_complete_ = true; }
+  [[nodiscard]] bool IsResponseComplete() const { return response_complete_; }
+
  private:
   int32_t stream_id_ = 0;
+  bool response_complete_ = false;
   Session* session_ = nullptr;
   RequestPtr request_ptr_ = nullptr;
   ResponsePtr response_ptr_ = nullptr;

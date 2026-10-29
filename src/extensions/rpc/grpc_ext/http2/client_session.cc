@@ -198,6 +198,7 @@ int OnFrameRecvCallback(nghttp2_session* session, const nghttp2_frame* frame, vo
   switch (frame->hd.type) {
     case NGHTTP2_DATA:
       if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+        stream->SetResponseComplete();
         client_session->OnFullResponse(stream->GetResponse());
         MW_TRACE("stream recv frame, stream id: {}, OnFullResponse", frame->hd.stream_id);
         break;
@@ -205,6 +206,7 @@ int OnFrameRecvCallback(nghttp2_session* session, const nghttp2_frame* frame, vo
       break;
     case NGHTTP2_HEADERS:
       if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+        stream->SetResponseComplete();
         client_session->OnFullResponse(stream->GetResponse());
         MW_TRACE("stream recv frame, stream id: {}, OnFullResponse", frame->hd.stream_id);
         break;
@@ -234,6 +236,14 @@ int OnStreamCloseCallback(nghttp2_session* session, int32_t stream_id, uint32_t 
   auto stream = client_session->FindStream(stream_id);
   if (!stream) {
     return 0;
+  }
+  // Closed without a complete response (e.g. RST_STREAM from the server):
+  // hand over what was received, so that the call fails now (no grpc-status)
+  // instead of waiting for its timeout.
+  if (!stream->IsResponseComplete()) {
+    MW_TRACE("stream closed before the response was complete, stream id: {}, error code: {}", stream_id, error_code);
+    stream->SetResponseComplete();
+    client_session->OnFullResponse(stream->GetResponse());
   }
   client_session->RemoveStream(stream_id);
   return 0;

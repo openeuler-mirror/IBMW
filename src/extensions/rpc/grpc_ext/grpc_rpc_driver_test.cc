@@ -5,6 +5,8 @@
 // inline or from another thread is never lost, a missing answer ends the
 // request by timeout, and a late answer is harmless.
 // EXT-002: an oversized request body is refused before it reaches the service.
+// Review S2/S3/N3: a failed call ends at once with an error status (not by
+// the client timeout), and grpc-timeout values follow the 8-digit format.
 
 #include <gtest/gtest.h>
 
@@ -22,6 +24,7 @@
 #include <boost/asio.hpp>
 
 #include "cpp/util/string.h"
+#include "grpc_ext/grpc/timeout.h"
 #include "grpc_ext/grpc_rpc_driver.h"
 
 namespace ibmw::extensions::grpc_extension {
@@ -89,6 +92,40 @@ const ibmw_type_support_base_t* IntTypeSupport() {
       .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
       .ctx = nullptr};
   return &ts;
+}
+
+TEST(GrpcTimeoutTest, ParsesUpToEightDigits) {
+  EXPECT_EQ(grpc::ParseTimeout("1H"), std::chrono::hours(1));
+  EXPECT_EQ(grpc::ParseTimeout("2M"), std::chrono::minutes(2));
+  EXPECT_EQ(grpc::ParseTimeout("3S"), std::chrono::seconds(3));
+  EXPECT_EQ(grpc::ParseTimeout("4m"), std::chrono::milliseconds(4));
+  EXPECT_EQ(grpc::ParseTimeout("5u"), std::chrono::microseconds(5));
+  EXPECT_EQ(grpc::ParseTimeout("0n"), std::chrono::nanoseconds(0));
+  EXPECT_EQ(grpc::ParseTimeout("2562047H"), std::chrono::hours(2562047));
+  // Beyond the nanosecond range: saturates instead of wrapping negative.
+  EXPECT_EQ(grpc::ParseTimeout("2562048H"), std::chrono::nanoseconds::max());
+  EXPECT_EQ(grpc::ParseTimeout("99999999H"), std::chrono::nanoseconds::max());
+  EXPECT_EQ(grpc::ParseTimeout("99999999M"), std::chrono::minutes(99999999));  // 6e18 ns: still fits
+  for (const char* bad : {"", "S", "1", "123456789S", "99999999999999999999H", "-1S", "+1S", "1s", "1 S", "1SS",
+                          "a1S"}) {
+    EXPECT_FALSE(grpc::ParseTimeout(bad).has_value()) << bad;
+  }
+}
+
+TEST(GrpcTimeoutTest, FormatsWithinEightDigitsAndNeverShortens) {
+  EXPECT_EQ(grpc::FormatTimeout(std::chrono::nanoseconds(0)), "0n");
+  EXPECT_EQ(grpc::FormatTimeout(std::chrono::nanoseconds(99999999)), "99999999n");
+  EXPECT_EQ(grpc::FormatTimeout(std::chrono::nanoseconds(100000001)), "100001u");
+  EXPECT_EQ(grpc::FormatTimeout(5s), "5000000u");
+  EXPECT_EQ(grpc::FormatTimeout(std::chrono::hours(48)), "172800S");
+  EXPECT_EQ(grpc::FormatTimeout(std::chrono::nanoseconds::max()), "2562048H");
+  for (auto t : {std::chrono::nanoseconds(1), std::chrono::nanoseconds(123456789), std::chrono::nanoseconds(5s),
+                 std::chrono::nanoseconds(std::chrono::hours(48)), std::chrono::nanoseconds::max()}) {
+    const std::string text = grpc::FormatTimeout(t);
+    auto parsed = grpc::ParseTimeout(text);
+    ASSERT_TRUE(parsed.has_value()) << text;
+    EXPECT_GE(*parsed, t) << text;
+  }
 }
 
 void Answer(const std::shared_ptr<ServiceMessageFrame>& frame, uint32_t code) {
@@ -169,6 +206,10 @@ class GrpcRpcDriverTest : public ::testing::Test {
   runtime::core::service::ServiceInfo info_;
   runtime::core::service::ServiceFuncWrapper service_;
   runtime::core::service::ClientFuncWrapper client_;
+  // Requests a service kept unanswered; owned by the fixture so that the
+  // service function (run on io threads) never touches a finished test body.
+  std::mutex pending_mutex_;
+  std::vector<std::shared_ptr<ServiceMessageFrame>> pending_;
 };
 
 TEST_F(GrpcRpcDriverTest, InlineAnswersAreNeverLost) {
@@ -205,22 +246,24 @@ TEST_F(GrpcRpcDriverTest, CrossThreadAnswersAreNeverLost) {
 // A service that never answers in time: the request ends by timeout, a late
 // answer touches nothing that is gone, and the server keeps serving.
 TEST_F(GrpcRpcDriverTest, MissingAnswerTimesOutAndLateAnswerIsHarmless) {
-  std::mutex mutex;
-  std::vector<std::shared_ptr<ServiceMessageFrame>> pending;
-  SetUpDriver([&](const std::shared_ptr<ServiceMessageFrame>& frame) {
-    std::lock_guard lock(mutex);
-    pending.push_back(frame);
+  SetUpDriver([this](const std::shared_ptr<ServiceMessageFrame>& frame) {
+    std::lock_guard lock(pending_mutex_);
+    pending_.push_back(frame);
   });
   int rsp = 0;
+  const auto begin = std::chrono::steady_clock::now();
   auto code = Call(1, &rsp, 300ms);
   ASSERT_TRUE(code) << "no answer";
   EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, 3s);
 
-  std::this_thread::sleep_for(100ms);  // the server side gave up as well
+  // The server got the same deadline; give it ample time to give up too
+  // (an answer before that is harmless as well).
+  std::this_thread::sleep_for(500ms);
   std::vector<std::shared_ptr<ServiceMessageFrame>> late;
   {
-    std::lock_guard lock(mutex);
-    late.swap(pending);
+    std::lock_guard lock(pending_mutex_);
+    late.swap(pending_);
   }
   ASSERT_EQ(late.size(), 1u);
   *static_cast<int*>(late[0]->rsp_ptr) = 7;  // the response object is still alive
@@ -243,9 +286,12 @@ TEST_F(GrpcRpcDriverTest, OversizedRequestIsRefusedAndServerStaysHealthy) {
       },
       8);
   int rsp = 0;
-  auto code = Call(1234567890, &rsp, 1s);
+  const auto begin = std::chrono::steady_clock::now();
+  auto code = Call(1234567890, &rsp, 5s);
   ASSERT_TRUE(code) << "no answer";
   EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+  // The reset stream fails the call at once, not by the client timeout.
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, 2s);
   EXPECT_EQ(served.load(), 0);
 
   for (int i = 0; i < 5; ++i) {
@@ -255,6 +301,33 @@ TEST_F(GrpcRpcDriverTest, OversizedRequestIsRefusedAndServerStaysHealthy) {
     EXPECT_EQ(rsp, 8);
   }
   EXPECT_EQ(served.load(), 5);
+}
+
+// A service answering with an error status: the client gets an error at
+// once (not its timeout) and the server keeps serving.
+TEST_F(GrpcRpcDriverTest, ServiceErrorEndsTheCallAtOnce) {
+  SetUpDriver([](const std::shared_ptr<ServiceMessageFrame>& frame) {
+    const int req = *static_cast<const int*>(frame->req_ptr);
+    if (req < 0) {
+      Answer(frame, req == -1 ? IBMW_RPC_STATUS_TIMEOUT : IBMW_RPC_STATUS_SVR_HANDLE_FAILED);
+      return;
+    }
+    *static_cast<int*>(frame->rsp_ptr) = req + 1;
+    Answer(frame, IBMW_RPC_STATUS_OK);
+  });
+  for (int req : {-1, -2, 3}) {
+    int rsp = 0;
+    const auto begin = std::chrono::steady_clock::now();
+    auto code = Call(req, &rsp, 5s);
+    ASSERT_TRUE(code) << "request " << req << ": no answer";
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, 2s) << "request " << req;
+    if (req < 0) {
+      EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK)) << "request " << req;
+    } else {
+      EXPECT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+      EXPECT_EQ(rsp, 4);
+    }
+  }
 }
 
 }  // namespace
