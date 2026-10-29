@@ -16,11 +16,7 @@ using FrameworkAsyncRpcFilter = ibmw::util::InlineFunction<void(const std::share
 
 class FrameworkAsyncRpcFilterCollector {
  public:
-  FrameworkAsyncRpcFilterCollector()
-      : final_filter_(
-            [](const std::shared_ptr<ServiceMessageFrame>& invoke_wrapper_ptr, FrameworkAsyncRpcHandle&& h) {
-              h(invoke_wrapper_ptr);
-            }) {}
+  FrameworkAsyncRpcFilterCollector() : final_filter_(PassThrough()) {}
   ~FrameworkAsyncRpcFilterCollector() = default;
 
   FrameworkAsyncRpcFilterCollector(const FrameworkAsyncRpcFilterCollector&) = delete;
@@ -43,11 +39,19 @@ class FrameworkAsyncRpcFilterCollector {
     final_filter_(invoke_wrapper_ptr, std::move(h));
   }
 
+  // Back to the no-filter state (never an empty function: InvokeRpc() does
+  // not check, to stay branch-free on the call path).
   void Clear() {
-    final_filter_ = FrameworkAsyncRpcFilter();
+    final_filter_ = PassThrough();
   }
 
  private:
+  static FrameworkAsyncRpcFilter PassThrough() {
+    return [](const std::shared_ptr<ServiceMessageFrame>& invoke_wrapper_ptr, FrameworkAsyncRpcHandle&& h) {
+      h(invoke_wrapper_ptr);
+    };
+  }
+
   FrameworkAsyncRpcFilter final_filter_;
 };
 
@@ -118,8 +122,10 @@ class FrameworkAsyncRpcFilterBus {
     return {};
   }
 
+  // Collectors reference entries of filter_map_, so they go first.
   void Clear() {
     filter_collector_map_.clear();
+    filter_names_map_.clear();
     filter_map_.clear();
   }
 

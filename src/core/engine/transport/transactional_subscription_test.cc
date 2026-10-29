@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -812,6 +813,88 @@ TEST_F(TransactionalSubscription, RetainedCloseUsesInnerTimeoutBudget) {
   EXPECT_FALSE(closed.get());
   EXPECT_EQ(driver.subscription()->close_calls, 1);
   EXPECT_EQ(driver.subscription()->last_close_timeout, timeout);
+  EXPECT_EQ(releases, 1);
+}
+
+// COMM-004: Clear() must leave a callable pass-through, not an empty function
+// (InvokeTransport() does not check), and must drop the per-topic names.
+TEST(FrameworkAsyncFilterClear, CollectorClearRestoresPassThrough) {
+  FrameworkAsyncTransportFilter filter(
+      [](MessageFrame&, FrameworkAsyncTransportHandle&&) { /* swallow */ });
+  FrameworkAsyncTransportFilterCollector collector;
+  collector.RegisterFilter(filter);
+  collector.Clear();
+
+  TransportInfo info;
+  MessageFrame frame{.info = info};
+  int calls = 0;
+  collector.InvokeTransport([&calls](MessageFrame&) { ++calls; }, frame);
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(FrameworkAsyncFilterClear, BusClearDropsFilterNames) {
+  FrameworkAsyncTransportFilterBus filters;
+  filters.RegisterFilter(
+      "f", FrameworkAsyncTransportFilter(
+               [](MessageFrame& m, FrameworkAsyncTransportHandle&& h) { h(m); }));
+  filters.CreateFilterCollector("topic", {"f"});
+  ASSERT_EQ(filters.GetFilterNameVec("topic").size(), 1u);
+  filters.Clear();
+  EXPECT_TRUE(filters.GetFilterNameVec("topic").empty());
+  EXPECT_TRUE(filters.GetAllFiltersName().empty());
+}
+
+struct ThrowingSubscriberSetup {
+  TransportCatalog catalog;
+  FrameworkAsyncTransportFilterBus filters;
+  TransportDriverDispatcher dispatcher;
+  ResidualCallbackDriver driver{"accepting", true, false};
+
+  explicit ThrowingSubscriberSetup(MessageCallback callback) {
+    dispatcher.SetTransportCatalog(&catalog);
+    dispatcher.SetSubscribeFrameworkAsyncTransportFilterBus(&filters);
+    dispatcher.SetSubTopicsDriversRules({{".*", {"accepting"}}});
+    dispatcher.RegisterTransportDriver(&driver);
+    dispatcher.Initialize();
+    MessageHandlerWrapper handler;
+    handler.info.msg_type = "Frame";
+    handler.info.topic_name = "camera";
+    handler.info.pkg_path = "pkg";
+    handler.info.module_name = "module";
+    handler.callback = std::move(callback);
+    EXPECT_TRUE(dispatcher.OnMessage(std::move(handler)));
+  }
+};
+
+// COMM-019: a subscriber throwing a non-std exception must not unwind into the
+// driver thread; the message is still released exactly once.
+TEST_F(TransactionalSubscription, SubscriberNonStdExceptionIsContained) {
+  ThrowingSubscriberSetup s(
+      [](MessageFrame&, std::function<void()>&&,
+         const internal::CallbackInvocationEnvelopeV1*) { throw 42; });
+  ASSERT_NE(s.driver.message_handler(), nullptr);
+  int releases = 0;
+  EXPECT_NO_THROW(s.driver.TriggerMessage(releases));
+  EXPECT_EQ(releases, 1);
+}
+
+// COMM-018: the driver's release callback runs from a shared_ptr deleter; if it
+// throws, the process must not std::terminate.
+TEST_F(TransactionalSubscription, ThrowingReleaseCallbackIsContained) {
+  ThrowingSubscriberSetup s(
+      [](MessageFrame&, std::function<void()>&&,
+         const internal::CallbackInvocationEnvelopeV1*) {});
+  ASSERT_NE(s.driver.message_handler(), nullptr);
+  TransportInfo info;
+  MessageFrame frame{.info = info};
+  int releases = 0;
+  EXPECT_NO_THROW(s.driver.message_handler()->callback(
+      frame,
+      [&releases] {
+        ++releases;
+        throw std::runtime_error("release failed");
+      },
+      nullptr));
   EXPECT_EQ(releases, 1);
 }
 

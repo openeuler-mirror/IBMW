@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <charconv>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -87,6 +88,19 @@ std::string MakePodRegistrationKey(std::string_view msg_type,
   return key;
 }
 
+// shared_ptr deleter for a driver's release callback: runs in a destructor
+// (implicitly noexcept), so a missing or throwing release must not escape.
+void RunReleaseAndDelete(std::function<void()>* f) noexcept {
+  try {
+    if (*f) (*f)();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "IBMW: transport release callback threw: %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr, "IBMW: transport release callback threw a non-std exception\n");
+  }
+  delete f;
+}
+
 class MessageCallbackState {
  public:
   MessageCallbackState(MessageCallback callback, uint64_t callback_registration_id)
@@ -119,10 +133,15 @@ class MessageCallbackState {
     callback(message, std::move(release), envelope);
   }
 
+  // Stops new invocations and waits for in-flight ones, so the callback's
+  // captures may be released afterwards. Only called on a state created by the
+  // same registration call, never from inside its own callback, so waiting
+  // cannot self-deadlock and Invoke() needs no reentrancy bookkeeping.
   void Disable() {
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     enabled_ = false;
     callback_ = {};
+    active_calls_done_.wait(lock, [this] { return active_ == 0; });
   }
 
  private:
@@ -502,10 +521,7 @@ bool TransportDriverDispatcher::OnMessage(MessageHandlerAccessInfoWrapper&& wrap
           const internal::CallbackInvocationEnvelopeV1* envelope) {
         auto release_callback_shared_ptr = std::shared_ptr<std::function<void()>>(
             new std::function<void()>(std::move(input_release_callback)),
-            [](std::function<void()>* f) {
-              (*f)();
-              delete f;
-            });
+            &RunReleaseAndDelete);
 
         filter_collector.InvokeTransport(
             [this,
@@ -528,6 +544,8 @@ bool TransportDriverDispatcher::OnMessage(MessageHandlerAccessInfoWrapper&& wrap
 
               } catch (const std::exception& e) {
                 MW_ERROR("{}", e.what());
+              } catch (...) {
+                MW_ERROR("Subscriber callback threw a non-std exception.");
               }
             },
             msg_wrapper);
@@ -1019,28 +1037,31 @@ bool TransportDriverDispatcher::OnMessage(MessageHandlerWrapper&& wrapper) {
   auto callback_registration_id = std::make_shared<uint64_t>(0);
 
   msg_handler_ptr->callback =
-      [&filter_collector, callback{std::move(msg_handler_ptr->callback)},
+      [this, &filter_collector, callback{std::move(msg_handler_ptr->callback)},
        callback_registration_id](
           MessageFrame& msg_wrapper, std::function<void()>&& input_release_callback,
           const internal::CallbackInvocationEnvelopeV1* envelope) {
         auto release_callback_shared_ptr = std::shared_ptr<std::function<void()>>(
             new std::function<void()>(std::move(input_release_callback)),
-            [](std::function<void()>* f) {
-              (*f)();
-              delete f;
-            });
+            &RunReleaseAndDelete);
 
         filter_collector.InvokeTransport(
-            [&callback, release_callback_shared_ptr, callback_registration_id,
+            [this, &callback, release_callback_shared_ptr, callback_registration_id,
              envelope](MessageFrame& msg_wrapper) {
-              IBMW_COMM_TRACE_CALLBACK_SCOPE();
-              InvokeFinalMessageCallback(envelope, *callback_registration_id, [&] {
-                callback(
-                    msg_wrapper,
-                    [release_callback_shared_ptr,
-                     msg_cache_ptr{msg_wrapper.msg_cache_ptr}]() {},
-                    nullptr);
-              });
+              try {
+                IBMW_COMM_TRACE_CALLBACK_SCOPE();
+                InvokeFinalMessageCallback(envelope, *callback_registration_id, [&] {
+                  callback(
+                      msg_wrapper,
+                      [release_callback_shared_ptr,
+                       msg_cache_ptr{msg_wrapper.msg_cache_ptr}]() {},
+                      nullptr);
+                });
+              } catch (const std::exception& e) {
+                MW_ERROR("{}", e.what());
+              } catch (...) {
+                MW_ERROR("Subscriber callback threw a non-std exception.");
+              }
             },
             msg_wrapper);
       };
