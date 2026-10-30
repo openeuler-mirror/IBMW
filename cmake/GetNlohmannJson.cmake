@@ -8,6 +8,9 @@ message(STATUS "get nlohmann_json ...")
 set(nlohmann_json_DOWNLOAD_URL
     "https://github.com/nlohmann/json/archive/v3.11.3.tar.gz"
     CACHE STRING "")
+set(nlohmann_json_DOWNLOAD_SHA256
+    "0d8ef5af7f9794e3263480193c491549b2ba6cc74bb018906202ada498a79406"
+    CACHE STRING "SHA256 of nlohmann_json_DOWNLOAD_URL (update both together)")
 
 if(nlohmann_json_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     nlohmann_json
     URL ${nlohmann_json_DOWNLOAD_URL}
+    URL_HASH SHA256=${nlohmann_json_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

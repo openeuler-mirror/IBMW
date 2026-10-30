@@ -12,6 +12,9 @@ endif()
 set(events_executor_GIT_URL
     "https://github.com/irobot-ros/events-executor/archive/b2ef94e1ecee3aa3369c680343df46035998ddc0.tar.gz"
     CACHE STRING "")
+set(events_executor_DOWNLOAD_SHA256
+    "190e07a3103e80a7277d1c0e09ec1c3e44b5539479d5f4cf964f8e72d162e74d"
+    CACHE STRING "SHA256 of events_executor_GIT_URL (update both together)")
 
 if(events_executor_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -22,6 +25,7 @@ else()
   FetchContent_Declare(
     irobot_events_executor
     URL ${events_executor_GIT_URL}
+    URL_HASH SHA256=${events_executor_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

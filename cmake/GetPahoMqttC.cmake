@@ -8,6 +8,9 @@ message(STATUS "get paho_mqtt_c ...")
 set(paho_mqtt_c_DOWNLOAD_URL
     "https://github.com/eclipse/paho.mqtt.c/archive/v1.3.13.tar.gz"
     CACHE STRING "")
+set(paho_mqtt_c_DOWNLOAD_SHA256
+    "47c77e95609812da82feee30db435c3b7c720d4fd3147d466ead126e657b6d9c"
+    CACHE STRING "SHA256 of paho_mqtt_c_DOWNLOAD_URL (update both together)")
 
 if(paho_mqtt_c_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     paho_mqtt_c
     URL ${paho_mqtt_c_DOWNLOAD_URL}
+    URL_HASH SHA256=${paho_mqtt_c_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

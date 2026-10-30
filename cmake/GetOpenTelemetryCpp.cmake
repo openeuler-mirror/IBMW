@@ -8,6 +8,9 @@ message(STATUS "get opentelemetry_cpp ...")
 set(opentelemetry_cpp_DOWNLOAD_URL
     "https://github.com/open-telemetry/opentelemetry-cpp/archive/v1.16.1.tar.gz"
     CACHE STRING "")
+set(opentelemetry_cpp_DOWNLOAD_SHA256
+    "b8a78bb2a3a78133dbb08bcd04342f4b1e03cb4a19079b8416d408d905fffc37"
+    CACHE STRING "SHA256 of opentelemetry_cpp_DOWNLOAD_URL (update both together)")
 
 if(opentelemetry_cpp_LOCAL_SOURCE)
   FetchContent_Declare(opentelemetry_cpp SOURCE_DIR ${opentelemetry_cpp_LOCAL_SOURCE})
@@ -15,6 +18,7 @@ else()
   FetchContent_Declare(
     opentelemetry_cpp
     URL ${opentelemetry_cpp_DOWNLOAD_URL}
+    URL_HASH SHA256=${opentelemetry_cpp_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 endif()
 

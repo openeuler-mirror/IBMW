@@ -8,6 +8,9 @@ message(STATUS "get asio ...")
 set(asio_DOWNLOAD_URL
     "https://github.com/chriskohlhoff/asio/archive/asio-1-30-2.tar.gz"
     CACHE STRING "")
+set(asio_DOWNLOAD_SHA256
+    "755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8"
+    CACHE STRING "SHA256 of asio_DOWNLOAD_URL (update both together)")
 
 if(asio_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     asio
     URL ${asio_DOWNLOAD_URL}
+    URL_HASH SHA256=${asio_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

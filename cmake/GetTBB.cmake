@@ -8,6 +8,9 @@ message(STATUS "get TBB ...")
 set(tbb_DOWNLOAD_URL
     "https://github.com/oneapi-src/oneTBB/archive/v2021.13.0.tar.gz"
     CACHE STRING "")
+set(tbb_DOWNLOAD_SHA256
+    "3ad5dd08954b39d113dc5b3f8a8dc6dc1fd5250032b7c491eb07aed5c94133e1"
+    CACHE STRING "SHA256 of tbb_DOWNLOAD_URL (update both together)")
 
 if(tbb_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     tbb
     URL ${tbb_DOWNLOAD_URL}
+    URL_HASH SHA256=${tbb_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

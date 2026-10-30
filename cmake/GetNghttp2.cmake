@@ -8,6 +8,9 @@ message(STATUS "get nghttp2 ...")
 set(nghttp2_DOWNLOAD_URL
     "https://github.com/nghttp2/nghttp2/archive/refs/tags/v1.62.1.zip"
     CACHE STRING "")
+set(nghttp2_DOWNLOAD_SHA256
+    "2ac4835503199ad75e7a6cf72290d31464663f7d99c3b85386d72b2c97544671"
+    CACHE STRING "SHA256 of nghttp2_DOWNLOAD_URL (update both together)")
 
 if(nghttp2_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     nghttp2
     URL ${nghttp2_DOWNLOAD_URL}
+    URL_HASH SHA256=${nghttp2_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

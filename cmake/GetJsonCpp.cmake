@@ -8,6 +8,9 @@ message(STATUS "get jsoncpp ...")
 set(jsoncpp_DOWNLOAD_URL
     "https://github.com/open-source-parsers/jsoncpp/archive/1.9.6.tar.gz"
     CACHE STRING "")
+set(jsoncpp_DOWNLOAD_SHA256
+    "f93b6dd7ce796b13d02c108bc9f79812245a82e577581c4c9aabe57075c90ea2"
+    CACHE STRING "SHA256 of jsoncpp_DOWNLOAD_URL (update both together)")
 
 if(jsoncpp_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     jsoncpp
     URL ${jsoncpp_DOWNLOAD_URL}
+    URL_HASH SHA256=${jsoncpp_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()
