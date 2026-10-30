@@ -119,9 +119,14 @@ function(get_mcap)
     FetchContent_Populate(mcap)
 
     if(UNIX)
+      # Runs at every configure on the same (possibly user supplied) source
+      # tree: patch only once, or every reconfigure adds another fsync.
       file(READ ${mcap_SOURCE_DIR}/cpp/mcap/include/mcap/writer.inl CONTENT)
-      string(REPLACE "std::fflush(file_);" "std::fflush(file_); ::fsync(fileno(file_));" CONTENT "${CONTENT}")
-      file(WRITE ${mcap_SOURCE_DIR}/cpp/mcap/include/mcap/writer.inl "${CONTENT}")
+      string(FIND "${CONTENT}" "::fsync(fileno(file_));" _ibmw_mcap_fsync_pos)
+      if(_ibmw_mcap_fsync_pos EQUAL -1)
+        string(REPLACE "std::fflush(file_);" "std::fflush(file_); ::fsync(fileno(file_));" CONTENT "${CONTENT}")
+        file(WRITE ${mcap_SOURCE_DIR}/cpp/mcap/include/mcap/writer.inl "${CONTENT}")
+      endif()
     endif()
 
     add_library(mcap INTERFACE)
