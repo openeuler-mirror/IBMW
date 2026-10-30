@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <condition_variable>
 #include <deque>
@@ -46,6 +47,17 @@ class RecordAction {
       std::string compression_mode = "zstd";
       std::string compression_level = "default";
       bool new_folder_daily = false;
+      // Disk usage limits, checked only when a bag file or folder is opened;
+      // 0 disables a limit.
+      // Writing pauses (messages are dropped) while the bag disk has less
+      // free space than this; rechecked at most once a second.
+      uint32_t min_free_space_m = 0;
+      // Oldest ibmwbag_YYYYMMDD_hhmmss folders under bag_path are removed so
+      // that at most this many remain, the current one included.
+      uint32_t max_folder_num = 0;
+      // Oldest bag files of the current folder are removed so that their
+      // total size stays within this limit (the current file is kept).
+      uint32_t max_total_size_m = 0;
     };
 
     StoragePolicy storage_policy;
@@ -170,6 +182,7 @@ class RecordAction {
 
   size_t GetFileSize() const;
   bool IsNewFolderNeeded(uint64_t timestamp) const;
+  bool HasEnoughFreeSpace();
 
   size_t GetDbFileSize() const;
 
@@ -254,6 +267,24 @@ class RecordAction {
   // Indicates whether currently in the process of writing cached messages,
   // used to avoid triggering splitting and causing recursion during cache flush.
   bool writing_cached_messages_ = false;
+
+  // Set while writing is paused for lack of free space (min_free_space_m).
+  bool write_paused_ = false;
+  std::chrono::steady_clock::time_point next_space_check_;
 };
+
+// Bag retention helpers (EXT-021), used when a bag folder or file is opened.
+namespace bag_retention {
+
+// Removes the oldest "ibmwbag_YYYYMMDD_hhmmss" directories directly under
+// `parent` (never `keep`, never symbolic links or other names) so that at
+// most `max_num` such directories remain.
+void PruneBagFolders(const std::filesystem::path& parent, const std::filesystem::path& keep, uint32_t max_num);
+
+// Removes the oldest of `files` (relative to `dir`), never the last one,
+// while their total size exceeds `max_bytes`.
+void PruneBagFiles(const std::filesystem::path& dir, std::deque<MetaData::FileMeta>& files, uint64_t max_bytes);
+
+}  // namespace bag_retention
 
 }  // namespace ibmw::extensions::record_playback_extension

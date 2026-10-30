@@ -3,10 +3,12 @@
 
 #include "record_playback_ext/record_action.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <string>
+#include <system_error>
 #include <unordered_set>
 #include <vector>
 
@@ -35,6 +37,9 @@ struct convert<ibmw::extensions::record_playback_extension::RecordAction::Option
     storage_policy["compression_mode"] = rhs.storage_policy.compression_mode;
     storage_policy["compression_level"] = rhs.storage_policy.compression_level;
     storage_policy["new_folder_daily"] = rhs.storage_policy.new_folder_daily;
+    storage_policy["min_free_space_m"] = rhs.storage_policy.min_free_space_m;
+    storage_policy["max_folder_num"] = rhs.storage_policy.max_folder_num;
+    storage_policy["max_total_size_m"] = rhs.storage_policy.max_total_size_m;
 
     node["storage_policy"] = storage_policy;
 
@@ -119,6 +124,15 @@ struct convert<ibmw::extensions::record_playback_extension::RecordAction::Option
 
       if (storage_policy["new_folder_daily"])
         rhs.storage_policy.new_folder_daily = storage_policy["new_folder_daily"].as<bool>();
+
+      if (storage_policy["min_free_space_m"])
+        rhs.storage_policy.min_free_space_m = storage_policy["min_free_space_m"].as<uint32_t>();
+
+      if (storage_policy["max_folder_num"])
+        rhs.storage_policy.max_folder_num = storage_policy["max_folder_num"].as<uint32_t>();
+
+      if (storage_policy["max_total_size_m"])
+        rhs.storage_policy.max_total_size_m = storage_policy["max_total_size_m"].as<uint32_t>();
     }
 
     if (node["extra_attributes"] && node["extra_attributes"].IsMap()) {
@@ -713,6 +727,12 @@ bool RecordAction::IsNewFolderNeeded(uint64_t timestamp) const {
 }
 
 void RecordAction::AddRecordImpl(OneRecord&& record) {
+  if (write_paused_) [[unlikely]] {
+    if (std::chrono::steady_clock::now() < next_space_check_) return;
+    OpenNewMcapToRecord(record.log_timestamp);
+    if (write_paused_) return;
+  }
+
   // try to open a new
   if (!writing_cached_messages_ && cur_data_size_ * estimated_overhead_ >= max_bag_size_) [[unlikely]] {
     size_t original_cur_data_size = cur_data_size_;
@@ -889,6 +909,26 @@ void RecordAction::SetMcapOptions() {
   mcap_options.compression_level = compression_level_map[options_.storage_policy.compression_level];
 }
 
+bool RecordAction::HasEnoughFreeSpace() {
+  if (options_.storage_policy.min_free_space_m == 0) return true;
+  const uint64_t required = static_cast<uint64_t>(options_.storage_policy.min_free_space_m) * 1024 * 1024;
+  std::error_code ec;
+  const auto space = std::filesystem::space(real_bag_path_, ec);
+  if (ec || space.available >= required) {
+    if (ec) MW_WARN("Can not get free space of '{}': {}", real_bag_path_.string(), ec.message());
+    if (write_paused_) MW_INFO("Free space of '{}' is back, recording resumes.", real_bag_path_.string());
+    write_paused_ = false;
+    return true;
+  }
+  if (!write_paused_) {
+    MW_ERROR("Free space of '{}' is {} MB, below min_free_space_m {} MB: recording pauses.",
+             real_bag_path_.string(), space.available / (1024 * 1024), options_.storage_policy.min_free_space_m);
+  }
+  write_paused_ = true;
+  next_space_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  return false;
+}
+
 bool RecordAction::OpenNewFolderToRecord() {
   auto tm = ibmw::common::util::GetCurTm();
   char buf[17];  // _YYYYMMDD_hhmmss
@@ -908,6 +948,10 @@ bool RecordAction::OpenNewFolderToRecord() {
   } catch (const std::filesystem::filesystem_error& e) {
     MW_WARN("Create directory '{}' failed: {}", new_real_bag_path.string(), e.what());
     return false;
+  }
+
+  if (options_.storage_policy.max_folder_num > 0) {
+    bag_retention::PruneBagFolders(parent_bag_path_, new_real_bag_path, options_.storage_policy.max_folder_num);
   }
 
   real_bag_path_ = new_real_bag_path;
@@ -939,6 +983,11 @@ bool RecordAction::OpenNewFolderToRecord() {
 
 void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
   CloseRecord();
+  if (!HasEnoughFreeSpace()) {
+    writer_.reset();
+    cur_mcap_file_path_.clear();
+    return;
+  }
   writer_ = std::make_unique<mcap::McapWriter>();
 
   char time_buf[16];
@@ -1002,6 +1051,10 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
     std::filesystem::remove(real_bag_path_ / itr->path);
     metadata_.files.erase(itr);
   }
+  if (options_.storage_policy.max_total_size_m > 0) {
+    bag_retention::PruneBagFiles(real_bag_path_, metadata_.files,
+                                 static_cast<uint64_t>(options_.storage_policy.max_total_size_m) * 1024 * 1024);
+  }
 
   YAML::Node node;
   node["ibmw_bagfile_information"] = metadata_;
@@ -1021,5 +1074,76 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
   }
   writing_cached_messages_ = false;
 }
+
+namespace bag_retention {
+
+namespace {
+
+// "ibmwbag_YYYYMMDD_hhmmss", as created by OpenNewFolderToRecord().
+bool IsBagFolderName(const std::string& name) {
+  constexpr std::string_view kPrefix = "ibmwbag_";
+  if (name.size() != kPrefix.size() + 15 || name.compare(0, kPrefix.size(), kPrefix) != 0) return false;
+  for (size_t i = kPrefix.size(); i < name.size(); ++i) {
+    const bool sep = i == kPrefix.size() + 8;
+    if (sep ? name[i] != '_' : (name[i] < '0' || name[i] > '9')) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+void PruneBagFolders(const std::filesystem::path& parent, const std::filesystem::path& keep, uint32_t max_num) {
+  if (max_num == 0) return;
+  std::vector<std::string> names;
+  std::error_code ec;
+  for (std::filesystem::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec)) {
+    auto name = it->path().filename().string();
+    if (!IsBagFolderName(name) || it->path() == keep) continue;
+    // A symbolic link is not a folder this recorder created: never removed.
+    if (!it->is_directory(ec) || it->is_symlink(ec)) continue;
+    names.push_back(std::move(name));
+  }
+  if (ec) {
+    MW_WARN("Can not list bag folders in '{}': {}", parent.string(), ec.message());
+    return;
+  }
+  // `keep` counts as one; the names sort by their timestamp.
+  if (names.size() + 1 <= max_num) return;
+  std::sort(names.begin(), names.end());
+  const size_t remove_num = names.size() + 1 - max_num;
+  for (size_t i = 0; i < remove_num; ++i) {
+    const auto path = parent / names[i];
+    std::filesystem::remove_all(path, ec);
+    if (ec) {
+      MW_WARN("Remove old bag folder '{}' failed: {}", path.string(), ec.message());
+    } else {
+      MW_INFO("Removed old bag folder '{}' (max_folder_num {}).", path.string(), max_num);
+    }
+  }
+}
+
+void PruneBagFiles(const std::filesystem::path& dir, std::deque<MetaData::FileMeta>& files, uint64_t max_bytes) {
+  std::vector<uint64_t> sizes;
+  sizes.reserve(files.size());
+  uint64_t total = 0;
+  for (const auto& file : files) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(dir / file.path, ec);
+    sizes.push_back(ec ? 0 : size);
+    total += sizes.back();
+  }
+  size_t removed = 0;
+  while (total > max_bytes && files.size() - removed > 1) {
+    const auto path = dir / files[removed].path;
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (ec) MW_WARN("Remove old bag file '{}' failed: {}", path.string(), ec.message());
+    total -= sizes[removed];
+    ++removed;
+  }
+  files.erase(files.begin(), files.begin() + static_cast<std::ptrdiff_t>(removed));
+}
+
+}  // namespace bag_retention
 
 }  // namespace ibmw::extensions::record_playback_extension
