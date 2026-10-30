@@ -32,6 +32,9 @@ ALL_SAMPLES=(
   iox_loaned_ctx
   iox_send
   shm_send
+  iox_loan_v2
+  shm_loan_v2
+  shm_loaned_ctx
   dds_loaned
   dds_send_shm
   dds_send_tcp
@@ -169,9 +172,9 @@ clean_runtime_state() {
   # iceoryx lock from the previous lane can make the next iceoryx lane publish
   # into the wrong runtime and produce zero samples (or trip a publisher crash).
   # Keep this cleanup local to the benchmark process names used by this matrix.
-  ps -eo pid=,comm= | awk '$2 ~ /^(iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|shm_send_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_)/ {print $1}' | xargs -r kill -TERM 2>/dev/null || true
+  ps -eo pid=,comm= | awk '$2 ~ /^(iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|shm_send_|iox_loan_v2_|shm_loan_v2_|shm_loaned_ctx_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_)/ {print $1}' | xargs -r kill -TERM 2>/dev/null || true
   sleep 1
-  ps -eo pid=,comm= | awk '$2 ~ /^(iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|shm_send_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_)/ {print $1}' | xargs -r kill -9 2>/dev/null || true
+  ps -eo pid=,comm= | awk '$2 ~ /^(iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|shm_send_|iox_loan_v2_|shm_loan_v2_|shm_loaned_ctx_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_)/ {print $1}' | xargs -r kill -9 2>/dev/null || true
   rm -rf /dev/shm/fastdds_* /dev/shm/fast_datasharing_* \
          /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* \
          /dev/shm/iceoryx_* /dev/shm/iox_* /dev/shm/iox-* \

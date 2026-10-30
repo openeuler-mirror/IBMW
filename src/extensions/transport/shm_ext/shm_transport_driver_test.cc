@@ -31,6 +31,7 @@
 #include "base/url_encode.h"
 #include "cpp/util/buffer_array_allocator.h"
 #include "shm_ext/shm_bus.h"
+#include "shm_ext/shm_ctx_publisher.h"
 #include "shm_ext/shm_transport_driver.h"
 #include "yaml-cpp/yaml.h"
 
@@ -873,6 +874,41 @@ TEST_F(ShmDriverTest, SerializedLoanGrows) {
   d.PublishLoaned(h);
   ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == 1; }));
   EXPECT_EQ(rx.Blob(0), msg.data);
+}
+
+// EXT-29 ShmCtxMetaPublisher (shm_ctx_publisher.h) drives the ctx-meta loan
+// through the TransportDriver base pointer: serialize-into-chunk + publish,
+// delivered to a standard handler; null driver/message and an unregistered
+// topic fail without holding a loan.
+TEST_F(ShmDriverTest, CtxMetaPublisherHelper) {
+  auto& d = Init();
+  const auto info = BlobInfo(UniqueTopic());
+  Received rx;
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.OnMessage(Handler(info, &rx)));
+  StopGuard stop{this};
+  d.Start();
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(info.topic_name, kBlobType)); }));
+
+  transport::TransportDriver* base = &d;
+  ShmCtxMetaPublisher pub(base, std::string(info.topic_name), kBlobType, info.msg_type_support_ref);
+  EXPECT_EQ(pub.info().topic_name, info.topic_name);
+  auto ctx = PubContext();
+  BlobMsg msg{MakeBlob(10000, 'c')};
+  EXPECT_FALSE(pub.Publish(*ctx, nullptr));
+  // Wait per sample: the default delivery is latest-only (queue depth 1).
+  for (size_t i = 1; i <= 3; ++i) {
+    ASSERT_TRUE(pub.Publish(*ctx, &msg));
+    ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == i; }));
+  }
+  EXPECT_EQ(rx.Blob(2), msg.data);
+  EXPECT_EQ(rx.Origin(), "test");
+  EXPECT_EQ(Publisher(StdUrl(info.topic_name, kBlobType))->Outstanding(), 0u);
+
+  ShmCtxMetaPublisher no_driver(nullptr, std::string(info.topic_name), kBlobType, info.msg_type_support_ref);
+  EXPECT_FALSE(no_driver.Publish(*ctx, &msg));
+  ShmCtxMetaPublisher unregistered(base, UniqueTopic("/unregistered"), kBlobType, info.msg_type_support_ref);
+  EXPECT_FALSE(unregistered.Publish(*ctx, &msg));
 }
 
 // ============================================================ retained loans

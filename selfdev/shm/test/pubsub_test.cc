@@ -469,5 +469,48 @@ TEST(ShmPubSubTest, ConcurrentThreads) {
   EXPECT_EQ(taken.load() + st.evictions, st.deliveries);
 }
 
+// PS-17 Hot chunk reuse: a chunk the subscriber released is the next one
+// loaned (Loan drains returns before popping the LIFO free list), so a
+// one-in-flight stream keeps writing the same, cached chunk; a chunk still
+// held is never handed out.
+TEST(ShmPubSubTest, ReleasedChunkIsReusedFirst) {
+  auto url = UniqueUrl("ps17");
+  Publisher pub(url);
+  Subscriber sub(url, SubscriberOptions{4, QueueFullPolicy::kDiscardOldest, 4});
+  ASSERT_TRUE(Connected(pub, sub));
+  void* first = nullptr;
+  for (int i = 0; i < 100; ++i) {
+    auto l = pub.Loan(64 * 1024);
+    ASSERT_TRUE(l.ok()) << i << " " << ErrorName(l.error());
+    if (i == 0) first = *l;
+    EXPECT_EQ(*l, first) << "iteration " << i;
+    FillPattern(*l, 64 * 1024, i);
+    pub.Publish(*l);
+    const void* taken = nullptr;
+    ASSERT_TRUE(WaitFor([&] {
+      auto t = sub.Take();
+      if (t) taken = *t;
+      return taken != nullptr;
+    }));
+    EXPECT_EQ(CheckPattern(taken, 64 * 1024), static_cast<uint64_t>(i));
+    sub.Release(taken);
+  }
+  // While the subscriber holds it, the chunk is not reused.
+  auto l = pub.Loan(64 * 1024);
+  ASSERT_TRUE(l.ok());
+  pub.Publish(*l);
+  const void* held = nullptr;
+  ASSERT_TRUE(WaitFor([&] {
+    auto t = sub.Take();
+    if (t) held = *t;
+    return held != nullptr;
+  }));
+  auto other = pub.Loan(64 * 1024);
+  ASSERT_TRUE(other.ok());
+  EXPECT_NE(*other, held);
+  pub.Release(*other);
+  sub.Release(held);
+}
+
 }  // namespace
 }  // namespace ibmw::selfdev::shm

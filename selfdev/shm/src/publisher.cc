@@ -338,7 +338,11 @@ Result<void*> PublisherImpl::Loan(uint32_t payload_size, uint32_t alignment) noe
   std::lock_guard<std::mutex> lock(mu_);
   if (shutting_down_) return Error::kShuttingDown;
   if (loans_ >= kMaxChunksAllocatedPerPublisher) return Error::kTooManyLoans;
-  if (free_[shift].empty()) DrainAllLocked();
+  // Reclaim what subscribers returned since the last push first: the free
+  // list is LIFO, so the chunk released just now (still in cache) is reused
+  // instead of alternating with a cold one. Costs one load per connection
+  // when nothing was returned.
+  DrainAllLocked();
   if (free_[shift].empty()) {
     auto g = GrowLocked(shift);
     if (!g) {

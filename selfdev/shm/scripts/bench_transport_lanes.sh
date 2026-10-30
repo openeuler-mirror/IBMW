@@ -6,6 +6,9 @@
 #   iox_send      iceoryx (RouDi) via ibmw::transport::Send()
 #   shm_send      the self-developed shm transport (shm_ext), same modules
 #   dds_send_shm  Fast DDS SHM transport (reference, needs a DDS build)
+# or, with LANES, the zero-copy loan lanes:
+#   iox_loan_v2 / shm_loan_v2        POD loan (LoanedSample<T>), iceoryx vs shm
+#   iox_loaned_ctx / shm_loaned_ctx  ctx-meta loan (CDR serialized into the chunk)
 # This is a benchmark, not a test: it prints medians per lane and payload,
 # marks runs that produced no samples as NO SAMPLES (e.g. iox_send at 4MB with
 # the default RouDi pool) and always exits 0.
@@ -15,6 +18,7 @@
 # IBMW_BUILD_DDS_EXTENSION=ON for dds_send_shm), then build the targets
 #   iox_send_{publisher,subscriber}_app shm_send_{publisher,subscriber}_app iox-roudi
 #   ibmw_samples_cpp_transport_benchmark_{iox,shm}_send_build_all
+#   (loan lanes: {iox,shm}_loan_v2_*_app iox_loaned_ctx_*_app shm_loaned_ctx_*_app and their _build_all)
 #   (dds_send_shm_{publisher,subscriber}_app ibmw_samples_cpp_transport_benchmark_dds_send_shm_build_all)
 #
 # Usage: bench_transport_lanes.sh [latency] [cpu]        (default: both)

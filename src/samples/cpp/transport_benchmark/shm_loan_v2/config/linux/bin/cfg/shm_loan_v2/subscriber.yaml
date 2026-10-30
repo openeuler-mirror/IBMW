@@ -1,0 +1,50 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# shm_loan_v2 subscriber process configuration: iox_loan_v2/subscriber.yaml with the
+# extension item switched to the self-developed shm transport. driver_name
+# "iceoryx" keeps the messaging section unchanged. No RouDi daemon is needed.
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          driver_name: iceoryx
+          shm_init_size: 4096
+          runtime_id: "shm_loan_v2_sub"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: iceoryx
+        options:
+          listener_thread_name: "shm_sub_listen"
+    subscribers:
+      - topic: "iox_bench_loan_v2_topic"
+        enable_drivers: [iceoryx]
+
+  modules:
+    modules:
+      - name: IoxLoanV2SubscriberModule
+        log_level: INFO
+
+IoxLoanV2SubscriberModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: shm_loan_v2_1KB
+    warmup_messages: 50
+    csv_path: /tmp/ibmw_bench/shm_bench_lat.csv

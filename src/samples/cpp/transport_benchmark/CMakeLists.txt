@@ -69,6 +69,8 @@ add_subdirectory(dds_send_tcp)
 add_subdirectory(net_send_tcp)
 # Phase 7 §7.3 Step 3.8: encapsulated user-level loan path benchmark.
 add_subdirectory(iox_loan_v2)
+add_subdirectory(shm_loan_v2)
+add_subdirectory(shm_loaned_ctx)
 
 # Minimal cross-middleware A/B/C interop endpoint.  It is deliberately
 # separate from the historical matrix so existing targets and ABI remain
@@ -106,6 +108,14 @@ foreach(_matrix_dep
         iox_loaned_ctx_subscriber_app
         iox_send_publisher_app
         iox_send_subscriber_app
+        iox_loan_v2_publisher_app
+        iox_loan_v2_subscriber_app
+        shm_send_publisher_app
+        shm_send_subscriber_app
+        shm_loan_v2_publisher_app
+        shm_loan_v2_subscriber_app
+        shm_loaned_ctx_publisher_app
+        shm_loaned_ctx_subscriber_app
         net_send_tcp_publisher_app
         net_send_tcp_subscriber_app)
   if(TARGET ${_matrix_dep})
