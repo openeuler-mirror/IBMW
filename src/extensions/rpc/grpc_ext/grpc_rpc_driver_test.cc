@@ -22,10 +22,12 @@
 #include <vector>
 
 #include <boost/asio.hpp>
+#include <stdexcept>
 
 #include "cpp/util/string.h"
 #include "grpc_ext/grpc/status.h"
 #include "grpc_ext/grpc/timeout.h"
+#include "grpc_ext/grpc_extension.h"
 #include "grpc_ext/grpc_rpc_driver.h"
 
 namespace ibmw::extensions::grpc_extension {
@@ -343,6 +345,17 @@ TEST_F(GrpcRpcDriverTest, ServiceErrorEndsTheCallAtOnce) {
       EXPECT_EQ(rsp, 4);
     }
   }
+}
+
+// EXT-001: the plaintext server warns unless it is reachable from this
+// host only, and a bad listen address fails initialization.
+TEST(GrpcListenAddressTest, LoopbackIsRecognizedAndBadAddressesThrow) {
+  EXPECT_TRUE(GrpcExtension::IsLoopbackListenAddress("127.0.0.1"));
+  EXPECT_TRUE(GrpcExtension::IsLoopbackListenAddress("127.10.0.1"));
+  EXPECT_FALSE(GrpcExtension::IsLoopbackListenAddress("0.0.0.0"));
+  EXPECT_FALSE(GrpcExtension::IsLoopbackListenAddress("192.168.1.10"));
+  EXPECT_THROW(GrpcExtension::IsLoopbackListenAddress("localhost"), std::invalid_argument);
+  EXPECT_THROW(GrpcExtension::IsLoopbackListenAddress("256.0.0.1"), std::invalid_argument);
 }
 
 }  // namespace

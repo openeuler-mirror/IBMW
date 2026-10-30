@@ -105,6 +105,18 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
   });
 
   if (!options_.listen_ip.empty() && options_.listen_port != 0) {
+    // Checked here so that a bad address fails initialization, not start.
+    bool loopback = false;
+    try {
+      loopback = IsLoopbackListenAddress(options_.listen_ip);
+    } catch (const std::invalid_argument& e) {
+      MW_THROW("{}", e.what());
+    }
+    MW_CHECK_WARN(loopback,
+                  "Grpc server listens on {}:{} in plaintext without authentication: every host that can reach it "
+                  "can call all services. Listen on 127.0.0.1 or put it behind a TLS proxy.",
+                  options_.listen_ip, options_.listen_port);
+
     http2_svr_ptr_ = std::make_shared<server::AsioHttp2Server>(asio_executor_ptr_->IO());
     core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStart), [this] {
       http2_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
