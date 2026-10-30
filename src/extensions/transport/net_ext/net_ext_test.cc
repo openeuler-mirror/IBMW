@@ -7,6 +7,7 @@
 // TRANS-018: peer-supplied meta cannot override framework "ibmw-" keys.
 // TRANS-019: a late or missing RPC answer neither hangs nor touches freed state.
 // TRANS-027/029/030/031: tcp/udp server receive path and startup.
+// TRANS-028: bounded tcp send queue.
 
 #include <gtest/gtest.h>
 
@@ -27,6 +28,7 @@
 #include "base/buffer_util.h"
 #include "cpp/util/string.h"
 #include "engine/service/service_catalog.h"
+#include "net_base/asio_tcp_cli.h"
 #include "net_base/asio_tcp_svr.h"
 #include "net_base/asio_udp_svr.h"
 #include "net_ext/http/http_rpc_driver.h"
@@ -206,6 +208,95 @@ TEST(NetTcpServerTest, OversizedMessageClosesSession) {
   EXPECT_TRUE(ec);
   EXPECT_FALSE(received.WaitFor(1, 100ms));
   svr->Shutdown();
+}
+
+// Reads from `sock` until nothing arrives for a while; returns the bytes read.
+size_t DrainSocket(Tcp::socket& sock) {
+  sock.non_blocking(true);
+  std::vector<char> chunk(1024 * 1024);
+  size_t bytes = 0;
+  for (auto idle_since = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - idle_since < 1s;) {
+    boost::system::error_code ec;
+    const size_t n = sock.read_some(asio::buffer(chunk), ec);
+    if (n > 0) {
+      bytes += n;
+      idle_since = std::chrono::steady_clock::now();
+    } else if (ec == asio::error::would_block) {
+      std::this_thread::sleep_for(5ms);
+    } else {
+      break;
+    }
+  }
+  return bytes;
+}
+
+// TRANS-028: sending to a peer that does not read is bounded: messages
+// beyond max_send_queue_size are dropped instead of queued without limit.
+TEST(NetTcpServerTest, SendQueueToSlowPeerIsBounded) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeTcpPort();
+  auto svr = std::make_shared<ibmw::common::net::AsioTcpServer>(io.Io());
+  svr->RegisterMsgHandle([&received](const Tcp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    received.Add(ep, buf);
+  });
+  svr->Initialize({.ep = Tcp::endpoint(kLoopback, port), .max_send_queue_size = 1024 * 1024});
+  svr->Start();
+
+  asio::io_context cli_io;
+  Tcp::socket sock(cli_io);
+  sock.open(Tcp::v4());
+  sock.set_option(asio::socket_base::receive_buffer_size(4096));
+  sock.connect(Tcp::endpoint(kLoopback, port));
+  asio::write(sock, asio::buffer(TcpFrame("hi")));  // makes the session known
+  ASSERT_TRUE(received.WaitFor(1));
+
+  // 64 MiB to a peer not reading: far more than the socket buffers hold.
+  constexpr size_t kMsgSize = 64 * 1024;
+  constexpr size_t kMsgNum = 1000;
+  const Tcp::endpoint peer = sock.local_endpoint();
+  for (size_t i = 0; i < kMsgNum; ++i) {
+    auto buf = std::make_shared<asio::streambuf>();
+    buf->commit(asio::buffer_copy(buf->prepare(kMsgSize), asio::buffer(std::string(kMsgSize, 'd'))));
+    svr->SendMsg(peer, buf);
+  }
+  std::this_thread::sleep_for(300ms);
+
+  const size_t delivered = DrainSocket(sock) / (6 + kMsgSize);
+  EXPECT_GE(delivered, 16u);  // at least the queue limit got through
+  EXPECT_LT(delivered, kMsgNum / 2) << "send queue grew without limit";
+  svr->Shutdown();
+}
+
+// TRANS-028: same bound on the client side.
+TEST(NetTcpClientTest, SendQueueToSlowPeerIsBounded) {
+  IoThreads io;
+  const uint16_t port = FreeTcpPort();
+  asio::io_context svr_io;
+  Tcp::acceptor acceptor(svr_io);
+  acceptor.open(Tcp::v4());
+  acceptor.set_option(asio::socket_base::receive_buffer_size(4096));  // inherited by accepted sockets
+  acceptor.bind(Tcp::endpoint(kLoopback, port));
+  acceptor.listen();
+
+  auto cli = std::make_shared<ibmw::common::net::AsioTcpClient>(io.Io());
+  cli->Initialize({.svr_ep = Tcp::endpoint(kLoopback, port), .max_send_queue_size = 1024 * 1024});
+  cli->Start();
+
+  constexpr size_t kMsgSize = 64 * 1024;
+  constexpr size_t kMsgNum = 1000;
+  for (size_t i = 0; i < kMsgNum; ++i) {
+    auto buf = std::make_shared<asio::streambuf>();
+    buf->commit(asio::buffer_copy(buf->prepare(kMsgSize), asio::buffer(std::string(kMsgSize, 'd'))));
+    cli->SendMsg(buf);
+  }
+  Tcp::socket sock = acceptor.accept();
+  std::this_thread::sleep_for(300ms);
+
+  const size_t delivered = DrainSocket(sock) / (6 + kMsgSize);
+  EXPECT_GE(delivered, 16u);
+  EXPECT_LT(delivered, kMsgNum / 2) << "send queue grew without limit";
+  cli->Shutdown();
 }
 
 // TRANS-031: the udp handler gets the real sender endpoint.

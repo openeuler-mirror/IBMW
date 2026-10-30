@@ -49,6 +49,12 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
     /// Maximum package size
     uint32_t max_recv_size = 1024 * 1024 * 16;
 
+    /// Maximum bytes queued for sending per session (TRANS-028): a peer that
+    /// reads slower than messages are sent makes new messages be dropped
+    /// instead of growing memory without bound. A message is always queued
+    /// if the queue is empty.
+    size_t max_send_queue_size = 256 * 1024 * 1024;
+
     static Options Verify(const Options& verify_options) {
       Options options(verify_options);
 
@@ -309,10 +315,12 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
   struct SessionOptions {
     explicit SessionOptions(const Options& options)
         : max_no_data_duration(options.max_no_data_duration),
-          max_recv_size(options.max_recv_size) {}
+          max_recv_size(options.max_recv_size),
+          max_send_queue_size(options.max_send_queue_size) {}
 
     std::chrono::nanoseconds max_no_data_duration;
     uint32_t max_recv_size;
+    size_t max_send_queue_size;
   };
 
   class Session : public std::enable_shared_from_this<Session> {
@@ -361,6 +369,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
                 while (!data_list_.empty()) {
                   std::list<std::shared_ptr<Streambuf>> tmp_data_list;
                   tmp_data_list.swap(data_list_);
+                  queued_size_ = 0;
 
                   std::vector<char> head_buf(tmp_data_list.size() * kHeadSize);
 
@@ -386,6 +395,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
                               write_data_size, RemoteAddr());
                 }
 
+                queue_full_ = false;  // drained: warn again on the next overflow
                 try {
                   send_sig_timer_.expires_after(std::chrono::seconds(3600));
                   co_await send_sig_timer_.async_wait(boost::asio::use_awaitable);
@@ -572,16 +582,25 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
     void SendMsg(const std::shared_ptr<Streambuf>& msg_buf_ptr) {
       auto self = shared_from_this();
+      // Read here, next to the copy of msg_buf_ptr: a message fanned out to
+      // several sessions has its (shared) cache line contended.
+      const size_t msg_size = msg_buf_ptr->size();
       boost::asio::dispatch(
           session_socket_strand_,
-          [this, self, msg_buf_ptr]() {
+          [this, self, msg_buf_ptr, msg_size]() {
             if (state_.load() != SessionState::kStart) [[unlikely]] {
               MW_WARN("Tcp svr session is closed, will not send current msg.");
               return;
             }
 
+            if (data_list_.empty()) {
+              send_sig_timer_.cancel();
+            } else if (queued_size_ + msg_size > session_options_ptr_->max_send_queue_size) [[unlikely]] {
+              OnSendQueueFull();
+              return;
+            }
+            queued_size_ += msg_size;
             data_list_.emplace_back(msg_buf_ptr);
-            send_sig_timer_.cancel();
           });
     }
 
@@ -594,6 +613,13 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
     bool IsRunning() const { return state_.load() == SessionState::kStart; }
 
    private:
+    [[gnu::cold, gnu::noinline]] void OnSendQueueFull() {
+      if (queue_full_) return;
+      queue_full_ = true;
+      MW_WARN("Tcp svr session send queue to {} is full ({} bytes), dropping messages.", RemoteAddr(),
+              queued_size_);
+    }
+
     enum class SessionState : uint32_t {
       kPreInit,
       kInit,
@@ -626,6 +652,8 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
     std::string remote_addr_;
     std::atomic_bool tick_has_data_ = false;
     std::list<std::shared_ptr<Streambuf>> data_list_;
+    size_t queued_size_ = 0;  // bytes in data_list_
+    bool queue_full_ = false;
   };
 
  private:

@@ -301,7 +301,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
           session_socket_strand_(boost::asio::make_strand(*io_ptr)),
           stream_(session_socket_strand_),
           session_mgr_strand_(boost::asio::make_strand(*io_ptr)),
-          timer_(session_socket_strand_),
+          timer_(session_mgr_strand_),  // used only on the mgr strand (TRANS-025)
           logger_ptr_(logger_ptr),
           http_dispatcher_ptr_(http_dispatcher_ptr) {}
 
