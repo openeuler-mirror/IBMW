@@ -150,12 +150,16 @@ void TimerExecutor::Shutdown() {
     timer_thread_ptr_->join();
 
   timer_thread_ptr_.reset();
+  // The dropped tasks are destroyed after the lock is released: a task's
+  // destructor may call back into this executor.
+  decltype(timing_task_map_) dropped_map;
+  decltype(timing_wheel_vec_) dropped_wheels;
   {
     // DispatchAt() checks start_flag_ under this lock.
     std::unique_lock<std::shared_mutex> lck(tick_mutex_);
     start_flag_.store(false, std::memory_order_relaxed);
-    timing_task_map_.clear();
-    timing_wheel_vec_.clear();
+    dropped_map.swap(timing_task_map_);
+    dropped_wheels.swap(timing_wheel_vec_);
   }
   get_executor_func_ = nullptr;
 }

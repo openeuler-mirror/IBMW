@@ -880,7 +880,8 @@ std::filesystem::path WriteTemporaryConfig(const std::string& prefix, const YAML
   constexpr int kSuffixLen = 5;  // ".yaml"
   std::string path = (std::filesystem::temp_directory_path() / (prefix + "-XXXXXX.yaml")).string();
   const int fd = ::mkstemps(path.data(), kSuffixLen);
-  MW_ASSERT(fd >= 0, "Cannot create temporary {} config: {}", what, std::strerror(errno));
+  const int create_errno = errno;
+  MW_ASSERT(fd >= 0, "Cannot create temporary {} config: {}", what, std::strerror(create_errno));
   size_t written = 0;
   while (written < data.size()) {
     const ssize_t n = ::write(fd, data.data() + written, data.size() - written);

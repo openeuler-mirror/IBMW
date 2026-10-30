@@ -30,7 +30,9 @@ inline const char* ToGrpcStatus(uint32_t code) noexcept {
   }
 }
 
-// The ibmw rpc status a client reports for a non-zero "grpc-status".
+// The ibmw rpc status a client reports for a non-zero "grpc-status". Lossy:
+// several server statuses share one gRPC code (e.g. a serialization failure
+// comes back as SVR_DRIVER_INTERNAL_ERROR).
 inline uint32_t FromGrpcStatus(std::string_view grpc_status) noexcept {
   if (grpc_status == "4") return IBMW_RPC_STATUS_TIMEOUT;
   if (grpc_status == "12") return IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED;

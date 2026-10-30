@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -50,13 +51,16 @@ class RecordAction {
       // Disk usage limits, checked only when a bag file or folder is opened;
       // 0 disables a limit.
       // Writing pauses (messages are dropped) while the bag disk has less
-      // free space than this; rechecked at most once a second.
+      // free space than this; rechecked at most once a second. While paused
+      // no new bag folder is created (a signal record fails to start).
       uint32_t min_free_space_m = 0;
       // Oldest ibmwbag_YYYYMMDD_hhmmss folders under bag_path are removed so
-      // that at most this many remain, the current one included.
+      // that at most this many remain, the current one included. bag_path
+      // must not be shared with another record action or writable by others.
       uint32_t max_folder_num = 0;
-      // Oldest bag files of the current folder are removed so that their
-      // total size stays within this limit (the current file is kept).
+      // When a bag file is opened, the oldest files of the current folder are
+      // removed while their total size exceeds this limit (the new file is
+      // kept): the folder can grow up to this plus one max_bag_size_m.
       uint32_t max_total_size_m = 0;
     };
 
@@ -95,6 +99,12 @@ class RecordAction {
   void InitExecutor(ibmw::executor::ExecutorHandle);
 
   const Options& GetOptions() const { return options_; }
+
+  // Replaces the free space query of min_free_space_m (for tests). Must be
+  // set before Initialize().
+  void SetFreeSpaceQuery(std::function<uintmax_t(const std::filesystem::path&)> query) {
+    free_space_query_ = std::move(query);
+  }
 
   struct StatusSnapshot {
     bool record_enabled = true;
@@ -271,14 +281,16 @@ class RecordAction {
   // Set while writing is paused for lack of free space (min_free_space_m).
   bool write_paused_ = false;
   std::chrono::steady_clock::time_point next_space_check_;
+  std::function<uintmax_t(const std::filesystem::path&)> free_space_query_;
 };
 
 // Bag retention helpers (EXT-021), used when a bag folder or file is opened.
 namespace bag_retention {
 
 // Removes the oldest "ibmwbag_YYYYMMDD_hhmmss" directories directly under
-// `parent` (never `keep`, never symbolic links or other names) so that at
-// most `max_num` such directories remain.
+// `parent` so that at most `max_num` such directories remain, `keep`
+// included. Never removes `keep` or a newer folder, symbolic links or other
+// names.
 void PruneBagFolders(const std::filesystem::path& parent, const std::filesystem::path& keep, uint32_t max_num);
 
 // Removes the oldest of `files` (relative to `dir`), never the last one,

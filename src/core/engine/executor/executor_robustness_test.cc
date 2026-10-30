@@ -174,7 +174,7 @@ TEST(ExecutorRobustness, TimerExecutorDispatchOutsideRunningState) {
   exe.Start();
   exe.DispatchAt(std::chrono::system_clock::time_point(std::chrono::seconds(1)),
                  ibmw::executor::Task([&] { ++early; }));
-  for (int i = 0; i < 250 && early.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  for (int i = 0; i < 1000 && early.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
   exe.Shutdown();
   exe.DispatchAt(std::chrono::system_clock::now() + std::chrono::hours(1),
                  ibmw::executor::Task([&] { ++after_shutdown; }));

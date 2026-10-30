@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <string>
 #include <system_error>
 #include <unordered_set>
@@ -527,10 +528,11 @@ bool RecordAction::StartSignalRecord(uint64_t preparation_duration_s, uint64_t r
         return;
       }
 
-      action->recording_flag_ = true;
-
+      // Set only once the folder is open: a failed start must not block
+      // the next one.
       bool ret = action->OpenNewFolderToRecord();
       MW_REQUIRE(ret, "Open new folder to record failed.");
+      action->recording_flag_ = true;
       filefolder = action->real_bag_path_.string();
 
       uint64_t now = ibmw::common::util::GetCurTimestampNs();
@@ -729,7 +731,12 @@ bool RecordAction::IsNewFolderNeeded(uint64_t timestamp) const {
 void RecordAction::AddRecordImpl(OneRecord&& record) {
   if (write_paused_) [[unlikely]] {
     if (std::chrono::steady_clock::now() < next_space_check_) return;
-    OpenNewMcapToRecord(record.log_timestamp);
+    // The pause may have spanned midnight.
+    if (IsNewFolderNeeded(record.log_timestamp)) {
+      OpenNewFolderToRecord();
+    } else {
+      OpenNewMcapToRecord(record.log_timestamp);
+    }
     if (write_paused_) return;
   }
 
@@ -744,6 +751,8 @@ void RecordAction::AddRecordImpl(OneRecord&& record) {
     } else {
       OpenNewMcapToRecord(record.log_timestamp);
     }
+    // Out of space: no file is open, the record is dropped.
+    if (write_paused_) [[unlikely]] return;
   }
 
   mcap::Message msg{
@@ -912,17 +921,25 @@ void RecordAction::SetMcapOptions() {
 bool RecordAction::HasEnoughFreeSpace() {
   if (options_.storage_policy.min_free_space_m == 0) return true;
   const uint64_t required = static_cast<uint64_t>(options_.storage_policy.min_free_space_m) * 1024 * 1024;
-  std::error_code ec;
-  const auto space = std::filesystem::space(real_bag_path_, ec);
-  if (ec || space.available >= required) {
-    if (ec) MW_WARN("Can not get free space of '{}': {}", real_bag_path_.string(), ec.message());
-    if (write_paused_) MW_INFO("Free space of '{}' is back, recording resumes.", real_bag_path_.string());
+  uintmax_t available = 0;
+  if (free_space_query_) {
+    available = free_space_query_(parent_bag_path_);
+  } else {
+    std::error_code ec;
+    available = std::filesystem::space(parent_bag_path_, ec).available;
+    if (ec) {
+      MW_WARN("Can not get free space of '{}': {}", parent_bag_path_.string(), ec.message());
+      available = std::numeric_limits<uintmax_t>::max();
+    }
+  }
+  if (available >= required) {
+    if (write_paused_) MW_INFO("Free space of '{}' is back, recording resumes.", parent_bag_path_.string());
     write_paused_ = false;
     return true;
   }
   if (!write_paused_) {
     MW_ERROR("Free space of '{}' is {} MB, below min_free_space_m {} MB: recording pauses.",
-             real_bag_path_.string(), space.available / (1024 * 1024), options_.storage_policy.min_free_space_m);
+             parent_bag_path_.string(), available / (1024 * 1024), options_.storage_policy.min_free_space_m);
   }
   write_paused_ = true;
   next_space_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
@@ -930,6 +947,12 @@ bool RecordAction::HasEnoughFreeSpace() {
 }
 
 bool RecordAction::OpenNewFolderToRecord() {
+  // Short of space, only the first folder is created (writing starts
+  // paused): a new folder would stay empty and could push out folders with
+  // data under max_folder_num.
+  const bool has_space = HasEnoughFreeSpace();
+  if (!has_space && !real_bag_path_.empty()) return false;
+
   auto tm = ibmw::common::util::GetCurTm();
   char buf[17];  // _YYYYMMDD_hhmmss
   snprintf(buf, sizeof(buf), "_%04d%02d%02d_%02d%02d%02d",
@@ -950,8 +973,22 @@ bool RecordAction::OpenNewFolderToRecord() {
     return false;
   }
 
-  if (options_.storage_policy.max_folder_num > 0) {
-    bag_retention::PruneBagFolders(parent_bag_path_, new_real_bag_path, options_.storage_policy.max_folder_num);
+  if (has_space && options_.storage_policy.max_folder_num > 0) {
+    // Removing whole folders can take long: asynchronous once recording.
+    if (state_.load() != State::kStart) {
+      bag_retention::PruneBagFolders(parent_bag_path_, new_real_bag_path, options_.storage_policy.max_folder_num);
+    } else {
+      auto task_state = task_state_;
+      executor_for_async_.Dispatch([task_state, parent = parent_bag_path_, keep = new_real_bag_path,
+                                    max_num = options_.storage_policy.max_folder_num]() {
+        RecordAction* action = nullptr;
+        if (!task_state || !task_state->Enter(action)) {
+          return;
+        }
+        struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
+        bag_retention::PruneBagFolders(parent, keep, max_num);
+      });
+    }
   }
 
   real_bag_path_ = new_real_bag_path;
@@ -984,7 +1021,7 @@ bool RecordAction::OpenNewFolderToRecord() {
 void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
   CloseRecord();
   if (!HasEnoughFreeSpace()) {
-    writer_.reset();
+    writer_ = std::make_unique<mcap::McapWriter>();  // not opened: writes fail
     cur_mcap_file_path_.clear();
     return;
   }
@@ -1094,25 +1131,30 @@ bool IsBagFolderName(const std::string& name) {
 
 void PruneBagFolders(const std::filesystem::path& parent, const std::filesystem::path& keep, uint32_t max_num) {
   if (max_num == 0) return;
-  std::vector<std::string> names;
+  const auto keep_name = keep.filename().string();
+  size_t folder_num = 1;  // `keep`
+  std::vector<std::string> older;
   std::error_code ec;
   for (std::filesystem::directory_iterator it(parent, ec), end; !ec && it != end; it.increment(ec)) {
     auto name = it->path().filename().string();
-    if (!IsBagFolderName(name) || it->path() == keep) continue;
+    if (!IsBagFolderName(name) || name == keep_name) continue;
     // A symbolic link is not a folder this recorder created: never removed.
-    if (!it->is_directory(ec) || it->is_symlink(ec)) continue;
-    names.push_back(std::move(name));
+    std::error_code status_ec;
+    if (!std::filesystem::is_directory(it->symlink_status(status_ec)) || status_ec) continue;
+    ++folder_num;
+    // A newer folder (another day started meanwhile) is never removed.
+    if (name < keep_name) older.push_back(std::move(name));
   }
   if (ec) {
     MW_WARN("Can not list bag folders in '{}': {}", parent.string(), ec.message());
     return;
   }
-  // `keep` counts as one; the names sort by their timestamp.
-  if (names.size() + 1 <= max_num) return;
-  std::sort(names.begin(), names.end());
-  const size_t remove_num = names.size() + 1 - max_num;
+  if (folder_num <= max_num) return;
+  // The names sort by their timestamp.
+  std::sort(older.begin(), older.end());
+  const size_t remove_num = std::min(folder_num - max_num, older.size());
   for (size_t i = 0; i < remove_num; ++i) {
-    const auto path = parent / names[i];
+    const auto path = parent / older[i];
     std::filesystem::remove_all(path, ec);
     if (ec) {
       MW_WARN("Remove old bag folder '{}' failed: {}", path.string(), ec.message());
