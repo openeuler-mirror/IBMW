@@ -37,6 +37,15 @@ uint32_t CreateCount(void* library) {
                            : reinterpret_cast<uint32_t (*)()>(symbol)();
 }
 
+// Creations so far if the fixture is already mapped (it may stay mapped
+// across --gtest_repeat iterations), else 0.
+uint32_t MappedCreateCount(const char* path) {
+#if defined(RTLD_NOLOAD)
+  if (Library mapped(dlopen(path, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD)); mapped) return CreateCount(mapped.get());
+#endif
+  return 0;
+}
+
 uint32_t InitializationCount(void* library, const char* name) {
   auto* symbol = dlsym(library, name);
   EXPECT_NE(symbol, nullptr) << dlerror();
@@ -63,9 +72,13 @@ TEST(ExtensionLoaderAbi, RejectsRuntimeV1WithoutCallingEitherInitializer) {
   EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), 0u);
 }
 
+// Counters are compared against their value before the test: a fixture may
+// stay mapped across --gtest_repeat iterations (not unloadable, or leaked).
 TEST(ExtensionLoaderAbi, InitializesMatchingRuntimeV2AcrossDso) {
   auto library = OpenFixture(EXTENSION_RUNTIME_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t engine_inits = InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount");
+  const uint32_t runtime_inits = InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount");
   Engine engine;
   ExtensionBus bus;
   bus.RegisterCorePtr(&engine);
@@ -73,41 +86,44 @@ TEST(ExtensionLoaderAbi, InitializesMatchingRuntimeV2AcrossDso) {
   options["items"][0]["name"] = "extension-v2-fixture";
   options["items"][0]["path"] = EXTENSION_RUNTIME_V2_FIXTURE_PATH;
   EXPECT_NO_THROW(bus.Initialize(options));
-  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount"), 0u);
-  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), 1u);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount"), engine_inits);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), runtime_inits + 1);
   bus.Shutdown();
 }
 
 TEST(ExtensionLoaderAbi, V2OnlyFixtureFailsClosedForLegacyLoader) {
+  const uint32_t creates = MappedCreateCount(EXTENSION_V2_FIXTURE_PATH);
   auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 
   dlerror();
   EXPECT_EQ(dlsym(library.get(), "IbmwExtEntry"), nullptr);
-  EXPECT_EQ(CreateCount(library.get()), 0U);
+  EXPECT_EQ(CreateCount(library.get()), creates);
 }
 
 TEST(ExtensionLoaderAbi, LoadsValidatedV2OnlyFixture) {
   auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t creates = CreateCount(library.get());
 
   ExtensionLoader loader;
   loader.LoadExtension(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(loader.GetExtension(), nullptr);
   EXPECT_EQ(loader.GetExtension()->Name(), "extension-v2-fixture");
-  EXPECT_EQ(CreateCount(library.get()), 1U);
+  EXPECT_EQ(CreateCount(library.get()), creates + 1);
   loader.UnLoadExtension();
 }
 
 TEST(ExtensionLoaderAbi, FallsBackToLegacyEntry) {
   auto library = OpenFixture(EXTENSION_LEGACY_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t creates = CreateCount(library.get());
 
   ExtensionLoader loader;
   loader.LoadExtension(EXTENSION_LEGACY_FIXTURE_PATH);
   ASSERT_NE(loader.GetExtension(), nullptr);
   EXPECT_EQ(loader.GetExtension()->Name(), "extension-v2-fixture");
-  EXPECT_EQ(CreateCount(library.get()), 1U);
+  EXPECT_EQ(CreateCount(library.get()), creates + 1);
   loader.UnLoadExtension();
 }
 
@@ -161,6 +177,7 @@ TEST(ExtensionLoaderAbi, RejectsSecondLoadAndKeepsFirstExtension) {
 }
 
 TEST(ExtensionLoaderAbi, DestroyThrowLeaksDsoAndClearsLoaderState) {
+  const uint32_t creates = MappedCreateCount(EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH);  // leaked by a repeat
   ExtensionLoader loader;
   loader.LoadExtension(EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH);
   ASSERT_NE(loader.GetExtension(), nullptr);
@@ -176,7 +193,7 @@ TEST(ExtensionLoaderAbi, DestroyThrowLeaksDsoAndClearsLoaderState) {
       dlopen(EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH,
              RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD));
   ASSERT_NE(still_mapped, nullptr) << dlerror();
-  EXPECT_EQ(CreateCount(still_mapped.get()), 1U);
+  EXPECT_EQ(CreateCount(still_mapped.get()), creates + 1);
 #endif
 }
 
