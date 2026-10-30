@@ -65,6 +65,10 @@ int main(int argc, char** argv) {
       return -1;
     }
     pub.SetIceoryxDriver(driver);
+    if (!pub.RegisterWithDriver()) {
+      std::cerr << "iox_loaned_pod publisher: POD registration failed\n";
+      return -1;
+    }
 
     engine.Start();
     engine.Shutdown();

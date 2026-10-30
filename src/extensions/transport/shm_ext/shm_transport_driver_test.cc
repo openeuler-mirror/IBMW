@@ -32,6 +32,7 @@
 #include "cpp/util/buffer_array_allocator.h"
 #include "shm_ext/shm_bus.h"
 #include "shm_ext/shm_ctx_publisher.h"
+#include "shm_ext/shm_pod_publisher.h"
 #include "shm_ext/shm_transport_driver.h"
 #include "yaml-cpp/yaml.h"
 
@@ -909,6 +910,62 @@ TEST_F(ShmDriverTest, CtxMetaPublisherHelper) {
   EXPECT_FALSE(no_driver.Publish(*ctx, &msg));
   ShmCtxMetaPublisher unregistered(base, UniqueTopic("/unregistered"), kBlobType, info.msg_type_support_ref);
   EXPECT_FALSE(unregistered.Publish(*ctx, &msg));
+}
+
+// EXT-30 ShmRawPodPublisher (shm_pod_publisher.h, counterpart of iceoryx_ext's
+// CreateRawPodPublisher): Init-only registration, borrow/write/publish to
+// RegisterPodSubscriber, unpublished and move-overwritten loans go back to
+// the publisher.
+TEST_F(ShmDriverTest, RawPodPublisherHelper) {
+  auto& d = Init();
+  const std::string topic = UniqueTopic();
+  constexpr std::string_view kRawType = "shm_ext_test/RawPod";
+  EXPECT_EQ(CreateShmRawPodPublisher(nullptr, topic, kRawType, 256), nullptr);
+  auto pub = CreateShmRawPodPublisher(&d, topic, kRawType, 256);
+  ASSERT_NE(pub, nullptr);
+
+  std::mutex mu;
+  std::vector<std::string> got;
+  ASSERT_TRUE(d.RegisterPodSubscriber(topic, kRawType, [&](const void* p, size_t size) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.emplace_back(static_cast<const char*>(p), size);
+  }));
+  StopGuard stop{this};
+  d.Start();
+  EXPECT_EQ(CreateShmRawPodPublisher(&d, topic + "/late", kRawType, 256), nullptr);  // not in Init any more
+  const auto url = PodUrl(topic, std::string(kRawType));
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
+
+  EXPECT_FALSE(pub->Borrow(0).valid());
+  EXPECT_FALSE(pub->Publish(ShmLoanedBytes()));
+  for (size_t i = 1; i <= 2; ++i) {
+    auto sample = pub->Borrow(256);
+    ASSERT_TRUE(sample.valid());
+    ASSERT_GE(sample.size(), 256u);
+    std::memset(sample.data(), static_cast<int>('a' + i), 256);
+    ASSERT_TRUE(pub->Publish(std::move(sample)));
+    EXPECT_FALSE(sample.valid());  // NOLINT(bugprone-use-after-move): moved-from state is specified
+    ASSERT_TRUE(WaitFor([&] {
+      std::lock_guard<std::mutex> lock(mu);
+      return got.size() == i;
+    }));
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    ASSERT_GE(got[1].size(), 256u);
+    EXPECT_EQ(got[1].substr(0, 256), std::string(256, 'c'));
+  }
+
+  auto* raw = Publisher(url);
+  {
+    auto a = pub->Borrow(256);
+    auto b = pub->Borrow(256);
+    ASSERT_TRUE(a.valid() && b.valid());
+    EXPECT_EQ(raw->Outstanding(), 2u);
+    a = std::move(b);  // releases a's loan
+    EXPECT_EQ(raw->Outstanding(), 1u);
+  }
+  EXPECT_EQ(raw->Outstanding(), 0u);
 }
 
 // ============================================================ retained loans

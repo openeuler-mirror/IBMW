@@ -21,9 +21,8 @@ bool PublisherModule::Setup(ibmw::Runtime core) {
   core_ = core;
 
   // The iceoryx driver is injected between Initialize() and Start(), so it is
-  // NOT available here. Mirrors the loaned_message_demo PlainPublisherModule
-  // pattern: only opts loading lives in Setup; driver-bound resources are
-  // created in Run().
+  // NOT available here: only opts loading lives in Setup; the POD publisher
+  // is created by RegisterWithDriver().
   auto cfg_path = core_.GetConfigurator().GetConfigFilePath();
   opts_ = LoadBenchOptions(cfg_path);
   if (opts_.payload_bytes < sizeof(BenchPodHeader)) {
@@ -41,10 +40,10 @@ bool PublisherModule::Setup(ibmw::Runtime core) {
   return true;
 }
 
-bool PublisherModule::Run() {
+bool PublisherModule::RegisterWithDriver() {
   if (driver_ == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
-           "PublisherModule: iceoryx driver not injected before Run()");
+           "PublisherModule: iceoryx driver not injected");
     return false;
   }
 
@@ -56,6 +55,15 @@ bool PublisherModule::Run() {
   if (raw_pub_ == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
            "PublisherModule: CreateRawPodPublisher failed");
+    return false;
+  }
+  return true;
+}
+
+bool PublisherModule::Run() {
+  if (raw_pub_ == nullptr) {
+    MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+           "PublisherModule: RegisterWithDriver() did not succeed before Start()");
     return false;
   }
 

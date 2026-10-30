@@ -36,6 +36,11 @@ class SubscriberModule : public ibmw::Module {
     driver_ = d;
   }
 
+  // Registers the POD subscriber. The iceoryx driver only accepts POD topics
+  // in its Init state, so main() calls this after Initialize() and before
+  // Start(); Run() fails if it did not succeed.
+  bool RegisterWithDriver();
+
   bool Setup(ibmw::Runtime core) override;
   bool Run() override;
   void Stop() override;
@@ -54,6 +59,7 @@ class SubscriberModule : public ibmw::Module {
   std::atomic<uint64_t> received_{0};
   std::atomic<uint64_t> dropped_{0};      // parse failures
   std::atomic<bool> finalized_{false};
+  bool registered_{false};
 };
 
 }  // namespace ibmw::samples::transport_benchmark::iox_loaned_pod

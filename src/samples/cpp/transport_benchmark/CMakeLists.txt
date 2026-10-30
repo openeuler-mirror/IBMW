@@ -7,6 +7,7 @@
 #
 #   iox_loaned_pod  - iceoryx: zero-copy POD path (extension-only API)
 #   iox_loaned_ctx  - iceoryx: zero-copy ctx-meta path (standard receive stack)
+#   shm_loaned_pod  - shm_ext: iox_loaned_pod on the self-developed transport
 #   iox_send        - iceoryx: standard Send() (with serialization)
 #   dds_loaned      - DDS:     LoanedMessage path (zero-copy via DataSharing/SHM)
 #   dds_send_shm    - DDS:     standard Send() over SHM transport (no DataSharing)
@@ -71,6 +72,7 @@ add_subdirectory(net_send_tcp)
 add_subdirectory(iox_loan_v2)
 add_subdirectory(shm_loan_v2)
 add_subdirectory(shm_loaned_ctx)
+add_subdirectory(shm_loaned_pod)
 
 # Minimal cross-middleware A/B/C interop endpoint.  It is deliberately
 # separate from the historical matrix so existing targets and ABI remain
@@ -116,6 +118,8 @@ foreach(_matrix_dep
         shm_loan_v2_subscriber_app
         shm_loaned_ctx_publisher_app
         shm_loaned_ctx_subscriber_app
+        shm_loaned_pod_publisher_app
+        shm_loaned_pod_subscriber_app
         net_send_tcp_publisher_app
         net_send_tcp_subscriber_app)
   if(TARGET ${_matrix_dep})
