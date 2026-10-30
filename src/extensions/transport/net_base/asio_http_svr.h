@@ -355,7 +355,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
                   MW_WARN(
                       "Http svr session get bad request, remote addr {}, err msg: {}, close_connect_flag: {}",
-                      RemoteAddr(), bad_req_check_ret.data(), close_connect_flag_);
+                      RemoteAddr(), bad_req_check_ret, close_connect_flag_);
                   size_t write_data_size = co_await http::async_write(
                       stream_, rsp, boost::asio::use_awaitable);
                   MW_TRACE("Http svr session async write {} bytes to {}",
@@ -372,7 +372,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
                   MW_WARN(
                       "Http svr session can not parse url: {}, remote addr {}, close_connect_flag: {}",
-                      RemoteAddr(), req.target().data(), close_connect_flag_);
+                      ToStdStringView(req.target()), RemoteAddr(), close_connect_flag_);
                   size_t write_data_size = co_await http::async_write(
                       stream_, rsp, boost::asio::use_awaitable);
                   MW_TRACE("Http svr session async write {} bytes to {}",
@@ -404,7 +404,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 }
 
                 std::string path = PathCat(session_options_ptr_->doc_root, url_struct->path);
-                if (url_struct->path.back() == '/') path.append("index.html");
+                if (url_struct->path.empty() || url_struct->path.back() == '/') path.append("index.html");
 
                 boost::beast::error_code ec;
                 http::file_body::value_type body;

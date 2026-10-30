@@ -503,6 +503,8 @@ void HttpRpcDriver::Call(
       }
     }
 
+    // The views point into the call's context meta or into options_, both of
+    // which outlive the call (the coroutine reads ctx_ref as well).
     auto url = util::ParseUrl<std::string_view>(to_addr);
     if (!url) {
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_INVALID_ADDR));
