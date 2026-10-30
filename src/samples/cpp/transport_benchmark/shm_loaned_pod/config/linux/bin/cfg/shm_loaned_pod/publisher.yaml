@@ -30,7 +30,7 @@ ibmw:
     drivers:
       - type: iceoryx
         options:
-          listener_thread_name: "iox_pub_listen"
+          listener_thread_name: "shm_pub_listen"
 
   modules:
     modules:

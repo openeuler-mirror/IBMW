@@ -11,6 +11,10 @@
 // Init state (after Engine::Initialize, before Engine::Start), like the
 // iceoryx factory.
 //
+// Lifetime: both classes keep a raw ShmTransportDriver*, so they must not
+// outlive the driver. Return or publish every loan before engine shutdown;
+// a loan still held makes the driver's shutdown preparation time out.
+//
 //   auto pub = CreateShmRawPodPublisher(driver, "topic", "BenchPod", 4096);
 //   auto sample = pub->Borrow(4096);
 //   if (sample.valid()) { Fill(sample.data(), sample.size()); pub->Publish(std::move(sample)); }

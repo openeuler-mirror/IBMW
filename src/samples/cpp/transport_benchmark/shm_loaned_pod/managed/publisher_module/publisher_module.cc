@@ -54,7 +54,7 @@ bool PublisherModule::RegisterWithDriver() {
       driver_, kTopic, kMsgType, opts_.payload_bytes);
   if (raw_pub_ == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
-           "PublisherModule: CreateRawPodPublisher failed");
+           "PublisherModule: CreateShmRawPodPublisher failed");
     return false;
   }
   return true;

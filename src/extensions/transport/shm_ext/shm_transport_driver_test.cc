@@ -952,8 +952,10 @@ TEST_F(ShmDriverTest, RawPodPublisherHelper) {
   }
   {
     std::lock_guard<std::mutex> lock(mu);
-    ASSERT_GE(got[1].size(), 256u);
-    EXPECT_EQ(got[1].substr(0, 256), std::string(256, 'c'));
+    for (size_t i = 0; i < 2; ++i) {
+      ASSERT_GE(got[i].size(), 256u);
+      EXPECT_EQ(got[i].substr(0, 256), std::string(256, static_cast<char>('b' + i)));
+    }
   }
 
   auto* raw = Publisher(url);

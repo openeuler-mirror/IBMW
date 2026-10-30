@@ -1,7 +1,7 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
 #
-# shm_loaned_pod: shm_loaned_pod on the self-developed shm extension.
+# shm_loaned_pod: iox_loaned_pod on the self-developed shm extension.
 #
 # Two-process layout (publisher + subscriber, daemonless):
 #   - publisher_module borrows a shm chunk via ShmRawPodPublisher,
