@@ -92,6 +92,10 @@ struct convert<ibmw::extensions::mqtt_extension::MqttRpcDriver::Options> {
 
 namespace ibmw::extensions::mqtt_extension {
 
+namespace {
+constexpr std::string_view kRspTopicPrefix = "ibmw_rpc_rsp/";
+}  // namespace
+
 void MqttRpcDriver::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
@@ -242,6 +246,12 @@ bool MqttRpcDriver::RegisterServiceFunc(
         ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, serialization_type);
 
         std::string mqtt_pub_topic(buf_oper.GetString(util::BufferLenType::kUInt8));
+        // Answers only go to client answer topics, never to a topic of the
+        // peer's choice (e.g. a data or request topic).
+        if (!mqtt_pub_topic.starts_with(kRspTopicPrefix)) [[unlikely]] {
+          MW_DEBUG("Drop rpc request for '{}': invalid answer topic.", info.func_name);
+          return;
+        }
 
         char req_id_buf[4];
         buf_oper.GetBuffer(req_id_buf, 4);
@@ -450,7 +460,7 @@ bool MqttRpcDriver::RegisterClientFunc(
 
     msg_handle_catalog_ptr_->RegisterMsgHandle(
         mqtt_sub_topic,
-        [this](MQTTAsync_message* message) {
+        [this, func = std::string(rpc::GetFuncNameWithoutPrefix(info.func_name))](MQTTAsync_message* message) {
           std::shared_ptr<runtime::core::service::ServiceMessageFrame> client_call_wrapper_ptr;
 
           try {
@@ -460,7 +470,11 @@ bool MqttRpcDriver::RegisterClientFunc(
             uint32_t req_id = buf_oper.GetUint32();
             uint32_t code = buf_oper.GetUint32();
 
-            auto msg_recorder = client_tool_ptr_->GetRecord(req_id);
+            // Only an answer on the topic of the called function completes
+            // the call (the topic is part of what the client asked for).
+            auto msg_recorder = client_tool_ptr_->GetRecordIf(req_id, [&func](const auto& record) {
+              return rpc::GetFuncNameWithoutPrefix(record->info.func_name) == func;
+            });
             if (!msg_recorder) [[unlikely]] {
               // No record is found, which means that the call has timed out. The record has been deleted after the timeout process is gone.
               MW_TRACE("Can not get req id {} from recorder.", req_id);
@@ -654,9 +668,12 @@ void MqttRpcDriver::Call(
 
     // Record the callbacks and other contents
     auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();
-    auto record_ptr = client_call_wrapper_ptr;
-
-    bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::move(record_ptr));
+    bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::shared_ptr(client_call_wrapper_ptr));
+    // After a wrap of the 32-bit ids: skip ids of calls still pending.
+    for (int retry = 0; !ret && retry < 8; ++retry) [[unlikely]] {
+      cur_req_id = req_id_++;
+      ret = client_tool_ptr_->Record(cur_req_id, timeout, std::shared_ptr(client_call_wrapper_ptr));
+    }
 
     if (!ret) [[unlikely]] {
       MW_ERROR("Failed to record msg.");

@@ -4,9 +4,11 @@
 // Regression tests for the MQTT RPC client path: every failure reaches the
 // client callback exactly once and releases the call record, also after
 // Shutdown (the client tool lives until the driver is destroyed).
+// TRANS-004: answer topics of incoming requests are validated.
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -37,7 +39,14 @@ const ibmw_type_support_base_t* JsonIntTypeSupport() {
         memcpy(buf.data, text.data(), text.size());
         return true;
       },
-      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) { return false; },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t buffers, void* msg) {
+        std::string text;
+        for (size_t i = 0; i < buffers.len; ++i)
+          text.append(static_cast<const char*>(buffers.data[i].data), buffers.data[i].len);
+        if (text.empty()) return false;
+        *static_cast<int*>(msg) = std::stoi(text);
+        return true;
+      },
       .serialization_types_supported_num = [](void*) -> size_t { return 1; },
       .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return kTypes; },
       .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
@@ -153,6 +162,53 @@ TEST_F(MqttRpcDriverTest, RegistrationAfterSealIsRejected) {
   service.info = info_;
   service.service_func = [](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>&) {};
   EXPECT_FALSE(driver.RegisterServiceFunc(service));
+}
+
+// A request as a client sends it: [serialization][answer topic][req id][no meta][body].
+MQTTAsync_message* NewRequest(const std::string& answer_topic, const std::string& body) {
+  std::string payload;
+  payload += static_cast<char>(4);
+  payload += "json";
+  payload += static_cast<char>(answer_topic.size());
+  payload += answer_topic;
+  payload.append(4, '\0');  // req id
+  payload += '\0';          // meta count
+  payload += body;
+  auto* msg = static_cast<MQTTAsync_message*>(std::malloc(sizeof(MQTTAsync_message)));
+  const MQTTAsync_message init = MQTTAsync_message_initializer;
+  std::memcpy(msg, &init, sizeof(init));
+  msg->payload = std::malloc(payload.size());
+  std::memcpy(msg->payload, payload.data(), payload.size());
+  msg->payloadlen = static_cast<int>(payload.size());
+  return msg;
+}
+
+// TRANS-004: the server answers only on client answer topics, never on a
+// topic chosen by the peer (a data or request topic of someone else).
+TEST_F(MqttRpcDriverTest, RequestWithForeignAnswerTopicIsDropped) {
+  auto catalog = std::make_shared<MsgHandleCatalog>();
+  MqttRpcDriver driver("ibmw_rpc_test", client_, 1024 * 1024, catalog);
+  driver.Initialize(YAML::Node());
+  std::vector<int> served;
+  runtime::core::service::ServiceFuncWrapper service;
+  service.info = info_;
+  service.service_func = [&served](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    served.push_back(*static_cast<const int*>(frame->req_ptr));
+  };
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  driver.Start();
+
+  auto deliver = [&](const std::string& answer_topic, const std::string& body) {
+    const std::string topic = "ibmw_rpc_req/%2Ftest%2Fsvc";
+    char* raw = static_cast<char*>(std::malloc(topic.size() + 1));
+    std::memcpy(raw, topic.c_str(), topic.size() + 1);
+    catalog->HandleServerMsg(raw, raw, NewRequest(answer_topic, body));
+  };
+  deliver("sensors/temperature", "1");
+  deliver("ibmw_rpc_req/%2Ftest%2Fsvc", "2");
+  deliver("ibmw_rpc_rsp/cli/%2Ftest%2Fsvc", "3");
+  EXPECT_EQ(served, std::vector<int>{3});
+  driver.Shutdown();
 }
 
 }  // namespace

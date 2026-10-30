@@ -115,7 +115,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver,
 
   std::shared_ptr<MsgHandleCatalog> msg_handle_catalog_ptr_;
 
-  std::atomic_uint32_t req_id_ = 0;
+  std::atomic_uint32_t req_id_{runtime::core::util::RandomReqIdStart()};
 
   struct ClientCfgInfo {
     std::string server_mqtt_id;

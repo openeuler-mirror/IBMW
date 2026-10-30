@@ -8,14 +8,26 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 
 #include "cpp/executor/executor.h"
 
 #include "tbb/concurrent_hash_map.h"
 
 namespace ibmw::runtime::core::util {
+
+// Start of a request id sequence: not predictable from outside, so an
+// injected answer has to guess it (ids on the wire are 32-bit).
+inline uint32_t RandomReqIdStart() noexcept {
+  try {
+    return std::random_device{}();
+  } catch (...) {
+    return static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  }
+}
 
 template <typename MsgRecorder>
 class RpcClientTool {
@@ -74,6 +86,13 @@ class RpcClientTool {
 
   std::optional<MsgRecorder> GetRecord(uint32_t req_id) { return state_->Take(req_id); }
 
+  // Takes the record only if `matches(record)`: an answer that does not
+  // belong to the call (e.g. arrived for another function) leaves it pending.
+  template <typename Pred>
+  std::optional<MsgRecorder> GetRecordIf(uint32_t req_id, Pred&& matches) {
+    return state_->TakeIf(req_id, std::forward<Pred>(matches));
+  }
+
   // Hands every remaining record to `handle` exactly once, so no call is
   // dropped without a result; an exception from `handle` only affects its
   // own record. Later timeouts are no-ops and timeout tasks still running
@@ -110,6 +129,23 @@ class RpcClientTool {
       bool find_ret = client_msg_recorder_map.find(ac, req_id);
 
       if (!find_ret) [[unlikely]]
+        return {};
+
+      auto result = std::make_optional<MsgRecorder>(std::move(ac->second));
+
+      client_msg_recorder_map.erase(ac);
+
+      return result;
+    }
+
+    // Take() for records that satisfy `matches` only (kept separate so that
+    // the plain Take() stays as it is).
+    template <typename Pred>
+    std::optional<MsgRecorder> TakeIf(uint32_t req_id, Pred&& matches) {
+      typename ClientMsgRecorderMap::accessor ac;
+      bool find_ret = client_msg_recorder_map.find(ac, req_id);
+
+      if (!find_ret || !matches(std::as_const(ac->second))) [[unlikely]]
         return {};
 
       auto result = std::make_optional<MsgRecorder>(std::move(ac->second));

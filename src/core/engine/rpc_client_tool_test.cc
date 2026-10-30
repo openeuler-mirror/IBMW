@@ -55,6 +55,19 @@ class ManualTimedExecutor {
       .ctx = this};
 };
 
+// TRANS-004: an answer that does not belong to the call leaves it pending.
+TEST(RpcClientToolTest, GetRecordIfKeepsNonMatchingRecord) {
+  RpcClientTool<int> tool;
+  ASSERT_TRUE(tool.Record(7, 1s, 10));
+  EXPECT_FALSE(tool.GetRecordIf(7, [](int record) { return record == 11; }));
+  EXPECT_FALSE(tool.GetRecordIf(8, [](int) { return true; }));
+  auto record = tool.GetRecordIf(7, [](int record) { return record == 10; });
+  ASSERT_TRUE(record);
+  EXPECT_EQ(*record, 10);
+  EXPECT_FALSE(tool.GetRecord(7));
+  EXPECT_NE(RandomReqIdStart(), RandomReqIdStart());  // 2^-32 to fail by chance
+}
+
 TEST(RpcClientToolTest, AbandonAllCompletesEachPendingRecordOnce) {
   RpcClientTool<int> tool;
   ASSERT_TRUE(tool.Record(1, 1s, 10));
