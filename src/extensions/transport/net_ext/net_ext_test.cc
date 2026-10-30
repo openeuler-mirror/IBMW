@@ -3,7 +3,7 @@
 
 // Regression tests for the net transports:
 // TRANS-016: listeners default to loopback.
-// TRANS-017: CORS headers only for configured origins.
+// TRANS-017: CORS headers only for configured origins (also on errors, Vary).
 // TRANS-018: peer-supplied meta cannot override framework "ibmw-" keys.
 // TRANS-019: a late or missing RPC answer neither hangs nor touches freed state.
 // TRANS-027/029/030/031: tcp/udp server receive path and startup.
@@ -533,6 +533,46 @@ TEST_F(HttpRpcDriverTest, CorsOnlyForAllowedOrigins) {
 
   auto preflight = Post("", {{"Origin", "https://evil.example"}}, http::verb::options);
   EXPECT_EQ(preflight.find(http::field::access_control_allow_methods), preflight.end());
+}
+
+// The answer depends on the origin also when it is rejected (Vary for
+// caches), and error responses keep the CORS headers so that the browser
+// can read them.
+TEST_F(HttpRpcDriverTest, CorsVaryOnRejectAndHeadersOnErrors) {
+  std::shared_ptr<runtime::core::service::ServiceMessageFrame> pending;
+  std::mutex mutex;
+  SetUpDriver(
+      [&](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+        std::lock_guard lock(mutex);
+        if (*static_cast<const int*>(frame->req_ptr) == 0) {
+          pending = frame;  // never answered in time
+        } else {
+          Answer(frame, IBMW_RPC_STATUS_OK);
+        }
+      },
+      "{cors_allow_origins: [\"https://ok.example\"]}");
+  auto bad = Post("1", {{"Origin", "https://evil.example"}});
+  EXPECT_EQ(bad.find(http::field::access_control_allow_origin), bad.end());
+  EXPECT_EQ(bad[http::field::vary], "Origin");
+
+  auto error = Post("0", {{"Origin", "https://ok.example"}, {"Timeout", "1"}});
+  EXPECT_EQ(error.result(), http::status::internal_server_error);
+  EXPECT_EQ(error[http::field::access_control_allow_origin], "https://ok.example");
+  EXPECT_EQ(error[http::field::vary], "Origin");
+
+  std::lock_guard lock(mutex);
+  if (pending) Answer(pending, IBMW_RPC_STATUS_OK);
+}
+
+TEST_F(HttpRpcDriverTest, CorsAcceptsScalarWildcard) {
+  SetUpDriver(
+      [](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+        Answer(frame, IBMW_RPC_STATUS_OK);
+      },
+      "{cors_allow_origins: \"*\"}");
+  auto rsp = Post("1", {{"Origin", "https://any.example"}});
+  EXPECT_EQ(rsp[http::field::access_control_allow_origin], "*");
+  EXPECT_EQ(rsp.find(http::field::vary), rsp.end());
 }
 
 // TRANS-019: a service that never answers in time gets an error response

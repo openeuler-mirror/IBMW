@@ -638,7 +638,12 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
         }
 
         if (!err_info.empty()) [[unlikely]] {
-          const auto& rsp = ServerErrorHandle(req, err_info);
+          auto rsp = ServerErrorHandle(req, err_info);
+          // Keep the CORS decision of the handler: a browser can read the error.
+          for (const auto field : {boost::beast::http::field::access_control_allow_origin,
+                                   boost::beast::http::field::vary}) {
+            if (auto itr = handle_rsp.find(field); itr != handle_rsp.end()) rsp.set(field, itr->value());
+          }
           session_ptr->close_connect_flag_ = rsp.need_eof();
 
           MW_LOG(

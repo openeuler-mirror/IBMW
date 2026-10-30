@@ -3,6 +3,7 @@
 
 #include "net_ext/http/http_rpc_driver.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <optional>
@@ -68,9 +69,11 @@ struct convert<ibmw::extensions::net_extension::HttpRpcDriver::Options> {
       }
     }
 
-    if (node["cors_allow_origins"] && node["cors_allow_origins"].IsSequence()) {
-      for (const auto& origin_node : node["cors_allow_origins"])
+    if (const auto origins = node["cors_allow_origins"]; origins && origins.IsSequence()) {
+      for (const auto& origin_node : origins)
         rhs.cors_allow_origins.emplace_back(origin_node.as<std::string>());
+    } else if (origins && origins.IsScalar()) {  // a single origin (or "*")
+      rhs.cors_allow_origins.emplace_back(origins.as<std::string>());
     }
 
     return true;
@@ -132,14 +135,16 @@ bool HttpRpcDriver::SetCorsAllowOrigin(
   if (origin_itr == req.end()) return false;
   std::string_view origin(origin_itr->value().data(), origin_itr->value().size());
 
+  if (std::find(options_.cors_allow_origins.begin(), options_.cors_allow_origins.end(), "*") !=
+      options_.cors_allow_origins.end()) {
+    rsp.set(http::field::access_control_allow_origin, "*");
+    return true;
+  }
+  // The answer depends on the origin, also when it is rejected (caches).
+  rsp.set(http::field::vary, "Origin");
   for (const auto& allowed : options_.cors_allow_origins) {
-    if (allowed == "*") {
-      rsp.set(http::field::access_control_allow_origin, "*");
-      return true;
-    }
     if (allowed == origin) {
       rsp.set(http::field::access_control_allow_origin, origin_itr->value());
-      rsp.set(http::field::vary, "Origin");
       return true;
     }
   }
