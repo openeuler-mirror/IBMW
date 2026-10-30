@@ -65,6 +65,7 @@ class TimerExecutor : public ExecutorBase {
 
  private:
   void TimerLoop();
+  [[gnu::cold, gnu::noinline]] void WarnTimedTaskDropped() const noexcept;
 
   struct TaskWithTimestamp {
     uint64_t tick_count;  // Tick count since start_time

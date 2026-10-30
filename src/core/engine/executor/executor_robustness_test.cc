@@ -161,6 +161,28 @@ TEST(ExecutorRobustness, TimerExecutorPlacesTasksDispatchedAtAnyTick) {
   }
 }
 
+// Before Start() there is no time origin and after Shutdown() no wheel: a
+// timed task is dropped instead of being lost in the far map (or touching
+// freed wheels); a time point before the start is due at once.
+TEST(ExecutorRobustness, TimerExecutorDispatchOutsideRunningState) {
+  executor::TimerExecutor exe;
+  exe.SetLogger(MakeLogger());
+  exe.RegisterGetExecutorFunc([](std::string_view) { return ibmw::executor::ExecutorHandle(); });
+  exe.Initialize("timer_state", YAML::Load("{dt_us: 1000, wheel_size: [4, 4]}"));
+  std::atomic<int> before_start{0}, early{0}, after_shutdown{0};
+  exe.DispatchAt(std::chrono::system_clock::now(), ibmw::executor::Task([&] { ++before_start; }));
+  exe.Start();
+  exe.DispatchAt(std::chrono::system_clock::time_point(std::chrono::seconds(1)),
+                 ibmw::executor::Task([&] { ++early; }));
+  for (int i = 0; i < 250 && early.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  exe.Shutdown();
+  exe.DispatchAt(std::chrono::system_clock::now() + std::chrono::hours(1),
+                 ibmw::executor::Task([&] { ++after_shutdown; }));
+  EXPECT_EQ(before_start.load(), 0);
+  EXPECT_EQ(early.load(), 1);
+  EXPECT_EQ(after_shutdown.load(), 0);
+}
+
 TEST(ExecutorRobustness, RotateFileLoggerDestructsAfterFailedSyncInitialize) {
   static const ibmw_executor_base_t kDummy{};
   const auto log_dir = std::filesystem::temp_directory_path() /

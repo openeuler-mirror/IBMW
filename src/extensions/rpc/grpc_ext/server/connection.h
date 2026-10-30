@@ -129,8 +129,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
                         failed = true;
                       }
                       if (failed) {
-                        // Answer instead of leaving the stream open until the
-                        // connection closes; a partly written response is dropped.
+                        // Answer (headers, no message, status trailer) instead of
+                        // leaving the stream open until the connection closes; a
+                        // partly written response is dropped.
                         rsp_ptr = std::make_shared<Response>(0);
                         rsp_ptr->SetStreamId(req_ptr->GetStreamId());
                         rsp_ptr->AddHeader("content-type", "application/grpc");

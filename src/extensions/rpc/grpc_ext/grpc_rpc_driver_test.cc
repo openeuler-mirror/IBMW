@@ -24,6 +24,7 @@
 #include <boost/asio.hpp>
 
 #include "cpp/util/string.h"
+#include "grpc_ext/grpc/status.h"
 #include "grpc_ext/grpc/timeout.h"
 #include "grpc_ext/grpc_rpc_driver.h"
 
@@ -126,6 +127,18 @@ TEST(GrpcTimeoutTest, FormatsWithinEightDigitsAndNeverShortens) {
     ASSERT_TRUE(parsed.has_value()) << text;
     EXPECT_GE(*parsed, t) << text;
   }
+}
+
+TEST(GrpcStatusTest, MapsBothWays) {
+  for (uint32_t code : {IBMW_RPC_STATUS_TIMEOUT, IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED,
+                        IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR, IBMW_RPC_STATUS_SVR_NOT_READY}) {
+    EXPECT_EQ(grpc::FromGrpcStatus(grpc::ToGrpcStatus(code)), code);
+  }
+  EXPECT_STREQ(grpc::ToGrpcStatus(IBMW_RPC_STATUS_SVR_NOT_FOUND), "12");
+  EXPECT_STREQ(grpc::ToGrpcStatus(IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED), "13");
+  EXPECT_STREQ(grpc::ToGrpcStatus(IBMW_RPC_STATUS_SVR_HANDLE_FAILED), "2");
+  EXPECT_EQ(grpc::FromGrpcStatus("2"), static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_UNKNOWN));
+  EXPECT_EQ(grpc::FromGrpcStatus("x"), static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_UNKNOWN));
 }
 
 void Answer(const std::shared_ptr<ServiceMessageFrame>& frame, uint32_t code) {
@@ -322,7 +335,9 @@ TEST_F(GrpcRpcDriverTest, ServiceErrorEndsTheCallAtOnce) {
     ASSERT_TRUE(code) << "request " << req << ": no answer";
     EXPECT_LT(std::chrono::steady_clock::now() - begin, 2s) << "request " << req;
     if (req < 0) {
-      EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK)) << "request " << req;
+      // The status survives the trip: a server timeout is reported as one.
+      EXPECT_EQ(*code, static_cast<uint32_t>(req == -1 ? IBMW_RPC_STATUS_TIMEOUT : IBMW_RPC_STATUS_CLI_UNKNOWN))
+          << "request " << req;
     } else {
       EXPECT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
       EXPECT_EQ(rsp, 4);

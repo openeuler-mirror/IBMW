@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 #include "parameter_ext/service.h"
 
 namespace ibmw::extensions::parameter_extension {
@@ -25,6 +27,12 @@ class TestableService : public ParameterServiceImpl {
   using ParameterServiceImpl::HandleGet;
   using ParameterServiceImpl::HandleLoad;
   using ParameterServiceImpl::HandleSet;
+
+  // Fills part of the answer, then fails.
+  void FillThenThrow(const proto::DumpParameterReq&, proto::DumpParameterRsp& rsp) {
+    rsp.module_parameter_map["mod"];
+    throw std::runtime_error("failed part way");
+  }
 };
 
 class ParameterServiceTest : public ::testing::Test {
@@ -96,6 +104,17 @@ TEST(ParameterServiceNotStarted, ExceptionBecomesErrorCode) {
   proto::GetParameterRsp rsp;
   EXPECT_NO_THROW(rsp = service.Call(&TestableService::HandleGet, proto::GetParameterReq{"mod", "k"}));
   EXPECT_EQ(rsp.msg, "INTERNAL_ERROR");
+}
+
+TEST(ParameterServiceNotStarted, ExceptionDiscardsPartialAnswer) {
+  TestableService service;
+  const auto handler = static_cast<void (ParameterServiceImpl::*)(const proto::DumpParameterReq&,
+                                                                  proto::DumpParameterRsp&)>(
+      &TestableService::FillThenThrow);
+  proto::DumpParameterRsp rsp;
+  EXPECT_NO_THROW(rsp = service.Call(handler, proto::DumpParameterReq{}));
+  EXPECT_EQ(rsp.msg, "INTERNAL_ERROR");
+  EXPECT_TRUE(rsp.module_parameter_map.empty());
 }
 
 }  // namespace

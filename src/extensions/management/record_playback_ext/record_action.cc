@@ -757,9 +757,10 @@ void RecordAction::CloseRecord() {
 
 namespace {
 
-// Upper bound for everything copied into one bag's extra_file folder: the
+// Upper bounds for everything copied into one bag's extra_file folder: the
 // copy is meant for configuration files, not for whole data directories.
 constexpr uintmax_t kMaxExtraFileBytes = 256ULL << 20;
+constexpr size_t kMaxExtraFileEntries = 10000;
 
 struct ExtraFileEntry {
   std::filesystem::path rel;  // relative to the copied directory
@@ -767,11 +768,16 @@ struct ExtraFileEntry {
 };
 
 // Lists the tree under `root` without following symbolic links; returns
-// false (with a warning) if it holds more than `budget` bytes.
+// false (with a warning) if it holds more than `budget` bytes or more than
+// kMaxExtraFileEntries entries.
 bool CollectExtraFileTree(const std::filesystem::path& root, uintmax_t budget,
                           std::vector<ExtraFileEntry>& entries, uintmax_t& total) {
   for (auto it = std::filesystem::recursive_directory_iterator(root);
        it != std::filesystem::recursive_directory_iterator(); ++it) {
+    if (entries.size() >= kMaxExtraFileEntries) {
+      MW_WARN("Extra file path '{}' has more than {} entries, skip copying.", root.string(), kMaxExtraFileEntries);
+      return false;
+    }
     const auto status = it->symlink_status();
     if (std::filesystem::is_symlink(status)) {
       MW_WARN("Extra file '{}' is a symbolic link, skip copying.", it->path().string());
@@ -795,8 +801,9 @@ bool CollectExtraFileTree(const std::filesystem::path& root, uintmax_t budget,
 
 }  // namespace
 
-void RecordAction::CopyExtraFilePathToNewFolder() {
-  extra_file_path_ = real_bag_path_ / "extra_file";
+// `extra_file_dir` is passed by value from the record thread: the copy may
+// run in the background while the next bag folder is opened.
+void RecordAction::CopyExtraFilePathToNewFolder(const std::filesystem::path& extra_file_dir) const {
   uintmax_t copied = 0;
 
   for (const auto& file_path_str : options_.extra_file_path) {
@@ -806,20 +813,23 @@ void RecordAction::CopyExtraFilePathToNewFolder() {
     }
 
     try {
-      // The configured path itself may be a link; its target is copied.
-      std::filesystem::path src_path = std::filesystem::weakly_canonical(std::filesystem::absolute(file_path_str));
+      // The copy keeps the configured name; if the configured path itself is
+      // a link, its target is copied.
+      std::filesystem::path configured = std::filesystem::absolute(file_path_str).lexically_normal();
+      if (configured.filename().empty()) configured = configured.parent_path();  // trailing separator
+      const auto name = configured.filename();
+      if (name.empty() || name == "." || name == "..") {
+        MW_WARN("Extra file path '{}' has no file name, skip copying.", file_path_str);
+        continue;
+      }
+      const std::filesystem::path src_path = std::filesystem::weakly_canonical(configured);
       if (!std::filesystem::exists(src_path)) {
         MW_WARN("Extra file path '{}' does not exist, skip copying.", src_path.string());
         continue;
       }
-      const auto name = src_path.filename();
-      if (name.empty() || name == "." || name == "..") {
-        MW_WARN("Extra file path '{}' has no file name, skip copying.", src_path.string());
-        continue;
-      }
       // Each entry gets its own name below extra_file: an entry with the
       // same name as an earlier one is not copied over it.
-      const std::filesystem::path dest = extra_file_path_ / name;
+      const std::filesystem::path dest = extra_file_dir / name;
       if (std::filesystem::exists(std::filesystem::symlink_status(dest))) {
         MW_WARN("Extra file '{}' has already existed, skip copying '{}'.", dest.string(), src_path.string());
         continue;
@@ -829,15 +839,20 @@ void RecordAction::CopyExtraFilePathToNewFolder() {
         std::vector<ExtraFileEntry> entries;
         uintmax_t total = copied;
         if (!CollectExtraFileTree(src_path, kMaxExtraFileBytes, entries, total)) continue;
+        // A failure part way leaves a partial tree (reported below); the
+        // budget is charged up front.
+        copied = total;
         std::filesystem::create_directories(dest);
         for (const auto& entry : entries) {
           if (entry.is_dir) {
             std::filesystem::create_directories(dest / entry.rel);
-          } else {
+          } else if (std::filesystem::is_regular_file(std::filesystem::symlink_status(src_path / entry.rel))) {
+            // Re-checked: the entry may have been replaced since it was listed.
             std::filesystem::copy_file(src_path / entry.rel, dest / entry.rel);
+          } else {
+            MW_WARN("Extra file '{}' changed while copying, skip it.", (src_path / entry.rel).string());
           }
         }
-        copied = total;
       } else if (std::filesystem::is_regular_file(src_path)) {
         const uintmax_t size = std::filesystem::file_size(src_path);
         if (size > kMaxExtraFileBytes - copied) {
@@ -845,7 +860,7 @@ void RecordAction::CopyExtraFilePathToNewFolder() {
                   kMaxExtraFileBytes);
           continue;
         }
-        std::filesystem::create_directories(extra_file_path_);
+        std::filesystem::create_directories(extra_file_dir);
         std::filesystem::copy_file(src_path, dest);
         copied += size;
       } else {
@@ -902,17 +917,18 @@ bool RecordAction::OpenNewFolderToRecord() {
   cur_data_size_ = 0;
 
   // use async operation to copy extra file path to new folder
+  auto extra_file_dir = real_bag_path_ / "extra_file";
   if (state_.load() != State::kStart) {
-    CopyExtraFilePathToNewFolder();
+    CopyExtraFilePathToNewFolder(extra_file_dir);
   } else {
     auto task_state = task_state_;
-    executor_for_async_.Dispatch([task_state]() {
+    executor_for_async_.Dispatch([task_state, extra_file_dir = std::move(extra_file_dir)]() {
       RecordAction* action = nullptr;
       if (!task_state || !task_state->Enter(action)) {
         return;
       }
       struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
-      action->CopyExtraFilePathToNewFolder();
+      action->CopyExtraFilePathToNewFolder(extra_file_dir);
     });
   }
 

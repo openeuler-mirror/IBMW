@@ -31,6 +31,7 @@
 #include "grpc_ext/client/options.h"
 #include "grpc_ext/global.h"  // IWYU pragma: keep
 #include "grpc_ext/grpc/message.h"
+#include "grpc_ext/grpc/status.h"
 #include "grpc_ext/grpc/timeout.h"
 #include "grpc_ext/http2/request.h"
 #include "grpc_ext/http2/response.h"
@@ -387,14 +388,12 @@ bool GrpcRpcDriver::RegisterServiceFunc(
         rsp_buf = std::move(call_state->rsp_buf);
       }
 
-      // A failed call (also a timeout) still ends the stream, with a
-      // trailers-only gRPC error, so the client neither waits for its own
+      // A failed call (also a timeout) still ends the stream, with a gRPC
+      // error status and no message, so the client neither waits for its own
       // timeout nor keeps the stream open.
       if (ret_code != 0) [[unlikely]] {
         MW_WARN("Handle rpc failed, ret_code: {}", ret_code);
-        rsp->AddTrailer("grpc-status", ret_code == IBMW_RPC_STATUS_TIMEOUT                    ? "4"    // DEADLINE_EXCEEDED
-                                       : ret_code == IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED ? "13"   // INTERNAL
-                                                                                              : "2");  // UNKNOWN
+        rsp->AddTrailer("grpc-status", grpc::ToGrpcStatus(ret_code));
         rsp->AddTrailer("grpc-message", "ibmw rpc status " + std::to_string(ret_code));
         co_return;
       }
@@ -596,9 +595,9 @@ void GrpcRpcDriver::Call(
               for (const auto& [key, value] : trailers) {
                 MW_WARN("Trailer: {} = {}", key, value);
               }
-              // TODO: Classify the grpc status code into relevant ibmw_rpc_status_code_t
-              // sa: https://grpc.io/docs/guides/status-codes/
-              deliver_completion(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_UNKNOWN));
+              deliver_completion(ibmw::rpc::Status(grpc_status_itr == trailers.end()
+                                                       ? static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_UNKNOWN)
+                                                       : grpc::FromGrpcStatus(grpc_status_itr->second)));
               co_return;
             }
 

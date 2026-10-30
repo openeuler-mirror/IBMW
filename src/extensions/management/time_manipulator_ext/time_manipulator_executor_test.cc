@@ -111,8 +111,10 @@ TEST_F(TimeManipulatorExecutorTest, TasksOnEveryLevelRunAtTheirTick) {
   executor_.SetTimeRatio(4.0);
 
   std::unique_lock lock(mutex);
-  ASSERT_TRUE(cv.wait_for(lock, 10s, [&] { return runs.size() == offsets_ms.size(); }))
-      << "only " << runs.size() << " of " << offsets_ms.size() << " tasks ran";
+  const bool all_ran = cv.wait_for(lock, 10s, [&] { return runs.size() == offsets_ms.size(); });
+  lock.unlock();
+  executor_.Shutdown();  // no task may touch the locals after the test body
+  ASSERT_TRUE(all_ran) << "only " << runs.size() << " of " << offsets_ms.size() << " tasks ran";
   for (size_t i = 0; i < runs.size(); ++i) {
     EXPECT_EQ(runs[i].first, offsets_ms[i]) << "out of order at " << i;
     EXPECT_EQ(runs[i].second, 1ms) << "offset " << runs[i].first << " ms ran at the wrong tick";
@@ -155,13 +157,13 @@ TEST(TimeManipulatorExecutorPlacement, TasksDispatchedAtAnyTickRunAtTheirTick) {
     executor.SetTimeRatio(1.0);
 
     std::unique_lock lock(mutex);
-    ASSERT_TRUE(cv.wait_for(lock, 10s, [&] { return done == kDispatchers * kTargets; }))
-        << wheel << ": only " << done << " of " << kDispatchers * kTargets << " tasks ran";
+    const bool all_ran = cv.wait_for(lock, 10s, [&] { return done == kDispatchers * kTargets; });
+    lock.unlock();
+    executor.Shutdown();  // no task may touch the locals after this iteration
+    ASSERT_TRUE(all_ran) << wheel << ": only " << done << " of " << kDispatchers * kTargets << " tasks ran";
     EXPECT_TRUE(wrong.empty()) << wheel << ": " << wrong.size() << " tasks ran at the wrong tick, e.g. "
                                << std::chrono::duration_cast<std::chrono::microseconds>(wrong.front()).count()
                                << " us after the target";
-    lock.unlock();
-    executor.Shutdown();
   }
 }
 

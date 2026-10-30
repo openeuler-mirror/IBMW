@@ -150,8 +150,13 @@ void TimerExecutor::Shutdown() {
     timer_thread_ptr_->join();
 
   timer_thread_ptr_.reset();
-  timing_task_map_.clear();
-  timing_wheel_vec_.clear();
+  {
+    // DispatchAt() checks start_flag_ under this lock.
+    std::unique_lock<std::shared_mutex> lck(tick_mutex_);
+    start_flag_.store(false, std::memory_order_relaxed);
+    timing_task_map_.clear();
+    timing_wheel_vec_.clear();
+  }
   get_executor_func_ = nullptr;
 }
 
@@ -190,17 +195,27 @@ std::chrono::system_clock::time_point TimerExecutor::Now() const noexcept {
 void TimerExecutor::DispatchAt(
     std::chrono::system_clock::time_point tp, ibmw::executor::Task&& task) noexcept {
   try {
-    uint64_t virtual_tp = ibmw::common::util::GetTimestampNs(tp) - start_time_point_;
+    const uint64_t tp_ns = ibmw::common::util::GetTimestampNs(tp);
 
     std::unique_lock<std::shared_mutex> lck(tick_mutex_);
 
-    if (virtual_tp < current_tick_count_ * dt_count_) {
+    // Before the timer thread has set the time origin, a task would be
+    // scheduled against origin 0 and never run; after Shutdown() (which
+    // clears the flag under this lock) the wheels are gone. start_flag_
+    // (acquire) publishes start_time_point_.
+    if (!start_flag_.load(std::memory_order_acquire)) [[unlikely]] {
+      WarnTimedTaskDropped();
+      return;
+    }
+
+    // Compare before subtracting: a time point before the start is due.
+    if (tp_ns < start_time_point_ || tp_ns - start_time_point_ < current_tick_count_ * dt_count_) {
       lck.unlock();
       Dispatch(std::move(task));
       return;
     }
 
-    const uint64_t target_tick = virtual_tp / dt_count_;
+    const uint64_t target_tick = (tp_ns - start_time_point_) / dt_count_;
 
     // Level 0 holds the next wheel_size[0] ticks. A slot of a higher level
     // is pulled one level down before it starts, so a task goes to the
@@ -225,6 +240,13 @@ void TimerExecutor::DispatchAt(
         TaskWithTimestamp{target_tick, std::move(task)});
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
+  }
+}
+
+void TimerExecutor::WarnTimedTaskDropped() const noexcept {
+  try {
+    MW_WARN("Timer executor '{}' is not running, timed task dropped.", name_);
+  } catch (...) {
   }
 }
 

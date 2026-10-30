@@ -82,6 +82,32 @@ TEST_F(RecordActionExtraFileTest, CopiesEveryEntryAndSkipsSymbolicLinks) {
   EXPECT_FALSE(fs::exists(fs::symlink_status(extra / "conf/sub/loop")));
 }
 
+// The copy keeps the configured name, also when the configured path is a link.
+TEST_F(RecordActionExtraFileTest, ConfiguredLinkKeepsItsName) {
+  WriteFile(root_ / "src/v3.yaml", "v3");
+  fs::create_symlink(root_ / "src/v3.yaml", root_ / "src/current.yaml");
+  WriteFile(root_ / "src/real_dir/x.yaml", "x");
+  fs::create_directory_symlink(root_ / "src/real_dir", root_ / "src/conf_dir");
+
+  const auto extra = Record({(root_ / "src/current.yaml").string(), (root_ / "src/conf_dir").string() + "/"});
+
+  EXPECT_TRUE(fs::is_regular_file(fs::symlink_status(extra / "current.yaml")));
+  EXPECT_FALSE(fs::exists(extra / "v3.yaml"));
+  EXPECT_TRUE(fs::is_regular_file(extra / "conf_dir/x.yaml"));
+  EXPECT_FALSE(fs::exists(extra / "real_dir"));
+}
+
+TEST_F(RecordActionExtraFileTest, DirectoryWithTooManyEntriesIsSkipped) {
+  WriteFile(root_ / "src/small.yaml", "small");
+  fs::create_directories(root_ / "src/many");
+  for (int i = 0; i <= 10000; ++i) std::ofstream(root_ / "src/many" / std::to_string(i));
+
+  const auto extra = Record({(root_ / "src/many").string(), (root_ / "src/small.yaml").string()});
+
+  EXPECT_FALSE(fs::exists(extra / "many"));
+  EXPECT_TRUE(fs::is_regular_file(extra / "small.yaml"));
+}
+
 TEST_F(RecordActionExtraFileTest, OversizedEntryIsSkipped) {
   WriteFile(root_ / "src/small.yaml", "small");
   {

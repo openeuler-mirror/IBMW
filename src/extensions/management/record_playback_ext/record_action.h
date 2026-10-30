@@ -164,7 +164,7 @@ class RecordAction {
 
   void CloseRecord();
   void FlushToDisk();
-  void CopyExtraFilePathToNewFolder();
+  void CopyExtraFilePathToNewFolder(const std::filesystem::path& extra_file_dir) const;
 
   void SetMcapOptions();
 
@@ -214,7 +214,6 @@ class RecordAction {
 
   std::filesystem::path parent_bag_path_;
   std::filesystem::path real_bag_path_;
-  std::filesystem::path extra_file_path_;
 
   std::unordered_map<uint64_t, McapStruct> mcap_info_map_;  // use to record
 
