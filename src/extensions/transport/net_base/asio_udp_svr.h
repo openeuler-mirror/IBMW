@@ -35,7 +35,8 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
     /// Listening address
     Udp::endpoint ep = Udp::endpoint{boost::asio::ip::address_v4::loopback(), 53927};
 
-    /// Maximum number of connections
+    /// Maximum number of sessions (remote endpoints). When reached, datagrams
+    /// from new endpoints are dropped; known endpoints are still served.
     size_t max_session_num = 1000000;
 
     /// Managing coroutine timer intervals
@@ -67,10 +68,8 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
   explicit AsioUdpServer(const std::shared_ptr<IOCtx>& io_ptr)
       : io_ptr_(io_ptr),
         mgr_strand_(boost::asio::make_strand(*io_ptr_)),
-        acceptor_timer_(mgr_strand_),
         mgr_timer_(mgr_strand_),
-        socket_strand_(boost::asio::make_strand(*io_ptr_)),
-        sock_(socket_strand_),
+        sock_(mgr_strand_),  // used only on the mgr strand
         logger_ptr_(std::make_shared<ibmw::common::util::LoggerWrapper>()) {}
 
   ~AsioUdpServer() = default;
@@ -136,13 +135,6 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
         [this, self]() -> Awaitable<void> {
           while (state_.load() == State::kStart) {
             try {
-              // If the number of connections reaches the upper limit, wait for a while before trying
-              if (session_ptr_map_.size() >= options_.max_session_num) {
-                acceptor_timer_.expires_after(options_.mgr_timer_dt);
-                co_await acceptor_timer_.async_wait(boost::asio::use_awaitable);
-                continue;
-              }
-
               auto msg_buf = std::make_shared<boost::asio::streambuf>();
               boost::asio::ip::udp::endpoint remote_ep;
               size_t read_data_size = co_await sock_.async_receive_from(
@@ -157,6 +149,11 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
               auto finditr = session_ptr_map_.find(remote_ep);
               if (finditr != session_ptr_map_.end()) {
                 session_ptr = finditr->second;
+              } else if (session_ptr_map_.size() >= options_.max_session_num) [[unlikely]] {
+                // Not stopping the receive loop: that would also block the
+                // known endpoints (TRANS-032).
+                OnSessionTableFull(remote_ep);
+                continue;
               } else {
                 session_ptr = std::make_shared<Session>(
                     io_ptr_, logger_ptr_, msg_handle_ptr_, remote_ep);
@@ -194,6 +191,7 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
                 else
                   session_ptr_map_.erase(itr++);
               }
+              if (session_ptr_map_.size() < options_.max_session_num) table_full_ = false;
             } catch (const std::exception& e) {
               MW_TRACE(
                   "udp svr timer get exception and exit, exception info: {}",
@@ -231,9 +229,6 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
               sock_.release();
               ++stop_step;
             case 5:
-              acceptor_timer_.cancel();
-              ++stop_step;
-            case 6:
               mgr_timer_.cancel();
               ++stop_step;
             default:
@@ -410,12 +405,17 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
     kShutdown,
   };
 
+  [[gnu::cold, gnu::noinline]] void OnSessionTableFull(const Udp::endpoint& remote_ep) {
+    if (table_full_) return;
+    table_full_ = true;
+    MW_WARN("udp svr session table is full ({} sessions), dropping datagrams from new endpoints such as {}.",
+            session_ptr_map_.size(), ibmw::common::util::SSToString(remote_ep));
+  }
+
   // IO CTX
   std::shared_ptr<IOCtx> io_ptr_;
   Strand mgr_strand_;
-  Timer acceptor_timer_;
   Timer mgr_timer_;
-  Strand socket_strand_;
   Udp::socket sock_;
 
   // Log handle
@@ -434,6 +434,7 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
   std::shared_ptr<const SessionOptions> session_options_ptr_;
   std::unordered_map<Udp::endpoint, std::shared_ptr<Session>, AsioEndpointHash>
       session_ptr_map_;
+  bool table_full_ = false;  // warned for the current full episode (mgr strand)
 };
 
 }  // namespace ibmw::common::net

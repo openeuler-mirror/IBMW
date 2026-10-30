@@ -8,6 +8,7 @@
 // TRANS-019: a late or missing RPC answer neither hangs nor touches freed state.
 // TRANS-027/029/030/031: tcp/udp server receive path and startup.
 // TRANS-028: bounded tcp send queue.
+// TRANS-032: a full udp session table does not stop the receive loop.
 
 #include <gtest/gtest.h>
 
@@ -318,6 +319,33 @@ TEST(NetUdpServerTest, DeliversSenderEndpoint) {
   std::lock_guard lock(received.mutex);
   EXPECT_EQ(received.msgs[0].first, ibmw::common::util::SSToString(sock.local_endpoint()));
   EXPECT_EQ(received.msgs[0].second, "hello");
+  svr->Shutdown();
+}
+
+// TRANS-032: a full session table drops new endpoints but keeps serving
+// the known ones (it used to stop receiving altogether).
+TEST(NetUdpServerTest, FullSessionTableDropsOnlyNewEndpoints) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeUdpPort();
+  auto svr = std::make_shared<ibmw::common::net::AsioUdpServer>(io.Io());
+  svr->RegisterMsgHandle([&received](const Udp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    received.Add(ep, buf);
+  });
+  svr->Initialize({.ep = Udp::endpoint(kLoopback, port), .max_session_num = 1});
+  svr->Start();
+
+  asio::io_context cli_io;
+  Udp::socket known(cli_io, Udp::endpoint(kLoopback, 0));
+  Udp::socket other(cli_io, Udp::endpoint(kLoopback, 0));
+  known.send_to(asio::buffer(std::string("a1")), Udp::endpoint(kLoopback, port));
+  ASSERT_TRUE(received.WaitFor(1));
+  other.send_to(asio::buffer(std::string("b1")), Udp::endpoint(kLoopback, port));
+  known.send_to(asio::buffer(std::string("a2")), Udp::endpoint(kLoopback, port));
+  ASSERT_TRUE(received.WaitFor(2, 2s)) << "known endpoint not served while the table is full";
+  EXPECT_FALSE(received.WaitFor(3, 200ms));
+  std::lock_guard lock(received.mutex);
+  EXPECT_EQ(received.msgs[1].second, "a2");
   svr->Shutdown();
 }
 
