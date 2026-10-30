@@ -38,15 +38,11 @@ class ShmCtxMetaPublisher {
  public:
   ShmCtxMetaPublisher(runtime::core::transport::TransportDriver* driver, std::string topic, std::string msg_type,
                       ibmw::util::TypeSupportRef type_support)
-      : driver_(driver), topic_(std::move(topic)), msg_type_(std::move(msg_type)) {
-    // TransportInfo holds string_views into the owned strings above, hence
-    // the class is neither copyable nor movable.
-    info_.topic_name = topic_;
-    info_.msg_type = msg_type_;
+      : driver_(driver) {
+    info_.topic_name = std::move(topic);
+    info_.msg_type = std::move(msg_type);
     info_.msg_type_support_ref = type_support;
   }
-  ShmCtxMetaPublisher(const ShmCtxMetaPublisher&) = delete;
-  ShmCtxMetaPublisher& operator=(const ShmCtxMetaPublisher&) = delete;
 
   // Loan, serialize `msg` into the chunk and publish. False if the loan or
   // the serialization failed; the driver then holds no chunk.
@@ -62,8 +58,6 @@ class ShmCtxMetaPublisher {
 
  private:
   runtime::core::transport::TransportDriver* driver_;
-  std::string topic_;
-  std::string msg_type_;
   runtime::core::transport::TransportInfo info_;
 };
 
