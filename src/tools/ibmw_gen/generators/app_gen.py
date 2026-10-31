@@ -27,6 +27,67 @@ _COPYRIGHT = """\
 """
 
 
+# Signal handling of the generated mains. Engine::Shutdown() logs and locks,
+# so it must not run in a signal handler: the handler only writes the signal
+# number to a pipe and a watcher thread calls Shutdown().
+_SIGNAL_SUPPORT = """\
+// SIGINT/SIGTERM only write the signal number to a pipe (async-signal-safe);
+// a watcher thread calls Engine::Shutdown(), which logs and locks.
+std::mutex g_core_mutex;
+Engine* global_core_ptr = nullptr;
+int g_signal_pipe[2] = {-1, -1};
+
+// Makes `core` the target of SIGINT/SIGTERM while in scope.
+class ScopedSignalCore {
+ public:
+  explicit ScopedSignalCore(Engine* core) { Set(core); }
+  ~ScopedSignalCore() { Set(nullptr); }
+  ScopedSignalCore(const ScopedSignalCore&) = delete;
+  ScopedSignalCore& operator=(const ScopedSignalCore&) = delete;
+
+ private:
+  static void Set(Engine* core) {
+    std::lock_guard<std::mutex> lck(g_core_mutex);
+    global_core_ptr = core;
+  }
+};
+
+void SignalHandler(int sig) {
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(sig);
+  [[maybe_unused]] auto ret = write(g_signal_pipe[1], &byte, 1);
+  errno = saved_errno;
+}
+
+bool InstallSignalHandlers() {
+  if (pipe2(g_signal_pipe, O_CLOEXEC) != 0 ||
+      fcntl(g_signal_pipe[1], F_SETFL, O_NONBLOCK) != 0) {
+    return false;
+  }
+  std::thread([] {
+    unsigned char sig = 0;
+    while (true) {
+      const ssize_t n = read(g_signal_pipe[0], &sig, 1);
+      if (n != 1) {
+        if (n < 0 && errno == EINTR) continue;
+        return;
+      }
+      std::lock_guard<std::mutex> lck(g_core_mutex);
+      if (global_core_ptr == nullptr) {
+        // No engine (anymore): die from the signal.
+        std::signal(sig, SIG_DFL);
+        raise(sig);
+        continue;
+      }
+      global_core_ptr->Shutdown();
+    }
+  }).detach();
+  return std::signal(SIGINT, SignalHandler) != SIG_ERR &&
+         std::signal(SIGTERM, SignalHandler) != SIG_ERR;
+}
+"""
+
+
 def _module_dir(mod_name: str) -> str:
     """Compute module directory name from module name."""
     snake = _snake(mod_name)
@@ -41,33 +102,32 @@ def _gen_bare_app(app: dict, project: dict) -> str:
     return f"""{_COPYRIGHT}//
 // App-mode entry point for {app_name}.
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <csignal>
 #include <iostream>
+#include <mutex>
+#include <thread>
 
 #include "cpp/core.h"
 #include "engine/engine.h"
 
 using namespace ibmw::runtime::core;
 
-Engine* global_core_ptr = nullptr;
-
-void SignalHandler(int sig) {{
-  if (global_core_ptr && (sig == SIGINT || sig == SIGTERM)) {{
-    global_core_ptr->Shutdown();
-    return;
-  }}
-  raise(sig);
-}}
-
+{_SIGNAL_SUPPORT}
 int32_t main(int32_t argc, char** argv) {{
-  signal(SIGINT, SignalHandler);
-  signal(SIGTERM, SignalHandler);
+  if (!InstallSignalHandlers()) {{
+    std::cerr << "Failed to set up SIGINT/SIGTERM handling." << std::endl;
+    return -1;
+  }}
 
   std::cout << "{app_name} start." << std::endl;
 
   try {{
     Engine core;
-    global_core_ptr = &core;
+    ScopedSignalCore signal_core(&core);
 
     // Initialize
     Engine::Options options;
@@ -94,7 +154,6 @@ int32_t main(int32_t argc, char** argv) {{
 
     // Clean shutdown
     core.Shutdown();
-    global_core_ptr = nullptr;
   }} catch (const std::exception& e) {{
     std::cerr << "Fatal error: " << e.what() << std::endl;
     return -1;
@@ -142,8 +201,14 @@ def _gen_standard_app(app: dict, project: dict) -> str:
 // Managed modules use public transport access handles. Concrete driver
 // injection is reserved for explicitly direct transport modules.
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <csignal>
 #include <iostream>
+#include <mutex>
+#include <thread>
 
 #include "cpp/core.h"
 #include "engine/engine.h"
@@ -151,25 +216,18 @@ def _gen_standard_app(app: dict, project: dict) -> str:
 
 using namespace ibmw::runtime::core;
 
-Engine* global_core_ptr = nullptr;
-
-void SignalHandler(int sig) {{
-  if (global_core_ptr && (sig == SIGINT || sig == SIGTERM)) {{
-    global_core_ptr->Shutdown();
-    return;
-  }}
-  raise(sig);
-}}
-
+{_SIGNAL_SUPPORT}
 int32_t main(int32_t argc, char** argv) {{
-  signal(SIGINT, SignalHandler);
-  signal(SIGTERM, SignalHandler);
+  if (!InstallSignalHandlers()) {{
+    std::cerr << "Failed to set up SIGINT/SIGTERM handling." << std::endl;
+    return -1;
+  }}
 
   std::cout << "{app_name} start." << std::endl;
 
   try {{
     Engine core;
-    global_core_ptr = &core;
+    ScopedSignalCore signal_core(&core);
 
     // Register modules
 {decl_block}
@@ -193,7 +251,6 @@ int32_t main(int32_t argc, char** argv) {{
 
     // Shutdown
     core.Shutdown();
-    global_core_ptr = nullptr;
   }} catch (const std::exception& e) {{
     std::cerr << "Fatal error: " << e.what() << std::endl;
     return -1;
