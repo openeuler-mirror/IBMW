@@ -1554,10 +1554,16 @@ void TransportDriverDispatcher::PublishLoaned(LoanedSampleHandle& handle) {
 
 void TransportDriverDispatcher::ReleaseLoaned(LoanedSampleHandle& handle) {
   // Release tolerates Shutdown so RAII wrappers finishing teardown
-  // don't spam warnings; only PreInit/Init are clearly wrong.
+  // don't spam warnings; only PreInit/Init are clearly wrong. After
+  // Shutdown the source driver may already be destroyed, so the handle
+  // is dropped without calling into it.
   auto st = state_.load();
-  if (st == State::kPreInit || st == State::kInit) [[unlikely]] {
-    MW_WARN("ReleaseLoaned called before Start.");
+  if (st != State::kStart) [[unlikely]] {
+    if (st == State::kShutdown) {
+      handle = {};
+    } else {
+      MW_WARN("ReleaseLoaned called before Start.");
+    }
     return;
   }
 

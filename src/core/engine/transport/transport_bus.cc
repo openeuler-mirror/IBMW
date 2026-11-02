@@ -290,9 +290,10 @@ bool TransportBus::TryShutdown() {
 
   transport_driver_vec_.clear();
   used_transport_driver_vec_.clear();
-  // Access wrappers back the C ABI ctx pointers used from driver callbacks;
-  // release them only once the drivers are gone.
-  transport_access_wrap_map_.clear();
+  // Access wrappers back the C ABI ctx pointers (SenderAccess/ReceiverAccess)
+  // that user-held RAII objects such as LoanedSample still dereference after
+  // Shutdown. Keep them until the bus itself is destroyed; the dispatcher
+  // turns post-Shutdown calls into no-ops.
   transport_driver_capabilities_map_.clear();
   serialized_transport_capabilities_map_.clear();
   prepared_shutdown_drivers_.clear();

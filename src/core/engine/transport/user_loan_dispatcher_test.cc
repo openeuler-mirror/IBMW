@@ -165,6 +165,37 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
 #endif
 }
 
+TEST(UserLoanDispatcher, ReleaseAfterShutdownDropsHandleWithoutDriverCall) {
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  FrameworkAsyncTransportFilterBus publish_filters;
+  FakeUserLoanDriver good("good", FakeUserLoanDriver::Result::kSuccess);
+
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&publish_filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"good"}}});
+  dispatcher.RegisterTransportDriver(&good);
+  dispatcher.Initialize();
+
+  SendTypeWrapper wrapper;
+  wrapper.info.msg_type = "Frame";
+  wrapper.info.topic_name = "camera";
+  wrapper.info.pkg_path = "pkg";
+  wrapper.info.module_name = "module";
+  ASSERT_TRUE(dispatcher.RegisterSendType(std::move(wrapper)));
+  dispatcher.Start();
+
+  auto outstanding = dispatcher.Loan(LoanRequest());
+  ASSERT_EQ(outstanding.source_driver, &good);
+  dispatcher.Shutdown();
+
+  // After Shutdown the source driver may already be destroyed by its owner.
+  dispatcher.ReleaseLoaned(outstanding);
+  EXPECT_EQ(outstanding.source_driver, nullptr);
+  EXPECT_EQ(outstanding.driver_token, nullptr);
+  EXPECT_EQ(good.release_calls, 0);
+}
+
 TEST(UserLoanDispatcher, BooleanSuccessIsNotRejectedByMetricsSideInvariants) {
 #ifdef IBMW_ENABLE_CORE_METRICS
   unsetenv("IBMW_CORE_METRICS");
