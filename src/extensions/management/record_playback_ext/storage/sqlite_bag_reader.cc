@@ -150,6 +150,7 @@ struct StatementGuard {
 
 bool SqliteIntegrityOk(sqlite3* database) {
   sqlite3_stmt* statement = nullptr;
+  StatementGuard statement_guard{&statement};
   if (sqlite3_prepare_v2(
           database, "PRAGMA quick_check", -1, &statement, nullptr) !=
       SQLITE_OK) {
@@ -160,9 +161,8 @@ bool SqliteIntegrityOk(sqlite3* database) {
   int result = SQLITE_ROW;
   while ((result = sqlite3_step(statement)) == SQLITE_ROW) {
     saw_result = true;
-    valid = valid && ColumnText(statement, 0) == "ok";
+    valid = valid && ColumnText(statement, 0) == "ok";  // may throw bad_alloc
   }
-  sqlite3_finalize(statement);
   return saw_result && valid && result == SQLITE_DONE;
 }
 
@@ -246,16 +246,18 @@ void SqliteBagReader::Open(
   std::unordered_map<std::string, size_t> schema_indices;
   std::unordered_map<std::string, size_t> channel_indices;
   for (size_t file_index = 0; file_index < files.size(); ++file_index) {
+    // sqlite3_open_v2 returns a connection also when it fails: closed by the
+    // guard. close_v2 frees it even if a statement is still unfinalized.
     sqlite3* database = nullptr;
+    struct DatabaseGuard {
+      sqlite3** database;
+      ~DatabaseGuard() { sqlite3_close_v2(*database); }
+    } guard{&database};
     MW_ASSERT(
         sqlite3_open_v2(
             files[file_index].c_str(), &database, SQLITE_OPEN_READONLY,
             nullptr) == SQLITE_OK,
         "Cannot open SQLite bag file.");
-    struct DatabaseGuard {
-      sqlite3* database;
-      ~DatabaseGuard() { sqlite3_close(database); }
-    } guard{database};
     ApplySqliteReaderConfiguration(database, busy_timeout_ms_, pragmas_);
     const bool integrity_ok = SqliteIntegrityOk(database);
     MW_ASSERT(
@@ -415,7 +417,7 @@ void SqliteBagReader::ReadMessages(
 
     ~FileCursor() {
       sqlite3_finalize(query);
-      sqlite3_close(database);
+      sqlite3_close_v2(database);
     }
   };
   struct PendingMessage {

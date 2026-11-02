@@ -221,6 +221,24 @@ TEST(SqliteBagReaderIntegrityTest, RejectsCorruptAndMissingTables) {
   }
 }
 
+// EXT-035: a bag file SQLite can not open (no read permission, or corrupt
+// when running as root) leaves no connection behind.
+TEST(SqliteBagReaderIntegrityTest, FailedOpenDoesNotLeakConnection) {
+  TemporaryDirectory temporary("ibmw-sqlite-unreadable");
+  const auto path = temporary.Path() / "unreadable.db3";
+  std::ofstream(path, std::ios::binary) << "not a sqlite database";
+  std::filesystem::permissions(path, std::filesystem::perms::none);
+  const auto open = [&path] {
+    SqliteBagReader reader;
+    EXPECT_THROW(reader.Open(path), ibmw::common::util::IbmwException);
+  };
+  open();  // SQLite allocates its globals once
+  const auto before = sqlite3_memory_used();
+  for (int i = 0; i < 10; ++i) open();
+  EXPECT_EQ(sqlite3_memory_used(), before);
+  std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+}
+
 TEST(SqliteBagReaderIntegrityTest, RejectsInvalidReferencesAndNarrowing) {
   TemporaryDirectory temporary("ibmw-sqlite-ids");
   const auto expect_rejected = [&](std::string_view name,
