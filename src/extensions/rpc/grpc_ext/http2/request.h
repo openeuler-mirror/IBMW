@@ -40,6 +40,11 @@ class Request {
     headers_.emplace(name, value);
   }
 
+  // Overwrites any peer-supplied header of the same name.
+  void SetHeader(std::string_view name, std::string_view value) {
+    headers_.insert_or_assign(std::string(name), std::string(value));
+  }
+
   void Write(const uint8_t* data, size_t len) {
     body_.Write(data, len);
   }

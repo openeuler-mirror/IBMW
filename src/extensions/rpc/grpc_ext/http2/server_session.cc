@@ -224,7 +224,8 @@ int OnHeaderCallback(nghttp2_session* session, const nghttp2_frame* frame, const
                      const uint8_t* value, size_t value_len, uint8_t flags, void* user_data) {
   MW_TRACE("stream on header, stream id: {}, name: {}, value: {}", frame->hd.stream_id,
               std::string_view(reinterpret_cast<const char*>(name), name_len),
-              std::string_view(reinterpret_cast<const char*>(value), value_len));
+              LoggableHeaderValue(std::string_view(reinterpret_cast<const char*>(name), name_len),
+                                  std::string_view(reinterpret_cast<const char*>(value), value_len)));
   if (frame->hd.type != NGHTTP2_HEADERS || frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
     return 0;
   }

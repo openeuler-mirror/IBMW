@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -33,6 +34,7 @@
 #include "grpc_ext/grpc/timeout.h"
 #include "grpc_ext/grpc_extension.h"
 #include "grpc_ext/grpc_rpc_driver.h"
+#include "grpc_ext/http2/header.h"
 
 namespace ibmw::extensions::grpc_extension {
 namespace {
@@ -158,6 +160,7 @@ class GrpcRpcDriverTest : public ::testing::Test {
  protected:
   void SetUpDriver(runtime::core::service::ServiceFunc func, size_t max_request_body_size = 16U << 20) {
     const uint16_t port = FreeTcpPort();
+    svr_addr_ = "127.0.0.1:" + std::to_string(port);
     svr_ = std::make_shared<server::AsioHttp2Server>(io_.Io());
     pool_ = std::make_shared<client::AsioHttp2ClientPool>(io_.Io());
     driver_ = std::make_unique<GrpcRpcDriver>(io_.Io(), svr_, pool_);
@@ -198,11 +201,13 @@ class GrpcRpcDriverTest : public ::testing::Test {
   };
 
   // Calls the service; returns the status code, or nullopt without an answer within 10s.
-  std::optional<uint32_t> Call(int req, int* rsp, std::chrono::nanoseconds timeout = 5s) {
+  std::optional<uint32_t> Call(int req, int* rsp, std::chrono::nanoseconds timeout = 5s,
+                               const std::vector<std::pair<std::string, std::string>>& meta = {}) {
     auto result = std::make_shared<Result>();
     auto ctx = std::make_shared<ibmw::rpc::Context>();
     ctx->SetSerializationType("cdr");
     ctx->SetTimeout(timeout);
+    for (const auto& [key, value] : meta) ctx->SetMetaValue(key, value);
     auto req_ptr = std::make_shared<int>(req);
     auto frame = std::make_shared<ServiceMessageFrame>(ServiceMessageFrame{
         .info = info_, .req_ptr = req_ptr.get(), .rsp_ptr = &result->rsp, .ctx_ref = ibmw::rpc::ContextRef(*ctx)});
@@ -219,6 +224,7 @@ class GrpcRpcDriverTest : public ::testing::Test {
   }
 
   IoThreads io_{2};
+  std::string svr_addr_;
   std::shared_ptr<server::AsioHttp2Server> svr_;
   std::shared_ptr<client::AsioHttp2ClientPool> pool_;
   std::unique_ptr<GrpcRpcDriver> driver_;
@@ -353,6 +359,45 @@ TEST_F(GrpcRpcDriverTest, ServiceErrorEndsTheCallAtOnce) {
 
 // EXT-001: the plaintext server warns unless it is reachable from this
 // host only, and a bad listen address fails initialization.
+TEST(GrpcHeaderLogTest, SensitiveValuesAreRedacted) {
+  EXPECT_EQ(http2::LoggableHeaderValue("authorization", "Bearer abc"), "<redacted>");
+  EXPECT_EQ(http2::LoggableHeaderValue("cookie", "s=1"), "<redacted>");
+  EXPECT_EQ(http2::LoggableHeaderValue("x-custom", "v"), "v");
+}
+
+// EXT-005: request headers become server ctx meta, but a peer cannot set
+// framework "ibmw-" keys, and Remote-Endpoint is the real peer address.
+TEST_F(GrpcRpcDriverTest, PeerHeadersCannotSetReservedMeta) {
+  std::mutex mutex;
+  std::map<std::string, std::string> seen;
+  SetUpDriver([&](const std::shared_ptr<ServiceMessageFrame>& frame) {
+    {
+      std::lock_guard lock(mutex);
+      for (const char* key : {IBMW_RPC_CONTEXT_KEY_TO_ADDR, IBMW_RPC_CONTEXT_KEY_REQUEST_ID,
+                              IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, IBMW_RPC_CONTEXT_KEY_DRIVER,
+                              "x-custom", "Remote-Endpoint", "remote-endpoint"})
+        seen[key] = std::string(frame->ctx_ref.GetMetaValue(key));
+    }
+    *static_cast<int*>(frame->rsp_ptr) = 0;
+    Answer(frame, IBMW_RPC_STATUS_OK);
+  });
+  int rsp = -1;
+  auto code = Call(1, &rsp, 5s,
+                   {{IBMW_RPC_CONTEXT_KEY_TO_ADDR, "http://" + svr_addr_},
+                    {IBMW_RPC_CONTEXT_KEY_REQUEST_ID, "42"},
+                    {"x-custom", "v"},
+                    {"remote-endpoint", "10.0.0.1:1"}});
+  ASSERT_TRUE(code) << "no answer";
+  ASSERT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+  std::lock_guard lock(mutex);
+  EXPECT_EQ(seen[IBMW_RPC_CONTEXT_KEY_TO_ADDR], "");
+  EXPECT_EQ(seen[IBMW_RPC_CONTEXT_KEY_REQUEST_ID], "42");
+  EXPECT_EQ(seen[IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE], "cdr");
+  EXPECT_EQ(seen[IBMW_RPC_CONTEXT_KEY_DRIVER], "grpc");
+  EXPECT_EQ(seen["x-custom"], "v");
+  EXPECT_EQ(seen["Remote-Endpoint"].rfind("127.0.0.1:", 0), 0u) << seen["Remote-Endpoint"];
+}
+
 TEST(GrpcListenAddressTest, LoopbackIsRecognizedAndBadAddressesThrow) {
   EXPECT_TRUE(GrpcExtension::IsLoopbackListenAddress("127.0.0.1"));
   EXPECT_TRUE(GrpcExtension::IsLoopbackListenAddress("127.10.0.1"));

@@ -37,6 +37,7 @@
 #include "grpc_ext/http2/response.h"
 #include "base/log_util.h"
 #include "base/url_parser.h"
+#include "net_base/peer_meta_filter.h"
 
 namespace YAML {
 template <>
@@ -232,9 +233,13 @@ bool GrpcRpcDriver::RegisterServiceFunc(
                               "Unsupported content-type: {}", content_type_itr->second);
       ctx_ptr->SetSerializationType(find_itr->second);
 
-      // Set the metadata
+      // Set the metadata. Peer headers must not override framework "ibmw-" keys.
       for (const auto& [key, value] : req->GetHeaders()) {
-        MW_DEBUG("Http2 handle for service, key: {}, value: {}", key, value);
+        MW_DEBUG("Http2 handle for service, key: {}, value: {}", key, http2::LoggableHeaderValue(key, value));
+        if (!ibmw::common::net::IsPeerMetaKeyAllowed(key)) [[unlikely]] {
+          MW_DEBUG("Ignore reserved meta key from peer: {}", key);
+          continue;
+        }
         ctx_ptr->SetMetaValue(key, value);
       }
       ctx_ptr->SetFunctionName(service_info.func_name);

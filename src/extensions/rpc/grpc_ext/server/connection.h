@@ -111,7 +111,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
                   continue;
                 }
 
-                req_ptr->AddHeader("Remote-Endpoint", remote_addr_);  // To trace the request
+                req_ptr->SetHeader("Remote-Endpoint", remote_addr_);  // To trace the request
 
                 asio::co_spawn(
                     io_ptr_->get_executor(),
