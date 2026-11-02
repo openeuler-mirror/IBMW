@@ -101,11 +101,17 @@ void ThreadPoolExecutor::Initialize(std::string_view name,
                      Name(), e.what());
         }
 
-        try {
-          io_ptr_->run();
-        } catch (const std::exception& e) {
-          MW_FATAL("Async pool executor '{}' run loop get exception, {}",
-                      Name(), e.what());
+        // A task exception unwinds out of run(); run() may be called again
+        // right away, so the worker keeps serving the queue.
+        while (true) {
+          try {
+            io_ptr_->run();
+            break;
+          } catch (const std::exception& e) {
+            MW_ERROR("Async pool executor '{}' task threw an exception, {}", Name(), e.what());
+          } catch (...) {
+            MW_ERROR("Async pool executor '{}' task threw an unknown exception.", Name());
+          }
         }
 
         tl_current_executor_ = nullptr;

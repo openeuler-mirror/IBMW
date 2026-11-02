@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -232,6 +233,27 @@ TEST(ExecutorRobustness, ThreadPoolShutdownDoesNotWaitForFarTimers) {
   EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(5));
   EXPECT_EQ(ran.load(), 100u);
   EXPECT_FALSE(far_ran.load());
+}
+
+// CORE-028: a handler throwing out of io_context::run() (Tasks themselves are
+// noexcept; raw handlers come in through IOCTX(), e.g. strands) does not take
+// its worker thread down with it.
+TEST(ExecutorRobustness, ThreadPoolWorkerSurvivesThrowingHandlers) {
+  executor::ThreadPoolExecutor exe;
+  exe.SetLogger(MakeLogger());
+  exe.Initialize("pool_throw", YAML::Load("thread_num: 1"));
+  exe.Start();
+
+  std::atomic_uint32_t ran{0};
+  asio::post(*exe.IOCTX(), [] { throw std::runtime_error("expected"); });
+  asio::post(*exe.IOCTX(), [] { throw 42; });
+  for (int i = 0; i < 10; ++i) exe.Dispatch(ibmw::executor::Task([&ran] { ++ran; }));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (ran.load() < 10 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_EQ(ran.load(), 10u);
+  exe.Shutdown();
 }
 
 // Without pending timers Shutdown() returns as soon as the queue drains.
