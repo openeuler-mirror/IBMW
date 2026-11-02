@@ -1361,8 +1361,8 @@ Extension options:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `thread_num` | uint32 | `1` | gRPC thread count |
-| `listen_ip` | string | `"0.0.0.0"` | Listen address |
+| `thread_num` | uint32 | `2` | gRPC thread count |
+| `listen_ip` | string | `""` | Listen address (IPv4); the server only starts when `listen_ip` and `listen_port` are both set |
 | `listen_port` | uint16 | `0` | Listen port |
 
 gRPC RPC driver options (`type: grpc`):
@@ -1380,11 +1380,11 @@ Extension options:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `thread_num` | uint32 | -- | Network I/O threads (required) |
-| `http_options.listen_ip` | string | `"0.0.0.0"` | HTTP listen IP |
+| `http_options.listen_ip` | string | `"127.0.0.1"` | HTTP listen IP (IPv4 or IPv6) |
 | `http_options.listen_port` | uint16 | `0` | HTTP listen port |
-| `tcp_options.listen_ip` | string | `"0.0.0.0"` | TCP listen IP |
+| `tcp_options.listen_ip` | string | `"127.0.0.1"` | TCP listen IP (IPv4 or IPv6) |
 | `tcp_options.listen_port` | uint16 | `0` | TCP listen port |
-| `udp_options.listen_ip` | string | `"0.0.0.0"` | UDP listen IP |
+| `udp_options.listen_ip` | string | `"127.0.0.1"` | UDP listen IP (IPv4 or IPv6) |
 | `udp_options.listen_port` | uint16 | `0` | UDP listen port |
 | `udp_options.max_pkg_size` | uint32 | `65535` | Max UDP datagram |
 

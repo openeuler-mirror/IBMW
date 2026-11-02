@@ -1287,8 +1287,8 @@ Extension 选项：
 
 | Key | 类型 | 默认 | 说明 |
 |-----|------|------|------|
-| `thread_num` | uint32 | `1` | gRPC 线程数 |
-| `listen_ip` | string | `"0.0.0.0"` | 监听地址 |
+| `thread_num` | uint32 | `2` | gRPC 线程数 |
+| `listen_ip` | string | `""` | 监听地址（IPv4）；`listen_ip` 与 `listen_port` 都设置时才启动服务端 |
 | `listen_port` | uint16 | `0` | 监听端口 |
 
 gRPC RPC Driver 选项（`type: grpc`）：
@@ -1306,11 +1306,11 @@ Extension 选项：
 | Key | 类型 | 默认 | 说明 |
 |-----|------|------|------|
 | `thread_num` | uint32 | -- | 网络 I/O 线程数（必需） |
-| `http_options.listen_ip` | string | `"0.0.0.0"` | HTTP 监听 IP |
+| `http_options.listen_ip` | string | `"127.0.0.1"` | HTTP 监听 IP（IPv4 或 IPv6） |
 | `http_options.listen_port` | uint16 | `0` | HTTP 监听端口 |
-| `tcp_options.listen_ip` | string | `"0.0.0.0"` | TCP 监听 IP |
+| `tcp_options.listen_ip` | string | `"127.0.0.1"` | TCP 监听 IP（IPv4 或 IPv6） |
 | `tcp_options.listen_port` | uint16 | `0` | TCP 监听端口 |
-| `udp_options.listen_ip` | string | `"0.0.0.0"` | UDP 监听 IP |
+| `udp_options.listen_ip` | string | `"127.0.0.1"` | UDP 监听 IP（IPv4 或 IPv6） |
 | `udp_options.listen_port` | uint16 | `0` | UDP 监听端口 |
 | `udp_options.max_pkg_size` | uint32 | `65535` | 最大 UDP 数据报 |
 
