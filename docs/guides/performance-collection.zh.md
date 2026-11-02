@@ -445,7 +445,7 @@ python3 src/samples/cpp/transport_benchmark/abc_interop/run_matrix.py \
   --build ./build --blocks 5 --output ./abc-results
 ```
 
-runner 默认读取上述 CMake 路径文件；需要覆盖时传入 `--roudi /path/to/iox-roudi`，或设置 `IBMW_ROUDI_BIN`。命令中的相对路径均按当前工作目录解释。
+runner 默认读取上述 CMake 路径文件；需要覆盖时传入 `--roudi /absolute/iox-roudi`，或设置 `IBMW_ROUDI_BIN`。命令中的相对路径均按当前工作目录解释。
 
 该 runner 使用 A=ROS 2、B=IBMW DDS compatible、C=IBMW iceoryx ordinary `Send()`，并验证固定 CSV、subscriber status、C publisher completion、freshness 与进程退出。C 不具备 DDS 协议级 reliability/discovery，结果必须单列 semantic warning。
 

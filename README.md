@@ -129,7 +129,7 @@ rm -f ibmw-config.cmake ibmw-config-version.cmake
 For an already authenticated Humble DDS prefix, the exact preset commands are:
 
 ```bash
-export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/path/to/dds-prefix
+export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/dds-prefix
 cmake --preset together-ros2-minimal-sdk
 cmake --build --preset together-ros2-minimal-sdk
 ```

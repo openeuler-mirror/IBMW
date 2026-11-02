@@ -11,7 +11,7 @@ Extension 的中间件框架。它提供统一的运行时，并以 DDS IDL / Fa
 
 推荐 preset 为 `together-ros2-minimal-sdk`：
 ```bash
-export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/path/to/dds-prefix
+export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/dds-prefix
 cmake --preset together-ros2-minimal-sdk
 cmake --build --preset together-ros2-minimal-sdk
 ```

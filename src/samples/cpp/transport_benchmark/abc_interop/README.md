@@ -201,7 +201,7 @@ and results stay identical.
 
 For lane C, CMake writes the resolved source-built or package-provided RouDi
 target location to `<build>/ibmw_abc_roudi_path.txt`. `run_block.py` and
-`run_matrix.py` use it automatically. Use `--roudi /path/to/iox-roudi` (or set
+`run_matrix.py` use it automatically. Use `--roudi /absolute/iox-roudi` (or set
 `IBMW_ROUDI_BIN`) to override that location explicitly.
 
 `run_matrix.py --comparison-plan PLAN.json` also emits a formal comparison plan

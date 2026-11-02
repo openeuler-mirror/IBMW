@@ -205,7 +205,7 @@ class RunBlockValidationTest(unittest.TestCase):
         self.assertEqual(env["IBMW_ABC_ROS2_ENDPOINT"], "build-benchmark-smoke/ibmw_abc_ros2_endpoint")
         self.assertEqual(env["IBMW_ABC_LATENCY_JSONL"], "/tmp/ibmw_abc_a_lane_latency.jsonl")
         self.assertEqual(artifact["path"], env["IBMW_ABC_LATENCY_JSONL"])
-        self.assertNotIn("/home/", json.dumps(config))
+        self.assertNotRegex(json.dumps(config), r"/(home|root)/")
 
     def test_resolve_roudi_override_environment_metadata_and_fallback(self):
         with tempfile.TemporaryDirectory() as directory:

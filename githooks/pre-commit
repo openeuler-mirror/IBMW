@@ -12,3 +12,9 @@ fi
 
 python3 "$CHECKER" --check --repo-root "$REPO_ROOT"
 python3 "$CHECKER" --check-deletions HEAD --repo-root "$REPO_ROOT"
+
+# Check the staged tree: the work tree holds ignored build and tool output.
+HYGIENE_TREE="$(mktemp -d)"
+trap 'rm -rf "$HYGIENE_TREE"' EXIT
+git checkout-index --all --prefix="$HYGIENE_TREE/"
+python3 "$REPO_ROOT/scripts/check_release_hygiene.py" --repo-root "$HYGIENE_TREE"

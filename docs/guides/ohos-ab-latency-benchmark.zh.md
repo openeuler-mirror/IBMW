@@ -32,9 +32,9 @@
 
 ```bash
 export IBMW_ROOT="$PWD"
-export OHOS_ROS2_PREFIX=/path/to/full-ohos-ros2/install
-export OHOS_MINIMAL_SDK_PREFIX=/path/to/ros2-minimal-humble-ohos-arm64-fastrtps-product-sdk
-export OHOS_SDK_NATIVE_ROOT=/path/to/ohos-sdk/native
+export OHOS_ROS2_PREFIX=/absolute/full-ohos-ros2/install
+export OHOS_MINIMAL_SDK_PREFIX=/absolute/ros2-minimal-humble-ohos-arm64-fastrtps-product-sdk
+export OHOS_SDK_NATIVE_ROOT=/absolute/ohos-sdk/native
 export A_BUILD=/tmp/ibmw-ohos-abc-a
 export B_BUILD=/tmp/ibmw-ohos-abc-b
 
