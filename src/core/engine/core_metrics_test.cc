@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include "observability/core_metrics.h"
 #include "cpp/transport/transport_handle.h"
 #include "cpp/util/string.h"

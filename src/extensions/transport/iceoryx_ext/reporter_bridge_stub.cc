@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include "iceoryx_ext/internal/reporter_bridge.h"
 
 namespace ibmw::extensions::iceoryx_extension {

@@ -49,6 +49,9 @@ TEXT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+LICENSE_HEADER_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp"}
+LICENSE_HEADER_LINES = 5
+LICENSE_HEADER_ACCEPTED = re.compile(r"copyright|license|generated", re.I)
 TEXT_FILENAMES = {
     ".gitignore",
     ".mailmap",
@@ -166,6 +169,11 @@ def check_tree(repo: Path) -> list[str]:
                 if relative in NON_PATH_DEFINITION_SOURCES
                 else FORBIDDEN_CONTENT
             )
+            if path.suffix.lower() in LICENSE_HEADER_SUFFIXES and not any(
+                LICENSE_HEADER_ACCEPTED.search(line)
+                for line in lines[:LICENSE_HEADER_LINES]
+            ):
+                errors.append(f"missing license header: {display(relative)}")
             for line_number, line in enumerate(lines, 1):
                 for label, pattern in patterns:
                     if pattern.search(line):

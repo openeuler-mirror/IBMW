@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include "observability/comm_trace.h"
 #include "engine/transport/internal/comm_trace_send_overlay.h"
 

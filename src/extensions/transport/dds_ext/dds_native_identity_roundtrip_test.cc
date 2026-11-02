@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include "dds_ext/fastdds_compat.h"
 #include "dds_ext/internal/dds_comm_trace.h"
 
