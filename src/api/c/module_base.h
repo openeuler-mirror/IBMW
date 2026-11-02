@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "c/core_base.h"
 
 #ifdef __cplusplus

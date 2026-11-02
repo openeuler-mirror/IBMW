@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "c/util/buffer_base.h"
 #include "c/util/string.h"
 

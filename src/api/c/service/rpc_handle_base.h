@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "c/service/rpc_context_base.h"
 #include "c/util/function_base.h"
 #include "c/util/string.h"
