@@ -42,7 +42,9 @@ class BlockQueue {
   T Dequeue() {
     std::unique_lock<std::mutex> lck(mutex_);
     cond_.wait(lck, [this] { return !queue_.empty() || !running_flag_; });
-    if (!running_flag_) throw BlockQueueStoppedException();
+    // Items queued before Stop() are still handed out; only an empty stopped
+    // queue throws.
+    if (queue_.empty()) throw BlockQueueStoppedException();
     T item = std::move(queue_.front());
     queue_.pop();
     return item;
@@ -50,7 +52,7 @@ class BlockQueue {
 
   std::optional<T> TryDequeue() {
     std::lock_guard<std::mutex> lck(mutex_);
-    if (queue_.empty() || !running_flag_) [[unlikely]]
+    if (queue_.empty()) [[unlikely]]
       return std::nullopt;
 
     T item = std::move(queue_.front());
