@@ -2,9 +2,11 @@
 // All rights reserved.
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cerrno>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -12,7 +14,9 @@
 #include <filesystem>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <fcntl.h>
 #include <pthread.h>
@@ -100,6 +104,30 @@ bool StartSignalThread() {
   return sigaction(SIGINT, &sa, nullptr) == 0 && sigaction(SIGTERM, &sa, nullptr) == 0;
 }
 
+// Accepts a whole non-negative number of seconds.
+bool ParseDuration(std::string_view text, int32_t& seconds) {
+  const char* end = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(text.data(), end, seconds);
+  return ec == std::errc() && ptr == end && seconds >= 0;
+}
+
+template <typename T>
+void DumpToFile(const std::string& path, const T& content) {
+  std::ofstream ofs(path, std::ios::trunc);
+  ofs << content;
+  ofs.close();
+  if (!ofs) throw std::runtime_error("failed to write " + path);
+}
+
+// _exit() skips static destructors (see RunRuntimeCommand) and stdio flushing,
+// so flush first.
+[[noreturn]] void FlushAndExit(int code) {
+  std::cout.flush();
+  std::cerr.flush();
+  std::fflush(nullptr);
+  _exit(code);
+}
+
 }  // namespace
 
 void PrintVersion() {
@@ -119,10 +147,8 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
   std::string dump_report_path =
       invocation.OptionValue("--dump-report", "./init_report.txt");
 
-  try {
-    running_duration = std::stoi(invocation.OptionValue("--duration", "0"));
-  } catch (const std::exception&) {
-    std::cerr << "Error: --duration requires an integer number of seconds.\n";
+  if (!ParseDuration(invocation.OptionValue("--duration", "0"), running_duration)) {
+    std::cerr << "Error: --duration requires a non-negative integer number of seconds.\n";
     return 1;
   }
 
@@ -142,17 +168,9 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
 
     core.Initialize(options);
 
-    if (dump_cfg) {
-      std::ofstream ofs(dump_cfg_path, std::ios::trunc);
-      ofs << core.GetConfigSubsystem().GetRootOptionsNode();
-      ofs.close();
-    }
+    if (dump_cfg) DumpToFile(dump_cfg_path, core.GetConfigSubsystem().GetRootOptionsNode());
 
-    if (dump_report) {
-      std::ofstream ofs(dump_report_path, std::ios::trunc);
-      ofs << core.GenInitializationReport();
-      ofs.close();
-    }
+    if (dump_report) DumpToFile(dump_report_path, core.GenInitializationReport());
 
     if (running_duration == 0) {
       core.Start();  // Blocked here
@@ -163,8 +181,10 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
       fu.wait();
     }
   } catch (const std::exception& e) {
-    std::cout << "IBMW fatal: " << e.what() << std::endl;
-    return -1;
+    std::cerr << "IBMW fatal: " << e.what() << std::endl;
+    // Same exit status as the former `return -1`; static destructors are
+    // skipped for the reason given below.
+    FlushAndExit(255);
   }
 
   std::cout << "IBMW stopped." << std::endl;
@@ -174,7 +194,7 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
   // reference already-freed resources, causing "double free or corruption"
   // crashes during normal process teardown. All managed shutdown has already
   // completed above (Engine destructor ran, all modules stopped).
-  _exit(0);
+  FlushAndExit(0);
 }
 
 int RunCli(int argc, char** argv) {
