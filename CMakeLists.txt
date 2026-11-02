@@ -205,6 +205,11 @@ else()
 endif()
 option(IBMW_ENABLE_COVERAGE "IBMW build with gcov coverage instrumentation." ${_ibmw_coverage_default})
 unset(_ibmw_coverage_default)
+# The option value is cached, so it survives a later change of build type.
+if(IBMW_ENABLE_COVERAGE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(WARNING "IBMW_ENABLE_COVERAGE is ON for a ${CMAKE_BUILD_TYPE} build: "
+                  "binaries are instrumented and slower. Pass -DIBMW_ENABLE_COVERAGE=OFF to disable.")
+endif()
 
 file(READ "${PROJECT_SOURCE_DIR}/VERSION" IBMW_RUNTIME_VERSION)
 string(STRIP "${IBMW_RUNTIME_VERSION}" IBMW_RUNTIME_VERSION)
