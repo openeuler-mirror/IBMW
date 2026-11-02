@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -426,8 +427,11 @@ void TransportDriverDispatcher::DeactivatePublishTap(
   std::unique_lock lock(tap_state->mutex);
   tap_state->active = false;
   const size_t own_depth = tap_state->CurrentDepth();
-  tap_state->idle_cv.wait(
-      lock, [&] { return tap_state->in_flight <= own_depth; });
+  while (!tap_state->idle_cv.wait_for(
+      lock, std::chrono::seconds(5), [&] { return tap_state->in_flight <= own_depth; })) {
+    MW_WARN("Removing a publish tap: still waiting for {} running callback(s).",
+            tap_state->in_flight - own_depth);
+  }
 }
 
 void TransportDriverDispatcher::InvokePublishTaps(MessageFrame& frame) noexcept {

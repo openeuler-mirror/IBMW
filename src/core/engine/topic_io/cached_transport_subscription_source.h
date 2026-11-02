@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -39,6 +40,14 @@ class CachedTransportSubscriptionRegistry {
     std::exception_ptr error;
     std::atomic<uint64_t> loaned_sequence{0};
     const ibmw::common::util::LoggerWrapper* logger = nullptr;
+    // The in_flight deliveries, linked through their stack frames: Stop()
+    // from a subscription callback must not wait for the delivery it runs in.
+    struct Delivery {
+      std::thread::id thread;
+      Delivery* prev = nullptr;
+      Delivery* next = nullptr;
+    };
+    Delivery* deliveries = nullptr;
   };
 
   std::shared_ptr<SubscriptionState> Attach(

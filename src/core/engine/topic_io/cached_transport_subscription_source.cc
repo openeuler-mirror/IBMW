@@ -4,7 +4,9 @@
 #include "engine/topic_io/cached_transport_subscription_source.h"
 
 #include <charconv>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 #include "base/exception.h"
 #include "base/time_util.h"
@@ -51,6 +53,17 @@ struct ReleaseGuard {
 struct InFlightGuard {
   std::shared_ptr<SubscriptionState> state;
   bool armed = false;
+  SubscriptionState::Delivery delivery;
+
+  // Called with state->mutex held.
+  void Arm() {
+    delivery.thread = std::this_thread::get_id();
+    delivery.next = state->deliveries;
+    if (delivery.next) delivery.next->prev = &delivery;
+    state->deliveries = &delivery;
+    ++state->in_flight;
+    armed = true;
+  }
 
   ~InFlightGuard() {
     if (!armed) {
@@ -58,11 +71,33 @@ struct InFlightGuard {
     }
     std::lock_guard lock(state->mutex);
     --state->in_flight;
+    (delivery.prev ? delivery.prev->next : state->deliveries) = delivery.next;
+    if (delivery.next) delivery.next->prev = delivery.prev;
     if (state->in_flight == 0) {
       state->idle_cv.notify_all();
     }
   }
 };
+
+// Waits until only the deliveries running on this thread (Stop() from a
+// callback) are left. Cold and out of line: Stop() is not on the delivery path.
+[[gnu::cold, gnu::noinline]] void WaitForOtherDeliveries(
+    SubscriptionState& state, std::unique_lock<std::mutex>& lock) {
+  size_t own_depth = 0;
+  for (auto* d = state.deliveries; d; d = d->next) {
+    own_depth += d->thread == std::this_thread::get_id();
+  }
+  while (!state.idle_cv.wait_for(lock, std::chrono::seconds(5), [&] {
+    return state.in_flight <= own_depth;
+  })) {
+    // Returning early would let a running callback outlive its owner.
+    if (state.logger) {
+      MW_LOG(*state.logger, ibmw::common::util::kLogLevelWarn,
+             "Stopping cached {} subscription for topic '{}': still waiting for {} running callback(s).",
+             state.driver_name, state.advertisement.topic.topic, state.in_flight - own_depth);
+    }
+  }
+}
 
 void DeliverFrame(
     const std::shared_ptr<SubscriptionState>& state,
@@ -81,8 +116,7 @@ void DeliverFrame(
       if (!state->active) {
         return;
       }
-      ++state->in_flight;
-      in_flight_guard.armed = true;
+      in_flight_guard.Arm();
       logger = state->logger;
       advertisement = state->advertisement;
       driver_name = state->driver_name;
@@ -316,7 +350,7 @@ void CachedTransportSubscriptionSource::Stop() {
   {
     std::unique_lock lock(state_->mutex);
     state_->active = false;
-    state_->idle_cv.wait(lock, [this] { return state_->in_flight == 0; });
+    WaitForOtherDeliveries(*state_, lock);
     error = state_->error;
   }
   if (error) {
