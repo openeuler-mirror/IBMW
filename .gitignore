@@ -79,6 +79,8 @@ bench_results/
 *.bench.json
 perf.data
 perf.data.old
+# Metrics/trace/bench runs write JSONL under many names; none are tracked.
+# Commit a JSONL fixture deliberately with `git add -f` or a `!path` rule.
 *.jsonl
 managed_exact_candidate_runs/
 topology-artifacts/
