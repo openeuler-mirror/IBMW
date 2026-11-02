@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <deque>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <thread>
 #include <filesystem>
@@ -120,6 +122,47 @@ TEST_F(RecordActionStoragePolicyTest, FoldersAreKeptWithoutLimit) {
     WriteFile(bags / name / "a.mcap", 1);
   Record(bags, "{}");
   EXPECT_EQ(List(bags).size(), 3u);
+}
+
+// EXT-023: bag folder names have second precision; a folder started in a
+// second whose name is taken gets a numbered suffix instead of failing.
+TEST_F(RecordActionStoragePolicyTest, FolderOfTheSameSecondGetsASuffix) {
+  const auto bags = root_ / "bags";
+  std::vector<std::string> taken;
+  const time_t now = ::time(nullptr);
+  for (time_t t = now; t < now + 3; ++t) {  // the recorder starts within these seconds
+    struct tm tm{};
+    localtime_r(&t, &tm);
+    char buf[32];
+    strftime(buf, sizeof(buf), "ibmwbag_%Y%m%d_%H%M%S", &tm);
+    taken.emplace_back(buf);
+    fs::create_directories(bags / buf);
+  }
+
+  ASSERT_NO_THROW(Record(bags, "{}"));
+
+  const auto names = List(bags);
+  ASSERT_EQ(names.size(), taken.size() + 1) << ::testing::PrintToString(names);
+  std::vector<std::string> created;
+  std::set_difference(names.begin(), names.end(), taken.begin(), taken.end(), std::back_inserter(created));
+  ASSERT_EQ(created.size(), 1u);
+  EXPECT_EQ(created[0].size(), taken[0].size() + 3) << created[0];
+  EXPECT_EQ(created[0].substr(taken[0].size()), "_01") << created[0];
+  for (const auto& name : taken) EXPECT_TRUE(fs::is_empty(bags / name)) << name;  // not reused
+}
+
+TEST_F(RecordActionStoragePolicyTest, NumberedBagFoldersArePruned) {
+  const auto bags = root_ / "bags";
+  for (const char* name : {"ibmwbag_20200101_000000", "ibmwbag_20200101_000000_01", "ibmwbag_20200101_000000_02"})
+    WriteFile(bags / name / "a.mcap", 1);
+  WriteFile(bags / "ibmwbag_20200101_000000_1" / "a.mcap", 1);  // not a recorder name
+
+  Record(bags, "{max_folder_num: 2}");
+
+  const auto names = List(bags);
+  ASSERT_EQ(names.size(), 3u) << ::testing::PrintToString(names);
+  EXPECT_EQ(names[0], "ibmwbag_20200101_000000_02");  // newest old folder
+  EXPECT_EQ(names[1], "ibmwbag_20200101_000000_1");
 }
 
 TEST_F(RecordActionStoragePolicyTest, OldestBagFilesAreRemovedAboveTotalSize) {

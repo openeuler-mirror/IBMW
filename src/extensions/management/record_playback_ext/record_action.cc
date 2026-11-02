@@ -311,7 +311,7 @@ void RecordAction::Initialize(YAML::Node options) {
 
   parent_bag_path_ = std::filesystem::absolute(options_.bag_path);
   if (!(std::filesystem::exists(parent_bag_path_) && std::filesystem::is_directory(parent_bag_path_))) {
-    std::filesystem::create_directories(parent_bag_path_);
+    if (!parent_bag_path_.empty()) std::filesystem::create_directories(parent_bag_path_);
   }
 
   if (options_.mode == Options::Mode::kImd) {
@@ -959,17 +959,28 @@ bool RecordAction::OpenNewFolderToRecord() {
            (tm.tm_year + 1900) % 10000u, (tm.tm_mon + 1) % 100u, (tm.tm_mday) % 100u,
            (tm.tm_hour) % 100u, (tm.tm_min) % 100u, (tm.tm_sec) % 100u);
   auto new_bag_base_name = "ibmwbag" + std::string(buf);
-  auto new_real_bag_path = parent_bag_path_ / new_bag_base_name;
+  std::filesystem::path new_real_bag_path;
 
-  if (std::filesystem::exists(new_real_bag_path)) {
-    MW_WARN("Bag path '{}' has already existed!", new_real_bag_path.string());
+  // Names have second precision: a folder started in the same second gets a
+  // "_01".."_99" suffix. create_directory() fails on an existing path, so a
+  // folder is never shared.
+  try {
+    if (!parent_bag_path_.empty()) std::filesystem::create_directories(parent_bag_path_);
+    for (uint32_t seq = 0; seq < kMaxBagFolderSeq && new_real_bag_path.empty(); ++seq) {
+      auto candidate = parent_bag_path_ / new_bag_base_name;
+      if (seq != 0) {
+        char seq_buf[4];
+        snprintf(seq_buf, sizeof(seq_buf), "_%02u", seq);
+        candidate += seq_buf;
+      }
+      if (std::filesystem::create_directory(candidate)) new_real_bag_path = std::move(candidate);
+    }
+  } catch (const std::filesystem::filesystem_error& e) {
+    MW_WARN("Create bag directory under '{}' failed: {}", parent_bag_path_.string(), e.what());
     return false;
   }
-
-  try {
-    std::filesystem::create_directories(new_real_bag_path);
-  } catch (const std::filesystem::filesystem_error& e) {
-    MW_WARN("Create directory '{}' failed: {}", new_real_bag_path.string(), e.what());
+  if (new_real_bag_path.empty()) {
+    MW_WARN("Bag path '{}' and its numbered variants already exist!", (parent_bag_path_ / new_bag_base_name).string());
     return false;
   }
 
@@ -1116,12 +1127,16 @@ namespace bag_retention {
 
 namespace {
 
-// "ibmwbag_YYYYMMDD_hhmmss", as created by OpenNewFolderToRecord().
+// "ibmwbag_YYYYMMDD_hhmmss" or "ibmwbag_YYYYMMDD_hhmmss_NN", as created by
+// OpenNewFolderToRecord().
 bool IsBagFolderName(const std::string& name) {
   constexpr std::string_view kPrefix = "ibmwbag_";
-  if (name.size() != kPrefix.size() + 15 || name.compare(0, kPrefix.size(), kPrefix) != 0) return false;
+  constexpr size_t kBaseSize = kPrefix.size() + 15;
+  if ((name.size() != kBaseSize && name.size() != kBaseSize + 3) ||
+      name.compare(0, kPrefix.size(), kPrefix) != 0)
+    return false;
   for (size_t i = kPrefix.size(); i < name.size(); ++i) {
-    const bool sep = i == kPrefix.size() + 8;
+    const bool sep = i == kPrefix.size() + 8 || i == kBaseSize;
     if (sep ? name[i] != '_' : (name[i] < '0' || name[i] > '9')) return false;
   }
   return true;

@@ -54,7 +54,7 @@ class RecordAction {
       // free space than this; rechecked at most once a second. While paused
       // no new bag folder is created (a signal record fails to start).
       uint32_t min_free_space_m = 0;
-      // Oldest ibmwbag_YYYYMMDD_hhmmss folders under bag_path are removed so
+      // Oldest ibmwbag_YYYYMMDD_hhmmss[_NN] folders under bag_path are removed so
       // that at most this many remain, the current one included. bag_path
       // must not be shared with another record action or writable by others.
       uint32_t max_folder_num = 0;
@@ -182,6 +182,8 @@ class RecordAction {
 
   void AddRecordImpl(OneRecord&& record);
   void OpenNewMcapToRecord(uint64_t start_timestamp);
+  // Bag folders started in the same second: the base name, then _01.._99.
+  static constexpr uint32_t kMaxBagFolderSeq = 100;
   bool OpenNewFolderToRecord();
 
   void CloseRecord();
@@ -287,7 +289,7 @@ class RecordAction {
 // Bag retention helpers (EXT-021), used when a bag folder or file is opened.
 namespace bag_retention {
 
-// Removes the oldest "ibmwbag_YYYYMMDD_hhmmss" directories directly under
+// Removes the oldest "ibmwbag_YYYYMMDD_hhmmss[_NN]" directories directly under
 // `parent` so that at most `max_num` such directories remain, `keep`
 // included. Never removes `keep` or a newer folder, symbolic links or other
 // names.
