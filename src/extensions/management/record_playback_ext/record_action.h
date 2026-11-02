@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -147,6 +149,17 @@ class RecordAction {
   }
   static uint64_t SampleIntervalNs(double freq) {
     return freq > 0 ? static_cast<uint64_t>(1.0 / freq * 1000000000) : 0;
+  }
+
+  // Publisher timestamp/sequence metadata comes from the remote peer: an empty
+  // value is 0, a malformed one is nullopt (never throws).
+  static std::optional<uint64_t> ParsePubMeta(std::string_view value) {
+    uint64_t result = 0;
+    if (value.empty()) return result;
+    const char* end = value.data() + value.size();
+    const auto [ptr, ec] = std::from_chars(value.data(), end, result);
+    if (ec != std::errc() || ptr != end) [[unlikely]] return std::nullopt;
+    return result;
   }
 
  private:

@@ -117,6 +117,16 @@ TEST(RecordActionSampleFreqTest, Validation) {
   EXPECT_EQ(RecordAction::SampleIntervalNs(10), 100000000u);
 }
 
+// EXT-020: publisher metadata from the peer is parsed without throwing.
+TEST(RecordActionPubMetaTest, MalformedValuesAreRejected) {
+  EXPECT_EQ(RecordAction::ParsePubMeta(""), 0u);
+  EXPECT_EQ(RecordAction::ParsePubMeta("1700000000123456789"), 1700000000123456789u);
+  EXPECT_EQ(RecordAction::ParsePubMeta("18446744073709551615"), UINT64_MAX);
+  for (std::string_view bad : {"abc", "12x", "-1", " 1", "18446744073709551616"}) {
+    EXPECT_FALSE(RecordAction::ParsePubMeta(bad)) << bad;
+  }
+}
+
 TEST_F(RecordServiceTest, InvalidSampleFreqIsRejected) {
   AddAction("signal", true);
   for (double freq : {-1.0, 1e-300, std::nan(""), std::numeric_limits<double>::infinity()}) {

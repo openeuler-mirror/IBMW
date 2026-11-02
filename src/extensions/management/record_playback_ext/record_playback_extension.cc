@@ -515,17 +515,24 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
                          msg_wrapper.msg_type, serialization_type);
               return;
             }
-            auto pub_ts = std::string(msg_wrapper.context.GetMetaValue(
+            // Parsed in place (no string copies); malformed values from the
+            // peer are recorded as 0 instead of throwing on this thread.
+            const auto pub_ts = RecordAction::ParsePubMeta(msg_wrapper.context.GetMetaValue(
                 IBMW_TRANSPORT_CONTEXT_KEY_PUB_TIMESTAMP));
-            auto pub_seq = std::string(msg_wrapper.context.GetMetaValue(
+            const auto pub_seq = RecordAction::ParsePubMeta(msg_wrapper.context.GetMetaValue(
                 IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ));
+            if (!pub_ts || !pub_seq) [[unlikely]] {
+              MW_WARN_INTERVAL(5000, "Malformed publisher timestamp/sequence on '{}', recorded as 0.",
+                               msg_wrapper.msg_type);
+            }
 
             record_action.AddRecord(
                 RecordAction::OneRecord{
                     .topic_index = topic_id,
                     .log_timestamp = cur_timestamp,
-                    .pub_timestamp = pub_ts.empty() ? 0 : std::stoull(pub_ts),
-                    .pub_sequence = pub_seq.empty() ? 0 : static_cast<uint32_t>(std::stoul(pub_seq)),
+                    .pub_timestamp = pub_ts.value_or(0),
+                    // MCAP message sequence numbers are 32-bit.
+                    .pub_sequence = static_cast<uint32_t>(pub_seq.value_or(0)),
                     .buffer_view_ptr = buffer_view_ptr});
           };
 
