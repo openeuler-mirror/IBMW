@@ -17,7 +17,7 @@
 
 namespace ibmw::cli::topic {
 namespace {
-constexpr const char* kDrivers[] = {"dds", "ros2", "zenoh", "mqtt", "tcp", "udp", "http", "iceoryx", "local"};
+constexpr const char* kDrivers[] = {"dds", "ros2", "zenoh", "mqtt", "tcp", "udp", "http", "iceoryx", "shm", "local"};
 
 uint64_t PositiveInteger(const Invocation& invocation, const std::string& name, const char* fallback) {
   const auto value = OptionValue(invocation, name, fallback);
@@ -85,7 +85,7 @@ PublicationConfig ParsePublicationOptions(const Invocation& invocation) {
     }
   }
   if (selected != 1)
-    throw std::invalid_argument("pub requires exactly one publishing backend: --dds, --ros2, --zenoh, --mqtt, --tcp, --udp, --http, --iceoryx or --local.");
+    throw std::invalid_argument("pub requires exactly one publishing backend: --dds, --ros2, --zenoh, --mqtt, --tcp, --udp, --http, --iceoryx, --shm or --local.");
   const auto& driver = result.driver;
   const bool dds_or_ros = driver == "dds" || driver == "ros2";
   const bool network = driver == "tcp" || driver == "udp" || driver == "http";
@@ -104,7 +104,11 @@ PublicationConfig ParsePublicationOptions(const Invocation& invocation) {
   require("--transport-library", driver != "local");
   for (const auto* option : {"--broker", "--client-id", "--mqtt-qos", "--mqtt-truststore", "--mqtt-client-cert", "--mqtt-client-key", "--mqtt-key-password"})
     require(option, driver == "mqtt");
-  for (const auto* option : {"--iceoryx-runtime-id", "--shm-init-size"}) require(option, driver == "iceoryx");
+  require("--iceoryx-runtime-id", driver == "iceoryx");
+  require("--shm-init-size", driver == "iceoryx" || driver == "shm");
+  for (const auto* option : {"--shm-runtime-id", "--shm-domain", "--shm-root-dir", "--shm-group",
+                             "--shm-max-bytes-per-publisher", "--shm-prefault", "--shm-require-read-only"})
+    require(option, driver == "shm");
   for (const auto* option : {"--qos-reliability", "--qos-durability", "--qos-history", "--qos-depth"}) {
     if (invocation.HasOption(option) && !dds_or_ros)
       throw std::invalid_argument(std::string(option) + " only applies to DDS/ROS 2.");
@@ -179,6 +183,22 @@ PublicationConfig ParsePublicationOptions(const Invocation& invocation) {
   } else if (driver == "iceoryx") {
     settings["runtime_id"] = RequiredValue(invocation, "--iceoryx-runtime-id", identity);
     settings["shm_init_size"] = Integer(OptionValue(invocation, "--shm-init-size", "1024"), "--shm-init-size", 1, std::numeric_limits<uint32_t>::max());
+  } else if (driver == "shm") {
+    // Keys of the shm_extension YAML node; omitted ones keep its defaults.
+    settings["runtime_id"] = RequiredValue(invocation, "--shm-runtime-id", identity);
+    settings["shm_init_size"] = Integer(OptionValue(invocation, "--shm-init-size", "1024"), "--shm-init-size", 1, std::numeric_limits<uint32_t>::max());
+    if (invocation.HasOption("--shm-domain")) settings["domain"] = RequiredValue(invocation, "--shm-domain");
+    if (invocation.HasOption("--shm-root-dir")) settings["root_dir"] = RequiredValue(invocation, "--shm-root-dir");
+    if (invocation.HasOption("--shm-group")) {
+      // 4294967295 is (gid_t)-1, "no change" for fchown, so it is not a group.
+      settings["group"] = std::to_string(Integer(OptionValue(invocation, "--shm-group", ""), "--shm-group", 0,
+                                                 std::numeric_limits<uint32_t>::max() - 1));
+    }
+    if (invocation.HasOption("--shm-max-bytes-per-publisher")) {
+      settings["max_bytes_per_publisher"] = PositiveInteger(invocation, "--shm-max-bytes-per-publisher", "");
+    }
+    if (invocation.HasOption("--shm-prefault")) settings["prefault"] = true;
+    if (invocation.HasOption("--shm-require-read-only")) settings["require_read_only"] = true;
   }
   if (driver != "local") {
     extension["path"] = invocation.HasOption("--transport-library")
@@ -186,8 +206,8 @@ PublicationConfig ParsePublicationOptions(const Invocation& invocation) {
         : ibmw::runtime::core::topic_io::TransportLibrary(network ? "net" : driver).string();
     runtime["extensions"]["items"].push_back(extension);
   }
-  // Local and Iceoryx do not have per-topic driver publisher options.
-  if (driver != "local" && driver != "iceoryx") options["publishers"].push_back(publisher);
+  // Local, Iceoryx and shm do not have per-topic driver publisher options.
+  if (driver != "local" && driver != "iceoryx" && driver != "shm") options["publishers"].push_back(publisher);
   runtime["messaging"]["drivers"].push_back(transport);
   YAML::Node route;
   route["topic"] = ".*";
@@ -237,7 +257,14 @@ void AddPublicationOptions(Command& pub) {
   pub.AddOption("--mqtt-client-key", {}, "path", "MQTT TLS client private key", Mode::kRequired);
   pub.AddOption("--mqtt-key-password", {}, "password", "MQTT TLS client key password", Mode::kRequired);
   pub.AddOption("--iceoryx-runtime-id", {}, "name", "Iceoryx runtime ID (default: unique process ID)", Mode::kRequired);
-  pub.AddOption("--shm-init-size", {}, "bytes", "Iceoryx initial shared-memory chunk size (default: 1024)", Mode::kRequired);
+  pub.AddOption("--shm-init-size", {}, "bytes", "Iceoryx/shm initial shared-memory chunk size (default: 1024)", Mode::kRequired);
+  pub.AddOption("--shm-runtime-id", {}, "name", "shm runtime ID (default: unique process ID)", Mode::kRequired);
+  pub.AddOption("--shm-domain", {}, "name", "shm domain (default: IBMW_SHM_DOMAIN)", Mode::kRequired);
+  pub.AddOption("--shm-root-dir", {}, "path", "shm discovery root directory (default: IBMW_SHM_ROOT or the built-in root)", Mode::kRequired);
+  pub.AddOption("--shm-group", {}, "gid", "shm numeric group ID sharing the memory (default: IBMW_SHM_GROUP or user-private)", Mode::kRequired);
+  pub.AddOption("--shm-max-bytes-per-publisher", {}, "bytes", "shm shared-memory budget per publisher (default: 512 MiB)", Mode::kRequired);
+  pub.AddOption("--shm-prefault", {}, {}, "shm: prefault new shared-memory segments");
+  pub.AddOption("--shm-require-read-only", {}, {}, "shm: fail instead of creating segments subscribers could map writable");
   pub.AddOption("--transport-library", {}, "path", "Override the selected transport extension library", Mode::kRequired);
   pub.AddOption("--qos-reliability", {}, "policy", "DDS/ROS 2: reliable (default) or best_effort", Mode::kRequired);
   pub.AddOption("--qos-durability", {}, "policy", "DDS/ROS 2: volatile (default) or transient_local", Mode::kRequired);

@@ -204,15 +204,20 @@ void ShmTransportDriver::Initialize(YAML::Node options_node) {
     });
   }
   options_ = std::move(options);
+  delivery_started_ = false;
   state_.store(State::kInit);
 }
 
 void ShmTransportDriver::Start() {
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-  MW_REQUIRE(state_.load() == State::kInit, "Method can only be called when state is 'Init'.");
+  // A Start() that threw while attaching may be retried: attaching is
+  // idempotent, so the retry attaches the rest.
+  MW_REQUIRE(state_.load() == State::kInit || (state_.load() == State::kStart && !delivery_started_),
+             "Method can only be called when state is 'Init'.");
   // kStart first: a callback may Send() as soon as its subscription attaches.
   state_.store(State::kStart);
   bus_.StartDelivery();
+  delivery_started_ = true;
 }
 
 bool ShmTransportDriver::CanShutdownFromCurrentThread() const noexcept { return !IsShmCallbackThread(); }
@@ -391,6 +396,8 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
     SHM_SEND_REQUIRE(state == State::kStart, "Method can only be called when state is 'Start'.");
     auto operation = bus_.TryAcquireOperation();
     if (!operation) return;
+    // A driver of a bus generation that was shut down is not running either.
+    if (bus_.Generation() != bus_generation_) return;
     namespace util = ibmw::common::util;
 
     const auto& info = msg_wrapper.info;
@@ -684,7 +691,10 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
     auto operation = bus_.TryAcquireOperation();
     if (!operation) return false;
     if (bus_.Generation() != bus_generation_) return false;
-    // pod_pub_map_ is only written in Init state, before any Start-phase loan.
+    // pod_pub_map_ is written under lifecycle_mutex_ in Init state only and is
+    // frozen once kStart is stored (seq_cst); before that, look up under the lock.
+    std::unique_lock<std::mutex> init_lock(lifecycle_mutex_, std::defer_lock);
+    if (state_.load() != State::kStart) init_lock.lock();
     auto it = pod_pub_map_.find(TopicKey(info.topic_name, info.msg_type));
     if (it == pod_pub_map_.end()) {
       MW_WARN("LoanSample: POD topic not registered. Call EnsurePodTopic first. topic={} msg_type={}",
@@ -824,16 +834,24 @@ size_t ShmTransportDriver::EncodeCtxMetaHeader(
 }
 
 void ShmTransportDriver::PublishLoaned(transport::LoanedSampleHandle& handle) noexcept {
-  if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this) return;
+  TryPublishLoaned(handle);
+}
+
+bool ShmTransportDriver::TryPublishLoaned(transport::LoanedSampleHandle& handle) noexcept {
+  if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this) {
+    return false;
+  }
+  bool published = false;
   switch (handle.mode) {
     case transport::LoanMode::kCtxMetaThenPayloadUnreported:
     case transport::LoanMode::kPodOnly:
-      ShmLoanSlot::FromToken(handle.driver_token)->owner->PublishSlot(handle.driver_token);
+      published = ShmLoanSlot::FromToken(handle.driver_token)->owner->PublishSlot(handle.driver_token);
       break;
     default:
-      return;
+      return false;
   }
   ClearHandle(handle);
+  return published;
 }
 
 void ShmTransportDriver::ReleaseLoaned(transport::LoanedSampleHandle& handle) noexcept {

@@ -68,11 +68,14 @@ def _is_ros2_message_module(module: dict) -> bool:
         or module.get("_is_loaned_publisher")
         or module.get("_is_loaned_subscriber")
         or module.get("_is_direct_iceoryx")
+        or module.get("_is_direct_shm")
         or module.get("type") in {
             "direct_ros2_publisher",
             "direct_ros2_subscriber",
             "direct_iceoryx_publisher",
             "direct_iceoryx_subscriber",
+            "direct_shm_publisher",
+            "direct_shm_subscriber",
             "loaned_publisher",
             "loaned_subscriber",
         }

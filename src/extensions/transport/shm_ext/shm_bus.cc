@@ -213,8 +213,10 @@ void* ShmPublisher::Loan(size_t size, size_t alignment) noexcept {
 
 // Only a chunk that really was on loan ends one: a stale or foreign pointer
 // must not drive the count (which gates shutdown) below the live loans.
-void ShmPublisher::Publish(void* chunk) noexcept {
-  if (publisher_.Publish(chunk)) EndLoan();
+bool ShmPublisher::Publish(void* chunk) noexcept {
+  if (!publisher_.Publish(chunk)) return false;
+  EndLoan();
+  return true;
 }
 
 void ShmPublisher::Release(void* chunk) noexcept {
@@ -254,8 +256,9 @@ void* ShmPublisher::TakeSlot(void* token) noexcept {
   return chunk;
 }
 
-void ShmPublisher::PublishSlot(void* token) noexcept {
-  if (void* chunk = TakeSlot(token)) Publish(chunk);
+bool ShmPublisher::PublishSlot(void* token) noexcept {
+  void* chunk = TakeSlot(token);
+  return chunk != nullptr && Publish(chunk);
 }
 
 void ShmPublisher::ReleaseSlot(void* token) noexcept {

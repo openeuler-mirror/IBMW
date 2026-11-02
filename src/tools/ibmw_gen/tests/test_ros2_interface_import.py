@@ -2533,8 +2533,9 @@ target_link_libraries(probe PRIVATE
         self.assertTrue(cap["is_bounded"])
         self.assertFalse(cap["contains_heap"])
         self.assertEqual(cap["max_serialized_size_bytes"], 28)
-        self.assertEqual(cap["zero_copy"], {"dds_loaned": "yes", "iceoryx": "yes"})
+        self.assertEqual(cap["zero_copy"], {"dds_loaned": "yes", "iceoryx": "yes", "shm": "yes"})
         self.assertEqual(cap["transports"]["iceoryx"], "yes")
+        self.assertEqual(cap["transports"]["shm"], "yes")
         self.assertEqual(cap["suggestions"], [])
         fields = data["messages"][0]["fields"]
         self.assertEqual(fields[0]["capability"]["size_bytes"], 4)
@@ -2607,9 +2608,10 @@ target_link_libraries(probe PRIVATE
         self.assertIsNone(cap["max_serialized_size_bytes"])
         for field in data["messages"][0]["fields"]:
             self.assertIsNone(field["capability"]["size_bytes"])
-        self.assertEqual(cap["zero_copy"], {"dds_loaned": "no", "iceoryx": "no"})
+        self.assertEqual(cap["zero_copy"], {"dds_loaned": "no", "iceoryx": "no", "shm": "no"})
         self.assertEqual(cap["transports"]["dds_ros2_compatible"], "yes")
         self.assertEqual(cap["transports"]["iceoryx"], "no")
+        self.assertEqual(cap["transports"]["shm"], "no")
         suggestions = "\n".join(item["suggestion"] for item in cap["suggestions"])
         self.assertIn("fixed-size char array", suggestions)
         self.assertIn("loaned/shared buffer", suggestions)

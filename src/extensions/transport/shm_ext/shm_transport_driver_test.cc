@@ -39,6 +39,7 @@
 #include "cpp/util/buffer_array_allocator.h"
 #include "engine/transport/transport_driver_dispatcher.h"
 #include "shm_ext/global.h"
+#include "shm_ext/iox_style_publisher.h"
 #include "shm_ext/shm_bus.h"
 #include "shm_ext/shm_ctx_publisher.h"
 #include "shm_ext/shm_extension.h"
@@ -567,8 +568,9 @@ TEST_F(ShmDriverTest, InitializeValidatesOptions) {
   }
 }
 
-// EXT-05 The driver name is configurable; the slot follows it so "iceoryx"
-// is a drop-in replacement, and received contexts carry the name.
+// EXT-05 The driver name is configurable so "iceoryx" is a drop-in
+// replacement for routing, and received contexts carry the name; the slot
+// stays "shm" (H2).
 TEST_F(ShmDriverTest, DriverNameAliasIsDropIn) {
   auto& d = Init(YAML::Node(), {}, "iceoryx");
   EXPECT_EQ(d.Name(), "iceoryx");
@@ -2187,13 +2189,343 @@ TEST_F(ShmDriverTest, BusReinitializesAfterShutdown) {
   auto ctx = PubContext();
   transport::MessageFrame frame{.info = info, .msg_ptr = &msg, .ctx_ref = ctx};
   stale->Send(frame);
-  EXPECT_EQ(stale->SendFailures(), 1u);
+  // Refused quietly like any send of a stopped driver: not a send failure,
+  // and nothing reaches the new generation.
+  EXPECT_EQ(stale->SendFailures(), 0u);
+  std::this_thread::sleep_for(20ms);
+  EXPECT_EQ(rx2.Ints(), 1u);
   // Nor can it shut the new generation down.
   EXPECT_TRUE(stale->TryPrepareShutdown(1s));
   stale->Shutdown();
   EXPECT_TRUE(bus_->TryAcquireOperation());
   SendInt(info, 4);
   EXPECT_TRUE(WaitFor([&] { return rx2.Ints() == 2; }));
+}
+
+}  // namespace
+
+// ============================================ iceoryx_ext-compatible helpers
+
+namespace {
+
+struct CompatPod {
+  int32_t seq;
+  int32_t value;
+};
+
+}  // namespace
+
+// Every member of the class templates compiles.
+template class IoxLoanedSample<CompatPod>;
+template class IoxStylePublisher<CompatPod>;
+template class IoxLoanedSample<std::byte>;
+
+}  // namespace ibmw::extensions::shm_extension
+
+// The typed ctx-meta publisher finds its type support through this trait,
+// which generated typesupport headers specialize.
+template <>
+struct ibmw::MessageTypeSupportTraits<ibmw::extensions::shm_extension::BlobMsg> {
+  static const ibmw_type_support_base_t* Get() { return ibmw::extensions::shm_extension::BlobTypeSupport(); }
+};
+
+namespace ibmw::extensions::shm_extension {
+namespace {
+
+// Ported iceoryx_ext code names the driver IceoryxTransportDriver and runs
+// the R8.2 check unchanged.
+static_assert(std::is_same_v<IceoryxTransportDriver, ShmTransportDriver>);
+struct LegacyOnlyModule {
+  using legacy_iox_marker = IoxStylePublisher<CompatPod>;
+};
+static_assert(IbmwUsesLegacyIceoryxApi<LegacyOnlyModule>::value);
+static_assert(!IbmwHasV2DriverSlot<LegacyOnlyModule>::value);
+static_assert(sizeof(IbmwR82SlotMixCheck<LegacyOnlyModule>) > 0);
+
+// EXT-48 Loan wrappers of iox_style_publisher.h without a driver: empty is
+// invalid and a no-op to destroy, a too-small loan is not a valid T,
+// ExtractForPublish hands over the handle and leaves the wrapper empty.
+TEST(ShmIoxCompatTest, LoanWrappersWithoutDriver) {
+  IoxLoanedSample<CompatPod> empty;
+  EXPECT_FALSE(empty.is_valid());
+  IoxCtxMetaLoanedBuffer empty_buf;
+  EXPECT_FALSE(empty_buf.is_valid());
+  EXPECT_EQ(empty_buf.size(), 0u);
+
+  CompatPod storage{};
+  transport::LoanedSampleHandle h;
+  h.user_payload_ptr = &storage;
+  h.user_payload_size = sizeof(CompatPod) - 1;
+  // Never released: a null driver marks the wrappers as not owning a loan.
+  IoxLoanedSample<CompatPod> short_loan(nullptr, h);
+  EXPECT_FALSE(short_loan.is_valid());
+  h.user_payload_size = sizeof(CompatPod);
+  IoxLoanedSample<CompatPod> no_driver(nullptr, h);
+  EXPECT_FALSE(no_driver.is_valid());
+  EXPECT_EQ(no_driver.get(), &storage);
+  const auto out = no_driver.ExtractForPublish();
+  EXPECT_EQ(out.user_payload_ptr, &storage);
+  EXPECT_EQ(no_driver.get(), nullptr);
+
+  IoxCtxMetaLoanedBuffer buf(nullptr, h);
+  EXPECT_FALSE(buf.is_valid());
+  EXPECT_EQ(buf.ExtractForPublish().user_payload_ptr, &storage);
+  EXPECT_EQ(buf.data(), nullptr);
+
+  EXPECT_EQ(CreatePodPublisher<CompatPod>(nullptr, "t", "CompatPod"), nullptr);
+  EXPECT_FALSE(RegisterPodSubscriber<CompatPod>(nullptr, "t", "CompatPod", [](const CompatPod&) {}));
+  EXPECT_EQ(CreateRawPodPublisher(nullptr, "t", "Raw", 64), nullptr);
+  EXPECT_FALSE(RegisterRawPodSubscriber(nullptr, "t", "Raw", [](const void*, size_t) {}));
+  EXPECT_EQ(CreateCtxMetaPublisher(nullptr, "t", kBlobType), nullptr);
+  EXPECT_EQ(CreateCtxMetaTypedPublisher<BlobMsg>(nullptr, "t", kBlobType), nullptr);
+  IoxCtxMetaTypedPublisher<BlobMsg> typed_no_driver(nullptr, "t", kBlobType);
+  EXPECT_FALSE(typed_no_driver.publish(*PubContext(), BlobMsg{"x"}));
+}
+
+// EXT-49 Typed POD path (CreatePodPublisher / IoxStylePublisher /
+// RegisterPodSubscriber): Init-only registration, write in place and publish,
+// variable-size loans, smaller payloads skipped by the typed subscriber,
+// unpublished loans given back, and publish() false for a duplicate or
+// foreign handle instead of claiming success.
+TEST_F(ShmDriverTest, IoxCompatPodPublisher) {
+  auto& d = Init();
+  const std::string topic = UniqueTopic();
+  constexpr std::string_view kType = "shm_ext_test/CompatPod";
+  auto pub = CreatePodPublisher<CompatPod>(&d, topic, kType);
+  ASSERT_NE(pub, nullptr);
+  EXPECT_EQ(pub->topic_name(), topic);
+  EXPECT_EQ(pub->msg_type(), kType);
+
+  std::mutex mu;
+  std::vector<CompatPod> got;
+  ASSERT_TRUE(RegisterPodSubscriber<CompatPod>(&d, topic, kType, [&](const CompatPod& msg) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.push_back(msg);
+  }));
+  StopGuard stop{this};
+  d.Start();
+  EXPECT_EQ(CreatePodPublisher<CompatPod>(&d, topic + "/late", kType), nullptr);  // not in Init any more
+  const auto url = PodUrl(topic, std::string(kType));
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
+  auto* raw = Publisher(url);
+  ASSERT_NE(raw, nullptr);
+  auto received = [&](size_t n) {
+    return WaitFor([&] {
+      std::lock_guard<std::mutex> lock(mu);
+      return got.size() == n;
+    });
+  };
+
+  EXPECT_FALSE(pub->publish(IoxLoanedSample<CompatPod>()));
+  auto sample = pub->borrow_loaned_sample();
+  ASSERT_TRUE(sample.is_valid());
+  sample->seq = 1;
+  (*sample).value = 10;
+  ASSERT_TRUE(pub->publish(std::move(sample)));
+  EXPECT_FALSE(sample.is_valid());  // NOLINT(bugprone-use-after-move): moved-from state is specified
+  ASSERT_TRUE(received(1));
+
+  EXPECT_FALSE(pub->borrow_loaned_sample(sizeof(CompatPod) - 1).is_valid());
+  auto big = pub->borrow_loaned_sample(sizeof(CompatPod) + 100);
+  ASSERT_TRUE(big.is_valid());
+  big->seq = 2;
+  std::memset(reinterpret_cast<char*>(big.get()) + sizeof(CompatPod), 'x', 100);
+  ASSERT_TRUE(pub->publish(std::move(big)));
+  ASSERT_TRUE(received(2));
+
+  // A payload smaller than T on the same topic never reaches the typed callback.
+  IoxRawPodPublisher tiny(&d, topic, std::string(kType));
+  auto one = tiny.borrow_loaned_sample(1);
+  ASSERT_TRUE(one.is_valid());
+  ASSERT_TRUE(tiny.publish(std::move(one)));
+  auto last = pub->borrow_loaned_sample();
+  ASSERT_TRUE(last.is_valid());
+  last->seq = 3;
+  ASSERT_TRUE(pub->publish(std::move(last)));
+  ASSERT_TRUE(received(3));
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    EXPECT_EQ(got[0].seq, 1);
+    EXPECT_EQ(got[0].value, 10);
+    EXPECT_EQ(got[1].seq, 2);
+    EXPECT_EQ(got[2].seq, 3);
+  }
+
+  // Unpublished loans go back: on destruction and when overwritten by a move.
+  {
+    auto a = pub->borrow_loaned_sample();
+    auto b = pub->borrow_loaned_sample();
+    ASSERT_TRUE(a.is_valid() && b.is_valid());
+    EXPECT_EQ(raw->Outstanding(), 2u);
+    a = std::move(b);
+    EXPECT_EQ(raw->Outstanding(), 1u);
+  }
+  EXPECT_EQ(raw->Outstanding(), 0u);
+
+  // The same loan wrapped twice: only the first publish happens.
+  const uint64_t publishes = raw->Stats().publishes;
+  auto h = pub->borrow_loaned_sample().ExtractForPublish();
+  ASSERT_NE(h.user_payload_ptr, nullptr);
+  IoxLoanedSample<CompatPod> first(&d, h), duplicate(&d, h);
+  EXPECT_TRUE(pub->publish(std::move(first)));
+  EXPECT_FALSE(pub->publish(std::move(duplicate)));
+  EXPECT_EQ(raw->Stats().publishes, publishes + 1);
+  EXPECT_EQ(raw->Outstanding(), 0u);
+
+  // A handle of another driver is not this driver's to publish; the real
+  // owner still gives the loan back.
+  auto mine = pub->borrow_loaned_sample().ExtractForPublish();
+  auto foreign = mine;
+  foreign.source_driver = nullptr;
+  EXPECT_FALSE(pub->publish(IoxLoanedSample<CompatPod>(&d, foreign)));
+  EXPECT_EQ(raw->Outstanding(), 1u);
+  { IoxLoanedSample<CompatPod> owner(&d, mine); }
+  EXPECT_EQ(raw->Outstanding(), 0u);
+  EXPECT_EQ(raw->Stats().publishes, publishes + 1);
+}
+
+// EXT-50 Raw POD path (CreateRawPodPublisher / IoxRawPodPublisher /
+// RegisterRawPodSubscriber) and ShmRawPodPublisher::Publish both report a
+// duplicate publish as false.
+TEST_F(ShmDriverTest, IoxCompatRawPodPublisher) {
+  auto& d = Init();
+  const std::string topic = UniqueTopic();
+  constexpr std::string_view kRawType = "shm_ext_test/CompatRaw";
+  auto pub = CreateRawPodPublisher(&d, topic, kRawType, 512);
+  ASSERT_NE(pub, nullptr);
+  EXPECT_EQ(pub->topic_name(), topic);
+  EXPECT_EQ(pub->msg_type(), kRawType);
+  auto native = CreateShmRawPodPublisher(&d, topic, kRawType, 512);
+  ASSERT_NE(native, nullptr);
+
+  std::mutex mu;
+  std::vector<std::string> got;
+  ASSERT_TRUE(RegisterRawPodSubscriber(&d, topic, kRawType, [&](const void* p, size_t size) {
+    std::lock_guard<std::mutex> lock(mu);
+    got.emplace_back(static_cast<const char*>(p), size);
+  }));
+  StopGuard stop{this};
+  d.Start();
+  const auto url = PodUrl(topic, std::string(kRawType));
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
+  auto* raw = Publisher(url);
+  ASSERT_NE(raw, nullptr);
+
+  EXPECT_FALSE(pub->borrow_loaned_sample(0).is_valid());
+  EXPECT_FALSE(pub->publish(IoxLoanedSample<std::byte>()));
+  auto sample = pub->borrow_loaned_sample(512);
+  ASSERT_TRUE(sample.is_valid());
+  std::memset(sample.get(), 'r', 512);
+  ASSERT_TRUE(pub->publish(std::move(sample)));
+  ASSERT_TRUE(WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    return got.size() == 1;
+  }));
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    ASSERT_GE(got[0].size(), 512u);
+    EXPECT_EQ(got[0].substr(0, 512), std::string(512, 'r'));
+  }
+
+  const uint64_t publishes = raw->Stats().publishes;
+  auto h = pub->borrow_loaned_sample(64).ExtractForPublish();
+  IoxLoanedSample<std::byte> first(&d, h), duplicate(&d, h);
+  EXPECT_TRUE(pub->publish(std::move(first)));
+  EXPECT_FALSE(pub->publish(std::move(duplicate)));
+
+  auto nh = native->Borrow(64).Extract();
+  ShmLoanedBytes native_first(&d, nh), native_duplicate(&d, nh);
+  EXPECT_TRUE(native->Publish(std::move(native_first)));
+  EXPECT_FALSE(native->Publish(std::move(native_duplicate)));
+  EXPECT_EQ(raw->Stats().publishes, publishes + 2);
+  EXPECT_EQ(raw->Outstanding(), 0u);
+}
+
+// EXT-51 Untyped ctx-meta buffer (CreateCtxMetaPublisher /
+// borrow_loaned_buffer, LoanMode::kCtxMetaThenPayload): the header comes from
+// the ctx at borrow time, the caller writes the serialized payload, a
+// standard handler receives it. No RegisterSendType means no buffer; an
+// unpublished buffer goes back; a duplicate publish is false.
+TEST_F(ShmDriverTest, IoxCompatCtxMetaBuffer) {
+  auto& d = Init();
+  const auto info = BlobInfo(UniqueTopic());
+  Received rx;
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.OnMessage(Handler(info, &rx)));
+  auto pub = CreateCtxMetaPublisher(&d, info.topic_name, kBlobType);
+  ASSERT_NE(pub, nullptr);
+  EXPECT_EQ(pub->topic_name(), info.topic_name);
+  EXPECT_EQ(pub->msg_type(), kBlobType);
+  StopGuard stop{this};
+  d.Start();
+  const auto url = StdUrl(info.topic_name, kBlobType);
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
+  auto* raw = Publisher(url);
+  ASSERT_NE(raw, nullptr);
+
+  auto ctx = PubContext();
+  const std::string payload = MakeBlob(3000, 'm');
+  auto buf = pub->borrow_loaned_buffer(*ctx, payload.size());
+  ASSERT_TRUE(buf.is_valid());
+  EXPECT_EQ(buf.size(), payload.size());
+  ctx->SetMetaValue("origin", "changed after borrow");  // header already written
+  std::memcpy(buf.data(), payload.data(), payload.size());
+  EXPECT_FALSE(pub->publish(IoxCtxMetaLoanedBuffer()));
+  ASSERT_TRUE(pub->publish(std::move(buf)));
+  EXPECT_FALSE(buf.is_valid());  // NOLINT(bugprone-use-after-move): moved-from state is specified
+  ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == 1; }));
+  EXPECT_EQ(rx.Blob(0), payload);
+  EXPECT_EQ(rx.Origin(), "test");
+
+  auto unregistered = CreateCtxMetaPublisher(&d, UniqueTopic("/unregistered"), kBlobType);
+  EXPECT_FALSE(unregistered->borrow_loaned_buffer(*PubContext(), 16).is_valid());
+
+  { auto dropped = pub->borrow_loaned_buffer(*ctx, 16); }
+  EXPECT_EQ(raw->Outstanding(), 0u);
+
+  const uint64_t publishes = raw->Stats().publishes;
+  auto h = pub->borrow_loaned_buffer(*PubContext(), 4).ExtractForPublish();
+  std::memcpy(h.user_payload_ptr, "dupl", 4);
+  IoxCtxMetaLoanedBuffer first(&d, h), duplicate(&d, h);
+  EXPECT_TRUE(pub->publish(std::move(first)));
+  EXPECT_FALSE(pub->publish(std::move(duplicate)));
+  EXPECT_EQ(raw->Stats().publishes, publishes + 1);
+  EXPECT_EQ(raw->Outstanding(), 0u);
+  ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == 2; }));
+  EXPECT_EQ(rx.Blob(1), "dupl");
+}
+
+// EXT-52 Typed ctx-meta publisher (CreateCtxMetaTypedPublisher): serialize
+// into the chunk and publish to a standard handler; an unregistered topic
+// fails without holding a loan.
+TEST_F(ShmDriverTest, IoxCompatCtxMetaTypedPublisher) {
+  auto& d = Init();
+  const auto info = BlobInfo(UniqueTopic());
+  Received rx;
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.OnMessage(Handler(info, &rx)));
+  StopGuard stop{this};
+  d.Start();
+  const auto url = StdUrl(info.topic_name, kBlobType);
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
+
+  auto pub = CreateCtxMetaTypedPublisher<BlobMsg>(&d, info.topic_name, kBlobType);
+  ASSERT_NE(pub, nullptr);
+  EXPECT_EQ(pub->topic_name(), info.topic_name);
+  EXPECT_EQ(pub->msg_type(), kBlobType);
+  auto ctx = PubContext();
+  // Wait per sample: the default delivery is latest-only (queue depth 1).
+  for (size_t i = 1; i <= 2; ++i) {
+    BlobMsg msg{MakeBlob(5000 * i, static_cast<char>('a' + i))};
+    ASSERT_TRUE(pub->publish(*ctx, msg));
+    ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == i; }));
+    EXPECT_EQ(rx.Blob(i - 1), msg.data);
+  }
+  EXPECT_EQ(rx.Origin(), "test");
+  EXPECT_EQ(Publisher(url)->Outstanding(), 0u);
+
+  auto unregistered = CreateCtxMetaTypedPublisher<BlobMsg>(&d, UniqueTopic("/unregistered"), kBlobType);
+  EXPECT_FALSE(unregistered->publish(*ctx, BlobMsg{"x"}));
 }
 
 }  // namespace

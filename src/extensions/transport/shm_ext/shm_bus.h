@@ -180,14 +180,15 @@ class IBMW_SHM_EXPORT ShmPublisher {
 
   // Tracked raw loans; nullptr on failure (closing, pool or loan limit).
   void* Loan(size_t size, size_t alignment = shm::kDefaultPayloadAlignment) noexcept;
-  void Publish(void* chunk) noexcept;
+  // False if `chunk` is not on loan from this publisher (nothing published).
+  bool Publish(void* chunk) noexcept;
   void Release(void* chunk) noexcept;
 
   // Loans with a token slot (for LoanedSampleHandle::driver_token).
   ShmLoanSlot* LoanSlot(size_t size, size_t alignment = shm::kDefaultPayloadAlignment) noexcept;
   // Take a slot token (ShmLoanSlot::Token). No-ops for a token of another
-  // publisher or of a loan already given back.
-  void PublishSlot(void* token) noexcept;
+  // publisher or of a loan already given back; PublishSlot() then returns false.
+  bool PublishSlot(void* token) noexcept;
   void ReleaseSlot(void* token) noexcept;
 
   // Loan size that most recently fitted a framed Send(); grows only.

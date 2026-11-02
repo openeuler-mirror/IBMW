@@ -95,11 +95,12 @@ class ShmRawPodPublisher {
     return ShmLoanedBytes(driver_, handle);
   }
 
+  // False if the sample is invalid or its chunk was not published (e.g. a
+  // stale or duplicate loan).
   bool Publish(ShmLoanedBytes&& sample) noexcept {
     if (!sample.valid()) return false;
     auto handle = sample.Extract();
-    driver_->PublishLoaned(handle);
-    return true;
+    return driver_->TryPublishLoaned(handle);
   }
 
   const runtime::core::transport::TransportInfo& info() const noexcept { return info_; }

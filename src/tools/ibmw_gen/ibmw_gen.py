@@ -417,7 +417,7 @@ def main():
             "--target",
             action="append",
             default=[],
-            choices=("dds_ros2", "dds_native", "iceoryx", "json"),
+            choices=("dds_ros2", "dds_native", "iceoryx", "shm", "json"),
             help="Artifact target to record in the report; repeatable (default: dds_ros2)",
         )
         import_parser.add_argument(

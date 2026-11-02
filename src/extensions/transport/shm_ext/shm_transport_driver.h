@@ -92,6 +92,11 @@ class IBMW_SHM_EXPORT ShmTransportDriver
                             runtime::core::transport::LoanedSampleHandle& out_handle) noexcept override;
   void PublishLoaned(runtime::core::transport::LoanedSampleHandle& handle) noexcept override;
   void ReleaseLoaned(runtime::core::transport::LoanedSampleHandle& handle) noexcept override;
+  // PublishLoaned() that tells whether the chunk was published: false for a
+  // handle of another driver or mode, a stale or duplicate token, or a chunk
+  // the library refused. The handle is left untouched only when it is not one
+  // of this driver's (as PublishLoaned()); otherwise it is cleared.
+  bool TryPublishLoaned(runtime::core::transport::LoanedSampleHandle& handle) noexcept;
 
   // Zero-copy POD registration under "/transport_zc_pod/<topic>/<msg_type>".
   bool EnsurePodTopic(std::string_view topic, std::string_view msg_type, size_t initial_size_hint,
@@ -147,6 +152,8 @@ class IBMW_SHM_EXPORT ShmTransportDriver
   std::atomic<State> state_ = State::kPreInit;
   mutable std::mutex lifecycle_mutex_;
   bool shutdown_started_ = false;
+  // Start() attached every subscription; until then a Start() may be retried.
+  bool delivery_started_ = false;
   const runtime::core::transport::TransportCatalog* transport_catalog_ptr_ = nullptr;
 
   std::unordered_map<std::string, std::shared_ptr<runtime::core::transport::MessageHandlerTool>>

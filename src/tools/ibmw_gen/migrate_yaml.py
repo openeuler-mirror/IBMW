@@ -64,6 +64,9 @@ _V1_MODULE_TO_V2_WIRE = {
     "iceoryx": [
         ("iceoryx_msg_type", "msg_type"),
     ],
+    "shm": [
+        ("shm_msg_type", "msg_type"),
+    ],
 }
 
 # Module-level fields that semantically belong to the message envelope but
@@ -97,6 +100,8 @@ def _module_implicit_transports(mod: dict) -> set[str]:
         return {"ros2"}
     if mtype.startswith("direct_iceoryx_"):
         return {"iceoryx"}
+    if mtype.startswith("direct_shm_"):
+        return {"shm"}
     return set()
 
 
