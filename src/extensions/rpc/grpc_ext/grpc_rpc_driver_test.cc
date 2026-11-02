@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -23,6 +24,9 @@
 
 #include <boost/asio.hpp>
 #include <stdexcept>
+
+#include <dirent.h>
+#include <sys/resource.h>
 
 #include "cpp/util/string.h"
 #include "grpc_ext/grpc/status.h"
@@ -356,6 +360,63 @@ TEST(GrpcListenAddressTest, LoopbackIsRecognizedAndBadAddressesThrow) {
   EXPECT_FALSE(GrpcExtension::IsLoopbackListenAddress("192.168.1.10"));
   EXPECT_THROW(GrpcExtension::IsLoopbackListenAddress("localhost"), std::invalid_argument);
   EXPECT_THROW(GrpcExtension::IsLoopbackListenAddress("256.0.0.1"), std::invalid_argument);
+}
+
+// EXT-008: when accept fails (here EMFILE) the server backs off instead of
+// spinning on the error, and accepts again once descriptors are available.
+TEST(GrpcServerAcceptTest, AcceptFailureBacksOffAndRecovers) {
+  IoThreads io(2);
+  const uint16_t port = FreeTcpPort();
+  auto svr = std::make_shared<server::AsioHttp2Server>(io.Io());
+  svr->Initialize(server::ServerOptions{.ep = {asio::ip::address_v4::loopback(), port}});
+  svr->Start();
+  std::this_thread::sleep_for(100ms);  // listening
+
+  asio::io_context cio;
+  asio::ip::tcp::socket sock(cio);
+  sock.open(asio::ip::tcp::v4());
+
+  // Lower the soft fd limit to the highest open descriptor + 1 so the
+  // server's accept() fails with EMFILE.
+  int max_fd = 0;
+  if (DIR* dir = opendir("/proc/self/fd")) {
+    while (auto* ent = readdir(dir)) max_fd = std::max(max_fd, atoi(ent->d_name));
+    closedir(dir);
+  }
+  rlimit old_lim{};
+  ASSERT_EQ(getrlimit(RLIMIT_NOFILE, &old_lim), 0);
+  rlimit low_lim = old_lim;
+  low_lim.rlim_cur = static_cast<rlim_t>(max_fd + 1);
+  ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &low_lim), 0);
+
+  sock.connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));  // sits in the backlog
+  auto cpu_seconds = [] {
+    rusage ru{};
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_utime.tv_sec + ru.ru_stime.tv_sec + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) / 1e6;
+  };
+  const double cpu0 = cpu_seconds();
+  std::this_thread::sleep_for(500ms);
+  const double cpu_used = cpu_seconds() - cpu0;
+  ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &old_lim), 0);
+
+  // A spinning accept loop burns about the whole 500ms on one core.
+  EXPECT_LT(cpu_used, 0.15) << "accept loop spins on EMFILE";
+
+  // Descriptors are back: the pending connection gets accepted and served
+  // (the server answers the HTTP/2 preface with its SETTINGS frame).
+  static const char kPreface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+  asio::write(sock, asio::buffer(kPreface, sizeof(kPreface) - 1));
+  std::array<char, 9> frame_header{};
+  sock.non_blocking(false);
+  timeval tv{.tv_sec = 5, .tv_usec = 0};
+  setsockopt(sock.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  boost::system::error_code ec;
+  asio::read(sock, asio::buffer(frame_header), ec);
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(frame_header[3], 0x4) << "expected a SETTINGS frame";  // type octet
+
+  svr->Shutdown();
 }
 
 }  // namespace

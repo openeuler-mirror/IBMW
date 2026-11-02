@@ -87,6 +87,7 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
           acceptor_.listen();
 
           while (state_.load() == State::kStart) {
+            bool accept_failed = false;
             try {
               if (connection_ptr_list_.size() >= options_.max_connection_num) {
                 acceptor_timer_.expires_after(options_.mgr_timer_dt);
@@ -106,6 +107,17 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
               connection_ptr_list_.emplace_back(connection_ptr);
             } catch (const std::exception& e) {
               MW_WARN("Http svr accept connection get exception and exit, exception info: {}", e.what());
+              accept_failed = true;
+            }
+
+            // Back off after a failed accept (e.g. EMFILE) instead of spinning
+            // on the same error.
+            if (accept_failed && state_.load() == State::kStart) {
+              try {
+                acceptor_timer_.expires_after(kAcceptRetryDelay);
+                co_await acceptor_timer_.async_wait(boost::asio::use_awaitable);
+              } catch (const std::exception&) {
+              }
             }
           }
 
@@ -167,16 +179,19 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
       } catch (const std::exception& e) {
         MW_TRACE("Http svr mgr shutdown failed, exception info: {}", e.what());
       }
+
+      // connection_ptr_list_ is only touched on mgr_strand_.
+      for (auto& connection_ptr : connection_ptr_list_) {
+        connection_ptr->Shutdown();
+      }
+
+      connection_ptr_list_.clear();
     });
-
-    for (auto& connection_ptr : connection_ptr_list_) {
-      connection_ptr->Shutdown();
-    }
-
-    connection_ptr_list_.clear();
   }
 
  private:
+  static constexpr std::chrono::milliseconds kAcceptRetryDelay{100};
+
   static bool CheckListenAddr(const boost::asio::ip::tcp::endpoint& ep) {
     try {
       IOCtx io;
