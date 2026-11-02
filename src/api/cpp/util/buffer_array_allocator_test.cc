@@ -59,6 +59,32 @@ TEST(SimpleBufferArrayAllocatorTest, CapacityDoublingOverflowFailsCleanly) {
   EXPECT_EQ(array.capacity, SIZE_MAX / 2 + 1);
 }
 
+// API-005: buffers are carved contiguously; a size larger than what is left
+// (including one that would wrap the pointer) fails without consuming bytes.
+TEST(FlatBufferArrayAllocatorTest, OversizedAllocationFails) {
+  char region[16];
+  FlatBufferArrayAllocator allocator(region, sizeof(region));
+  ibmw_buffer_array_t array{nullptr, 0, 0};
+  const auto* base = allocator.NativeHandle();
+  auto first = base->allocate(base->ctx, &array, 10);
+  auto second = base->allocate(base->ctx, &array, 6);
+  EXPECT_EQ(first.data, region);
+  EXPECT_EQ(second.data, region + 10);
+  EXPECT_FALSE(allocator.IsOutOfMemory());
+
+  FlatBufferArrayAllocator wrapping(region, sizeof(region));
+  ibmw_buffer_array_t other{nullptr, 0, 0};
+  const auto* wrap_base = wrapping.NativeHandle();
+  wrap_base->allocate(wrap_base->ctx, &other, 10);
+  auto huge = wrap_base->allocate(wrap_base->ctx, &other, SIZE_MAX - 5);
+  EXPECT_EQ(huge.data, nullptr);
+  EXPECT_TRUE(wrapping.IsOutOfMemory());
+  EXPECT_EQ(other.len, 1u);
+
+  FlatBufferArrayAllocator::Release(&array);
+  FlatBufferArrayAllocator::Release(&other);
+}
+
 // API-003: reserve below the current length must not shrink the array.
 TEST(FlatBufferArrayAllocatorTest, ReserveNeverShrinks) {
   char region[64];

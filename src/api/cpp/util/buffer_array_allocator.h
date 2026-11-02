@@ -124,33 +124,32 @@ class FlatBufferArrayAllocator {
     if (out_of_memory_) [[unlikely]]
       return ibmw_buffer_t{nullptr, 0};
 
-    if (cur_ptr_ == nullptr) [[unlikely]] {
+    // Compare with the remaining bytes: advancing first forms an out-of-range
+    // pointer and wraps around for a huge size.
+    if (cur_ptr_ == nullptr ||
+        size > static_cast<size_t>(static_cast<char*>(end_ptr_) - static_cast<char*>(cur_ptr_)))
+        [[unlikely]] {
       out_of_memory_ = true;
       return ibmw_buffer_t{nullptr, 0};
     }
 
-    void* last_ptr = cur_ptr_;
+    // Grow the array before taking the bytes so a failed grow consumes nothing.
+    if (buffer_array->capacity <= buffer_array->len) [[unlikely]] {
+      static constexpr size_t kInitCapacitySize = 2;
+      if (buffer_array->capacity > SIZE_MAX / 2) [[unlikely]]
+        return ibmw_buffer_t{nullptr, 0};
+      size_t new_capacity = (buffer_array->capacity < kInitCapacitySize)
+                                ? kInitCapacitySize
+                                : (buffer_array->capacity << 1);
+      if (!Reserve(buffer_array, new_capacity)) [[unlikely]]
+        return ibmw_buffer_t{nullptr, 0};
+    }
+
+    // No alignment padding: buffers stay contiguous because users send the
+    // region as one packet (see the iceoryx transport driver).
+    void* data = cur_ptr_;
     cur_ptr_ = static_cast<char*>(cur_ptr_) + size;
-
-    if (cur_ptr_ > end_ptr_) [[unlikely]] {
-      out_of_memory_ = true;
-      return ibmw_buffer_t{nullptr, 0};
-    }
-
-    // can directly put in current data
-    if (buffer_array->capacity > buffer_array->len) {
-      return (buffer_array->data[buffer_array->len++] = ibmw_buffer_t{last_ptr, size});
-    }
-
-    // current data area is full, need to reallocate space
-    static constexpr size_t kInitCapacitySize = 2;
-    size_t new_capacity = (buffer_array->capacity < kInitCapacitySize)
-                              ? kInitCapacitySize
-                              : (buffer_array->capacity << 1);
-    if (!Reserve(buffer_array, new_capacity)) [[unlikely]]
-      return ibmw_buffer_t{nullptr, 0};
-
-    return (buffer_array->data[buffer_array->len++] = ibmw_buffer_t{last_ptr, size});
+    return (buffer_array->data[buffer_array->len++] = ibmw_buffer_t{data, size});
   }
 
   static void Release(ibmw_buffer_array_t* buffer_array) {
