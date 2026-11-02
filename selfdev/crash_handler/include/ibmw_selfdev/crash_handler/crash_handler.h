@@ -22,12 +22,17 @@ using ReportCallback = void (*)(const char* report, size_t len, void* user_data)
 
 struct Options {
   std::vector<int> signals = DefaultSignals();
-  /// Size of the sigaltstack installed for the calling thread; 0 disables it.
+  /// Size of the sigaltstack installed for the calling thread. 0 installs
+  /// none and disables the one a previous Install() set up on this thread
+  /// (an alternate stack installed by someone else is left alone).
   size_t alt_stack_size = 1024 * 1024;
   /// fd receiving the report; -1 disables it. The header (signal, code,
   /// fault address, pc, tid, then "*** pc 0x...  module+0xoffset" or
-  /// "(not in a loaded module)") is written first, before anything reads the
-  /// interrupted stack. When the fault is the instruction fetch at pc itself
+  /// "(not in a loaded module)"; the fault address only for a fault the
+  /// kernel raised, "sent by pid N uid N" for kill() / raise() / abort() /
+  /// sigqueue(), "call addr 0x..." for a seccomp SIGSYS) is written first,
+  /// before anything reads the interrupted stack. When the fault is the
+  /// instruction fetch at pc itself
   /// (SIGSEGV with fault addr == pc: a call through a null or wild function
   /// pointer, a jump into data), a "*** caller 0x..." line follows with the
   /// return address of that call ([sp] on x86_64, LR on aarch64, printed as
@@ -38,17 +43,24 @@ struct Options {
   /// back right after the walk (also when the walk faults), so a core dump
   /// or a debugger sees the faulting registers. A fault while reporting
   /// prints a marker naming the stage ("reading the caller address faulted",
-  /// "stack capture faulted, no stacktrace", "symbol lookup faulted",
-  /// "report callback faulted") and ends the process with the original
-  /// signal. The rest is written in two parts. First, with
-  /// async-signal-safe calls only: the raw frames as
-  /// "#NN pc 0x...  module+0xoffset [base 0x...]", using the module table
-  /// recorded by Install() / RefreshModules() (modules loaded later show as
-  /// a bare pc). Then, when `symbolize` is set, the frames again with dladdr
-  /// symbols (not async-signal-safe: dladdr takes the loader lock and can
-  /// block, e.g. while another thread runs a dlopen'ed library's
-  /// constructors; the watchdog bounds that, and the first part is already
-  /// out).
+  /// "stack capture faulted, no stacktrace", "writing the raw stacktrace
+  /// faulted", "symbol lookup faulted" (dladdr or demangling, also while
+  /// building the callback's copy), "report callback faulted") and ends the
+  /// process with the original signal. The rest is written in two parts.
+  /// First the raw frames as "#NN pc 0x...  module+0xoffset [base 0x...]",
+  /// using the module table recorded by Install() / RefreshModules()
+  /// (modules loaded later show as a bare pc); formatting and writing them
+  /// is async-signal-safe, the stack walk before them is as safe as the
+  /// unwinder (see the README: older libgcc / glibc and LLVM libunwind take
+  /// locks in the FDE lookup). Then, when `symbolize` is set, the frames
+  /// again with dladdr symbols (not async-signal-safe: dladdr takes the
+  /// loader lock and can block, e.g. while another thread runs a dlopen'ed
+  /// library's constructors; the watchdog bounds that, and the first part
+  /// is already out). Each part, and the callback's copy, is at most 64 KiB;
+  /// a longer one is cut and ends with "*** IBMW crash: report truncated".
+  /// The last part of the report (the symbolized part, or the raw part
+  /// without symbolization; the whole callback copy) then still ends with
+  /// the "*** end of stacktrace" line.
   int output_fd = 2;
   /// Clamped to kMaxFrames.
   size_t max_frames = 64;
@@ -65,7 +77,8 @@ struct Options {
   /// Upper bound for the whole report (stack walk, symbolization, callback).
   /// When it expires a SIGALRM watchdog terminates the process as above, so a
   /// callback that deadlocks (e.g. malloc after heap corruption) cannot keep
-  /// the process alive. 0 disables the watchdog. The watchdog uses alarm():
+  /// the process alive; at most one second more if the reporting thread
+  /// blocks SIGALRM (see Install()). 0 disables the watchdog. The watchdog uses alarm():
   /// a thread consuming SIGALRM via sigwait()/signalfd() defeats it.
   unsigned report_timeout_sec = 10;
 };
@@ -73,9 +86,13 @@ struct Options {
 /// Installs process-wide handlers for options.signals (duplicates are
 /// ignored). Re-installing replaces the previous configuration and refreshes
 /// the module table used by the raw report part (see RefreshModules()).
-/// Returns true when
-/// every handler was installed; IsInstalled() is true when at least one was.
-/// Not supported on Windows (returns false).
+/// Returns true when every handler and the alternate stack were set up.
+/// Returns false when a sigaction() failed (the other signals are still
+/// installed), when the alternate stack could not be allocated, installed or
+/// disabled (the handlers are still installed), or when more than 64
+/// distinct signals were given (the rest are not installed). IsInstalled()
+/// is true when at least one handler was installed. Not supported on
+/// Windows (returns false).
 ///
 /// Known limitations:
 ///  - The alternate signal stack is installed for the calling thread only;
@@ -85,10 +102,18 @@ struct Options {
 ///    concurrently on another thread (the configuration may be half updated
 ///    in that report); install once at start-up.
 ///  - The watchdog uses alarm(): SIGALRM may be delivered to any thread that
-///    does not block it; it terminates the process from there. A thread that
-///    consumes SIGALRM (sigwait/signalfd) defeats it. Under TSAN, which
-///    defers asynchronous signals until the next intercepted call, it cannot
-///    fire while the reporting thread is blocked inside dladdr.
+///    does not block it; that thread hands it over to the reporting thread,
+///    which writes "report timed out" and terminates the process. If that
+///    has not happened one second later (the reporting thread blocks
+///    SIGALRM, e.g. in the callback, or its write blocks), the next alarm
+///    terminates the process on whichever thread it lands, without the
+///    message (a socket output_fd gets one non-blocking "ended by the
+///    watchdog's last resort" note); the core dump then shows that thread
+///    as the one that died.
+///    A thread that consumes SIGALRM (sigwait/signalfd) defeats it. Under
+///    TSAN, which defers asynchronous signals until the next intercepted
+///    call, it cannot fire while the reporting thread is blocked inside
+///    dladdr.
 ///  - Memory of the alternate stack is never freed (the kernel may still
 ///    reference it); a larger alt_stack_size on re-install leaks the old one.
 bool Install(const Options& options);
@@ -107,7 +132,8 @@ bool IsInstalled() noexcept;
 /// crashes should be reported with module names (IBMW calls it once the
 /// packages are loaded); Install() does the same. Works whether or not the
 /// handler is installed. Not async-signal-safe: never call it from a signal
-/// handler. May run while a crash is being reported on another thread: the
+/// handler. Calls from several threads are serialized (same mutex as
+/// Install()). May run while a crash is being reported on another thread: the
 /// table is double buffered and versioned, and a report that sees it change
 /// while reading an entry prints that address as a bare pc instead of a
 /// possibly torn module name. At most 256 modules are recorded; when more
@@ -129,6 +155,7 @@ size_t FormatFrame(char* buf, size_t buf_size, size_t index, const void* pc,
                    bool symbolize, bool demangle) noexcept;
 
 /// Formats `count` frames, one line each. Same guarantees as FormatFrame.
+/// A null `frames` formats nothing.
 size_t FormatStack(char* buf, size_t buf_size, const void* const* frames, size_t count,
                    bool symbolize, bool demangle) noexcept;
 

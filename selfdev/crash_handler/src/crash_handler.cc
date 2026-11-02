@@ -21,7 +21,9 @@
   #if !defined(__APPLE__)
     #include <link.h>
   #endif
+  #include <pthread.h>
   #include <signal.h>
+  #include <sys/socket.h>
   #include <sys/syscall.h>
   #include <ucontext.h>
   #include <unistd.h>
@@ -41,10 +43,13 @@ namespace {
   #define IBMW_CRASH_SEQLOCK_READER
 #endif
 
-// Bounded, allocation-free string builder. Keeps buf NUL terminated.
+// Bounded, allocation-free string builder. Keeps buf NUL terminated. The
+// last `reserve` bytes are kept free until ReleaseReserve(), so a report that
+// overflows still has room for its truncation marker and trailer.
 class Writer {
  public:
-  Writer(char* buf, size_t cap) noexcept : buf_(buf), cap_(cap) {
+  Writer(char* buf, size_t cap, size_t reserve = 0) noexcept
+      : buf_(buf), cap_(cap), limit_(cap > reserve ? cap - reserve : 0) {
     if (cap_ > 0) buf_[0] = '\0';
   }
 
@@ -54,7 +59,10 @@ class Writer {
   }
 
   void PutChar(char c) noexcept {
-    if (len_ + 1 >= cap_) return;
+    if (len_ + 1 >= limit_) {
+      truncated_ = true;
+      return;
+    }
     buf_[len_++] = c;
     buf_[len_] = '\0';
   }
@@ -86,10 +94,19 @@ class Writer {
 
   size_t Len() const noexcept { return len_; }
 
+  // True when a character was dropped because the buffer was full.
+  bool Truncated() const noexcept { return truncated_; }
+
+  bool AtLineStart() const noexcept { return len_ == 0 || buf_[len_ - 1] == '\n'; }
+
+  void ReleaseReserve() noexcept { limit_ = cap_; }
+
  private:
   char* buf_;
   size_t cap_;
+  size_t limit_;
   size_t len_ = 0;
+  bool truncated_ = false;
 };
 
 // Copies the tail of src (the file name matters most) into dst.
@@ -178,6 +195,7 @@ size_t FormatStack(char* buf, size_t buf_size, const void* const* frames, size_t
                    bool symbolize, bool demangle) noexcept {
   if (buf == nullptr || buf_size == 0) return 0;
   Writer w(buf, buf_size);
+  if (frames == nullptr) return 0;
   for (size_t i = 0; i < count; ++i) PutFrame(w, i, frames[i], symbolize, demangle);
   return w.Len();
 }
@@ -279,12 +297,32 @@ SavedAction g_saved[kMaxSignals];
 size_t g_saved_count = 0;
 std::atomic<bool> g_installed{false};
 std::atomic<long> g_handling_tid{0};
+#if !defined(SYS_tgkill)
+// Where SYS_tgkill is missing the watchdog hands SIGALRM over with
+// pthread_kill. pthread_t need not fit an atomic, so it is published by
+// g_handling_thread_set (release after the store, acquire before the read).
+pthread_t g_handling_thread;
+std::atomic<bool> g_handling_thread_set{false};
+#endif
 volatile sig_atomic_t g_handling_signo = 0;
 
 // What the reporting thread is doing, so a fault inside the handler can say
-// where the report stopped (see HandleSignal).
-enum Stage : int { kStageNone, kStageCaller, kStageCapture, kStageSymbolize, kStageCallback };
+// where the report stopped (see HandleSignal). kStageSymbolize covers every
+// dladdr and __cxa_demangle call, including those that build the callback's
+// report; kStageCallback is only the callback itself.
+enum Stage : int {
+  kStageNone,
+  kStageCaller,
+  kStageCapture,
+  kStageRaw,
+  kStageSymbolize,
+  kStageCallback
+};
 volatile sig_atomic_t g_stage = kStageNone;
+
+// Room kept free at the end of every report buffer (see Writer) for the
+// truncation marker and the "*** end of stacktrace" trailer.
+constexpr size_t kReportReserve = 128;
 
 // Signal-context storage; never freed (the kernel may still reference the
 // alternate stack after Uninstall()).
@@ -344,13 +382,24 @@ void* CallerFromContext(void* raw_ctx) noexcept {
 }
 
 // Registers ResumeAtCaller() changed, so RestoreInterruptedContext() can put
-// them back. Written and read by the reporting thread only.
+// them back. The reporting thread touches them: in its own code, in a
+// nested fault and in the watchdog, which HandleWatchdog() hands over to
+// that thread. Those handlers run between two of its instructions, so the
+// order below is enough (the one exception, the watchdog's last-resort exit
+// on another thread, runs only when the reporting thread is past the walk or
+// does not take signals; see HandleWatchdog): g_moved_uctx is set after
+// g_moved and before the registers change, and cleared only after they are
+// put back (putting them back twice is harmless). The signal fences keep the
+// compiler from moving the register writes across these points; the
+// release / acquire on g_moved_uctx also orders g_moved and the registers
+// for that last-resort exit on another thread.
 struct MovedContext {
-  ucontext_t* uctx;
   uintptr_t pc;
   uintptr_t sp;
 };
-MovedContext g_moved{nullptr, 0, 0};
+MovedContext g_moved{0, 0};
+std::atomic<ucontext_t*> g_moved_uctx{nullptr};
+static_assert(std::atomic<ucontext_t*>::is_always_lock_free);
 
 // Makes the interrupted context look as if the bad call had returned to
 // `caller`, for the stack walk only. The unwinder reads the interrupted
@@ -364,14 +413,17 @@ bool ResumeAtCaller(void* raw_ctx, void* caller) noexcept {
   auto* uctx = static_cast<ucontext_t*>(raw_ctx);
   (void)uctx;
   #if defined(__x86_64__) && defined(REG_RSP) && defined(REG_RIP)
-  g_moved = {uctx, static_cast<uintptr_t>(uctx->uc_mcontext.gregs[REG_RIP]),
+  g_moved = {static_cast<uintptr_t>(uctx->uc_mcontext.gregs[REG_RIP]),
              static_cast<uintptr_t>(uctx->uc_mcontext.gregs[REG_RSP])};
+  g_moved_uctx.store(uctx, std::memory_order_release);
+  std::atomic_signal_fence(std::memory_order_seq_cst);
   uctx->uc_mcontext.gregs[REG_RIP] = static_cast<greg_t>(reinterpret_cast<uintptr_t>(caller));
   uctx->uc_mcontext.gregs[REG_RSP] += static_cast<greg_t>(sizeof(void*));
   return true;
   #elif defined(__aarch64__) && !defined(__APPLE__)
-  g_moved = {uctx, static_cast<uintptr_t>(uctx->uc_mcontext.pc),
-             static_cast<uintptr_t>(uctx->uc_mcontext.sp)};
+  g_moved = {static_cast<uintptr_t>(uctx->uc_mcontext.pc), static_cast<uintptr_t>(uctx->uc_mcontext.sp)};
+  g_moved_uctx.store(uctx, std::memory_order_release);
+  std::atomic_signal_fence(std::memory_order_seq_cst);
   uctx->uc_mcontext.pc = reinterpret_cast<uintptr_t>(caller);
   return true;
   #else
@@ -379,9 +431,10 @@ bool ResumeAtCaller(void* raw_ctx, void* caller) noexcept {
   #endif
 }
 
-// Undoes ResumeAtCaller(); a no-op when the context was not moved.
+// Undoes ResumeAtCaller(); a no-op when the context was not moved or was
+// already put back.
 void RestoreInterruptedContext() noexcept {
-  ucontext_t* const uctx = g_moved.uctx;
+  ucontext_t* const uctx = g_moved_uctx.load(std::memory_order_acquire);
   if (uctx == nullptr) return;
   #if defined(__x86_64__) && defined(REG_RSP) && defined(REG_RIP)
   uctx->uc_mcontext.gregs[REG_RIP] = static_cast<greg_t>(g_moved.pc);
@@ -390,7 +443,8 @@ void RestoreInterruptedContext() noexcept {
   uctx->uc_mcontext.pc = g_moved.pc;
   uctx->uc_mcontext.sp = g_moved.sp;
   #endif
-  g_moved.uctx = nullptr;
+  std::atomic_signal_fence(std::memory_order_seq_cst);
+  g_moved_uctx.store(nullptr, std::memory_order_release);
 }
 
 void WriteAll(int fd, const char* data, size_t len) noexcept {
@@ -480,10 +534,48 @@ void PutRawFrame(Writer& w, size_t index, const void* pc) noexcept {
   w.PutChar('\n');
 }
 
+// si_addr is a fault address only for a fault the kernel raised (si_code > 0)
+// with one of the fault signals. For kill() / raise() / abort() / sigqueue()
+// (si_code <= 0) the same bytes hold the sender's pid and uid, and SI_KERNEL
+// (e.g. a general protection fault on x86) carries no address.
+bool HasFaultAddress(int signo, const siginfo_t* info) noexcept {
+  if (info == nullptr || info->si_code <= 0) return false;
+  #if defined(SI_KERNEL)
+  if (info->si_code == SI_KERNEL) return false;
+  #endif
+  return signo == SIGSEGV || signo == SIGBUS || signo == SIGILL || signo == SIGFPE || signo == SIGTRAP;
+}
+
+// A seccomp trap (SIGSYS, si_code SYS_SECCOMP = 1 in the Linux ABI; glibc
+// does not name it): si_call_addr is the address of the instruction after the
+// system call that was refused.
+bool HasCallAddress(int signo, const siginfo_t* info) noexcept {
+  #if defined(__linux__) && defined(si_call_addr)
+  constexpr int kSysSeccomp = 1;
+  return signo == SIGSYS && info != nullptr && info->si_code == kSysSeccomp;
+  #else
+  (void)signo;
+  (void)info;
+  return false;
+  #endif
+}
+
+// kill() / raise() / abort() / sigqueue(): si_pid and si_uid name the sender.
+bool HasSender(const siginfo_t* info) noexcept {
+  if (info == nullptr) return false;
+  #if defined(SI_TKILL)
+  if (info->si_code == SI_TKILL) return true;
+  #endif
+  return info->si_code == SI_USER || info->si_code == SI_QUEUE;
+}
+
 // Header, async-signal-safe, written before anything touches the interrupted
 // stack:
 //   *** IBMW crash: signal 11 (SIGSEGV), code 1, fault addr 0x..., pc 0x..., tid N
 //   *** pc 0x...  module+0x... [base 0x...]       (or "(not in a loaded module)")
+// A signal sent by kill() / raise() / abort() / sigqueue() has
+// "sent by pid N uid N" instead of the fault address, a seccomp SIGSYS has
+// "call addr 0x..." (after the refused system call).
 void PutHeader(Writer& w, int signo, const siginfo_t* info, const void* pc, long tid) noexcept {
   const int width = 2 * static_cast<int>(sizeof(uintptr_t));
   w.Put("*** IBMW crash: signal ");
@@ -492,8 +584,20 @@ void PutHeader(Writer& w, int signo, const siginfo_t* info, const void* pc, long
   w.Put(SignalName(signo));
   w.Put("), code ");
   w.PutDec(info != nullptr ? info->si_code : 0);
-  w.Put(", fault addr 0x");
-  w.PutHex(reinterpret_cast<uintptr_t>(info != nullptr ? info->si_addr : nullptr), width);
+  if (HasFaultAddress(signo, info)) {
+    w.Put(", fault addr 0x");
+    w.PutHex(reinterpret_cast<uintptr_t>(info->si_addr), width);
+  } else if (HasCallAddress(signo, info)) {
+  #if defined(si_call_addr)
+    w.Put(", call addr 0x");
+    w.PutHex(reinterpret_cast<uintptr_t>(info->si_call_addr), width);
+  #endif
+  } else if (HasSender(info)) {
+    w.Put(", sent by pid ");
+    w.PutDec(info->si_pid);
+    w.Put(" uid ");
+    w.PutDec(info->si_uid);
+  }
   w.Put(", pc 0x");
   w.PutHex(reinterpret_cast<uintptr_t>(pc), width);
   w.Put(", tid ");
@@ -516,27 +620,31 @@ void PutCaller(Writer& w, const void* caller) noexcept {
 
 // Part 1, async-signal-safe: raw frames (module+offset from the table
 // recorded at Install()). Without symbolization it ends the report.
-size_t FormatRawFrames(Writer& w, const void* const* frames, size_t count, bool symbolize) noexcept {
+void FormatRawFrames(Writer& w, const void* const* frames, size_t count, bool symbolize) noexcept {
   if (symbolize) w.Put("*** raw stacktrace (no symbol lookup):\n");
   PutModuleTableFull(w);
   for (size_t i = 0; i < count; ++i) PutRawFrame(w, i, frames[i]);
-  if (!symbolize) {
-    w.Put("*** end of stacktrace (");
-    w.PutDec(static_cast<long long>(count));
-    w.Put(" frames)\n");
-  }
-  return w.Len();
 }
 
 // Part 2, not async-signal-safe: dladdr may take the loader lock (bounded by
 // the watchdog); demangling allocates.
-size_t FormatSymbolizedReport(Writer& w, const void* const* frames, size_t count, bool demangle) noexcept {
+void FormatSymbolizedFrames(Writer& w, const void* const* frames, size_t count, bool demangle) noexcept {
   w.Put("*** symbolized stacktrace:\n");
   for (size_t i = 0; i < count; ++i) PutFrame(w, i, frames[i], true, demangle);
+}
+
+// Ends a report buffer in the space kept free by kReportReserve: a marker
+// when something was cut off, then, with `trailer`, the end line.
+void PutReportEnd(Writer& w, size_t count, bool trailer) noexcept {
+  w.ReleaseReserve();
+  if (w.Truncated()) {
+    if (!w.AtLineStart()) w.PutChar('\n');
+    w.Put("*** IBMW crash: report truncated\n");
+  }
+  if (!trailer) return;
   w.Put("*** end of stacktrace (");
   w.PutDec(static_cast<long long>(count));
   w.Put(" frames)\n");
-  return w.Len();
 }
 
 [[noreturn]] void Terminate(int signo) noexcept {
@@ -559,11 +667,74 @@ size_t FormatSymbolizedReport(Writer& w, const void* const* frames, size_t count
 // example malloc deadlocking in the callback after heap corruption, or a
 // lock held by a thread parked in HandleSignal) still ends the process with
 // the original signal.
+//
+// SIGALRM goes to the process and may land on any thread that does not
+// block it. The first expiry re-arms a one-second alarm, then, on another
+// thread, hands the signal to the reporting thread (ArmWatchdog() unblocked
+// it there) so that it runs between two of that thread's instructions and
+// never in the middle of ResumeAtCaller() / RestoreInterruptedContext().
+// That thread (or the first expiry, if it lands there) writes "report timed
+// out" and ends the process. If that does not happen within the second (the
+// reporting thread blocks SIGALRM, e.g. in the callback or in a nested
+// fault, or the write blocks on a full pipe), the next expiry ends the
+// process on whichever thread it lands; it writes only a short note, and
+// only to a socket, where MSG_DONTWAIT makes it one attempt that cannot
+// block (a pipe or a terminal could, and their flags are not changed). Then the
+// faulting pc/sp are put back from that thread too: by then the reporting
+// thread is not moving them (the walk runs with SIGALRM unblocked, so the
+// handed-over signal would have run there), and putting them back twice is
+// harmless. The core dump then shows that thread as the one that died.
+// SA_NODEFER (ArmWatchdog) lets the next expiry interrupt a write that
+// blocks inside this handler.
+std::atomic<int> g_watchdog_fires{0};
+std::atomic<bool> g_watchdog_handed_over{false};
+static_assert(std::atomic<int>::is_always_lock_free && std::atomic<bool>::is_always_lock_free);
+
+bool HandOverWatchdog(long reporter) noexcept {
+  #if defined(SYS_tgkill)
+  return syscall(SYS_tgkill, static_cast<long>(getpid()), reporter, SIGALRM) == 0;
+  #else
+  (void)reporter;
+  if (!g_handling_thread_set.load(std::memory_order_acquire)) return false;
+  return pthread_kill(g_handling_thread, SIGALRM) == 0;
+  #endif
+}
+
 void HandleWatchdog(int) {
-  if (g_cfg.output_fd >= 0) {
+  const long reporter = g_handling_tid.load();
+  const bool on_reporter = reporter != 0 && reporter == CurrentTid();
+  const int fires = g_watchdog_fires.fetch_add(1);
+  bool write_message = false;
+  if (fires == 0) {
+    alarm(1);
+    if (reporter != 0 && !on_reporter) {
+      // Set before the hand-over: the reporting thread may run the signal
+      // before tgkill returns here.
+      g_watchdog_handed_over.store(true);
+      if (HandOverWatchdog(reporter)) return;
+      g_watchdog_handed_over.store(false);
+    }
+    write_message = true;
+  } else if (fires == 1 && on_reporter && g_watchdog_handed_over.load()) {
+    write_message = true;  // the handed-over signal; the re-armed alarm still runs
+  }
+  if (write_message && g_cfg.output_fd >= 0) {
     static const char kMsg[] = "*** IBMW crash: report timed out\n";
     WriteAll(g_cfg.output_fd, kMsg, sizeof(kMsg) - 1);
+  } else if (!write_message && g_cfg.output_fd >= 0) {
+    // Last resort: one attempt, only on a socket (ENOTSOCK otherwise).
+    static const char kForced[] = "\n*** IBMW crash: report timed out, ended by the watchdog's last resort\n";
+    #if defined(MSG_NOSIGNAL)
+    constexpr int kSendFlags = MSG_DONTWAIT | MSG_NOSIGNAL;
+    #else
+    constexpr int kSendFlags = MSG_DONTWAIT;
+    #endif
+    const ssize_t sent = send(g_cfg.output_fd, kForced, sizeof(kForced) - 1, kSendFlags);
+    (void)sent;
   }
+  // The walk may still be running from the caller (see ResumeAtCaller): put
+  // the faulting registers back for the core dump, as the other ways out do.
+  RestoreInterruptedContext();
   Terminate(g_handling_signo);
 }
 
@@ -573,13 +744,112 @@ void ArmWatchdog(unsigned seconds) noexcept {
   std::memset(&action, 0, sizeof(action));
   action.sa_handler = &HandleWatchdog;
   sigemptyset(&action.sa_mask);
-  action.sa_flags = SA_ONSTACK;
+  // SA_RESTART: a thread the alarm lands on only hands it over and returns;
+  // its blocking system call goes on instead of failing with EINTR.
+  action.sa_flags = SA_ONSTACK | SA_RESTART | SA_NODEFER;
   if (sigaction(SIGALRM, &action, nullptr) != 0) return;
   sigset_t unblock;
   sigemptyset(&unblock);
   sigaddset(&unblock, SIGALRM);
   pthread_sigmask(SIG_UNBLOCK, &unblock, nullptr);
   alarm(seconds);
+}
+
+// Crashed again inside the handler (on the reporting thread): say where the
+// report stopped (the header is already out), then end the process as the
+// original signal would have, honouring reraise (false: _exit(128 + original
+// signal)).
+[[noreturn]] void ReportNestedFault(int signo) noexcept {
+  const char* msg = nullptr;
+  switch (g_stage) {
+    case kStageCaller: msg = "*** IBMW crash: reading the caller address faulted\n"; break;
+    case kStageCapture: msg = "*** IBMW crash: stack capture faulted, no stacktrace\n"; break;
+    case kStageRaw: msg = "*** IBMW crash: writing the raw stacktrace faulted\n"; break;
+    case kStageSymbolize: msg = "*** IBMW crash: symbol lookup faulted\n"; break;
+    case kStageCallback: msg = "*** IBMW crash: report callback faulted\n"; break;
+    default: break;
+  }
+  if (msg != nullptr && g_cfg.output_fd >= 0) WriteAll(g_cfg.output_fd, msg, std::strlen(msg));
+  // The fault may have hit while the context was moved to the caller.
+  RestoreInterruptedContext();
+  Terminate(g_handling_signo != 0 ? static_cast<int>(g_handling_signo) : signo);
+}
+
+// Drops the handler's own frames from g_frames[0, count): the stack starts at
+// the interrupted pc (`walk_pc`, the caller when the context was moved
+// there). If the unwinder could not cross the signal frame, walk_pc is
+// prepended instead; a moved context gets the faulting `pc` prepended as
+// frame #00. Returns the first frame; `count` is updated.
+void** TrimHandlerFrames(size_t& count, void* walk_pc, void* pc, bool unwind_from_caller) noexcept {
+  void** frames = g_frames;
+  if (walk_pc == nullptr) return frames;
+  size_t start = count;
+  for (size_t i = 0; i < count; ++i) {
+    if (g_frames[i] == walk_pc) {
+      start = i;
+      break;
+    }
+  }
+  if (start < count) {
+    frames += start;
+    count -= start;
+  } else {
+    if (count == g_cfg.max_frames && count > 0) --count;
+    std::memmove(g_frames + 1, g_frames, count * sizeof(void*));
+    g_frames[0] = walk_pc;
+    ++count;
+  }
+  if (unwind_from_caller) {
+    if (frames == g_frames) {
+      if (count == g_cfg.max_frames && count > 0) --count;
+      std::memmove(g_frames + 1, g_frames, count * sizeof(void*));
+    } else {
+      --frames;
+    }
+    frames[0] = pc;
+    if (count < g_cfg.max_frames) ++count;
+  }
+  return frames;
+}
+
+// The stack parts on output_fd. The raw part is written before any symbol
+// lookup: if dladdr blocks (loader lock held by a thread inside dlopen), the
+// watchdog still finds the header and the raw frames there.
+void WriteFdReport(void* const* frames, size_t count) noexcept {
+  if (g_cfg.output_fd < 0) return;
+  {
+    Writer w(g_report, sizeof(g_report), kReportReserve);
+    FormatRawFrames(w, frames, count, g_cfg.symbolize);
+    PutReportEnd(w, count, !g_cfg.symbolize);
+    WriteAll(g_cfg.output_fd, g_report, w.Len());
+  }
+  if (g_cfg.symbolize) {
+    g_stage = kStageSymbolize;
+    Writer w(g_report, sizeof(g_report), kReportReserve);
+    FormatSymbolizedFrames(w, frames, count, false);
+    PutReportEnd(w, count, true);
+    WriteAll(g_cfg.output_fd, g_report, w.Len());
+  }
+}
+
+// Builds the whole report again for the callback (demangled) and calls it.
+// Building it runs dladdr and __cxa_demangle again: a fault there is a symbol
+// lookup fault, not a callback fault.
+void RunCallback(int signo, const siginfo_t* info, void* pc, void* caller, long tid, void* const* frames,
+                 size_t count) {
+  if (g_cfg.report_callback == nullptr) return;
+  g_stage = kStageRaw;
+  Writer w(g_report, sizeof(g_report), kReportReserve);
+  PutHeader(w, signo, info, pc, tid);
+  PutCaller(w, caller);
+  FormatRawFrames(w, frames, count, g_cfg.symbolize);
+  if (g_cfg.symbolize) {
+    g_stage = kStageSymbolize;
+    FormatSymbolizedFrames(w, frames, count, true);
+  }
+  PutReportEnd(w, count, true);
+  g_stage = kStageCallback;
+  g_cfg.report_callback(g_report, w.Len(), g_cfg.report_user_data);
 }
 
 void HandleSignal(int signo, siginfo_t* info, void* raw_ctx) {
@@ -597,27 +867,15 @@ void HandleSignal(int signo, siginfo_t* info, void* raw_ctx) {
   const long tid = CurrentTid();
   long expected = 0;
   if (!g_handling_tid.compare_exchange_strong(expected, tid)) {
-    if (expected == tid) {
-      // Crashed again inside the handler: say where the report stopped (the
-      // header is already out), then end the process as the original signal
-      // would have, honouring reraise (false: _exit(128 + original signal)).
-      const char* msg = nullptr;
-      switch (g_stage) {
-        case kStageCaller: msg = "*** IBMW crash: reading the caller address faulted\n"; break;
-        case kStageCapture: msg = "*** IBMW crash: stack capture faulted, no stacktrace\n"; break;
-        case kStageSymbolize: msg = "*** IBMW crash: symbol lookup faulted\n"; break;
-        case kStageCallback: msg = "*** IBMW crash: report callback faulted\n"; break;
-        default: break;
-      }
-      if (msg != nullptr && g_cfg.output_fd >= 0) WriteAll(g_cfg.output_fd, msg, std::strlen(msg));
-      // The fault may have hit while the context was moved to the caller.
-      RestoreInterruptedContext();
-      Terminate(g_handling_signo != 0 ? static_cast<int>(g_handling_signo) : signo);
-    }
+    if (expected == tid) ReportNestedFault(signo);
     // Another thread is reporting and will terminate the process.
     for (;;) pause();
   }
 
+  #if !defined(SYS_tgkill)
+  g_handling_thread = pthread_self();
+  g_handling_thread_set.store(true, std::memory_order_release);
+  #endif
   g_handling_signo = signo;
   ArmWatchdog(g_cfg.report_timeout_sec);
 
@@ -640,7 +898,7 @@ void HandleSignal(int signo, siginfo_t* info, void* raw_ctx) {
   // missing from it, and data inside a module is in it.
   void* caller = nullptr;
   bool unwind_from_caller = false;
-  if (signo == SIGSEGV && info != nullptr && info->si_addr == pc) {
+  if (signo == SIGSEGV && HasFaultAddress(signo, info) && info->si_addr == pc) {
     g_stage = kStageCaller;
     caller = CallerFromContext(raw_ctx);
     if (g_cfg.output_fd >= 0) {
@@ -654,72 +912,29 @@ void HandleSignal(int signo, siginfo_t* info, void* raw_ctx) {
   g_stage = kStageCapture;
   size_t count = CaptureStack(g_frames, g_cfg.max_frames, 0);
   RestoreInterruptedContext();
+  g_stage = kStageRaw;
 
-  // Drop the handler's own frames: start at the interrupted pc (the caller
-  // when the context was moved there). If the unwinder could not cross the
-  // signal frame, the pc is prepended instead; a moved context gets the
-  // original pc prepended as frame #00.
-  void** frames = g_frames;
-  void* const walk_pc = unwind_from_caller ? caller : pc;
-  if (walk_pc != nullptr) {
-    size_t start = count;
-    for (size_t i = 0; i < count; ++i) {
-      if (g_frames[i] == walk_pc) {
-        start = i;
-        break;
-      }
-    }
-    if (start < count) {
-      frames += start;
-      count -= start;
-    } else {
-      if (count == g_cfg.max_frames && count > 0) --count;
-      std::memmove(g_frames + 1, g_frames, count * sizeof(void*));
-      g_frames[0] = walk_pc;
-      ++count;
-    }
-    if (unwind_from_caller) {
-      if (frames == g_frames) {
-        if (count == g_cfg.max_frames && count > 0) --count;
-        std::memmove(g_frames + 1, g_frames, count * sizeof(void*));
-      } else {
-        --frames;
-      }
-      frames[0] = pc;
-      if (count < g_cfg.max_frames) ++count;
-    }
-  }
-
-  g_stage = kStageSymbolize;
-  if (g_cfg.output_fd >= 0) {
-    // Raw part next, written before any symbol lookup: if dladdr blocks
-    // (loader lock held by a thread inside dlopen), the watchdog still finds
-    // the header and the raw frames on output_fd.
-    {
-      Writer w(g_report, sizeof(g_report));
-      WriteAll(g_cfg.output_fd, g_report, FormatRawFrames(w, frames, count, g_cfg.symbolize));
-    }
-    if (g_cfg.symbolize) {
-      Writer w(g_report, sizeof(g_report));
-      WriteAll(g_cfg.output_fd, g_report, FormatSymbolizedReport(w, frames, count, false));
-    }
-  }
-
-  if (g_cfg.report_callback != nullptr) {
-    g_stage = kStageCallback;
-    Writer w(g_report, sizeof(g_report));
-    PutHeader(w, signo, info, pc, tid);
-    PutCaller(w, caller);
-    FormatRawFrames(w, frames, count, g_cfg.symbolize);
-    if (g_cfg.symbolize) FormatSymbolizedReport(w, frames, count, true);
-    g_cfg.report_callback(g_report, w.Len(), g_cfg.report_user_data);
-  }
+  void** const frames = TrimHandlerFrames(count, unwind_from_caller ? caller : pc, pc, unwind_from_caller);
+  WriteFdReport(frames, count);
+  RunCallback(signo, info, pc, caller, tid, frames, count);
 
   Terminate(signo);
 }
 
 bool SetupAltStack(size_t size) {
-  if (size == 0) return true;
+  if (size == 0) {
+    // Disable the alternate stack a previous Install() set up for this
+    // thread; one installed by someone else is left alone. The memory is
+    // kept (see g_alt_stack): another thread may still use it.
+    stack_t current;
+    if (g_alt_stack == nullptr || sigaltstack(nullptr, &current) != 0) return true;
+    if (current.ss_sp != g_alt_stack || (current.ss_flags & SS_DISABLE) != 0) return true;
+    if ((current.ss_flags & SS_ONSTACK) != 0) return false;  // running on it
+    stack_t off;
+    std::memset(&off, 0, sizeof(off));
+    off.ss_flags = SS_DISABLE;
+    return sigaltstack(&off, nullptr) == 0;
+  }
   if (g_alt_stack == nullptr || g_alt_stack_size < size) {
     // A previous, smaller stack is intentionally leaked; see g_alt_stack.
     char* mem = static_cast<char*>(std::malloc(size));
@@ -838,7 +1053,7 @@ bool Install(const Options& options) {
   g_cfg.report_timeout_sec = options.report_timeout_sec;
   g_handling_tid.store(0);
   g_stage = kStageNone;
-  g_moved.uctx = nullptr;
+  g_moved_uctx.store(nullptr);
 
   // Resolve the PLT slots and unwinder caches of _Unwind_Backtrace and dladdr
   // now, so their first use does not happen in signal context.

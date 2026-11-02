@@ -23,6 +23,8 @@ namespace ibmw::runtime::core::logger {
 // queued tasks cannot run before the caller returns, and flushing inline could
 // touch a stream that the interrupted task is writing. Also returns false when
 // the executor does not run the task before the deadline (stuck or stopped).
+// The deadline bounds the wait for the task (checked every 1 ms), not the
+// Dispatch() call, which takes the executor's queue lock.
 template <typename Flush>
 bool FlushOnLogExecutor(ibmw::executor::ExecutorHandle& log_executor, Flush&& flush,
                         std::chrono::steady_clock::time_point deadline) noexcept {

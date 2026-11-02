@@ -9,6 +9,7 @@
 
 #include <signal.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -46,6 +47,9 @@ std::string ReadFile(const std::string& path) {
   ss << ifs.rdbuf();
   return ss.str();
 }
+
+// In milliseconds, so that a failed comparison prints a number.
+long long Millis(Clock::duration d) { return std::chrono::duration_cast<std::chrono::milliseconds>(d).count(); }
 
 LogDataWrapper MakeLogData(const char* text) {
   return LogDataWrapper{
@@ -140,16 +144,21 @@ TEST_F(LogExecutorFixture, ConsoleFlushForCrashRunsAfterQueuedReport) {
 }
 
 // A crash on the log executor thread itself: the queued tasks cannot run
-// before the handler returns, so FlushForCrash returns false at once.
+// before the handler returns, so FlushForCrash returns false at once. The
+// drivers are started, so this is the own-thread check and not the "not
+// running" one: without the check the flush task would be queued behind the
+// running task and the call would wait until the 2 s deadline.
 // CH-47
 TEST_F(LogExecutorFixture, FlushForCrashOnLogExecutorThreadReturnsAtOnce) {
   const std::string dir = MakeTempDir();
   RotateFileLoggerDriver rotate;
   rotate.RegisterGetExecutorFunc(GetExecutorFunc());
   rotate.Initialize(YAML::Load("{path: '" + dir + "', filename: crash.log, suffix_with_timestamp: false}"));
+  rotate.Start();
   ConsoleLoggerDriver console;
   console.RegisterGetExecutorFunc(GetExecutorFunc());
   console.Initialize(YAML::Load("{print_color: false}"));
+  console.Start();
 
   std::promise<std::pair<bool, Clock::duration>> rotate_result;
   std::promise<std::pair<bool, Clock::duration>> console_result;
@@ -169,8 +178,8 @@ TEST_F(LogExecutorFixture, FlushForCrashOnLogExecutorThreadReturnsAtOnce) {
   const auto [console_ok, console_took] = console_future.get();
   EXPECT_FALSE(rotate_ok);
   EXPECT_FALSE(console_ok);
-  EXPECT_LT(rotate_took, 100ms);
-  EXPECT_LT(console_took, 100ms);
+  EXPECT_LT(Millis(rotate_took), 100);
+  EXPECT_LT(Millis(console_took), 100);
   rotate.Shutdown();
   console.Shutdown();
 }
@@ -207,7 +216,7 @@ __attribute__((noinline, no_sanitize("address", "undefined"))) void CrashNow() {
 // subsystem with enable_crash_log and a rotate_file backend, core logger
 // routed to the drivers (Engine::SetCoreLogger). Lives until the crash.
 struct CrashLogSetup {
-  explicit CrashLogSetup(const std::string& dir) {
+  explicit CrashLogSetup(const std::string& dir, bool crash_log = true) {
     exe.Initialize(YAML::Load("{name: crash_flush_test}"));
     exe.Start();
     logger = std::make_shared<ibmw::common::util::LoggerWrapper>();
@@ -215,7 +224,8 @@ struct CrashLogSetup {
     logging.RegisterGetExecutorFunc(
         [this](std::string_view) { return ibmw::executor::ExecutorHandle(exe.NativeHandle()); });
     logging.Initialize(YAML::Load(
-        "{enable_crash_log: true, backends: [{type: rotate_file, options: {path: '" + dir +
+        std::string("{enable_crash_log: ") + (crash_log ? "true" : "false") +
+        ", backends: [{type: rotate_file, options: {path: '" + dir +
         "', filename: crash.log, suffix_with_timestamp: false}}]}"));
     const auto* core = logging.GetLoggerAccess("core").NativeHandle();
     logger->get_log_level_func = [core]() -> uint32_t { return core->get_log_level(core->ctx); };
@@ -225,6 +235,11 @@ struct CrashLogSetup {
                 log_data_size);
     };
     logging.Start();
+  }
+
+  ~CrashLogSetup() {
+    logging.Shutdown();
+    exe.Shutdown();
   }
 
   executor::WatchdogExecutor exe;
@@ -237,6 +252,23 @@ struct CrashLogSetup {
 bool LogHasCompleteReport(const std::string& log) {
   const size_t begin = log.find("Crash signal handling");
   return begin != std::string::npos && log.find("(crash_signal_handling.cc:", begin) != std::string::npos;
+}
+
+// Death test child: records when it is about to crash (steady_clock is
+// CLOCK_MONOTONIC, the same in the parent) and turns off core dumps, so the
+// parent can measure how long the crash handler took.
+void CrashNowTimed(const std::string& dir) {
+  const rlimit no_core{0, 0};
+  (void)setrlimit(RLIMIT_CORE, &no_core);
+  std::ofstream(dir + "/crash_time") << Clock::now().time_since_epoch().count();
+  CrashNow();
+}
+
+// Time from CrashNowTimed() in the child until now.
+Clock::duration SinceCrash(const std::string& dir) {
+  const std::string text = ReadFile(dir + "/crash_time");
+  EXPECT_FALSE(text.empty()) << "the child did not reach the crash";
+  return Clock::now() - Clock::time_point(Clock::duration(std::stoll(text.empty() ? "0" : text)));
 }
 
 class CrashLogFlushDeathTest : public ::testing::Test {
@@ -277,21 +309,20 @@ TEST_F(CrashLogFlushDeathTest, ReportReachesRotateFileBeforeProcessEnds) {
 }
 
 // A crash on the log executor thread: no wait on the executor (it is the
-// crashing thread), the process still ends with its signal, quickly.
+// crashing thread). Waiting there would take the whole kCrashFlushTimeout
+// (the flush task can never run), so ending sooner proves there was no wait.
+// The time also holds the report itself (about 250 ms with backward-cpp).
 // CH-48
-TEST_F(CrashLogFlushDeathTest, CrashOnLogExecutorThreadDoesNotHang) {
+TEST_F(CrashLogFlushDeathTest, CrashOnLogExecutorThreadDoesNotWait) {
   const std::string dir = LogDir();
-  const auto t0 = Clock::now();
   EXPECT_EXIT(
       {
         auto* setup = new CrashLogSetup(dir);
-        setup->exe.Dispatch([]() { CrashNow(); });
+        setup->exe.Dispatch([dir]() { CrashNowTimed(dir); });
         for (;;) std::this_thread::sleep_for(1s);
       },
       ::testing::KilledBySignal(SIGSEGV), "");
-  // Well below the selfdev handler's 10 s report watchdog: the flush did not
-  // wait on its own thread (backward-cpp has no watchdog and would hang).
-  EXPECT_LT(Clock::now() - t0, 5s);
+  EXPECT_LT(Millis(SinceCrash(dir)), LoggingSubsystem::kCrashFlushTimeout.count());
 }
 
 // A stuck log executor: the flush gives up after kCrashFlushTimeout and the
@@ -311,6 +342,88 @@ TEST_F(CrashLogFlushDeathTest, StuckLogExecutorDelaysCrashOnlyByFlushTimeout) {
       },
       ::testing::KilledBySignal(SIGSEGV), "");
   EXPECT_LT(Clock::now() - t0, 5s);
+}
+
+// dir/name; the death test child, which runs the test body again, finds it.
+std::string MakeSubDir(const std::string& dir, const char* name) {
+  const std::string sub = dir + "/" + name;
+  std::error_code ec;
+  std::filesystem::create_directory(sub, ec);
+  EXPECT_TRUE(std::filesystem::is_directory(sub)) << sub;
+  return sub;
+}
+
+// Which owner's record is published. Initialize() runs once per object, so
+// "crash log off" is always a different object than the one that turned it
+// on: it must not take that owner's hook away (its handler and logger stay),
+// and each owner removes only its own record when it goes away. The child
+// reports the first failed check in its exit code.
+// CH-56
+TEST_F(CrashLogFlushDeathTest, HookIsOwnedByThePublishingSubsystem) {
+  const std::string dir = LogDir();
+  const std::string a_dir = MakeSubDir(dir, "a");
+  const std::string b_dir = MakeSubDir(dir, "b");
+  const std::string c_dir = MakeSubDir(dir, "c");
+  EXPECT_EXIT(
+      {
+        auto owner = []() -> const void* {
+          const auto* hook = CrashSignalHandling::GetCrashFlush();
+          return hook == nullptr ? nullptr : hook->ctx;
+        };
+        auto* a = new CrashLogSetup(a_dir);
+        if (owner() != &a->logging) _exit(10);
+        auto* b = new CrashLogSetup(b_dir, /*crash_log=*/false);
+        if (owner() != &a->logging) _exit(11);  // crash log off: A's hook stays
+        auto* c = new CrashLogSetup(c_dir);
+        if (owner() != &c->logging) _exit(12);  // the last one on wins
+        delete a;
+        if (owner() != &c->logging) _exit(13);  // A's record was not published
+        delete b;
+        if (owner() != &c->logging) _exit(14);
+        delete c;
+        if (owner() != nullptr) _exit(15);  // C removed its own record
+        _exit(0);
+      },
+      ::testing::ExitedWithCode(0), "");
+}
+
+// End to end: with an earlier owner's crash log on, initializing another
+// subsystem with it off keeps the earlier hook, so the report queued behind
+// the busy log executor still reaches the earlier owner's log.
+// CH-56
+TEST_F(CrashLogFlushDeathTest, CrashLogOffElsewhereKeepsEarlierHook) {
+  const std::string dir = LogDir();
+  const std::string off_dir = MakeSubDir(dir, "off");
+  EXPECT_EXIT(
+      {
+        auto* first = new CrashLogSetup(dir);
+        (void)new CrashLogSetup(off_dir, /*crash_log=*/false);
+        first->exe.Dispatch([]() { std::this_thread::sleep_for(150ms); });
+        CrashNow();
+      },
+      ::testing::KilledBySignal(SIGSEGV), "");
+  const std::string log = ReadFile(dir + "/crash.log");
+  EXPECT_TRUE(LogHasCompleteReport(log)) << log;
+}
+
+// Two owners with the crash log on: destroying the earlier one leaves the
+// later one's hook, which still flushes its queued report.
+// CH-56
+TEST_F(CrashLogFlushDeathTest, DestroyingEarlierOwnerKeepsLaterHook) {
+  const std::string dir = LogDir();
+  const std::string first_dir = MakeSubDir(dir, "first");
+  EXPECT_EXIT(
+      {
+        auto* first = new CrashLogSetup(first_dir);
+        auto* second = new CrashLogSetup(dir);
+        delete first;
+        second->exe.Dispatch([]() { std::this_thread::sleep_for(150ms); });
+        CrashNow();
+      },
+      ::testing::KilledBySignal(SIGSEGV), "");
+  const std::string log = ReadFile(dir + "/crash.log");
+  EXPECT_TRUE(LogHasCompleteReport(log)) << log;
+  EXPECT_FALSE(LogHasCompleteReport(ReadFile(first_dir + "/crash.log")));
 }
 
 }  // namespace

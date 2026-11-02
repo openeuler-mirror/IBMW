@@ -54,8 +54,10 @@ class LoggingSubsystem : public ISubsystem {
 
   /**
    * @brief Bounded flush for the crash report (see LoggerDriverBase::FlushForCrash).
-   * @note  Waits at most `timeout` in total for all drivers. Called by the
-   *        crash signal handler after it logged the report.
+   * @note  Waits about `timeout` at most in total for all drivers (one
+   *        deadline; see LoggerDriverBase::FlushForCrash for what it does not
+   *        bound). Called by the crash signal handler after it logged the
+   *        report.
    * @return true when every driver wrote out what was logged before the call.
    */
   bool FlushForCrash(std::chrono::milliseconds timeout) noexcept;
@@ -91,6 +93,11 @@ class LoggingSubsystem : public ISubsystem {
   Options options_;
 
   std::unique_ptr<CrashSignalHandling> crash_signal_handling_;
+
+  // Published to the crash handler while this object's crash log is on:
+  // waits (bounded) for the drivers to write the report.
+  const CrashSignalHandling::CrashFlushHook crash_flush_hook_{
+      [](void* self) { (void)static_cast<LoggingSubsystem*>(self)->FlushForCrash(kCrashFlushTimeout); }, this};
 
   std::function<ibmw::executor::ExecutorHandle(std::string_view)> get_executor_func_;
 

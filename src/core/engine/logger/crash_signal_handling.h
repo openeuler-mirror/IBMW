@@ -6,6 +6,7 @@
 #include <atomic>
 #include <csignal>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -36,19 +37,33 @@ class CrashSignalHandling {
   // Called by the handler right after it logged the report, before the
   // process ends: the log drivers write asynchronously, so fn(ctx) waits
   // (bounded, see LoggingSubsystem::FlushForCrash) until the report is
-  // written. Set before crashes can happen. Stored in two atomics (trivially
-  // destructible, lock-free): a crash during ClearCrashFlush() or static
-  // destruction sees either the hook or none, never a destroyed object.
+  // written. Set before crashes can happen.
+  //
+  // The hook is one atomic pointer to an immutable {fn, ctx} record owned by
+  // the caller, so a crash sees a whole record or none, never fn of one owner
+  // with ctx of another. SetCrashFlush() publishes the record (nullptr: no
+  // hook; the last call wins). ClearCrashFlush() unpublishes it only if it is
+  // still the published one, then waits until no crash handler is running
+  // the hook any more: once it returns, the owner may destroy the record and
+  // ctx. Clearing removes the hook; it does not hand it back to an owner that
+  // published earlier and was replaced (that owner has no hook until it
+  // publishes again). Not for signal context.
   using CrashFlushFunc = void (*)(void* ctx);
-  static void SetCrashFlush(CrashFlushFunc fn, void* ctx) {
-    crash_flush_ctx_.store(ctx, std::memory_order_release);
-    crash_flush_fn_.store(fn, std::memory_order_release);
-  }
-  // Removes the hook if ctx set it (another owner's hook is left alone).
-  static void ClearCrashFlush(void* ctx) {
-    CrashFlushFunc fn = crash_flush_fn_.load(std::memory_order_acquire);
-    if (crash_flush_ctx_.load(std::memory_order_acquire) != ctx) return;
-    crash_flush_fn_.compare_exchange_strong(fn, nullptr, std::memory_order_acq_rel);
+  struct CrashFlushHook {
+    CrashFlushFunc fn;
+    void* ctx;
+  };
+  static void SetCrashFlush(const CrashFlushHook* hook) { crash_flush_hook_.store(hook); }
+  // The published record, or nullptr.
+  static const CrashFlushHook* GetCrashFlush() { return crash_flush_hook_.load(); }
+  static void ClearCrashFlush(const CrashFlushHook* hook) {
+    const CrashFlushHook* expected = hook;
+    crash_flush_hook_.compare_exchange_strong(expected, nullptr);
+    // Also after a failed exchange: a handler may have loaded the record
+    // before another owner replaced it. Sequentially consistent with the
+    // increment in RunCrashFlush(): a handler that registers after this load
+    // reads the exchanged pointer, never this record.
+    while (crash_flush_readers_.load() != 0) std::this_thread::yield();
   }
 
   // Re-records the module table of the selfdev crash handler, so a crash in
@@ -79,15 +94,19 @@ class CrashSignalHandling {
  private:
   inline static std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_ =
       std::make_shared<ibmw::common::util::LoggerWrapper>();
-  // Runs the hook from signal context: loads both atomics, no allocation.
+  // Runs the hook from signal context: lock-free atomics, no allocation.
   static void RunCrashFlush() {
-    const CrashFlushFunc fn = crash_flush_fn_.load(std::memory_order_acquire);
-    void* const ctx = crash_flush_ctx_.load(std::memory_order_acquire);
-    if (fn != nullptr) fn(ctx);
+    crash_flush_readers_.fetch_add(1);
+    const CrashFlushHook* const hook = crash_flush_hook_.load();
+    if (hook != nullptr) hook->fn(hook->ctx);
+    crash_flush_readers_.fetch_sub(1);
   }
 
-  inline static std::atomic<CrashFlushFunc> crash_flush_fn_{nullptr};
-  inline static std::atomic<void*> crash_flush_ctx_{nullptr};
+  static_assert(std::atomic<const CrashFlushHook*>::is_always_lock_free);
+  static_assert(std::atomic<int>::is_always_lock_free);
+  inline static std::atomic<const CrashFlushHook*> crash_flush_hook_{nullptr};
+  // Crash handlers between loading the hook and returning from it.
+  inline static std::atomic<int> crash_flush_readers_{0};
 #if !defined(_WIN32) && !defined(IBMW_SELFDEV_CRASH_HANDLER)
   std::unique_ptr<char, FreeDeleter> alt_stack_{nullptr};
 #endif

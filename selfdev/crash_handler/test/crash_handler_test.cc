@@ -6,19 +6,31 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <unwind.h>
+#if defined(__linux__)
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <new>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -895,7 +907,6 @@ TEST(CrashHandlerTest, InterruptedContextIsRestoredAfterTheWalk) {
 }
 #endif
 
-
 // ---- module table limits and concurrent refresh (5.6 re-review round 4) --
 
 #if defined(__linux__)
@@ -1003,4 +1014,422 @@ TEST(CrashHandlerTest, ConcurrentRefreshNeverNamesWrongModule) {
 }
 #endif
 
+// ---- report header details, truncation, fault injection --------------------
+
+// CH-49 (C-17): a null frame array with a non-zero count formats nothing.
+TEST(CrashHandlerTest, FormatStackWithNullFramesFormatsNothing) {
+  char buf[64];
+  std::memset(buf, 'x', sizeof(buf));
+  EXPECT_EQ(FormatStack(buf, sizeof(buf), nullptr, 3, true, true), 0u);
+  EXPECT_STREQ(buf, "");
+}
+
+// The "tid N" field of the header line.
+std::string HeaderTid(const std::string& header) {
+  const size_t pos = header.find(", tid ");
+  return pos == std::string::npos ? std::string() : header.substr(pos + std::strlen(", tid "));
+}
+
+// CH-50 (C-2): for kill() / raise() / abort() / sigqueue() si_addr holds the
+// sender's pid and uid, not an address: the header names the sender and has
+// no fault address. A real fault keeps it.
+TEST(CrashHandlerTest, SentSignalNamesSenderInsteadOfFaultAddress) {
+  struct Case {
+    const char* name;
+    int signo;
+    void (*send)();
+  };
+  const Case cases[] = {
+      {"abort", SIGABRT, [] { std::abort(); }},
+      {"raise", SIGSEGV, [] { raise(SIGSEGV); }},
+      {"kill", SIGBUS, [] { kill(getpid(), SIGBUS); }},
+      {"sigqueue", SIGFPE, [] { sigqueue(getpid(), SIGFPE, sigval{}); }},
+  };
+  const std::string uid = std::to_string(getuid());
+  for (const Case& c : cases) {
+    ChildResult r = RunInChild(Options{}, [&c] {
+      c.send();
+      for (;;) pause();
+    }, /*kill_after_sec=*/15);
+    ASSERT_TRUE(WIFSIGNALED(r.status)) << c.name << "\n" << r.out;
+    EXPECT_EQ(WTERMSIG(r.status), c.signo) << c.name << "\n" << r.out;
+    const std::string header = HeaderLine(r.out, "*** IBMW crash: signal ");
+    ASSERT_FALSE(header.empty()) << c.name << "\n" << r.out;
+    EXPECT_EQ(header.find("fault addr"), std::string::npos) << c.name << ": " << header;
+    // Single-threaded child: the sender pid is the reporting tid.
+    const std::string tid = HeaderTid(header);
+    ASSERT_FALSE(tid.empty()) << header;
+    EXPECT_NE(header.find(", sent by pid " + tid + " uid " + uid + ", pc 0x"), std::string::npos)
+        << c.name << ": " << header;
+    EXPECT_EQ(r.out.find("*** caller"), std::string::npos) << c.name << "\n" << r.out;
+    EXPECT_NE(r.out.find("*** end of stacktrace"), std::string::npos) << c.name << "\n" << r.out;
+  }
+
+  ChildResult r = RunInChild(Options{}, [] { CrashHere(); });
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out;
+  const std::string header = HeaderLine(r.out, "*** IBMW crash: signal ");
+  EXPECT_NE(header.find(", fault addr 0x0000000000000000, pc 0x"), std::string::npos) << header;
+  EXPECT_EQ(header.find("sent by"), std::string::npos) << header;
+}
+
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
+// CH-57: a seccomp trap (SIGSYS, si_code SYS_SECCOMP) names the address after
+// the refused system call; si_addr means nothing there.
+TEST(CrashHandlerTest, SeccompTrapShowsCallAddress) {
+  ChildResult r = RunInChild(Options{}, [] {
+#if defined(__x86_64__)
+    constexpr unsigned kArch = AUDIT_ARCH_X86_64;
+#else
+    constexpr unsigned kArch = AUDIT_ARCH_AARCH64;
+#endif
+    // getppid() traps, everything else is allowed.
+    sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kArch, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_getppid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    sock_fprog prog{static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])), filter};
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(140);
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(141);
+    syscall(SYS_getppid);
+    _exit(142);
+  }, /*kill_after_sec=*/15);
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << "exit " << (WIFEXITED(r.status) ? WEXITSTATUS(r.status) : -1) << "\n" << r.out;
+  EXPECT_EQ(WTERMSIG(r.status), SIGSYS) << r.out;
+  const std::string header = HeaderLine(r.out, "*** IBMW crash: signal ");
+  EXPECT_EQ(header.rfind("*** IBMW crash: signal 31 (SIGSYS), code 1, call addr 0x", 0), 0u) << header;
+  EXPECT_EQ(header.find("call addr 0x0000000000000000"), std::string::npos) << header;
+  EXPECT_EQ(header.find("fault addr"), std::string::npos) << header;
+  EXPECT_EQ(header.find("sent by"), std::string::npos) << header;
+  EXPECT_NE(r.out.find("*** end of stacktrace"), std::string::npos) << r.out;
+}
+#endif
+
+// CH-51 (C-3): alt_stack_size = 0 on a re-Install() disables the alternate
+// stack the previous Install() set up, and leaves someone else's alone.
+TEST(CrashHandlerTest, ZeroAltStackSizeDisablesPreviousAltStack) {
+  constexpr size_t kSize = 1024 * 1024;
+  Options on;
+  on.signals = {SIGUSR2};
+  on.alt_stack_size = kSize;
+  ChildResult r = RunInChild(on, [on] {
+    stack_t ss;
+    if (sigaltstack(nullptr, &ss) != 0 || (ss.ss_flags & SS_DISABLE) != 0 || ss.ss_size != kSize) _exit(120);
+    Options off = on;
+    off.alt_stack_size = 0;
+    if (!Install(off)) _exit(121);
+    if (sigaltstack(nullptr, &ss) != 0 || (ss.ss_flags & SS_DISABLE) == 0) _exit(122);
+
+    static char other[256 * 1024];
+    stack_t theirs;
+    std::memset(&theirs, 0, sizeof(theirs));
+    theirs.ss_sp = other;
+    theirs.ss_size = sizeof(other);
+    if (sigaltstack(&theirs, nullptr) != 0) _exit(123);
+    if (!Install(off)) _exit(124);
+    if (sigaltstack(nullptr, &ss) != 0 || (ss.ss_flags & SS_DISABLE) != 0 || ss.ss_sp != other) _exit(125);
+
+    if (!Install(on)) _exit(126);
+    if (sigaltstack(nullptr, &ss) != 0 || ss.ss_sp == other || ss.ss_size != kSize) _exit(127);
+    Uninstall();
+  });
+  ASSERT_TRUE(WIFEXITED(r.status)) << r.out;
+  EXPECT_EQ(WEXITSTATUS(r.status), 0) << r.out;
+}
+
+// CH-52 (C-4): a report longer than the 64 KiB buffer (128 frames with
+// names of about 1.5 KB each) is cut, says so, and still ends with the
+// "*** end of stacktrace" line, both on output_fd and in the callback.
+// Each level must stay a separate call of this instantiation, named by
+// dladdr, at every optimization level: GCC's IPA-SRA would otherwise turn it
+// into a local ".isra" clone that dladdr cannot name, and the report would
+// stay short. noipa (GCC) and optnone (Clang) keep it as written.
+#if defined(__clang__)
+#define IBMW_CH_KEEP_AS_WRITTEN __attribute__((noinline, optnone))
+#else
+#define IBMW_CH_KEEP_AS_WRITTEN __attribute__((noinline, noipa))
+#endif
+template <typename Seq>
+IBMW_CH_KEEP_AS_WRITTEN int DeepTemplateFrames(int depth) {
+  if (depth == 0) {
+    CrashHere();
+    return 0;
+  }
+  const int r = DeepTemplateFrames<Seq>(depth - 1);
+  asm volatile("" ::: "memory");
+  return r + 1;
+}
+
+bool EndsWith(const std::string& s, const std::string& suffix) {
+  return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+TEST(CrashHandlerTest, LongReportIsTruncatedWithMarkerAndTrailer) {
+  Options opt;
+  opt.max_frames = kMaxFrames;
+  opt.report_callback = &CallbackToFd;
+  ChildResult r = RunInChild(opt, [] { (void)DeepTemplateFrames<std::make_integer_sequence<int, 300>>(200); },
+                             /*kill_after_sec=*/30);
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out.substr(0, 4096);
+  EXPECT_EQ(WTERMSIG(r.status), SIGSEGV);
+  EXPECT_EQ(r.out.find("faulted"), std::string::npos);
+  const std::string marker = "\n*** IBMW crash: report truncated\n*** end of stacktrace (";
+
+  // output_fd: the raw part fits, the symbolized part (mangled names) is cut.
+  const size_t sym = r.out.find("*** symbolized stacktrace:\n");
+  ASSERT_NE(sym, std::string::npos) << r.out.substr(0, 4096);
+  EXPECT_EQ(r.out.rfind("report truncated", sym), std::string::npos) << "raw part was cut";
+  EXPECT_NE(r.out.find(marker, sym), std::string::npos) << r.out.substr(r.out.size() - 512);
+  EXPECT_TRUE(EndsWith(r.out, " frames)\n")) << r.out.substr(r.out.size() - 512);
+  EXPECT_LT(r.out.size() - sym, 64u * 1024u);
+
+  // The callback's copy is cut the same way (names this long do not fit the
+  // demangling buffer and stay mangled).
+  EXPECT_EQ(r.extra.rfind("*** IBMW crash: signal 11 (SIGSEGV)", 0), 0u) << r.extra.substr(0, 512);
+  EXPECT_NE(r.extra.find(marker), std::string::npos) << r.extra.substr(r.extra.size() - 512);
+  EXPECT_TRUE(EndsWith(r.extra, " frames)\n")) << r.extra.substr(r.extra.size() - 512);
+  EXPECT_LT(r.extra.size(), 64u * 1024u);
+  const size_t extra_sym = r.extra.find("*** symbolized stacktrace:\n");
+  ASSERT_NE(extra_sym, std::string::npos) << r.extra.substr(0, 4096);
+  EXPECT_NE(r.extra.find("DeepTemplateFrames", extra_sym), std::string::npos)
+      << r.extra.substr(extra_sym, 4096);
+}
+
+// CH-55 (C-4): a report that fits has no truncation marker.
+TEST(CrashHandlerTest, ShortReportHasNoTruncationMarker) {
+  Options opt;
+  opt.report_callback = &CallbackToFd;
+  ChildResult r = RunInChild(opt, [] { CrashHere(); });
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out;
+  EXPECT_EQ(r.out.find("truncated"), std::string::npos) << r.out;
+  EXPECT_EQ(r.extra.find("truncated"), std::string::npos) << r.extra;
+  EXPECT_NE(r.extra.find("*** end of stacktrace"), std::string::npos) << r.extra;
+}
+
+long long MillisSince(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+}
+
+void BlockWatchdogAndHang(const char*, size_t, void*) {
+  sigset_t alarm_only;
+  sigemptyset(&alarm_only);
+  sigaddset(&alarm_only, SIGALRM);
+  pthread_sigmask(SIG_BLOCK, &alarm_only, nullptr);
+  for (;;) usleep(10 * 1000);
+}
+
+// CH-59 (round-2 review M1): the crash is on a worker thread while the main
+// thread waits in join(), so the alarm lands on the main thread and is
+// handed over to the reporting thread, whose callback blocks SIGALRM and
+// hangs. The handed-over signal stays pending there; the re-armed alarm
+// (one second later) ends the process on the main thread. Before the fix
+// the process hung until killed.
+TEST(CrashHandlerTest, WatchdogEndsReportWhoseCallbackBlocksSigalrm) {
+  Options opt;
+  opt.report_callback = &BlockWatchdogAndHang;
+  opt.report_timeout_sec = 1;
+  const auto start = std::chrono::steady_clock::now();
+  ChildResult r = RunInChild(opt, [] {
+    std::thread worker([] { CrashHere(); });
+    worker.join();
+  }, /*kill_after_sec=*/10);
+  const long long elapsed_ms = MillisSince(start);
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out;
+  EXPECT_EQ(WTERMSIG(r.status), SIGSEGV) << "killed after the 10 s limit: the watchdog did not end it\n" << r.out;
+  EXPECT_LT(elapsed_ms, 3000) << r.out;
+  EXPECT_NE(r.out.find("*** end of stacktrace"), std::string::npos) << r.out;
+}
+
+#if !defined(IBMW_CH_NO_INTERPOSE)
+// Fault injection for CH-53 / CH-54. The test program defines
+// _Unwind_GetIPInfo and __cxa_demangle itself (below, after the namespace):
+// the handler, linked into it statically, binds to them. They forward to the
+// real functions (looked up with dlsym(RTLD_NEXT) during static
+// initialization, never in a signal handler) unless a child sets g_inject
+// before crashing. This needs the shared libgcc_s / libstdc++: with
+// -static-libgcc, -static-libstdc++ or -static the test CMakeLists defines
+// IBMW_CH_NO_INTERPOSE and these tests are not built.
+enum Inject : int { kInjectNone, kInjectHangInWalk, kInjectFaultInDemangle };
+volatile sig_atomic_t g_inject = kInjectNone;
+
+using GetIPInfoFn = _Unwind_Ptr (*)(struct _Unwind_Context*, int*);
+using DemangleFn = char* (*)(const char*, char*, size_t*, int*);
+const GetIPInfoFn g_real_get_ip_info = reinterpret_cast<GetIPInfoFn>(dlsym(RTLD_NEXT, "_Unwind_GetIPInfo"));
+const DemangleFn g_real_demangle = reinterpret_cast<DemangleFn>(dlsym(RTLD_NEXT, "__cxa_demangle"));
+
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
+// The child's alternate stack, shared with the parent so that it can read the
+// interrupted context the kernel saved there after the child is gone (the
+// state a core dump or a debugger would see).
+struct SharedAltStack {
+  uintptr_t ctx_offset;
+  uintptr_t fault_pc;
+  uintptr_t fault_sp;
+  uintptr_t pc_during_walk;
+  int recorded;
+  alignas(64) char stack[1024 * 1024];
+};
+SharedAltStack* g_shared = nullptr;
+
+const ucontext_t* SharedContext() {
+  return reinterpret_cast<const ucontext_t*>(reinterpret_cast<const char*>(g_shared) + g_shared->ctx_offset);
+}
+
+void RecordIntoShared(int signo, siginfo_t* info, void* ctx) {
+  if (g_shared->recorded == 0) {
+    auto* uctx = static_cast<ucontext_t*>(ctx);
+    g_shared->ctx_offset = static_cast<uintptr_t>(reinterpret_cast<char*>(uctx) - reinterpret_cast<char*>(g_shared));
+    g_shared->fault_pc = CtxPc(uctx);
+    g_shared->fault_sp = CtxSp(uctx);
+    g_shared->recorded = 1;
+  }
+  g_inner_action.sa_sigaction(signo, info, ctx);
+}
+
+// Called by the injected hang inside the stack walk.
+void HangInWalk() {
+  g_shared->pc_during_walk = CtxPc(SharedContext());
+  for (;;) usleep(10 * 1000);
+}
+
+// CH-53 (C-5): the watchdog fires while the walk runs from the caller (pc/sp
+// moved, see CH-43): it puts the faulting registers back before ending the
+// process, like the other ways out.
+TEST(CrashHandlerTest, WatchdogRestoresInterruptedContext) {
+  ASSERT_NE(g_real_get_ip_info, nullptr) << "dlsym(RTLD_NEXT, \"_Unwind_GetIPInfo\") failed: no fault injection";
+  void* mem = mmap(nullptr, sizeof(SharedAltStack), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(mem, MAP_FAILED);
+  g_shared = new (mem) SharedAltStack();
+  Options opt;
+  opt.alt_stack_size = 0;
+  opt.report_timeout_sec = 1;
+  ChildResult r = RunInChild(opt, [] {
+    stack_t ss;
+    std::memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = g_shared->stack;
+    ss.ss_size = sizeof(g_shared->stack);
+    if (sigaltstack(&ss, nullptr) != 0) _exit(130);
+    if (sigaction(SIGSEGV, nullptr, &g_inner_action) != 0) _exit(131);
+    struct sigaction wrapper = g_inner_action;
+    wrapper.sa_sigaction = &RecordIntoShared;
+    if (sigaction(SIGSEGV, &wrapper, nullptr) != 0) _exit(132);
+    g_inject = kInjectHangInWalk;
+    CallThroughPointer(&g_wild_fn);
+  }, /*kill_after_sec=*/15);
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out;
+  EXPECT_EQ(WTERMSIG(r.status), SIGSEGV) << r.out;
+  EXPECT_NE(r.out.find("*** caller 0x"), std::string::npos) << r.out;
+  EXPECT_NE(r.out.find("*** IBMW crash: report timed out"), std::string::npos)
+      << "the walk did not hang: the handler did not call the test's _Unwind_GetIPInfo\n" << r.out;
+  EXPECT_EQ(r.out.find("*** end of stacktrace"), std::string::npos) << r.out;
+  ASSERT_EQ(g_shared->recorded, 1);
+  EXPECT_EQ(g_shared->fault_pc, 0x1234u);
+  // The hang was inside the moved window ...
+  EXPECT_NE(g_shared->pc_during_walk, 0x1234u);
+  EXPECT_NE(g_shared->pc_during_walk, 0u);
+  // ... and the context the process died with is the fault site again.
+  EXPECT_EQ(CtxPc(SharedContext()), g_shared->fault_pc);
+  EXPECT_EQ(CtxSp(SharedContext()), g_shared->fault_sp);
+  munmap(mem, sizeof(SharedAltStack));
+  g_shared = nullptr;
+}
+
+// CH-58 (round-2 review M3): as CH-53, but the crash is on a worker thread
+// while the main thread waits in join(). The alarm lands on the main thread
+// (the kernel prefers it for a process-directed signal it does not block),
+// which hands it over to the reporting thread: that thread writes "report
+// timed out", puts the faulting registers back and ends the process, about
+// one second after the crash (the last-resort exit, one second later, would
+// not write the message).
+TEST(CrashHandlerTest, WatchdogHandedOverFromJoiningThreadRestoresContext) {
+  ASSERT_NE(g_real_get_ip_info, nullptr) << "dlsym(RTLD_NEXT, \"_Unwind_GetIPInfo\") failed: no fault injection";
+  void* mem = mmap(nullptr, sizeof(SharedAltStack), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(mem, MAP_FAILED);
+  g_shared = new (mem) SharedAltStack();
+  Options opt;
+  opt.alt_stack_size = 0;
+  opt.report_timeout_sec = 1;
+  const auto start = std::chrono::steady_clock::now();
+  ChildResult r = RunInChild(opt, [] {
+    if (sigaction(SIGSEGV, nullptr, &g_inner_action) != 0) _exit(131);
+    struct sigaction wrapper = g_inner_action;
+    wrapper.sa_sigaction = &RecordIntoShared;
+    if (sigaction(SIGSEGV, &wrapper, nullptr) != 0) _exit(132);
+    std::thread worker([] {
+      stack_t ss;
+      std::memset(&ss, 0, sizeof(ss));
+      ss.ss_sp = g_shared->stack;
+      ss.ss_size = sizeof(g_shared->stack);
+      if (sigaltstack(&ss, nullptr) != 0) _exit(130);
+      g_inject = kInjectHangInWalk;
+      CallThroughPointer(&g_wild_fn);
+    });
+    worker.join();
+  }, /*kill_after_sec=*/15);
+  const long long elapsed_ms = MillisSince(start);
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out;
+  EXPECT_EQ(WTERMSIG(r.status), SIGSEGV) << r.out;
+  EXPECT_LT(elapsed_ms, 2000) << r.out;
+  EXPECT_NE(r.out.find("*** IBMW crash: report timed out"), std::string::npos)
+      << "the walk did not hang, or the reporting thread did not take the handed-over signal\n" << r.out;
+  ASSERT_EQ(g_shared->recorded, 1);
+  EXPECT_EQ(g_shared->fault_pc, 0x1234u);
+  EXPECT_NE(g_shared->pc_during_walk, 0x1234u);
+  EXPECT_NE(g_shared->pc_during_walk, 0u);
+  EXPECT_EQ(CtxPc(SharedContext()), g_shared->fault_pc);
+  EXPECT_EQ(CtxSp(SharedContext()), g_shared->fault_sp);
+  munmap(mem, sizeof(SharedAltStack));
+  g_shared = nullptr;
+}
+#endif
+
+// CH-54 (C-6): a fault while the callback's copy is demangled is reported as
+// a symbol lookup fault, not as a callback fault; the callback never ran.
+TEST(CrashHandlerTest, FaultWhileDemanglingForCallbackIsSymbolLookupFault) {
+  ASSERT_NE(g_real_demangle, nullptr) << "dlsym(RTLD_NEXT, \"__cxa_demangle\") failed: no fault injection";
+  Options opt;
+  opt.report_callback = &CallbackToFd;
+  ChildResult r = RunInChild(opt, [] {
+    g_inject = kInjectFaultInDemangle;
+    CrashHere();
+  }, /*kill_after_sec=*/15);
+  ASSERT_TRUE(WIFSIGNALED(r.status)) << r.out;
+  EXPECT_EQ(WTERMSIG(r.status), SIGSEGV) << r.out;
+  // output_fd does not demangle: its report is complete.
+  EXPECT_NE(r.out.find("*** end of stacktrace"), std::string::npos) << r.out;
+  EXPECT_NE(r.out.find("*** IBMW crash: symbol lookup faulted"), std::string::npos)
+      << "no fault: the handler did not call the test's __cxa_demangle\n" << r.out;
+  EXPECT_EQ(r.out.find("report callback faulted"), std::string::npos) << r.out;
+  EXPECT_TRUE(r.extra.empty()) << r.extra;
+}
+#endif  // !IBMW_CH_NO_INTERPOSE
+
 }  // namespace crash_handler_test
+
+#if !defined(IBMW_CH_NO_INTERPOSE)
+// The fault injection points of CH-53 / CH-54 (see g_inject). A call before
+// the static initialization above (an exception thrown by another static
+// constructor) looks the function up itself; none happens in a signal
+// handler.
+extern "C" _Unwind_Ptr _Unwind_GetIPInfo(struct _Unwind_Context* ctx, int* ip_before_insn) {
+  using crash_handler_test::GetIPInfoFn;
+  GetIPInfoFn real = crash_handler_test::g_real_get_ip_info;
+  if (real == nullptr) real = reinterpret_cast<GetIPInfoFn>(dlsym(RTLD_NEXT, "_Unwind_GetIPInfo"));
+#if (defined(__x86_64__) || defined(__aarch64__)) && defined(__linux__)
+  if (crash_handler_test::g_inject == crash_handler_test::kInjectHangInWalk) crash_handler_test::HangInWalk();
+#endif
+  return real(ctx, ip_before_insn);
+}
+
+extern "C" char* __cxa_demangle(const char* mangled, char* out, size_t* len, int* status) {
+  using crash_handler_test::DemangleFn;
+  DemangleFn real = crash_handler_test::g_real_demangle;
+  if (real == nullptr) real = reinterpret_cast<DemangleFn>(dlsym(RTLD_NEXT, "__cxa_demangle"));
+  if (crash_handler_test::g_inject == crash_handler_test::kInjectFaultInDemangle) crash_handler_test::CrashHere();
+  return real(mangled, out, len, status);
+}
+#endif  // !IBMW_CH_NO_INTERPOSE

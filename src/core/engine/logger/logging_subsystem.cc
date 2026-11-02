@@ -110,10 +110,13 @@ void LoggingSubsystem::Initialize(YAML::Node options_node) {
     CrashSignalHandling::SetLogger(logger_ptr_);
     // The drivers write on their log executor: wait (bounded) for the report
     // to be written before the handler ends the process.
-    CrashSignalHandling::SetCrashFlush(
-        [](void* self) { (void)static_cast<LoggingSubsystem*>(self)->FlushForCrash(kCrashFlushTimeout); }, this);
+    CrashSignalHandling::SetCrashFlush(&crash_flush_hook_);
   } else {
     crash_signal_handling_.reset();
+    // The crash flush hook is left alone: Initialize() runs once per object,
+    // so this one never published its hook, and another owner's hook (an
+    // earlier LoggingSubsystem whose handler and logger are still in place)
+    // must stay.
   }
 
   options_node = options_;
@@ -170,8 +173,8 @@ bool LoggingSubsystem::FlushForCrash(std::chrono::milliseconds timeout) noexcept
 
 LoggingSubsystem::~LoggingSubsystem() {
   // The handler stays installed after this object is gone; drop the hook
-  // that points to it.
-  if (crash_signal_handling_) CrashSignalHandling::ClearCrashFlush(this);
+  // that points to it (if still published) and wait out a running one.
+  CrashSignalHandling::ClearCrashFlush(&crash_flush_hook_);
 }
 
 void LoggingSubsystem::RegisterGetExecutorFunc(
