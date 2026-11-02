@@ -376,6 +376,12 @@ void RecordAction::InitExecutor(ibmw::executor::ExecutorHandle timer_executor) {
       }
       struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
       if (action->state_.load() == State::kStart) {
+        // A silent topic brings no record that would end the signal record.
+        if (action->recording_flag_ && action->stop_record_timestamp_ != 0 &&
+            ibmw::common::util::GetCurTimestampNs() > action->stop_record_timestamp_) {
+          action->recording_flag_ = false;
+          action->CloseRecord();
+        }
         action->FlushToDisk();
       }
     });

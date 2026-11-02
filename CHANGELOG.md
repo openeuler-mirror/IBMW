@@ -51,6 +51,9 @@ details remain governed by the documentation for each release.
 - gRPC: a request or response above 4 GiB - 1 is refused (client
   `CLI_SERIALIZATION_FAILED`, server `grpc-status` 13) instead of being sent
   with a truncated length prefix.
+- Recorder: a signal record now also ends at its stop time while its topics are
+  silent, checked every `msg_write_interval_time` (default 1 s). Previously only
+  the next message ended it.
 
 ### Added
 
