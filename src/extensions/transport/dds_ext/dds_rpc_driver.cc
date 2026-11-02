@@ -627,11 +627,12 @@ void DdsRpcDriver::ClientListener::on_data_available(
     // (matches rmw_fastrtps __rmw_take_response: uses related_sample_identity)
     auto& related_id = sample_info.related_sample_identity;
 
-    // Check if this response is for us (match GUID)
-    if (related_id.writer_guid() != ep_.reply_reader_guid) {
+    // Check if this response is for us (match GUID and the full id)
+    const auto reply_seq = DdsRpcReplySeq(related_id, ep_.reply_reader_guid);
+    if (!reply_seq) {
       continue;
     }
-    uint32_t seq = related_id.sequence_number().low;
+    uint32_t seq = *reply_seq;
 
     MW_TRACE("DDS RPC client received response: func='{}', seq={}.",
                 ep_.func_name, seq);

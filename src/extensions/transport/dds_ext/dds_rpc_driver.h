@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -50,6 +51,17 @@ inline bool DdsRpcWriteSucceeded(bool ret) {
 
 inline bool DdsRpcWriteSucceeded(dds_rpc_return::ReturnCode_t ret) {
   return ret == kDdsRpcReturnOk;
+}
+
+// Request id a reply answers, if it is meant for the client whose reply reader
+// is `reader_guid`. Requests carry 32-bit ids with high word 0 (the client
+// tool keys records by uint32_t and skips ids still in flight on wrap), so a
+// reply with any other high word is not one of ours.
+inline std::optional<uint32_t> DdsRpcReplySeq(
+    const dds_rpc_rtps::SampleIdentity& related_id, const dds_rpc_rtps::GUID_t& reader_guid) {
+  if (related_id.writer_guid() != reader_guid || related_id.sequence_number().high != 0) [[unlikely]]
+    return std::nullopt;
+  return related_id.sequence_number().low;
 }
 
 class DdsRpcDriver : public runtime::core::service::ServiceDriver,

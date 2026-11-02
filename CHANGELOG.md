@@ -95,6 +95,9 @@ details remain governed by the documentation for each release.
 - Documentation: `listen_port` of the net extension's HTTP, TCP and UDP sections
   is required when the section is set; it was wrongly listed with default `0`.
   Missing `thread_num` or `listen_port` now names the option in the error.
+- DDS RPC client: a reply is matched to its call by the full 64-bit request id;
+  a reply whose high word is not 0 is ignored. Previously only the low 32 bits
+  were compared.
 
 ### Added
 
