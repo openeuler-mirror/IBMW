@@ -16,6 +16,7 @@
 #include "dynamiclatch.h"
 #include "record_playback_ext/global.h"
 #include "record_playback_ext/topic_meta.h"
+#include "record_playback_ext/time_math.h"
 #include "base/string_util.h"
 #include "base/time_util.h"
 
@@ -260,7 +261,7 @@ void RecordAction::Initialize(YAML::Node options) {
   }
   // misc
   max_bag_size_ = static_cast<size_t>(options_.storage_policy.max_bag_size_m) * 1024 * 1024;
-  max_preparation_duration_ns_ = options_.max_preparation_duration_s * 1000000000;
+  max_preparation_duration_ns_ = SecondsToNsSaturated(options_.max_preparation_duration_s);
 
   metadata_.version = kVersion;
   if (options_.extra_attributes && !options_.extra_attributes.IsNull()) {
@@ -539,9 +540,9 @@ bool RecordAction::StartSignalRecord(uint64_t preparation_duration_s, uint64_t r
 
       uint64_t now = ibmw::common::util::GetCurTimestampNs();
 
-      action->stop_record_timestamp_ = now + record_duration_s * 1000000000;
+      action->stop_record_timestamp_ = AddSaturated(now, SecondsToNsSaturated(record_duration_s));
 
-      uint64_t start_record_timestamp = now - preparation_duration_s * 1000000000;
+      uint64_t start_record_timestamp = SubSaturated(now, SecondsToNsSaturated(preparation_duration_s));
 
         // Use binary search to locate the starting point for recording in the cache
       size_t last_cache_size = action->last_cache_.size();
