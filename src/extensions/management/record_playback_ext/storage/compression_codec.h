@@ -14,6 +14,16 @@ namespace ibmw::extensions::record_playback_extension {
 // instead of growing until OOM (decompression bomb / corrupted frame).
 inline constexpr size_t kMaxDecompressedPayloadSize = size_t{1} << 30;  // 1 GiB
 inline constexpr size_t kMaxDecompressedFileSize = size_t{4} << 30;     // 4 GiB
+// The size a frame header declares is untrusted: it is used as a reservation
+// hint only up to this many bytes, larger outputs grow while decompressing.
+inline constexpr size_t kMaxDecompressReserveHint = size_t{64} << 20;  // 64 MiB
+
+// Bytes to reserve for a frame that declares `declared` output bytes.
+inline size_t DecompressReserveHint(unsigned long long declared, size_t max_output_size) {
+  if (declared > max_output_size) return 0;
+  return declared < kMaxDecompressReserveHint ? static_cast<size_t>(declared)
+                                              : kMaxDecompressReserveHint;
+}
 
 std::string CompressBuffer(
     std::string_view input,

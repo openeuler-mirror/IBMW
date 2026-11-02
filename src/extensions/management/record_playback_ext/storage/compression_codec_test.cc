@@ -67,6 +67,21 @@ TEST(CompressionCodecTest, OutputLargerThanLimitIsRejected) {
       DecompressBuffer(Lz4WithoutContentSize(plain), "lz4", kPlainSize - 1));
 }
 
+// EXT-037: a frame header can declare any size; at most 64 MiB of it is
+// reserved up front.
+TEST(CompressionCodecTest, DeclaredSizeOnlyReservesUpToTheHint) {
+  EXPECT_EQ(DecompressReserveHint(0, kPlainSize), 0u);
+  EXPECT_EQ(DecompressReserveHint(kPlainSize, kPlainSize), kPlainSize);
+  EXPECT_EQ(DecompressReserveHint(kPlainSize + 1, kPlainSize), 0u);
+  EXPECT_EQ(DecompressReserveHint(kMaxDecompressedPayloadSize, kMaxDecompressedPayloadSize),
+            kMaxDecompressReserveHint);
+  EXPECT_EQ(DecompressReserveHint(~0ull, kMaxDecompressedPayloadSize), 0u);
+
+  // Larger than the hint still round-trips: the output grows past it.
+  const std::string plain(kMaxDecompressReserveHint + 4096, 'b');
+  EXPECT_EQ(DecompressBuffer(CompressBuffer(plain, "zstd"), "zstd"), plain);
+}
+
 TEST(CompressionCodecTest, CorruptedFramesAreRejected) {
   const std::string plain(4096, 'x');
   for (const char* format : {"zstd", "lz4"}) {

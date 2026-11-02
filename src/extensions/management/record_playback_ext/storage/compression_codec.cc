@@ -81,8 +81,8 @@ std::string DecompressZstd(std::string_view input, size_t max_output_size) {
   const unsigned long long declared =
       ZSTD_getFrameContentSize(input.data(), input.size());
   if (declared != ZSTD_CONTENTSIZE_UNKNOWN &&
-      declared != ZSTD_CONTENTSIZE_ERROR && declared <= max_output_size) {
-    output.reserve(static_cast<size_t>(declared));
+      declared != ZSTD_CONTENTSIZE_ERROR) {
+    output.reserve(DecompressReserveHint(declared, max_output_size));
   }
   size_t remaining = 1;
   while (source.pos < source.size || remaining != 0) {
@@ -146,9 +146,7 @@ std::string DecompressLz4(std::string_view input, size_t max_output_size) {
         !LZ4F_isError(remaining), "LZ4 decompression failed: {}.",
         LZ4F_getErrorName(remaining));
     source_offset = source_size;
-    if (info.contentSize != 0 && info.contentSize <= max_output_size) {
-      output.reserve(static_cast<size_t>(info.contentSize));
-    }
+    output.reserve(DecompressReserveHint(info.contentSize, max_output_size));
   }
   while (source_offset < input.size() || remaining != 0) {
     size_t source_size = input.size() - source_offset;
