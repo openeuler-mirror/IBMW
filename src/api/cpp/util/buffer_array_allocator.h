@@ -101,16 +101,22 @@ class FlatBufferArrayAllocator {
   const ibmw_buffer_array_allocator_t* NativeHandle() const { return &base_; }
 
   static bool Reserve(ibmw_buffer_array_t* buffer_array, size_t new_cap) {
-    ibmw_buffer_t* cur_data = buffer_array->data;
+    // C ABI contract: never shrink, and leave the array unchanged on failure
+    // (a too large new_cap throws bad_array_new_length, caught below).
+    if (new_cap <= buffer_array->capacity) return true;
 
-    buffer_array->data = new ibmw_buffer_t[new_cap];
+    ibmw_buffer_t* cur_data = buffer_array->data;
+    try {
+      buffer_array->data = new ibmw_buffer_t[new_cap];
+    } catch (...) {
+      return false;
+    }
     buffer_array->capacity = new_cap;
 
     if (cur_data) {
       memcpy(buffer_array->data, cur_data, buffer_array->len * sizeof(ibmw_buffer_t));
       delete[] cur_data;
     }
-
     return true;
   }
 

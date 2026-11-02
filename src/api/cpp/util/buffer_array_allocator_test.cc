@@ -59,4 +59,20 @@ TEST(SimpleBufferArrayAllocatorTest, CapacityDoublingOverflowFailsCleanly) {
   EXPECT_EQ(array.capacity, SIZE_MAX / 2 + 1);
 }
 
+// API-003: reserve below the current length must not shrink the array.
+TEST(FlatBufferArrayAllocatorTest, ReserveNeverShrinks) {
+  char region[64];
+  FlatBufferArrayAllocator allocator(region, sizeof(region));
+  ibmw_buffer_array_t array{nullptr, 0, 0};
+  const auto* base = allocator.NativeHandle();
+  for (int ii = 0; ii < 3; ++ii) base->allocate(base->ctx, &array, 8);
+  auto* data = array.data;
+  EXPECT_TRUE(base->reserve(base->ctx, &array, 1));
+  EXPECT_EQ(array.data, data);
+  EXPECT_EQ(array.capacity, 4u);
+  EXPECT_FALSE(base->reserve(base->ctx, &array, SIZE_MAX));
+  EXPECT_EQ(array.data, data);
+  FlatBufferArrayAllocator::Release(&array);
+}
+
 }  // namespace ibmw::util
