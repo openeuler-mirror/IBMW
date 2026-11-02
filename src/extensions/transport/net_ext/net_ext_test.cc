@@ -39,6 +39,7 @@
 #include "net_base/asio_udp_cli.h"
 #include "net_base/asio_udp_svr.h"
 #include "net_base/http_media_type.h"
+#include "net_ext/global.h"
 #include "net_ext/http/http_rpc_driver.h"
 #include "net_ext/http/http_transport_driver.h"
 #include "net_ext/meta_filter.h"
@@ -1057,6 +1058,102 @@ TEST(HttpTransportDriverTest, FanOutGivesEachTargetItsOwnHostAndBody) {
 
   driver.Shutdown();
   for (auto& svr : svrs) svr->Shutdown();
+}
+
+// Keeps what the extension logs while it is alive.
+class LogCapture {
+ public:
+  LogCapture() {
+    base_.get_log_level = [](void*) { return static_cast<ibmw_log_level_t>(ibmw::common::util::kLogLevelError); };
+    base_.log = [](void* ctx, ibmw_log_level_t, uint32_t, const char*, const char*, const char* data, size_t size) {
+      auto* self = static_cast<LogCapture*>(ctx);
+      std::lock_guard lock(self->mutex_);
+      self->text_.append(data, size).push_back('\n');
+    };
+    base_.ctx = this;
+    g_logger.Set(ibmw::logger::LoggerRef(&base_));
+  }
+  ~LogCapture() { g_logger.Set(ibmw::logger::LoggerRef()); }
+  std::string Text() {
+    std::lock_guard lock(mutex_);
+    return text_;
+  }
+
+ private:
+  ibmw_logger_base_t base_{};
+  std::mutex mutex_;
+  std::string text_;
+};
+
+// Sends one message whose serialized form is `view` through a started driver,
+// which stays up until `received` (when given) got it: sending is asynchronous.
+template <typename Driver, typename Pool>
+void SendCached(IoThreads& io, uint16_t port, std::shared_ptr<ibmw::util::BufferArrayView> view,
+                Received* received = nullptr) {
+  auto pool = std::make_shared<Pool>(io.Io());
+  pool->Initialize({});
+  pool->Start();
+  Driver driver(io.Io(), pool, nullptr, nullptr);
+  driver.Initialize(YAML::Load("publishers: [{topic: /t, server_url_list: ['127.0.0.1:" + std::to_string(port) + "']}]"));
+  runtime::core::transport::SendTypeWrapper wrapper;
+  wrapper.info.topic_name = "/t";
+  wrapper.info.msg_type = "test:Int";
+  wrapper.info.msg_type_support_ref = ibmw::util::TypeSupportRef(JsonIntTypeSupport());
+  ASSERT_TRUE(driver.RegisterSendType(wrapper));
+  driver.Start();
+  int value = 0;
+  runtime::core::transport::MessageFrame frame{.info = wrapper.info, .msg_ptr = &value};
+  frame.serialization_cache.emplace("json", std::move(view));
+  driver.Send(frame);
+  if (received) EXPECT_TRUE(received->WaitFor(1));
+  driver.Shutdown();
+}
+
+// TRANS-036: the package length is checked before it is narrowed to the 32 bit
+// frame header. Only the declared size is huge: the payload is never read.
+template <typename Driver, typename Pool>
+void ExpectOversizedPackageIsRefused() {
+  IoThreads io;
+  static const char kPayload[] = "x";
+  const size_t declared = (size_t{1} << 32) + 16;
+  LogCapture capture;
+  SendCached<Driver, Pool>(io, FreeTcpPort(),
+                           std::make_shared<ibmw::util::BufferArrayView>(kPayload, declared));
+  EXPECT_NE(capture.Text().find("exceeds the 4 GiB - 1 limit"), std::string::npos) << capture.Text();
+}
+
+TEST(NetDriverPackageSizeTest, OversizedPackageIsRefusedBeforeNarrowing) {
+  ExpectOversizedPackageIsRefused<TcpTransportDriver, ibmw::common::net::AsioTcpClientPool>();
+  ExpectOversizedPackageIsRefused<UdpTransportDriver, ibmw::common::net::AsioUdpClientPool>();
+}
+
+TEST(NetDriverPackageSizeTest, NormalPackageStillArrives) {
+  IoThreads io;
+  static const char kPayload[] = "payload";
+  const auto view = [] { return std::make_shared<ibmw::util::BufferArrayView>(kPayload, sizeof(kPayload) - 1); };
+  const auto ends_with_payload = [](const std::string& msg) { return msg.ends_with("payload"); };
+
+  Received tcp_received;
+  const uint16_t tcp_port = FreeTcpPort();
+  auto tcp_svr = MakeTcpServer(io, tcp_received, tcp_port);
+  tcp_svr->Start();
+  SendCached<TcpTransportDriver, ibmw::common::net::AsioTcpClientPool>(io, tcp_port, view(), &tcp_received);
+  ASSERT_EQ(tcp_received.msgs.size(), 1u);
+  EXPECT_TRUE(ends_with_payload(tcp_received.msgs[0].second));
+  tcp_svr->Shutdown();
+
+  Received udp_received;
+  const uint16_t udp_port = FreeUdpPort();
+  auto udp_svr = std::make_shared<ibmw::common::net::AsioUdpServer>(io.Io());
+  udp_svr->RegisterMsgHandle([&udp_received](const Udp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    udp_received.Add(ep, buf);
+  });
+  udp_svr->Initialize({.ep = Udp::endpoint(kLoopback, udp_port)});
+  udp_svr->Start();
+  SendCached<UdpTransportDriver, ibmw::common::net::AsioUdpClientPool>(io, udp_port, view(), &udp_received);
+  ASSERT_EQ(udp_received.msgs.size(), 1u);
+  EXPECT_TRUE(ends_with_payload(udp_received.msgs[0].second));
+  udp_svr->Shutdown();
 }
 
 }  // namespace

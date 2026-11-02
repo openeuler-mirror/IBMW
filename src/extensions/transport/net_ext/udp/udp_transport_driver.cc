@@ -3,6 +3,7 @@
 
 #include "net_ext/udp/udp_transport_driver.h"
 
+#include <limits>
 #include <regex>
 
 #include "cpp/util/type_support.h"
@@ -300,10 +301,12 @@ void UdpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
     const size_t buffer_array_len = buffer_array_view_ptr->Size();
     size_t msg_size = buffer_array_view_ptr->BufferSize();
 
-    uint32_t pkg_size = 1 + pattern.size() +
-                        1 + serialization_type.size() +
-                        context_meta_kv_size +
-                        msg_size;
+    const size_t pkg_size = 1 + pattern.size() +
+                            1 + serialization_type.size() +
+                            context_meta_kv_size +
+                            msg_size;
+    MW_REQUIRE(pkg_size <= std::numeric_limits<uint32_t>::max(),
+               "Package of {} bytes for topic {} exceeds the 4 GiB - 1 limit.", pkg_size, info.topic_name);
 
     auto buf = msg_buf_ptr->prepare(pkg_size);
 
