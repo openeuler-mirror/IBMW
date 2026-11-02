@@ -25,6 +25,7 @@ ibmw_selfdev_install(ibmw_selfdev_shm ibmw::selfdev::shm)
 if(IBMW_BUILD_TESTS)
   ibmw_selfdev_add_test(ibmw_selfdev_shm_test
     SRCS test/test_util.cc
+         test/fail_alloc.cc
          test/platform_test.cc
          test/pubsub_test.cc
          test/listener_test.cc
@@ -34,7 +35,7 @@ if(IBMW_BUILD_TESTS)
     LIBS ibmw::selfdev::shm)
   target_include_directories(ibmw_selfdev_shm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
   # Multi-process cases fork/exec this helper.
-  add_executable(ibmw_selfdev_shm_peer test/shm_peer.cc)
+  add_executable(ibmw_selfdev_shm_peer test/shm_peer.cc test/fail_alloc.cc)
   target_link_libraries(ibmw_selfdev_shm_peer PRIVATE ibmw::selfdev::shm)
   ibmw_selfdev_warnings(ibmw_selfdev_shm_peer)
   target_compile_definitions(ibmw_selfdev_shm_test PRIVATE

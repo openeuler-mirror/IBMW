@@ -19,10 +19,14 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <climits>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <future>
 #include <memory>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -120,8 +124,8 @@ class RawPublisher {
   const std::string& PublicPath() const { return path_; }
   const std::string& ListenPath() const { return tmp_; }
 
-  // Accepts one subscriber, answers its Hello and announces segment 0.
-  bool Handshake(bool seal_conn = true) {
+  // Accepts one subscriber and reads its Hello.
+  bool AcceptHello() {
     struct pollfd pfd {listen_.Get(), POLLIN, 0};
     if (::poll(&pfd, 1, 3000) <= 0) return false;
     sock_ = UniqueFd(::accept4(listen_.Get(), nullptr, nullptr, SOCK_CLOEXEC));
@@ -134,6 +138,11 @@ class RawPublisher {
     cap = hello.queue_capacity;
     dslots = cap + 1;
     rslots = cap + hello.max_held + 1;
+    return true;
+  }
+
+  // Maps a connection segment and sends it with the Welcome.
+  bool SendWelcome(bool seal_conn = true) {
     size_t size = ConnSegmentSize(dslots, rslots);
     UniqueFd conn_fd;
     if (seal_conn) {
@@ -162,8 +171,21 @@ class RawPublisher {
     wm.return_slots = rslots;
     wm.segment_size = size;
     int fd = conn_fd.Get();
-    if (!SendMessage(sock_.Get(), &wm, sizeof(wm), &fd, 1)) return false;
+    return SendMessage(sock_.Get(), &wm, sizeof(wm), &fd, 1);
+  }
+
+  // A message from the subscriber is waiting.
+  bool Readable() {
+    struct pollfd pfd {sock_.Get(), POLLIN, 0};
+    return ::poll(&pfd, 1, 0) > 0;
+  }
+
+  // Accepts one subscriber, answers its Hello and announces segment 0.
+  bool Handshake(bool seal_conn = true) {
+    if (!AcceptHello() || !SendWelcome(seal_conn)) return false;
     if (!seal_conn) return true;
+    std::vector<uint8_t> buf;
+    std::vector<UniqueFd> fds;
     if (Receive(&buf, &fds) <= 0) return false;  // ConnAck
     auto data = CreateSegment("raw_data", kRawStride * kRawChunks, false, true);
     if (!data) return false;
@@ -948,13 +970,11 @@ TEST(ShmRegressionTest, InotifyOverflowTriggersRescan) {
   ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
 }
 
-// RG-25 (third review, M2) The watched service directory is removed (tmp cleaner,
-// administrator). The runtime re-creates it, watches it again and rescans.
-TEST(ShmRegressionTest, RemovedServiceDirectoryIsRecreated) {
-  auto url = UniqueUrl("rg25");
-  Subscriber sub(url);
+// Empties and removes the service directory (only stale entries of earlier
+// tests are in it).
+bool RemoveServiceDirectory() {
   const std::string dir = Runtime::ServiceDirectory();
-  if (DIR* d = ::opendir(dir.c_str())) {  // only stale entries of earlier tests
+  if (DIR* d = ::opendir(dir.c_str())) {
     while (auto* de = ::readdir(d)) {
       if (de->d_name[0] != '.' || (de->d_name[1] != '\0' && std::strcmp(de->d_name, "..") != 0)) {
         ::unlink((dir + "/" + de->d_name).c_str());
@@ -962,7 +982,16 @@ TEST(ShmRegressionTest, RemovedServiceDirectoryIsRecreated) {
     }
     ::closedir(d);
   }
-  ASSERT_EQ(::rmdir(dir.c_str()), 0) << std::strerror(errno);
+  return ::rmdir(dir.c_str()) == 0;
+}
+
+// RG-25 (third review, M2) The watched service directory is removed (tmp cleaner,
+// administrator). The runtime re-creates it, watches it again and rescans.
+TEST(ShmRegressionTest, RemovedServiceDirectoryIsRecreated) {
+  auto url = UniqueUrl("rg25");
+  Subscriber sub(url);
+  const std::string dir = Runtime::ServiceDirectory();
+  ASSERT_TRUE(RemoveServiceDirectory()) << std::strerror(errno);
   struct stat st {};
   ASSERT_TRUE(WaitFor([&] { return ::stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }));
   EXPECT_EQ(st.st_mode & 0777, 0700u);
@@ -974,10 +1003,13 @@ TEST(ShmRegressionTest, RemovedServiceDirectoryIsRecreated) {
 
 // Runs "ibmw_selfdev_shm_peer probe" and returns its four answers.
 struct ProbeResult {
-  std::string init, dir, pub, sub;
+  std::string init, dir, pub, sub, sock;
 };
-ProbeResult Probe(const std::vector<std::string>& args, const std::vector<std::string>& env) {
-  std::vector<std::string> full{"probe"};
+// `as`: the "as <uid> <gid> <groups>" prefix of a peer running as another user.
+ProbeResult Probe(const std::vector<std::string>& args, const std::vector<std::string>& env,
+                  const std::vector<std::string>& as = {}) {
+  std::vector<std::string> full = as;
+  full.push_back("probe");
   full.insert(full.end(), args.begin(), args.end());
   auto peer = test::SpawnPeer(full, env);
   ProbeResult r;
@@ -990,6 +1022,7 @@ ProbeResult Probe(const std::vector<std::string>& args, const std::vector<std::s
   r.dir = value("dir");
   r.pub = value("pub");
   r.sub = value("sub");
+  r.sock = value("sock");
   test::WaitPeer(peer);
   return r;
 }
@@ -1129,6 +1162,445 @@ TEST(ShmRegressionTest, MissingWriteSealIsVisibleOrFatal) {
   ASSERT_TRUE(ok.ok()) << ErrorName(ok.error());
   EXPECT_TRUE(pub.Stats().read_only_enforced);
   pub.Release(*ok);
+}
+
+// RG-31 (fourth review, H-1) Running out of memory while growing the pool is
+// the publisher's problem, not a protocol violation: the subscriber loses
+// the connection, but what it holds stays quarantined and is not handed to
+// a later Loan().
+TEST(ShmRegressionTest, GrowOutOfMemoryKeepsHeldChunks) {
+  struct Restore {
+    ~Restore() { fault::grow_bad_alloc.store(0); }
+  } restore;
+  auto url = UniqueUrl("rg31");
+  Publisher pub(url);
+  Subscriber sub(url);
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  PublishSeq(pub, 1);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto held = sub.Take();
+  ASSERT_TRUE(held.ok()) << ErrorName(held.error());
+
+  fault::grow_bad_alloc.store(1);
+  auto big = pub.Loan(4096);  // new size class: tracking this subscriber fails
+  ASSERT_TRUE(big.ok()) << ErrorName(big.error());
+  EXPECT_EQ(fault::grow_bad_alloc.load(), 0u);
+  pub.Release(*big);
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0 && sub.Stats().connections == 0; }));
+  auto st = pub.Stats();
+  EXPECT_EQ(st.quarantined_chunks, 1u);
+  EXPECT_EQ(st.reclaimed, 0u);
+
+  // However often the pool is used up, the held chunk is never among it.
+  for (int round = 0; round < 32; ++round) {
+    std::vector<void*> loans;
+    for (uint64_t i = 0; i < kMaxChunksAllocatedPerPublisher; ++i) {
+      auto l = pub.Loan(64);
+      ASSERT_TRUE(l.ok()) << ErrorName(l.error());
+      FillPattern(*l, 64, 1000 + i);
+      loans.push_back(*l);
+    }
+    for (auto* l : loans) {
+      EXPECT_NE(l, *held);
+      pub.Release(l);
+    }
+  }
+  EXPECT_EQ(CheckPattern(*held, 64), 1u);
+
+  // The last release is a late orderly close.
+  sub.Release(*held);
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().quarantined_chunks == 0; }));
+  EXPECT_EQ(pub.Stats().reclaimed, 1u);
+}
+
+// RG-32 (fourth review, M-a) An exception in a control-thread command or timer
+// stays there: Call() hands it to its caller instead of leaving it waiting
+// for ever, Post() and RunAfter() log it, and the thread keeps running.
+TEST(ShmRegressionTest, ControlThreadSurvivesExceptions) {
+  auto* rt = detail::RuntimeImpl::Instance();
+  ASSERT_NE(rt, nullptr);
+  EXPECT_THROW(rt->Call([] { throw std::runtime_error("from Call"); }), std::runtime_error);
+  // On the control thread Call() runs inline; the command around it catches.
+  rt->Post([rt] { rt->Call([] { throw std::bad_alloc(); }); });
+  rt->Post([] { throw 42; });
+  std::atomic<bool> fired{false};
+  rt->Call([&] {
+    rt->RunAfter(1, [] { throw std::runtime_error("from a timer"); });
+    rt->RunAfter(2, [&fired] { fired.store(true); });
+  });
+  ASSERT_TRUE(WaitFor([&] { return fired.load(); }));
+  auto url = UniqueUrl("rg32");
+  Publisher pub(url);
+  Subscriber sub(url);
+  EXPECT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+}
+
+// RG-33 (fourth review, M-a) A publisher whose discovery fails for lack of
+// memory is found by a rescan, whichever way it was being discovered.
+TEST(ShmRegressionTest, DiscoveryOutOfMemoryRescans) {
+  struct Restore {
+    ~Restore() {
+      fault::offer_bad_alloc.store(0);
+      detail::RuntimeImpl::Instance()->Call([] { test::FailAllocations(0); });
+    }
+  } restore;
+  {  // inotify: the subscriber is first, the publisher's IN_MOVED_TO fails
+    auto url = UniqueUrl("rg33a");
+    Subscriber sub(url);
+    fault::offer_bad_alloc.store(1);
+    Publisher pub(url);
+    ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+    EXPECT_EQ(fault::offer_bad_alloc.load(), 0u);
+  }
+  {  // scan: the publisher is first, the new subscriber's scan fails
+    auto url = UniqueUrl("rg33b");
+    Publisher pub(url);
+    fault::offer_bad_alloc.store(1);
+    Subscriber sub(url);
+    ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+    EXPECT_EQ(fault::offer_bad_alloc.load(), 0u);
+  }
+  {  // no allocation works on the control thread for a while: the rescan
+     // itself has to wait, and backs off without needing memory
+    auto url = UniqueUrl("rg33c");
+    Subscriber sub(url);
+    auto* rt = detail::RuntimeImpl::Instance();
+    rt->Call([] { test::FailAllocations(INT_MAX); });
+    RawPublisher raw;
+    ASSERT_TRUE(raw.Listen(url));
+    std::this_thread::sleep_for(50ms);
+    rt->Call([] { test::FailAllocations(0); });
+    ASSERT_TRUE(raw.Handshake());
+    ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
+  }
+}
+
+// RG-34 (fourth review, M-b) A Welcome that arrives after Subscriber::Shutdown()
+// looked at its connections: nothing was delivered, nothing is held, and
+// the hang-up has to read as an orderly close.
+RawPublisher* g_rg34_raw = nullptr;
+TEST(ShmRegressionTest, WelcomeDuringShutdownClosesInOrder) {
+  auto url = UniqueUrl("rg34");
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(url));
+  auto sub = std::make_unique<Subscriber>(url);
+  ASSERT_TRUE(raw.AcceptHello());
+  g_rg34_raw = &raw;
+  fault::subscriber_shutdown_pause.store(+[] {
+    // Past the point where Shutdown() used to set the flag, control thread free.
+    ASSERT_TRUE(g_rg34_raw->SendWelcome());
+    ASSERT_TRUE(WaitFor([] { return g_rg34_raw->Readable() || g_rg34_raw->hdr->closed.load() != 0; }));
+  });
+  sub.reset();
+  fault::subscriber_shutdown_pause.store(nullptr);
+  EXPECT_NE(raw.hdr->closed.load(), 0u);
+  EXPECT_EQ(raw.Expect(MsgType::kConnAck, 1), 0);
+}
+
+// RG-35 (fourth review, M-c) A subscriber that gives a publisher up while it
+// holds a sample (here: a segment it cannot map) must say so at once. The
+// publisher quarantines what it holds, a lossless publish does not wait
+// for a ring nobody reads, and the subscriber can reconnect beside the old
+// connection; the last release is the late orderly close.
+TEST(ShmRegressionTest, OrphanWithHeldSampleHangsUp) {
+  struct Restore {
+    ~Restore() { fault::map_segment_fail.store(0); }
+  } restore;
+  auto url = UniqueUrl("rg35");
+  PublisherOptions po;
+  po.too_slow = TooSlowPolicy::kWaitForConsumer;
+  po.block_timeout = 3s;
+  SubscriberOptions so;
+  so.queue_capacity = 2;
+  so.queue_full = QueueFullPolicy::kBlockProducer;
+  Publisher pub(url, po);
+  Subscriber sub(url, so);
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  PublishSeq(pub, 1);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto held = sub.Take();
+  ASSERT_TRUE(held.ok()) << ErrorName(held.error());
+
+  fault::map_segment_fail.store(1);
+  auto big = pub.Loan(4096);  // the SegmentAdd the subscriber cannot map
+  ASSERT_TRUE(big.ok()) << ErrorName(big.error());
+  pub.Release(*big);
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 0; }));
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }, 2s));
+  EXPECT_EQ(pub.Stats().quarantined_chunks, 1u);
+
+  const auto t0 = std::chrono::steady_clock::now();
+  for (uint64_t s = 2; s <= 6; ++s) PublishSeq(pub, s);
+  EXPECT_LT(std::chrono::steady_clock::now() - t0, 2s);
+  EXPECT_EQ(pub.Stats().block_timeouts, 0u);
+  EXPECT_EQ(pub.Stats().quarantined_chunks, 1u);
+
+  // Any scan of this URL offers the publisher again; known_paths_ forgot it
+  // with the hang-up although the old connection is still there.
+  Subscriber other(url, so);
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 2 && sub.Stats().connections == 1; }));
+  PublishSeq(pub, 7);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto fresh = sub.Take();
+  ASSERT_TRUE(fresh.ok()) << ErrorName(fresh.error());
+  EXPECT_EQ(CheckPattern(*fresh, 64), 7u);
+  EXPECT_EQ(CheckPattern(*held, 64), 1u);
+  sub.Release(*fresh);
+
+  sub.Release(*held);
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().quarantined_chunks == 0; }));
+  EXPECT_EQ(sub.Stats().connections, 1u);
+  EXPECT_EQ(pub.Stats().connections, 2u);
+}
+
+// RG-36 (fourth review, L-2) ENOBUFS/ENOMEM from sendmsg with a socket that
+// polls writable: EPOLLOUT would spin the control thread. The publisher
+// retries on a timer and nothing is lost.
+TEST(ShmRegressionTest, PublisherBacksOffWhileOutOfSocketBuffers) {
+  struct Restore {
+    ~Restore() { fault::send_no_buffers.store(0); }
+  } restore;
+  auto url = UniqueUrl("rg36");
+  Publisher pub(url);
+  Subscriber sub(url);
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  constexpr uint32_t kMany = 1u << 30;
+  const auto t0 = std::chrono::steady_clock::now();
+  fault::send_no_buffers.store(kMany);
+  auto big = pub.Loan(4096);  // a SegmentAdd that cannot be sent
+  ASSERT_TRUE(big.ok()) << ErrorName(big.error());
+  std::this_thread::sleep_for(100ms);
+  const uint32_t attempts = kMany - fault::send_no_buffers.exchange(0);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+  EXPECT_GE(attempts, 2u);  // the Send() and at least one retry
+  EXPECT_LE(attempts, static_cast<uint64_t>(elapsed.count()) / kNoBuffersRetryMs + 3);
+  FillPattern(*big, 4096, 5);
+  ASSERT_TRUE(pub.Publish(*big));
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto t = sub.Take();
+  ASSERT_TRUE(t.ok()) << ErrorName(t.error());
+  EXPECT_EQ(CheckPattern(*t, 4096), 5u);
+  sub.Release(*t);
+  EXPECT_EQ(pub.Stats().connections, 1u);
+  EXPECT_EQ(pub.Stats().quarantined, 0u);
+}
+
+// RG-37 (fourth review, L-2) The same for the subscriber's acks.
+TEST(ShmRegressionTest, SubscriberBacksOffWhileOutOfSocketBuffers) {
+  struct Restore {
+    ~Restore() { fault::send_no_buffers.store(0); }
+  } restore;
+  auto url = UniqueUrl("rg37");
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(url));
+  Subscriber sub(url);
+  ASSERT_TRUE(raw.Handshake());
+  constexpr uint32_t kMany = 1u << 30;
+  const auto t0 = std::chrono::steady_clock::now();
+  {
+    ControlThreadStall stall;  // our own send must not hit the fault
+    ASSERT_TRUE(raw.SendSegmentAdd(1));
+    fault::send_no_buffers.store(kMany);
+  }
+  std::this_thread::sleep_for(100ms);
+  const uint32_t attempts = kMany - fault::send_no_buffers.exchange(0);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+  EXPECT_GE(attempts, 2u);
+  EXPECT_LE(attempts, static_cast<uint64_t>(elapsed.count()) / kNoBuffersRetryMs + 3);
+  EXPECT_EQ(raw.Expect(MsgType::kSegmentAck, 1), 1);
+  EXPECT_EQ(sub.Stats().connections, 1u);
+}
+
+// RG-38 (fourth review, M-d) Group mode as one user: a setgid directory of the
+// group, sockets in that group with mode 0660. The group may be any of
+// ours, not just the effective one, and bits a directory of ours should
+// not have are removed.
+TEST(ShmRegressionTest, GroupModeSetsDirectoryAndSocketAccess) {
+  std::string root = test::TestRoot() + "/rg38_XXXXXX";  // fresh for every --gtest_repeat round
+  ASSERT_NE(::mkdtemp(root.data()), nullptr) << std::strerror(errno);
+  gid_t gid = ::getegid();
+  gid_t groups[64];
+  int n = ::getgroups(64, groups);
+  for (int i = 0; i < n; ++i) {
+    if (groups[i] != gid) {
+      gid = groups[i];
+      break;
+    }
+  }
+  RecordProperty("supplementary_group", gid != ::getegid() ? "yes" : "no");
+  const std::string g = std::to_string(gid);
+  const std::string dir = root + "/ibmw_shm.g" + g + ".dom";
+  ASSERT_EQ(::mkdir(dir.c_str(), 0777), 0);
+  ASSERT_EQ(::chmod(dir.c_str(), 0777), 0);
+  auto r = Probe({UniqueUrl("rg38")}, {"IBMW_SHM_ROOT=" + root, "IBMW_SHM_DOMAIN=dom", "IBMW_SHM_GROUP=" + g});
+  EXPECT_EQ(r.dir, dir);
+  EXPECT_EQ(r.pub, "ok");
+  EXPECT_EQ(r.sub, "ok");
+  EXPECT_EQ(r.sock, "660 " + g);
+  struct stat st {};
+  ASSERT_EQ(::stat(dir.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 07777, 02770u);
+  EXPECT_EQ(st.st_gid, gid);
+}
+
+// RG-39 (fourth review, M-d) Group mode between real users: publisher and
+// subscriber of different uids meet, the subscriber being in the group only
+// as a supplementary group where SO_PEERGROUPS can tell. Everyone else is
+// kept out, and a directory that is open to others or not writable by the
+// group is refused. Root only; run_shm_ohos.sh fails if this was skipped.
+TEST(ShmRegressionTest, CrossUidGroupMode) {
+  if (::geteuid() != 0) GTEST_SKIP() << "requires root: forks peers that call setresuid/setresgid";
+  constexpr gid_t kGroup = 4300;
+  const std::string group = std::to_string(kGroup);
+  ASSERT_EQ(::chmod(test::TestRoot().c_str(), 0711), 0);
+  std::string root = test::TestRoot() + "/rg39_XXXXXX";
+  ASSERT_NE(::mkdtemp(root.data()), nullptr) << std::strerror(errno);
+  ASSERT_EQ(::chmod(root.c_str(), 01777), 0);
+  auto env = [&](const std::string& domain) {
+    return std::vector<std::string>{"IBMW_SHM_ROOT=" + root, "IBMW_SHM_DOMAIN=" + domain, "IBMW_SHM_GROUP=" + group};
+  };
+  const bool peer_groups = PeerGroupsSupported();
+  RecordProperty("so_peergroups", peer_groups ? "yes" : "no");
+  const std::vector<std::string> as_pub{"as", "4201", group, "-"};
+  // Without SO_PEERGROUPS membership must be the effective gid (docs, 3.7).
+  const std::vector<std::string> as_sub = peer_groups ? std::vector<std::string>{"as", "4202", "4302", group}
+                                                      : std::vector<std::string>{"as", "4202", group, "-"};
+  const std::vector<std::string> as_other{"as", "4203", "4303", "-"};
+  auto args = [](std::vector<std::string> as, const std::vector<std::string>& rest) {
+    as.insert(as.end(), rest.begin(), rest.end());
+    return as;
+  };
+
+  const auto url = UniqueUrl("rg39");
+  auto pub = test::SpawnPeer(args(as_pub, {"pub", url, "10", "1", "64"}), env("dom"));
+  struct Reap {
+    test::Peer& p;
+    ~Reap() {
+      if (p.pid > 0) {
+        test::KillPeer(p, SIGKILL);
+        test::WaitPeer(p);
+      }
+    }
+  } reap{pub};
+  ASSERT_EQ(test::ReadLine(pub), "ready");
+
+  const std::string dir = root + "/ibmw_shm.g" + group + ".dom";
+  struct stat st {};
+  ASSERT_EQ(::stat(dir.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 07777, 02770u);
+  EXPECT_EQ(st.st_uid, 4201u);
+  EXPECT_EQ(st.st_gid, kGroup);
+  std::string sock;
+  if (DIR* d = ::opendir(dir.c_str())) {
+    while (auto* de = ::readdir(d)) {
+      if (de->d_name[0] != '.') sock = dir + "/" + de->d_name;
+    }
+    ::closedir(d);
+  }
+  ASSERT_FALSE(sock.empty());
+  ASSERT_EQ(::stat(sock.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, 0660u);
+  EXPECT_EQ(st.st_gid, kGroup);
+
+  // Not in the group: the runtime refuses the directory.
+  auto r = Probe({UniqueUrl("rg39")}, env("dom"), as_other);
+  EXPECT_EQ(r.pub, "permission");
+  EXPECT_EQ(r.sub, "permission");
+
+  auto sub = test::SpawnPeer(args(as_sub, {"sub", url, "10", "1", "64"}), env("dom"));
+  ASSERT_EQ(test::ReadLine(sub), "ready");
+  EXPECT_EQ(test::ReadLine(pub), "done 10");
+  EXPECT_EQ(test::ReadLine(sub), "done 10");
+  EXPECT_EQ(test::WaitPeer(sub), 0);
+
+  // Directories prepared by someone else: open to others, or the group
+  // cannot write, or another group.
+  struct Foreign {
+    const char* domain;
+    gid_t gid;
+    mode_t mode;
+  };
+  for (const Foreign& f : {Foreign{"open", kGroup, 0777}, Foreign{"ro", kGroup, 0750}, Foreign{"other", 4303, 0770}}) {
+    const std::string d = root + "/ibmw_shm.g" + group + "." + f.domain;
+    ASSERT_EQ(::mkdir(d.c_str(), 0700), 0);
+    ASSERT_EQ(::chown(d.c_str(), 4201, f.gid), 0);
+    ASSERT_EQ(::chmod(d.c_str(), f.mode), 0);
+    r = Probe({UniqueUrl("rg39")}, env(f.domain), as_sub);
+    EXPECT_EQ(r.pub, "permission") << f.domain;
+    EXPECT_EQ(r.sub, "permission") << f.domain;
+  }
+}
+
+// RG-40 (fourth review, M-a, L-1) Shutdown is noexcept: nothing on the way may
+// depend on an allocation succeeding, and connections must still close in
+// order then.
+TEST(ShmRegressionTest, ShutdownSurvivesOutOfMemory) {
+  auto url = UniqueUrl("rg40");
+  auto pub = std::make_unique<Publisher>(url);
+  auto sub = std::make_unique<Subscriber>(url);
+  auto gone = std::make_unique<Subscriber>(url);
+  ASSERT_TRUE(WaitFor([&] { return pub->Stats().connections == 2 && sub->Stats().connections == 1; }));
+  PublishSeq(*pub, 1);
+  ASSERT_TRUE(WaitFor([&] { return gone->HasData(); }));
+  ASSERT_TRUE(gone->Take().ok());
+
+  test::FailAllocations(8);
+  gone.reset();
+  test::FailAllocations(0);
+  ASSERT_TRUE(WaitFor([&] { return pub->Stats().connections == 1; }));
+  EXPECT_EQ(pub->Stats().quarantined, 0u);
+
+  test::FailAllocations(8);
+  pub.reset();
+  test::FailAllocations(0);
+  EXPECT_TRUE(WaitFor([&] { return sub->Stats().connections == 0; }));
+}
+
+// RG-41 (fourth review, M-a) Runtime::Shutdown() is noexcept too. A queued stop
+// command could fail to allocate only at a block boundary of the command
+// deque, hence every position in a block.
+TEST(ShmRegressionTest, RuntimeShutdownNeedsNoMemory) {
+  for (int n = 0; n < 40; ++n) {
+    auto peer = test::SpawnPeer({"runtime_shutdown_oom", UniqueUrl("rg41"), std::to_string(n)});
+    EXPECT_EQ(test::ReadLine(peer), "done") << n;
+    EXPECT_EQ(test::WaitPeer(peer), 0) << n;
+  }
+}
+
+// RG-42 (fourth review, L-4) Re-creating the service directory keeps being
+// retried when it fails and memory is short: the retry is no allocated timer
+// that could silently not exist.
+TEST(ShmRegressionTest, RewatchRetriesWithoutMemory) {
+  auto url = UniqueUrl("rg42");
+  Subscriber sub(url);
+  const std::string dir = Runtime::ServiceDirectory();
+  auto* rt = detail::RuntimeImpl::Instance();
+  struct Restore {
+    detail::RuntimeImpl* rt;
+    ~Restore() {
+      rt->Call([] { test::FailAllocations(0); });
+    }
+  } restore{rt};
+  rt->Call([] { test::FailAllocations(INT_MAX); });
+  {
+    ControlThreadStall stall;  // the removal is only seen once the file is there
+    ASSERT_TRUE(RemoveServiceDirectory()) << std::strerror(errno);
+    int fd = ::open(dir.c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0600);  // in the way: mkdir fails
+    ASSERT_GE(fd, 0) << std::strerror(errno);
+    ::close(fd);
+  }
+  std::this_thread::sleep_for(100ms);
+  struct stat st {};
+  ASSERT_EQ(::stat(dir.c_str(), &st), 0);
+  EXPECT_TRUE(S_ISREG(st.st_mode));
+  rt->Call([] { test::FailAllocations(0); });
+  ASSERT_EQ(::unlink(dir.c_str()), 0);
+  ASSERT_TRUE(WaitFor([&] { return ::stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }));
+  // Watching again: found through inotify or the rescan after the re-watch.
+  RawPublisher raw;
+  ASSERT_TRUE(WaitFor([&] { return raw.Listen(url); }));
+  ASSERT_TRUE(raw.Handshake());
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
 }
 
 }  // namespace

@@ -16,7 +16,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <future>
+#include <memory>
 #include <new>
 
 #include "impl.h"
@@ -68,6 +70,23 @@ constexpr uint64_t kInotifyTag = 0xfffffffe00000000ull;
 constexpr uint32_t kWatchMask = IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF;
 
 void LogError(const std::string& what) { std::fprintf(stderr, "[ibmw_shm] %s\n", what.c_str()); }
+
+// 10 ms doubling to 1 s.
+uint64_t BackoffNs(uint32_t attempt) noexcept {
+  return static_cast<uint64_t>(std::min<uint32_t>(10u << std::min<uint32_t>(attempt, 7), 1000)) * 1000000ull;
+}
+
+// One failing command or timer must not take the control thread (and with
+// it every publisher and subscriber of the process) down.
+void RunGuarded(const std::function<void()>& fn, const char* what) noexcept {
+  try {
+    fn();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "[ibmw_shm] %s failed: %s\n", what, e.what());
+  } catch (...) {
+    std::fprintf(stderr, "[ibmw_shm] %s failed\n", what);
+  }
+}
 
 // Root used when neither RuntimeOptions::root_dir nor $IBMW_SHM_ROOT is set;
 // "" when there is none. A fixed path, never derived from per-process
@@ -224,9 +243,10 @@ Result<void> RuntimeImpl::Start(const RuntimeOptions& options) {
   auto dir = ResolveServiceDir(options, &group_, &root, &domain);
   if (!dir) return dir.error();
   service_dir_ = std::move(dir.value());
-  if (!MakeDirectory(service_dir_, group_ ? 0770 : 0700, group_)) {
+  if (!MakeDirectory(service_dir_, group_)) {
     LogError("cannot use service directory '" + service_dir_ + "': " + std::strerror(errno) +
-             " (it must be a directory owned by this user, or by the group given as RuntimeOptions::group)");
+             " (it must be a directory owned by this user or, in group mode, by RuntimeOptions::group with g+rwx,"
+             " no access for others, and this process must be in that group)");
     return Error::kPermission;
   }
   const std::string owner = group_ ? "g" + std::to_string(*group_) : std::to_string(euid_);
@@ -274,7 +294,10 @@ Result<void> RuntimeImpl::Start(const RuntimeOptions& options) {
 
 RuntimeImpl::~RuntimeImpl() {
   if (thread_.joinable()) {
-    Post([this] { running_ = false; });
+    stop_.store(true, std::memory_order_release);
+    uint64_t one = 1;
+    ssize_t n = ::write(wake_.Get(), &one, sizeof(one));
+    (void)n;  // EAGAIN only when the counter is saturated: already readable
     thread_.join();
   }
   for (auto& [fd, reg] : handlers_) ::epoll_ctl(epoll_.Get(), EPOLL_CTL_DEL, fd, nullptr);
@@ -299,21 +322,28 @@ void RuntimeImpl::Call(const std::function<void()>& fn) {
     return;
   }
   // Shutdown paths call this from noexcept functions: an allocation that
-  // fails before the command is queued is retried, not thrown.
+  // fails before the command is queued is retried, not thrown. The promise
+  // is shared with the command, and what fn throws goes through it: the
+  // waiter must wake up either way.
+  std::future<void> done;
   for (;;) {
     try {
-      std::promise<void> done;
-      auto f = done.get_future();
-      Post([&fn, &done] {
-        fn();
-        done.set_value();
+      auto promise = std::make_shared<std::promise<void>>();
+      done = promise->get_future();
+      Post([&fn, promise] {
+        try {
+          fn();
+          promise->set_value();
+        } catch (...) {
+          promise->set_exception(std::current_exception());
+        }
       });
-      f.wait();
-      return;
+      break;
     } catch (const std::bad_alloc&) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
+  done.get();
 }
 
 bool RuntimeImpl::AddFd(int fd, uint32_t events, std::shared_ptr<EventHandler> handler, uint64_t* tag) {
@@ -351,12 +381,31 @@ bool RuntimeImpl::RunAfter(uint32_t delay_ms, std::function<void()> fn) noexcept
   }
 }
 
-void RuntimeImpl::RunTimers() {
+void RuntimeImpl::RunTimers() noexcept {
   const uint64_t now = NowNs();
   while (!timers_.empty() && timers_.begin()->first <= now) {
     auto fn = std::move(timers_.begin()->second);
     timers_.erase(timers_.begin());
-    fn();
+    RunGuarded(fn, "control thread timer");
+  }
+}
+
+void RuntimeImpl::ScheduleRescan() noexcept {
+  if (rescan_at_ != 0) return;
+  rescan_at_ = NowNs() + BackoffNs(rescan_attempt_);
+  if (rescan_attempt_ < 7) ++rescan_attempt_;
+}
+
+void RuntimeImpl::RunDeferred() noexcept {
+  const uint64_t now = NowNs();
+  if (rewatch_at_ != 0 && rewatch_at_ <= now) {
+    rewatch_at_ = 0;
+    Rewatch();
+  }
+  if (rescan_at_ != 0 && rescan_at_ <= now) {
+    rescan_at_ = 0;
+    ScanAll();
+    if (rescan_at_ == 0) rescan_attempt_ = 0;  // a clean pass ends the backoff
   }
 }
 
@@ -409,56 +458,84 @@ void RuntimeImpl::UnregisterSubscriber(uint64_t hash, const SubscriberImpl* sub)
   }
 }
 
-void RuntimeImpl::OfferPublisher(uint64_t hash, const std::string& path) {
-  std::vector<std::shared_ptr<SubscriberImpl>> subs;
-  {
-    std::lock_guard<std::mutex> lock(reg_mu_);
-    auto [b, e] = subscribers_.equal_range(hash);
-    for (auto it = b; it != e; ++it) {
-      if (auto sp = it->second.lock()) subs.push_back(std::move(sp));
+void RuntimeImpl::OfferPublisher(uint64_t hash, const std::string& path) noexcept {
+  try {
+    if (fault::Hit(fault::offer_bad_alloc)) throw std::bad_alloc();
+    std::vector<std::shared_ptr<SubscriberImpl>> subs;
+    {
+      std::lock_guard<std::mutex> lock(reg_mu_);
+      auto [b, e] = subscribers_.equal_range(hash);
+      for (auto it = b; it != e; ++it) {
+        if (auto sp = it->second.lock()) subs.push_back(std::move(sp));
+      }
     }
+    for (auto& s : subs) s->ConnectTo(path);
+  } catch (...) {  // std::bad_alloc: a publisher must not stay undiscovered
+    ScheduleRescan();
   }
-  for (auto& s : subs) s->ConnectTo(path);
 }
 
-void RuntimeImpl::ScanAll() {
-  std::vector<uint64_t> hashes;
-  {
-    std::lock_guard<std::mutex> lock(reg_mu_);
-    for (auto it = subscribers_.begin(); it != subscribers_.end(); it = subscribers_.upper_bound(it->first)) {
-      hashes.push_back(it->first);
+void RuntimeImpl::ScanAll() noexcept {
+  try {
+    std::vector<uint64_t> hashes;
+    {
+      std::lock_guard<std::mutex> lock(reg_mu_);
+      for (auto it = subscribers_.begin(); it != subscribers_.end(); it = subscribers_.upper_bound(it->first)) {
+        hashes.push_back(it->first);
+      }
     }
+    for (uint64_t h : hashes) ScanFor(h);
+  } catch (...) {  // std::bad_alloc
+    ScheduleRescan();
   }
-  for (uint64_t h : hashes) ScanFor(h);
 }
 
-void RuntimeImpl::ScanFor(uint64_t hash) {
-  std::string prefix = HashPrefix(hash) + ".";
-  DIR* d = ::opendir(service_dir_.c_str());
-  if (d == nullptr) return;
-  std::vector<std::string> paths;
-  while (struct dirent* de = ::readdir(d)) {
-    std::string_view name(de->d_name);
-    if (name.size() > 5 && name.substr(0, prefix.size()) == prefix && name.substr(name.size() - 5) == ".sock") {
-      paths.push_back(service_dir_ + "/" + std::string(name));
+void RuntimeImpl::ScanFor(uint64_t hash) noexcept {
+  try {
+    std::string prefix = HashPrefix(hash) + ".";
+    std::unique_ptr<DIR, int (*)(DIR*)> d(::opendir(service_dir_.c_str()), ::closedir);
+    if (!d) {
+      ScheduleRescan();
+      return;
     }
+    std::vector<std::string> paths;
+    errno = 0;
+    while (struct dirent* de = ::readdir(d.get())) {
+      std::string_view name(de->d_name);
+      if (name.size() > 5 && name.substr(0, prefix.size()) == prefix && name.substr(name.size() - 5) == ".sock") {
+        paths.push_back(service_dir_ + "/" + std::string(name));
+      }
+    }
+    if (errno != 0) ScheduleRescan();  // what was read is still offered
+    d.reset();
+    for (auto& p : paths) OfferPublisher(hash, p);
+  } catch (...) {  // std::bad_alloc
+    ScheduleRescan();
   }
-  ::closedir(d);
-  for (auto& p : paths) OfferPublisher(hash, p);
 }
 
-bool RuntimeImpl::PeerAllowed(const PeerCredentials& cred) const noexcept {
+bool RuntimeImpl::PeerAllowed(const PeerCredentials& cred, int sock) const noexcept {
   if (cred.uid == euid_ || cred.uid == 0) return true;
-  return group_.has_value() && cred.gid == *group_;
+  if (!group_.has_value()) return false;
+  return cred.gid == *group_ || PeerInSupplementaryGroup(sock, *group_);
 }
 
-void RuntimeImpl::HandleInotify() {
+bool RuntimeImpl::SetSocketAccess(const char* path) const noexcept {
+  if (group_.has_value() && ::chown(path, static_cast<uid_t>(-1), *group_) != 0) return false;
+  return ::chmod(path, group_.has_value() ? 0660 : 0600) == 0;
+}
+
+void RuntimeImpl::HandleInotify() noexcept {
   alignas(struct inotify_event) char buf[4096];
   bool rescan = false;
   bool rewatch = false;
   for (;;) {
     ssize_t n = ::read(inotify_.Get(), buf, sizeof(buf));
-    if (n <= 0) break;
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) {
+      if (n < 0 && errno != EAGAIN) ScheduleRescan();  // events may be lost
+      break;
+    }
     for (ssize_t off = 0; off < n;) {
       auto* ev = reinterpret_cast<struct inotify_event*>(buf + off);
       off += static_cast<ssize_t>(sizeof(struct inotify_event) + ev->len);
@@ -468,43 +545,51 @@ void RuntimeImpl::HandleInotify() {
       // cleaners) or was moved: nothing would ever be reported again.
       if (ev->wd == watch_ && (ev->mask & (IN_DELETE_SELF | IN_MOVE_SELF | IN_IGNORED)) != 0) rewatch = true;
       if (ev->len == 0) continue;
-      std::string_view name(ev->name);
-      if (name.size() < 22 || name.substr(name.size() - 5) != ".sock" || name[16] != '.') continue;
-      char* end = nullptr;
-      std::string hex(name.substr(0, 16));
-      uint64_t hash = std::strtoull(hex.c_str(), &end, 16);
-      if (end != hex.c_str() + 16) continue;
-      OfferPublisher(hash, service_dir_ + "/" + std::string(name));
+      try {
+        std::string_view name(ev->name);
+        if (name.size() < 22 || name.substr(name.size() - 5) != ".sock" || name[16] != '.') continue;
+        char* end = nullptr;
+        std::string hex(name.substr(0, 16));
+        uint64_t hash = std::strtoull(hex.c_str(), &end, 16);
+        if (end != hex.c_str() + 16) continue;
+        OfferPublisher(hash, service_dir_ + "/" + std::string(name));
+      } catch (...) {  // std::bad_alloc: this event is consumed, find it later
+        ScheduleRescan();
+      }
     }
   }
   if (rewatch) {
-    LogError("service directory '" + service_dir_ + "' was removed or moved; re-creating it");
-    Rewatch(0);
+    std::fprintf(stderr, "[ibmw_shm] service directory '%s' was removed or moved; re-creating it\n", service_dir_.c_str());
+    Rewatch();
   } else if (rescan) {
-    LogError("inotify queue overflow; rescanning '" + service_dir_ + "'");
+    std::fprintf(stderr, "[ibmw_shm] inotify queue overflow; rescanning '%s'\n", service_dir_.c_str());
     ScanAll();
   }
 }
 
-void RuntimeImpl::Rewatch(uint32_t attempt) {
+void RuntimeImpl::Rewatch() noexcept {
   if (watch_ >= 0) ::inotify_rm_watch(inotify_.Get(), watch_);  // still set after IN_MOVE_SELF
   watch_ = -1;
-  if (MakeDirectory(service_dir_, group_ ? 0770 : 0700, group_)) {
+  if (MakeDirectory(service_dir_, group_)) {
     watch_ = ::inotify_add_watch(inotify_.Get(), service_dir_.c_str(), kWatchMask);
   }
   if (watch_ < 0) {
     // Retried with backoff (10 ms .. 1 s) for as long as the runtime lives.
-    if (attempt == 0) LogError("cannot re-create '" + service_dir_ + "': " + std::strerror(errno) + "; retrying");
-    RunAfter(std::min<uint32_t>(10u << std::min<uint32_t>(attempt, 7), 1000), [this, attempt] { Rewatch(attempt + 1); });
+    if (rewatch_attempt_ == 0) {
+      std::fprintf(stderr, "[ibmw_shm] cannot re-create '%s': %s; retrying\n", service_dir_.c_str(), std::strerror(errno));
+    }
+    rewatch_at_ = NowNs() + BackoffNs(rewatch_attempt_);
+    if (rewatch_attempt_ < 7) ++rewatch_attempt_;
     return;
   }
+  rewatch_attempt_ = 0;
   // Sockets created in between had no watch; publishers of this process
   // whose socket file was deleted with the directory cannot be found again
   // until they are re-created.
   ScanAll();
 }
 
-void RuntimeImpl::RunCommands() {
+void RuntimeImpl::RunCommands() noexcept {
   uint64_t v;
   while (::read(wake_.Get(), &v, sizeof(v)) > 0) {
   }
@@ -512,24 +597,30 @@ void RuntimeImpl::RunCommands() {
     std::function<void()> fn;
     {
       std::lock_guard<std::mutex> lock(cmd_mu_);
-      if (commands_.empty()) return;
+      if (commands_.empty()) {
+        if (stop_.load(std::memory_order_acquire)) running_ = false;
+        return;
+      }
       fn = std::move(commands_.front());
       commands_.pop_front();
     }
-    fn();
+    RunGuarded(fn, "control thread command");
   }
 }
 
-void RuntimeImpl::Loop() {
+void RuntimeImpl::Loop() noexcept {
   struct epoll_event events[kEpollMaxEvents];
   while (running_) {
-    // No timeout unless a timer is pending (retries, quarantine polling):
+    // No timeout unless something is pending (retries, quarantine polling):
     // the control thread only wakes for socket, inotify or command events,
     // so an idle process costs zero wake-ups.
     int timeout = -1;
-    if (!timers_.empty()) {
+    uint64_t at = timers_.empty() ? 0 : timers_.begin()->first;
+    for (uint64_t deferred : {rescan_at_, rewatch_at_}) {
+      if (deferred != 0 && (at == 0 || deferred < at)) at = deferred;
+    }
+    if (at != 0) {
       uint64_t now = NowNs();
-      uint64_t at = timers_.begin()->first;
       timeout = at <= now ? 0 : static_cast<int>(std::min<uint64_t>((at - now + 999999) / 1000000, 60000));
     }
     int n = ::epoll_wait(epoll_.Get(), events, kEpollMaxEvents, timeout);
@@ -554,6 +645,7 @@ void RuntimeImpl::Loop() {
       }
     }
     if (running_ && !timers_.empty()) RunTimers();
+    if (running_ && (rescan_at_ != 0 || rewatch_at_ != 0)) RunDeferred();
   }
 }
 

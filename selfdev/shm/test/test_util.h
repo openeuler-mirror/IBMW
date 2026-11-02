@@ -38,6 +38,11 @@ class JoiningThread {
 };
 
 
+// The next `n` operator new calls of the calling thread throw
+// std::bad_alloc; 0 ends that early. Reaches allocations no fault hook
+// covers. In the test binary and the peer (fail_alloc.cc).
+void FailAllocations(int n) noexcept;
+
 // Every test binary uses a private service root (mkdtemp) exported through
 // IBMW_SHM_ROOT so child processes join the same discovery directory.
 const std::string& TestRoot();

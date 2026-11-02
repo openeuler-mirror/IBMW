@@ -141,6 +141,13 @@ stage_device() {
     summarize "device-${name}" "${run_rc:-255}" "${log}" || fail "device-${name} (${log})"
   }
   run_device core-once ibmw_selfdev_shm_test IBMW_SHM_PEER_PATH ibmw_selfdev_shm_peer
+  # RG-39 (group mode between real uids) needs root, which the device shell
+  # is; skipped there it proves nothing, so a skip fails this stage.
+  run_device core-crossuid ibmw_selfdev_shm_test IBMW_SHM_PEER_PATH ibmw_selfdev_shm_peer "--gtest_filter='*CrossUid*'"
+  if ! grep -q '^\[  PASSED  \] 1 test' "${LOGS}/device-core-crossuid.log" ||
+    grep -q 'SKIPPED' "${LOGS}/device-core-crossuid.log"; then
+    fail "device-core-crossuid did not run as root (${LOGS}/device-core-crossuid.log)"
+  fi
   run_device core-repeat ibmw_selfdev_shm_test IBMW_SHM_PEER_PATH ibmw_selfdev_shm_peer --gtest_repeat="${REPEAT}" --gtest_shuffle
   run_device ext-once ibmw_extensions_shm_ext_test IBMW_SHM_EXT_PEER_PATH ibmw_shm_ext_peer
   run_device ext-repeat ibmw_extensions_shm_ext_test IBMW_SHM_EXT_PEER_PATH ibmw_shm_ext_peer --gtest_repeat="${REPEAT}" --gtest_shuffle

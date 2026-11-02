@@ -5,6 +5,7 @@
 
 #include <sys/types.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -65,7 +66,11 @@ class RuntimeImpl {
   const std::string& ServiceDir() const noexcept { return service_dir_; }
   bool OnControlThread() const noexcept;
   // Runs fn on the control thread and waits for it. Inline if already there.
+  // What fn throws is rethrown here; failing to queue it (std::bad_alloc)
+  // is retried, so a non-throwing fn makes Call() non-throwing.
   void Call(const std::function<void()>& fn);
+  // Queues fn for the control thread; throws std::bad_alloc. Exceptions fn
+  // throws there are logged and dropped.
   void Post(std::function<void()> fn);
 
   // Control thread only. `tag` receives the epoll tag for ModFd().
@@ -77,8 +82,13 @@ class RuntimeImpl {
   void ModFd(int fd, uint64_t tag, uint32_t events) noexcept;
   // Runs fn on the control thread after `delay_ms`. Control thread only.
   // Pending timers are the only thing that gives epoll_wait a timeout, so
-  // an idle process still never wakes up.
+  // an idle process still never wakes up. False when out of memory.
   bool RunAfter(uint32_t delay_ms, std::function<void()> fn) noexcept;
+  // Rescans the service directory for every subscriber later (backoff 10 ms
+  // doubling to 1 s while scans keep failing). Discovery that failed (out
+  // of memory, opendir error) calls this so no publisher is lost for good.
+  // Needs no allocation. Control thread only.
+  void ScheduleRescan() noexcept;
 
   NotifySegment* Notify() const noexcept { return reinterpret_cast<NotifySegment*>(notify_.map.Data()); }
   int NotifyFd() const noexcept { return notify_.fd.Get(); }
@@ -88,15 +98,19 @@ class RuntimeImpl {
   void RegisterSubscriber(uint64_t hash, const std::shared_ptr<SubscriberImpl>& sub);
   void UnregisterSubscriber(uint64_t hash, const SubscriberImpl* sub);
   // Asks every subscriber of `hash` to connect to the socket at `path`.
-  // Control thread only.
-  void OfferPublisher(uint64_t hash, const std::string& path);
+  // Control thread only. These three schedule a rescan when they fail.
+  void OfferPublisher(uint64_t hash, const std::string& path) noexcept;
   // Scans the service directory for publishers of `hash`. Control thread only.
-  void ScanFor(uint64_t hash);
+  void ScanFor(uint64_t hash) noexcept;
   // ScanFor() every registered subscriber hash. Control thread only.
-  void ScanAll();
+  void ScanAll() noexcept;
 
-  bool PeerAllowed(const PeerCredentials& cred) const noexcept;
-  mode_t SocketMode() const noexcept { return group_ ? 0660 : 0600; }
+  // Same euid, root, or (group mode) the group as effective gid or, where
+  // the kernel reports it (SO_PEERGROUPS), as a supplementary group.
+  bool PeerAllowed(const PeerCredentials& cred, int sock) const noexcept;
+  // Applies the socket file's group and mode (0600, or 0660 and the
+  // group); false with errno set when that fails.
+  bool SetSocketAccess(const char* path) const noexcept;
 
   static std::string HashPrefix(uint64_t hash);
 
@@ -108,13 +122,15 @@ class RuntimeImpl {
   // returns kInvalidArg when the result is unusable.
   static Result<std::string> ResolveServiceDir(const RuntimeOptions& options, std::optional<gid_t>* group,
                                                std::string* root = nullptr, std::string* domain = nullptr);
-  void Loop();
-  void HandleInotify();
+  void Loop() noexcept;
+  void HandleInotify() noexcept;
   // Re-creates the service directory and its watch after it was removed or
   // moved away, then rescans. Retries with backoff while that fails.
-  void Rewatch(uint32_t attempt);
-  void RunCommands();
-  void RunTimers();
+  void Rewatch() noexcept;
+  void RunCommands() noexcept;
+  void RunTimers() noexcept;
+  // Runs a due rescan or re-watch.
+  void RunDeferred() noexcept;
 
   RuntimeOptions options_;
   std::string service_dir_;
@@ -129,6 +145,16 @@ class RuntimeImpl {
   std::thread thread_;
   std::thread::id thread_id_;
   bool running_ = true;  // control thread only
+  // Set by the destructor; the control thread stops once it has run the
+  // commands queued before. A flag, not a command: stopping must not need
+  // an allocation (Runtime::Shutdown() is noexcept).
+  std::atomic<bool> stop_{false};
+  // Retries that must not depend on an allocation succeeding (control
+  // thread only): deadline (NowNs, 0: none) and attempt for the backoff.
+  uint64_t rescan_at_ = 0;
+  uint32_t rescan_attempt_ = 0;
+  uint64_t rewatch_at_ = 0;
+  uint32_t rewatch_attempt_ = 0;
 
   struct Registered {
     uint32_t generation;

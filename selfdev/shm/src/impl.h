@@ -45,6 +45,27 @@ struct PoolSegment {
 enum class ChunkState : uint8_t { kFree, kLoaned, kPublished };
 
 class PublisherImpl;
+class PubConn;
+
+// Chunks of a connection that hung up without an orderly close. The
+// subscriber may still be reading them, so they are not reused until its
+// process is known to be gone. Guarded by the publisher mutex.
+struct Quarantine {
+  uint64_t id = 0;
+  // Closed connection; its `outstanding` bits are the quarantined chunks and
+  // its connection segment stays mapped to see a late orderly close.
+  std::shared_ptr<PubConn> conn;
+  pid_t pid = 0;          // SO_PEERCRED of the subscriber; 0: other pid namespace
+  UniqueFd pidfd;         // readable once `pid` exited; invalid if unavailable
+  bool watched = false;   // pidfd registered with the control thread's epoll
+  bool armed = false;     // watch or polling timer set up
+  bool released = false;  // chunks are back in the pool
+  // The process can be checked: a real pid, peer_death_check on, and no
+  // EPERM from it so far. If not, only the closed flag releases.
+  bool verifiable = false;
+  bool removing = false;  // control thread asked to drop the watch
+  uint32_t chunks = 0;
+};
 
 // Publisher end of one connection. Fields other than `sock` are guarded by
 // the owning publisher's mutex.
@@ -77,23 +98,7 @@ class PubConn : public EventHandler, public std::enable_shared_from_this<PubConn
   std::deque<uint64_t> pending;  // delivered but waiting for segment ack
   SendQueue out;                 // control messages the subscriber has not taken yet
   uint64_t epoll_tag = 0;        // for RuntimeImpl::ModFd (EPOLLOUT while `out` is not empty)
-};
-
-// Chunks of a connection that hung up without an orderly close. The
-// subscriber may still be reading them, so they are not reused until its
-// process is known to be gone. Guarded by the publisher mutex.
-struct Quarantine {
-  uint64_t id = 0;
-  // Closed connection; its `outstanding` bits are the quarantined chunks and
-  // its connection segment stays mapped to see a late orderly close.
-  std::shared_ptr<PubConn> conn;
-  pid_t pid = 0;          // SO_PEERCRED of the subscriber; 0: other pid namespace
-  UniqueFd pidfd;         // readable once `pid` exited; invalid if unavailable
-  bool watched = false;   // pidfd registered with the control thread's epoll
-  bool armed = false;     // watch or polling timer set up
-  bool released = false;  // chunks are back in the pool
-  bool removing = false;  // control thread asked to drop the watch
-  uint32_t chunks = 0;
+  std::unique_ptr<Quarantine> spare;  // allocated up front, see QuarantineLocked()
 };
 
 class PublisherImpl : public EventHandler, public std::enable_shared_from_this<PublisherImpl> {
@@ -144,7 +149,9 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
   void QuarantineLocked(PubConn& conn) noexcept;
   // Control thread: sets up death detection for new quarantine entries.
   void ArmQuarantineLocked() noexcept;
-  bool PeerGoneLocked(const Quarantine& q) const noexcept;
+  // May find out that the process cannot be checked (clears q.verifiable).
+  bool PeerGoneLocked(Quarantine& q) noexcept;
+  void NoteUnverifiableLocked() noexcept;
   void ReleaseLocked(Quarantine& q) noexcept;
   // Releases entries whose subscriber is gone (any thread).
   void ReapQuarantineLocked() noexcept;

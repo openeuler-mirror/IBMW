@@ -39,6 +39,9 @@
 #ifndef F_SEAL_FUTURE_WRITE
 #define F_SEAL_FUTURE_WRITE 0x0010
 #endif
+#ifndef SO_PEERGROUPS
+#define SO_PEERGROUPS 59  // Linux 4.13, asm-generic value (x86, arm, arm64)
+#endif
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434  // same number on every architecture
 #endif
@@ -47,8 +50,22 @@ namespace ibmw::selfdev::shm::detail {
 
 namespace fault {
 std::atomic<uint32_t> send_would_block{0};
+std::atomic<uint32_t> send_no_buffers{0};
 std::atomic<bool> no_future_write_seal{false};
 std::atomic<bool> no_pidfd{false};
+std::atomic<bool> kill_eperm{false};
+std::atomic<uint32_t> map_segment_fail{0};
+std::atomic<uint32_t> grow_bad_alloc{0};
+std::atomic<uint32_t> offer_bad_alloc{0};
+std::atomic<size_t> send_queue_limit{0};
+std::atomic<void (*)()> subscriber_shutdown_pause{nullptr};
+
+bool Hit(std::atomic<uint32_t>& counter) noexcept {
+  for (uint32_t n = counter.load(std::memory_order_relaxed); n != 0;) {
+    if (counter.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) return true;
+  }
+  return false;
+}
 }  // namespace fault
 
 void UniqueFd::Reset(int fd) noexcept {
@@ -115,6 +132,7 @@ Result<Mapping> MapSegment(int fd, size_t size, bool writable) {
   // writeback. memfds report TMPFS_MAGIC on Linux and on OHOS (HongMeng or
   // Linux kernel, measured).
   constexpr unsigned long kTmpfsMagic = 0x01021994ul;  // linux/magic.h TMPFS_MAGIC
+  if (fault::Hit(fault::map_segment_fail)) return Error::kNoMemory;
   struct statfs sfs {};
   if (::fstatfs(fd, &sfs) != 0) return Error::kSystem;
   if (static_cast<unsigned long>(sfs.f_type) != kTmpfsMagic) return Error::kCorrupted;
@@ -154,11 +172,13 @@ bool SendMessage(int sock, const void* data, size_t len, const int* fds, size_t 
     errno = EINVAL;
     return false;
   }
-  for (uint32_t n = fault::send_would_block.load(std::memory_order_relaxed); n != 0;) {
-    if (fault::send_would_block.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) {
-      errno = EAGAIN;
-      return false;
-    }
+  if (fault::Hit(fault::send_would_block)) {
+    errno = EAGAIN;
+    return false;
+  }
+  if (fault::Hit(fault::send_no_buffers)) {
+    errno = ENOBUFS;
+    return false;
   }
   struct iovec iov {};
   iov.iov_base = const_cast<void*>(data);
@@ -196,7 +216,8 @@ SendQueue::Status SendQueue::Send(int sock, const void* data, size_t len, int fd
     if (SendMessage(sock, data, len, &fd, fd >= 0 ? 1 : 0)) return Status::kSent;
     if (!SendWouldBlock(errno)) return Status::kFailed;
   }
-  if (msgs_.size() >= kMaxMessages) return Status::kOverflow;
+  const size_t limit = fault::send_queue_limit.load(std::memory_order_relaxed);
+  if (msgs_.size() >= (limit != 0 ? limit : kMaxMessages)) return Status::kOverflow;
   if (len > kMaxBytes) return Status::kFailed;
   try {
     msgs_.emplace_back();
@@ -212,9 +233,13 @@ SendQueue::Status SendQueue::Send(int sock, const void* data, size_t len, int fd
 }
 
 bool SendQueue::Flush(int sock) noexcept {
+  no_buffers_ = false;
   while (!msgs_.empty()) {
     Msg& m = msgs_.front();
-    if (!SendMessage(sock, m.data, m.len, &m.fd, m.fd >= 0 ? 1 : 0)) return SendWouldBlock(errno);
+    if (!SendMessage(sock, m.data, m.len, &m.fd, m.fd >= 0 ? 1 : 0)) {
+      no_buffers_ = errno == ENOBUFS || errno == ENOMEM;
+      return SendWouldBlock(errno);
+    }
     msgs_.pop_front();
   }
   return true;
@@ -291,7 +316,40 @@ int PidfdOpen(pid_t pid) noexcept {
   return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
 }
 
-int PidGone(pid_t pid) noexcept { return ::kill(pid, 0) != 0 && errno == ESRCH ? 1 : 0; }
+bool PeerInSupplementaryGroup(int sock, gid_t group) noexcept {
+  // Enough for any sane group list; a peer in more groups than this is
+  // checked by its effective gid only (the call fails with ERANGE).
+  gid_t groups[256];
+  socklen_t len = sizeof(groups);
+  if (::getsockopt(sock, SOL_SOCKET, SO_PEERGROUPS, groups, &len) != 0) return false;
+  for (size_t i = 0; i < len / sizeof(gid_t); ++i) {
+    if (groups[i] == group) return true;
+  }
+  return false;
+}
+
+bool PeerGroupsSupported() noexcept {
+  int sv[2];
+  if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) return false;
+  gid_t groups[256];
+  socklen_t len = sizeof(groups);
+  bool ok = ::getsockopt(sv[0], SOL_SOCKET, SO_PEERGROUPS, groups, &len) == 0;
+  ::close(sv[0]);
+  ::close(sv[1]);
+  return ok;
+}
+
+int PidGone(pid_t pid) noexcept {
+  if (fault::kill_eperm.load(std::memory_order_relaxed)) {
+    errno = EPERM;
+    return -1;
+  }
+  if (::kill(pid, 0) == 0) return 0;
+  // Only "no such process" means dead. Anything else (EPERM for another
+  // uid, EACCES from a security module, whatever a sandbox or another
+  // kernel returns) proves nothing either way.
+  return errno == ESRCH ? 1 : -1;
+}
 
 uint64_t Hash64(std::string_view s) noexcept {
   // FNV-1a; collisions are resolved by comparing the full URL at handshake.
@@ -315,14 +373,30 @@ uint64_t RandomU64() noexcept {
   return rng();
 }
 
-bool MakeDirectory(const std::string& path, mode_t mode, std::optional<gid_t> group) noexcept {
-  if (::mkdir(path.c_str(), mode) != 0 && errno != EEXIST) return false;
+bool MakeDirectory(const std::string& path, std::optional<gid_t> group) noexcept {
+  const mode_t mode = group ? (S_ISGID | 0770) : 0700;
+  if (::mkdir(path.c_str(), mode & 0777) != 0 && errno != EEXIST) return false;
   struct stat st {};
-  if (::lstat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return false;
-  if (st.st_uid != ::geteuid()) {
-    // Shared group directory created by another user of the same group.
-    return group.has_value() && st.st_gid == *group;
+  if (::lstat(path.c_str(), &st) != 0) return false;
+  if (!S_ISDIR(st.st_mode)) {
+    errno = ENOTDIR;
+    return false;
   }
+  if (st.st_uid != ::geteuid()) {
+    // Shared group directory created by another member of the group. Its
+    // creator controls the mode: anyone it lets in could plant or remove
+    // sockets, so others must have no access and the group must be able
+    // to create sockets. Membership may be supplementary (access() checks
+    // with every group of the process).
+    if (!group.has_value() || st.st_gid != *group || (st.st_mode & 0007) != 0 || (st.st_mode & 0070) != 0070 ||
+        ::access(path.c_str(), R_OK | W_OK | X_OK) != 0) {
+      errno = EACCES;
+      return false;
+    }
+    return true;
+  }
+  // chown() to a group we are only a supplementary member of is allowed. It
+  // comes first: chmod() drops S_ISGID unless the group is one of ours.
   if (group.has_value() && st.st_gid != *group && ::chown(path.c_str(), static_cast<uid_t>(-1), *group) != 0) {
     return false;
   }

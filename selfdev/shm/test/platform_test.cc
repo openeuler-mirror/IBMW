@@ -8,7 +8,9 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -214,13 +216,40 @@ TEST(ShmPlatformTest, MapSegmentRequiresTmpfs) {
     ASSERT_FALSE(m.ok());
     EXPECT_EQ(m.error(), Error::kCorrupted);
   }
-  // Whatever the kernel offers, a non-memfd file is never accepted.
+  // Whatever the kernel offers, a file outside tmpfs is never accepted: this
+  // binary is a regular file of the right size on a disk filesystem. (The
+  // test root may itself be tmpfs, which proves nothing about this check.)
+  UniqueFd exe(::open("/proc/self/exe", O_RDONLY | O_CLOEXEC));
+  ASSERT_TRUE(exe.Valid()) << std::strerror(errno);
+  struct statfs sfs {};
+  struct stat st {};
+  ASSERT_EQ(::fstatfs(exe.Get(), &sfs), 0);
+  ASSERT_EQ(::fstat(exe.Get(), &st), 0);
+  ASSERT_TRUE(S_ISREG(st.st_mode));
+  RecordProperty("exe_fs_magic", std::to_string(static_cast<unsigned long>(sfs.f_type)));
+  if (static_cast<unsigned long>(sfs.f_type) != 0x01021994ul) {  // TMPFS_MAGIC
+    auto m = MapSegment(exe.Get(), static_cast<size_t>(st.st_size), false);
+    ASSERT_FALSE(m.ok());
+    EXPECT_EQ(m.error(), Error::kCorrupted);
+  }
+  // Nor is procfs, ...
+  UniqueFd proc(::open("/proc/self/stat", O_RDONLY | O_CLOEXEC));
+  ASSERT_TRUE(proc.Valid()) << std::strerror(errno);
+  EXPECT_FALSE(MapSegment(proc.Get(), 1, false).ok());
+  // ... and on tmpfs only what is sealed against shrinking: a plain file
+  // and an unsealed memfd pass the filesystem check and fail on the seals.
   std::string path = test::TestRoot() + "/pl11_XXXXXX";
   UniqueFd file(::mkstemp(path.data()));
   ASSERT_TRUE(file.Valid()) << std::strerror(errno);
   ::unlink(path.c_str());
   ASSERT_EQ(::ftruncate(file.Get(), 4096), 0);
   EXPECT_FALSE(MapSegment(file.Get(), 4096, false).ok());
+  UniqueFd unsealed(static_cast<int>(::syscall(SYS_memfd_create, "pl11_unsealed", MFD_CLOEXEC)));
+  ASSERT_TRUE(unsealed.Valid()) << std::strerror(errno);
+  ASSERT_EQ(::ftruncate(unsealed.Get(), 4096), 0);
+  auto u = MapSegment(unsealed.Get(), 4096, false);
+  ASSERT_FALSE(u.ok());
+  EXPECT_EQ(u.error(), Error::kCorrupted);
 }
 
 // Fills `sock` until the next send would block; returns how many fit.
@@ -295,9 +324,11 @@ TEST(ShmPlatformTest, SendQueueOrderOwnershipAndBound) {
   EXPECT_EQ(broken.Send(s0.Get(), &one_more, sizeof(one_more), -1), SendQueue::Status::kFailed);
 }
 
-// PL-13 (third review H1) Peer death detection. A zombie still exists for
-// kill(), so PidGone() only reports it once reaped; a pidfd is readable as
-// soon as the process exits. pidfd may be missing (old kernel, sandbox).
+// PL-13 (third review H1, fourth review L-8) Peer death detection. A zombie
+// still exists for kill(), so PidGone() only reports it once reaped; a pidfd
+// is readable as soon as the process exits. pidfd may be missing (old
+// kernel, sandbox). Only ESRCH means gone: EPERM says the process exists or
+// that nothing can be known, never that it died.
 TEST(ShmPlatformTest, PeerDeathDetection) {
   pid_t child = ::fork();
   ASSERT_GE(child, 0);
@@ -334,6 +365,15 @@ TEST(ShmPlatformTest, PeerDeathDetection) {
   ASSERT_EQ(::waitpid(child, nullptr, 0), child);
   reap.pid = -1;
   EXPECT_EQ(PidGone(child), 1);
+
+  EXPECT_NE(PidGone(1), 1);  // init: alive, whatever we may send it
+  errno = 0;
+  if (::kill(1, 0) != 0 && errno == EPERM) {
+    EXPECT_EQ(PidGone(1), -1);
+  }
+  fault::kill_eperm.store(true);
+  EXPECT_EQ(PidGone(::getpid()), -1);
+  fault::kill_eperm.store(false);
 
   fault::no_pidfd.store(true);
   EXPECT_EQ(PidfdOpen(::getpid()), -1);

@@ -39,6 +39,13 @@ struct PublisherOptions {
   // F_SEAL_FUTURE_WRITE (Linux < 5.1). Default: degrade, warn once and count
   // in PublisherStats::unsealed_segments.
   bool require_read_only = false;
+  // Chunks a subscriber still held when it disappeared without closing are
+  // reused once its process is gone (pidfd or kill(pid, 0)). Turn this off
+  // where a pid cannot be trusted to mean "that process" (unusual pid
+  // handling in a sandbox or on another kernel): such chunks then stay
+  // quarantined until the subscriber closes in order or this publisher is
+  // destroyed, which trades pool space for never reusing a chunk too early.
+  bool peer_death_check = true;
 };
 
 struct PublisherStats {
@@ -63,8 +70,8 @@ struct PublisherStats {
   uint64_t quarantined = 0;          // chunks ever quarantined
   uint32_t quarantined_chunks = 0;   // currently quarantined
   // Quarantines whose subscriber process cannot be checked (other pid
-  // namespace, same process, sandbox): held until it closes in order or
-  // this publisher is destroyed.
+  // namespace, same process, kill() refused, peer_death_check off): held
+  // until it closes in order or this publisher is destroyed.
   uint64_t unverifiable_peers = 0;
   uint64_t unknown_messages = 0;     // control messages of unknown type, ignored
   uint64_t deferred_sends = 0;       // control messages queued: subscriber socket full

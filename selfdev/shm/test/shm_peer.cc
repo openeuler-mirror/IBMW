@@ -12,22 +12,35 @@
 //   sub_write <url>                           write into a received chunk (must die by SIGSEGV)
 //   sub_hold_drop <url> <n>                   like sub_hold, then shut its control sockets down
 //                                             without an orderly close and wait to be killed
+//   sub_hold_drop_release <url> <n>           like sub_hold_drop, then release everything on
+//                                             SIGUSR1, print "released" and wait to be killed
 //   probe <url> [domain|-] [root|-]           Init() with these options (if given), then print
 //                                             "init <error>", "dir <service dir>", "pub <error>",
-//                                             "sub <error>" ("ok" on success)
+//                                             "sub <error>" ("ok" on success), "sock <mode> <gid>"
+//                                             of the publisher's socket file
+//   runtime_shutdown_oom <url> <n>            create n publishers, then Runtime::Shutdown() with
+//                                             every allocation failing; print "done"
+//   as <uid> <gid> <groups|-> <mode> ...      run a mode above with these ids (needs root);
+//                                             groups is a comma-separated gid list
 
 #include <dirent.h>
+#include <grp.h>
+#include <signal.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
 #include <cstdio>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "ibmw_selfdev/shm/shm.h"
+#include "test_util.h"
 
 using namespace ibmw::selfdev::shm;  // NOLINT
 
@@ -154,15 +167,25 @@ int RunPubHold(const std::string& url) {
 // Simulates control-socket trouble under a live subscriber: every
 // SOCK_SEQPACKET socket of this process (only the shm connections) is shut
 // down, the held chunks stay mapped.
-int RunSubHoldDrop(const std::string& url, uint32_t n) {
+int RunSubHoldDrop(const std::string& url, uint32_t n, bool release) {
+  // Before any thread exists: all of them inherit the mask, so sigwait()
+  // below is the only taker.
+  sigset_t usr1;
+  sigemptyset(&usr1);
+  sigaddset(&usr1, SIGUSR1);
+  pthread_sigmask(SIG_BLOCK, &usr1, nullptr);
   SubscriberOptions so;
   so.queue_capacity = 16;
   Subscriber sub(url, so);
   if (!sub.Valid()) return 4;
-  uint32_t held = 0;
+  std::vector<const void*> held;
   if (!Wait([&] {
-        while (held < n && sub.Take()) ++held;  // never released
-        return held == n;
+        while (held.size() < n) {  // not released here
+          auto t = sub.Take();
+          if (!t) break;
+          held.push_back(*t);
+        }
+        return held.size() == n;
       }, 10000)) {
     return 3;
   }
@@ -179,6 +202,12 @@ int RunSubHoldDrop(const std::string& url, uint32_t n) {
   }
   if (!Wait([&] { return sub.Stats().connections == 0; }, 10000)) return 3;
   Say("ready");
+  if (release) {
+    int sig = 0;
+    sigwait(&usr1, &sig);
+    for (const void* p : held) sub.Release(p);
+    Say("released");
+  }
   Park();
 }
 
@@ -197,7 +226,54 @@ int RunProbe(const std::string& url, const std::string& domain, const std::strin
   Say(std::string("pub ") + ErrorName(pub.InitError()));
   Subscriber sub(url);
   Say(std::string("sub ") + ErrorName(sub.InitError()));
+  std::string sock = "none";
+  if (pub.Valid()) {
+    const std::string dir = Runtime::ServiceDirectory();
+    if (DIR* d = ::opendir(dir.c_str())) {
+      while (auto* de = ::readdir(d)) {
+        const std::string name = de->d_name;
+        struct stat st {};
+        if (name.size() > 5 && name.compare(name.size() - 5, 5, ".sock") == 0 &&
+            ::stat((dir + "/" + name).c_str(), &st) == 0) {
+          char line[48];
+          std::snprintf(line, sizeof(line), "%o %u", static_cast<unsigned>(st.st_mode & 07777),
+                        static_cast<unsigned>(st.st_gid));
+          sock = line;
+        }
+      }
+      ::closedir(d);
+    }
+  }
+  Say("sock " + sock);
   return 0;
+}
+
+int RunRuntimeShutdownOom(const std::string& url, uint32_t n) {
+  for (uint32_t i = 0; i < n; ++i) {
+    Publisher pub(url);
+    if (!pub.Valid()) return 4;
+  }
+  test::FailAllocations(INT_MAX);
+  Runtime::Shutdown();
+  test::FailAllocations(0);
+  Say("done");
+  return 0;
+}
+
+// Takes the ids of "as <uid> <gid> <groups|->" for good; false on failure.
+bool BecomeUser(const char* uid_arg, const char* gid_arg, const char* groups_arg) {
+  std::vector<gid_t> groups;
+  if (std::strcmp(groups_arg, "-") != 0) {
+    for (const char* p = groups_arg; *p != '\0';) {
+      char* end = nullptr;
+      groups.push_back(static_cast<gid_t>(std::strtoul(p, &end, 10)));
+      p = *end == ',' ? end + 1 : end;
+    }
+  }
+  const auto uid = static_cast<uid_t>(std::strtoul(uid_arg, nullptr, 10));
+  const auto gid = static_cast<gid_t>(std::strtoul(gid_arg, nullptr, 10));
+  return ::setgroups(groups.size(), groups.data()) == 0 && ::setresgid(gid, gid, gid) == 0 &&
+         ::setresuid(uid, uid, uid) == 0 && ::geteuid() == uid && ::getegid() == gid;
 }
 
 int RunSubWrite(const std::string& url) {
@@ -218,6 +294,14 @@ int RunSubWrite(const std::string& url) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 5 && std::strcmp(argv[1], "as") == 0) {
+    if (!BecomeUser(argv[2], argv[3], argv[4])) {
+      std::perror("as");
+      return 4;
+    }
+    argc -= 4;
+    argv += 4;
+  }
   if (argc < 3) return 64;
   std::string mode = argv[1];
   std::string url = argv[2];
@@ -227,7 +311,9 @@ int main(int argc, char** argv) {
   if (mode == "sub_hold") return RunSubHold(url, static_cast<uint32_t>(arg(3, 1)));
   if (mode == "pub_hold") return RunPubHold(url);
   if (mode == "sub_write") return RunSubWrite(url);
-  if (mode == "sub_hold_drop") return RunSubHoldDrop(url, static_cast<uint32_t>(arg(3, 1)));
+  if (mode == "sub_hold_drop") return RunSubHoldDrop(url, static_cast<uint32_t>(arg(3, 1)), false);
+  if (mode == "sub_hold_drop_release") return RunSubHoldDrop(url, static_cast<uint32_t>(arg(3, 1)), true);
+  if (mode == "runtime_shutdown_oom") return RunRuntimeShutdownOom(url, static_cast<uint32_t>(arg(3, 0)));
   if (mode == "probe") return RunProbe(url, argc > 3 ? argv[3] : "-", argc > 4 ? argv[4] : "-");
   return 64;
 }

@@ -657,5 +657,150 @@ TEST(ShmRobustnessTest, QuarantineEndsWithPeerProcessWithoutPidfd) {
   QuarantineUntilPeerDies(UniqueUrl("rb17"));
 }
 
+// A subscriber process holding 3 chunks that lost its control sockets; the
+// peer stays parked until the fixture ends.
+class QuarantinedPeer {
+ public:
+  QuarantinedPeer(const std::string& url, const char* mode, const PublisherOptions& po) : pub(url, po) {
+    peer = test::SpawnPeer({mode, url, "3"});
+    EXPECT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }, 10s));
+    for (uint64_t s = 1; s <= 3; ++s) PublishSeq(pub, s);
+    EXPECT_EQ(test::ReadLine(peer), "ready");
+    EXPECT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }));
+    EXPECT_EQ(pub.Stats().quarantined_chunks, 3u);
+  }
+  ~QuarantinedPeer() { Kill(); }
+  void Kill() {
+    if (peer.pid > 0) {
+      test::KillPeer(peer, SIGKILL);
+      test::WaitPeer(peer);
+    }
+  }
+
+  Publisher pub;
+  test::Peer peer;
+};
+
+int CountPidfds() {
+  int n = 0;
+  if (DIR* d = ::opendir("/proc/self/fd")) {
+    while (auto* de = ::readdir(d)) {
+      char target[64];
+      ssize_t len = ::readlink((std::string("/proc/self/fd/") + de->d_name).c_str(), target, sizeof(target) - 1);
+      if (len > 0) {
+        target[len] = '\0';
+        n += std::strcmp(target, "anon_inode:[pidfd]") == 0 ? 1 : 0;
+      }
+    }
+    ::closedir(d);
+  }
+  return n;
+}
+
+// RB-18 (fourth review) A subscriber that stopped reading its control socket
+// hits the send queue bound end to end: it is dropped, what it holds stays
+// quarantined and comes back with its orderly close. A compliant peer cannot
+// reach the real bound, so a hook lowers it.
+TEST(ShmRobustnessTest, SendQueueOverflowQuarantines) {
+  struct Restore {
+    ~Restore() {
+      fault::send_would_block.store(0);
+      fault::send_queue_limit.store(0);
+    }
+  } restore;
+  auto url = UniqueUrl("rb18");
+  Publisher pub(url, EagerPool());
+  RawSubscriber raw;
+  ASSERT_TRUE(raw.Connect(url));
+  ASSERT_TRUE(raw.Handshake(url, 1));
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+  PublishSeq(pub, 1);
+  uint64_t held = 0;
+  ASSERT_TRUE(WaitFor([&] { return raw.TakeHandle(&held); }));
+
+  fault::send_queue_limit.store(1);
+  fault::send_would_block.store(1000);
+  for (uint32_t size : {1024u, 4096u}) {  // new size classes: one SegmentAdd each
+    auto l = pub.Loan(size);
+    ASSERT_TRUE(l.ok()) << ErrorName(l.error());
+    pub.Release(*l);
+  }
+  fault::send_would_block.store(0);
+  fault::send_queue_limit.store(0);
+
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }));
+  auto st = pub.Stats();
+  EXPECT_EQ(st.send_queue_overflows, 1u);
+  EXPECT_EQ(st.quarantined_chunks, 1u);
+  EXPECT_EQ(st.reclaimed, 0u);
+  for (uint64_t s = 2; s < 100; ++s) {
+    auto l = pub.Loan(64);
+    ASSERT_TRUE(l.ok()) << ErrorName(l.error());
+    FillPattern(*l, 64, s);
+    pub.Release(*l);
+  }
+  EXPECT_EQ(CheckPattern(raw.Payload(held), 64), 1u);
+  EXPECT_TRUE(raw.Closed());
+  raw.hdr->closed.store(1, std::memory_order_release);
+  EXPECT_EQ(pub.Stats().quarantined_chunks, 0u);
+  EXPECT_EQ(pub.Stats().reclaimed, 1u);
+}
+
+// RB-19 (fourth review) A late orderly close while a pidfd watches the process:
+// the process lives on, so the watch would never fire. Reaping asks the
+// control thread to drop it and the pidfd goes (Reap -> Post -> PeerExited).
+TEST(ShmRobustnessTest, LateOrderlyCloseDropsPidfdWatch) {
+  auto url = UniqueUrl("rb19");
+  const int before = CountPidfds();
+  QuarantinedPeer q(url, "sub_hold_drop_release", {});
+  const bool have_pidfd = CountPidfds() == before + 1;
+  RecordProperty("pidfd_watch", have_pidfd ? "yes" : "no");
+  test::KillPeer(q.peer, SIGUSR1);
+  ASSERT_EQ(test::ReadLine(q.peer), "released");
+  ASSERT_TRUE(WaitFor([&] { return q.pub.Stats().quarantined_chunks == 0; }));
+  EXPECT_EQ(q.pub.Stats().reclaimed, 3u);
+  EXPECT_TRUE(WaitFor([&] { return CountPidfds() == before; }));
+  EXPECT_EQ(::kill(q.peer.pid, 0), 0);  // still running, no death involved
+}
+
+// RB-20 (fourth review, L-8) kill(pid, 0) refused: nothing can be learned about
+// the process, and never will be. That is not "gone": the chunks stay and
+// polling ends, however the process fares later.
+TEST(ShmRobustnessTest, RefusedKillStopsPollingAndKeepsChunks) {
+  struct Faults {
+    Faults() {
+      fault::no_pidfd.store(true);
+      fault::kill_eperm.store(true);
+    }
+    ~Faults() {
+      fault::no_pidfd.store(false);
+      fault::kill_eperm.store(false);
+    }
+  } faults;
+  QuarantinedPeer q(UniqueUrl("rb20"), "sub_hold_drop", {});
+  EXPECT_EQ(q.pub.Stats().unverifiable_peers, 1u);
+  q.Kill();
+  fault::kill_eperm.store(false);  // a poll now would see ESRCH
+  std::this_thread::sleep_for(200ms);
+  auto st = q.pub.Stats();
+  EXPECT_EQ(st.quarantined_chunks, 3u);
+  EXPECT_EQ(st.reclaimed, 0u);
+  EXPECT_EQ(st.unverifiable_peers, 1u);
+}
+
+// RB-21 (fourth review) PublisherOptions::peer_death_check off: the death of the
+// process releases nothing, only an orderly close or the end of the publisher.
+TEST(ShmRobustnessTest, PeerDeathCheckCanBeDisabled) {
+  PublisherOptions po;
+  po.peer_death_check = false;
+  const int before = CountPidfds();
+  QuarantinedPeer q(UniqueUrl("rb21"), "sub_hold_drop", po);
+  EXPECT_EQ(CountPidfds(), before);  // no process is looked at
+  EXPECT_EQ(q.pub.Stats().unverifiable_peers, 1u);
+  q.Kill();
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(q.pub.Stats().quarantined_chunks, 3u);
+}
+
 }  // namespace
 }  // namespace ibmw::selfdev::shm

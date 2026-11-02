@@ -102,6 +102,9 @@ bool SendMessage(int sock, const void* data, size_t len, const int* fds, size_t 
 // queue or our send buffer is full), as opposed to a broken connection.
 bool SendWouldBlock(int err) noexcept;
 
+// Delay between Flush() attempts while the kernel is out of socket memory.
+inline constexpr uint32_t kNoBuffersRetryMs = 10;
+
 // Control messages a peer could not take yet, sent in order once the socket
 // is writable again (EPOLLOUT). Not thread-safe: the owner serialises access.
 class SendQueue {
@@ -121,6 +124,10 @@ class SendQueue {
   // Sends what the socket takes; false when the connection is broken.
   bool Flush(int sock) noexcept;
   bool Empty() const noexcept { return msgs_.empty(); }
+  // The last Flush() stopped on ENOBUFS/ENOMEM: the kernel is short of
+  // memory, not the peer slow. The socket may still poll writable, so the
+  // owner retries on a timer instead of waiting for EPOLLOUT (which would spin).
+  bool NoBuffers() const noexcept { return no_buffers_; }
 
  private:
   struct Msg {
@@ -130,6 +137,7 @@ class SendQueue {
     UniqueFd owned;
   };
   std::deque<Msg> msgs_;
+  bool no_buffers_ = false;
 };
 // Receives one message. Returns bytes read, 0 on orderly shutdown, -1 with
 // errno EAGAIN when empty, -1 otherwise. Received fds are CLOEXEC.
@@ -141,25 +149,50 @@ struct PeerCredentials {
   gid_t gid = 0;
 };
 bool GetPeerCredentials(int sock, PeerCredentials* out) noexcept;
+// SO_PEERGROUPS: whether `group` is one of the peer's supplementary groups
+// (as of connect()/listen()). False when it is not or the kernel cannot
+// tell (before Linux 4.13, or a kernel without the option); SO_PEERCRED's
+// gid (the effective gid) is checked separately.
+bool PeerInSupplementaryGroup(int sock, gid_t group) noexcept;
+// Whether this kernel answers SO_PEERGROUPS (for tests and diagnostics).
+bool PeerGroupsSupported() noexcept;
 
 // pidfd for `pid` (-1 when unavailable: old kernel, sandbox, no such pid;
 // errno tells which). Readable once the process has exited.
 int PidfdOpen(pid_t pid) noexcept;
-// 1: the process is gone (ESRCH), 0: it exists or we cannot tell (EPERM).
-// A pid reused by an unrelated process reads as alive: callers must treat
-// "alive" as "not known dead".
+// kill(pid, 0): 1 the process is gone (ESRCH and nothing else), 0 it
+// exists, -1 we may not ask (EPERM/EACCES: another uid, a security module)
+// or got an unexpected error. A pid reused by an unrelated process reads as
+// alive: callers must treat "alive" as "not known dead".
 int PidGone(pid_t pid) noexcept;
 
 uint64_t Hash64(std::string_view s) noexcept;
 uint64_t NowNs() noexcept;
 uint64_t RandomU64() noexcept;
-bool MakeDirectory(const std::string& path, mode_t mode, std::optional<gid_t> group) noexcept;
+// Creates or validates a service directory. Without `group`: mode 0700,
+// owned by us. With `group`: mode 02770 (setgid, so entries inherit the
+// group) and group `group`; a directory another member of the group created
+// is accepted only if its group is `group`, it is group-writable, has no
+// permission bits for others and we can use it (errno EACCES otherwise).
+bool MakeDirectory(const std::string& path, std::optional<gid_t> group) noexcept;
 
-// Fault injection for tests; never set in production.
+// Fault injection for tests; never set in production. Counters fail the
+// next N calls, then disarm; flags hold while set.
 namespace fault {
-extern std::atomic<uint32_t> send_would_block;  // next N SendMessage() calls fail with EAGAIN
+extern std::atomic<uint32_t> send_would_block;  // SendMessage() fails with EAGAIN
+extern std::atomic<uint32_t> send_no_buffers;   // SendMessage() fails with ENOBUFS
 extern std::atomic<bool> no_future_write_seal;  // CreateSegment() behaves as if the seal were unsupported
 extern std::atomic<bool> no_pidfd;              // PidfdOpen() fails with ENOSYS
+extern std::atomic<bool> kill_eperm;            // PidGone() sees EPERM (peer of another uid)
+extern std::atomic<uint32_t> map_segment_fail;  // MapSegment() fails with kNoMemory
+extern std::atomic<uint32_t> grow_bad_alloc;    // GrowLocked(): per-connection bookkeeping throws std::bad_alloc
+extern std::atomic<uint32_t> offer_bad_alloc;   // RuntimeImpl::OfferPublisher() throws std::bad_alloc
+extern std::atomic<size_t> send_queue_limit;    // SendQueue bound instead of kMaxMessages (0: unchanged)
+// Called by SubscriberImpl::Shutdown() between marking itself shut down and
+// handing its connections to the control thread (race tests).
+extern std::atomic<void (*)()> subscriber_shutdown_pause;
+// Consumes one armed failure of `counter`; false when it is not armed.
+bool Hit(std::atomic<uint32_t>& counter) noexcept;
 }  // namespace fault
 
 }  // namespace ibmw::selfdev::shm::detail
