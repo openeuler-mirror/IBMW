@@ -38,14 +38,23 @@ class TestTap final : public io::PublishTapCapability {
     callback_ = std::move(callback);
     return 1;
   }
+  // Like the runtime tap, Unregister waits for an in-flight Emit, and the
+  // callback runs without the lock Register takes: RuntimeTapServer registers
+  // while holding its session lock, which OnPublish also takes.
   bool Unregister(uint64_t) override {
+    std::lock_guard emit_lock(emit_mutex_);
     std::lock_guard lock(mutex_);
     callback_ = {};
     return true;
   }
   bool Emit(std::string_view bytes = "payload", std::string_view serialization = "cdr") {
-    std::lock_guard lock(mutex_);
-    if (!callback_) return false;
+    std::lock_guard emit_lock(emit_mutex_);
+    Callback callback;
+    {
+      std::lock_guard lock(mutex_);
+      callback = callback_;
+    }
+    if (!callback) return false;
     ibmw::transport::Context context;
     ibmw::extension::MessageView view{
         .topic = "/rate", .msg_type = "test:Bytes", .module_name = "publisher", .endpoint_index = 0,
@@ -54,10 +63,11 @@ class TestTap final : public io::PublishTapCapability {
         .acquire_serialized = [&](std::string_view) {
           return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
         }};
-    callback_(view);
+    callback(view);
     return true;
   }
  private:
+  std::mutex emit_mutex_;
   std::mutex mutex_;
   Callback callback_;
 };
