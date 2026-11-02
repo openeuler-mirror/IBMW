@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include <cassert>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -22,13 +22,16 @@ class SimpleBuffer {
     data_.append(reinterpret_cast<const char*>(data), len);
   }
 
+  // Consumes at most the readable bytes.
   void Consume(size_t len) {
-    read_pos_ += len;
+    read_pos_ += std::min(len, GetReadableSize());
   }
 
-  void Read(uint8_t* data, size_t len) {
-    assert(len <= GetReadableSize());
+  // Copies at most the readable bytes and returns how many it copied.
+  size_t Read(uint8_t* data, size_t len) {
+    len = std::min(len, GetReadableSize());
     std::memcpy(data, data_.data() + read_pos_, len);
+    return len;
   }
 
   [[nodiscard]] std::string_view GetStringView() const {

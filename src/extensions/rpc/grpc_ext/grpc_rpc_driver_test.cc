@@ -186,6 +186,28 @@ TEST(GrpcServerConnectionTest, IdleTimerClosesConnectionWithChattyClient) {
   for (auto& worker : workers) worker.join();
 }
 
+// EXT-012: a length beyond the readable bytes never leaves the buffer.
+TEST(GrpcSimpleBufferTest, ReadAndConsumeStayWithinReadableBytes) {
+  http2::SimpleBuffer buffer(16);
+  const std::string text = "abc";
+  buffer.Write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
+
+  std::array<uint8_t, 8> out{};
+  out.fill(0xee);
+  EXPECT_EQ(buffer.Read(out.data(), out.size()), 3u);
+  EXPECT_EQ(out[2], 'c');
+  EXPECT_EQ(out[3], 0xee);
+
+  buffer.Consume(2);
+  EXPECT_EQ(buffer.GetStringView(), "c");
+  buffer.Consume(100);
+  EXPECT_TRUE(buffer.Empty());
+  EXPECT_EQ(buffer.Read(out.data(), out.size()), 0u);
+
+  buffer.Write(reinterpret_cast<const uint8_t*>(text.data()), text.size());
+  EXPECT_EQ(buffer.GetStringView(), "abc");
+}
+
 TEST(GrpcTimeoutTest, ParsesUpToEightDigits) {
   EXPECT_EQ(grpc::ParseTimeout("1H"), std::chrono::hours(1));
   EXPECT_EQ(grpc::ParseTimeout("2M"), std::chrono::minutes(2));
