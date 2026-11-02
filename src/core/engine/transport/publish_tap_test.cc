@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -40,13 +41,18 @@ class PublishTapDriver final : public TransportDriver {
   }
   void Send(MessageFrame&) noexcept override {
     ++send_calls;
-    if (events_) events_->emplace_back("driver");
+    if (events_) {
+      std::lock_guard lock(events_mutex_);
+      events_->emplace_back("driver");
+    }
   }
 
-  int send_calls = 0;
+  // Concurrent tests send from several threads.
+  std::atomic<int> send_calls{0};
   int shutdown_calls = 0;
 
  private:
+  std::mutex events_mutex_;
   std::vector<std::string>* events_;
 };
 
