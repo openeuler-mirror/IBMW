@@ -137,13 +137,13 @@ cmake --build --preset together-ros2-minimal-sdk
 The sibling `ros2_minimal_deps/scripts/ibmw_dds_compat.py` CLI is the recommended
 entrypoint for OHOS ARM64 because it diagnoses the prefix/toolchain, owns a
 dedicated build directory, and validates the resulting CMake cache.
-OpenCode users can invoke `/dds-compatibility`. `IBMW_together` is a separate companion repository, not part of this repository: check it out next to this repository first, or the commands below fail with file not found.
+`IBMW_together` is a separate companion repository, not part of this repository: check it out next to this repository first, or the commands below fail with file not found.
 Copyable sibling workflow:
 ```bash
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py doctor --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 ```
-Default mode requires a message-complete prefix with the `std_msgs` config/header. DDS substrate-only builder output requires `--dds-only`. Prefix precedence is explicit `--dds-prefix`, then `IBMW_ROS2_MINIMAL_SDK_PREFIX`, then exactly one canonical candidate. Offline use requires a complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout. If `/dds-compatibility` is absent after adding/updating the skill, restart OpenCode.
+Default mode requires a message-complete prefix with the `std_msgs` config/header. DDS substrate-only builder output requires `--dds-only`. Prefix precedence is explicit `--dds-prefix`, then `IBMW_ROS2_MINIMAL_SDK_PREFIX`, then exactly one canonical candidate. Offline use requires a complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout.
 
 > **ROS2 rcl Deprecation Notice**
 >

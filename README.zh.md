@@ -16,7 +16,7 @@ cmake --preset together-ros2-minimal-sdk
 cmake --build --preset together-ros2-minimal-sdk
 ```
 
-OpenCode 可使用 `/dds-compatibility`；新增或更新 skill 后若命令未出现，请重启 OpenCode。`IBMW_together` 是独立的配套仓库，不包含在本仓库中：需要先把它检出到本仓库的同级目录，否则下列命令会报文件不存在。相邻仓库的可复制命令：
+`IBMW_together` 是独立的配套仓库，不包含在本仓库中：需要先把它检出到本仓库的同级目录，否则下列命令会报文件不存在。相邻仓库的可复制命令：
 ```bash
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py doctor --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network

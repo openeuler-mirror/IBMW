@@ -89,6 +89,7 @@ class PerfRunnerTest(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,"required CMake option mismatch: IBMW_BUILD_TESTS"):
     m.verify_registered_builds(out,registration)
  def test_build_sandbox_is_network_isolated_and_fail_closed(self):
+  (ROOT/".opencode").mkdir(exist_ok=True)
   with tempfile.TemporaryDirectory(dir=ROOT/".opencode") as d:
    command=m.sandbox_command(Path(d),["true"])
    self.assertEqual(command[0],"/usr/bin/bwrap");self.assertIn("--unshare-net",command);self.assertIn("--ro-bind",command);self.assertIn("--tmpfs",command)
