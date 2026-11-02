@@ -5,9 +5,27 @@
 #include "record_playback_ext/global.h"
 #include "record_playback_ext/topic_meta.h"
 
+#include <exception>
+
 #include <nlohmann/json.hpp>
 
 namespace ibmw::extensions::record_playback_extension {
+
+void RecordPlaybackServiceImpl::ReportHandlerException(
+    std::string_view func_name,
+    ibmw::protocols::record_playback_extension::CommonRsp& rsp) noexcept {
+  try {
+    try {
+      throw;
+    } catch (const std::exception& e) {
+      MW_ERROR("Record playback service '{}' failed: {}", func_name, e.what());
+    } catch (...) {
+      MW_ERROR("Record playback service '{}' failed: unknown exception", func_name);
+    }
+    SetErrorCode(ErrorCode::kInternalError, rsp);
+  } catch (...) {
+  }
+}
 
 void RecordPlaybackServiceImpl::HandleStartRecord(
     const ibmw::protocols::record_playback_extension::StartRecordReq& req,
@@ -116,6 +134,16 @@ void RecordPlaybackServiceImpl::HandleUpdateMetadata(
     SetErrorCode(ErrorCode::kInvalidActionName, rsp);
     return;
   }
+  if (req.kv_pairs.size() > kMaxMetadataPairs) {
+    SetErrorCode(ErrorCode::kInvalidArgument, rsp);
+    return;
+  }
+  for (const auto& [key, value] : req.kv_pairs) {
+    if (key.size() > kMaxMetadataKeySize || value.size() > kMaxMetadataValueSize) {
+      SetErrorCode(ErrorCode::kInvalidArgument, rsp);
+      return;
+    }
+  }
   std::unordered_map<std::string, std::string> kv_pairs;
   for (const auto& [key, value] : req.kv_pairs) {
     if (key.empty()) [[unlikely]] {
@@ -133,7 +161,9 @@ void RecordPlaybackServiceImpl::HandleUpdateMetadata(
 void RecordPlaybackServiceImpl::HandleUpdateRecordAction(
     const ibmw::protocols::record_playback_extension::UpdateRecordActionReq& req,
     ibmw::protocols::record_playback_extension::UpdateRecordActionRsp& rsp) {
-  MW_INFO("Received update record action request: {}", nlohmann::json(req).dump());
+  // Invalid UTF-8 in the request must not make dump() throw.
+  MW_INFO("Received update record action request: {}",
+          nlohmann::json(req).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace));
   auto finditr = record_action_map_ptr_->find(req.action_name);
   auto& common_rsp = rsp.common_rsp;
   if (finditr == record_action_map_ptr_->end()) {
@@ -143,7 +173,12 @@ void RecordPlaybackServiceImpl::HandleUpdateRecordAction(
 
   auto& action_wrapper = *(finditr->second);
   std::vector<TopicMeta> topic_metas;
+  topic_metas.reserve(req.topic_metas.size());
   for (const auto& topic_meta : req.topic_metas) {
+    if (!RecordAction::IsValidSampleFreq(topic_meta.sample_freq.value_or(0))) {
+      SetErrorCode(ErrorCode::kInvalidArgument, common_rsp);
+      return;
+    }
     topic_metas.emplace_back(TopicMeta{
         .topic_name = topic_meta.topic_name,
         .msg_type = topic_meta.msg_type,
@@ -151,8 +186,17 @@ void RecordPlaybackServiceImpl::HandleUpdateRecordAction(
         .sample_freq = topic_meta.sample_freq.has_value() ? topic_meta.sample_freq.value() : 0});
   }
 
-  action_wrapper.UpdateTopicMetaRecord(std::move(topic_metas), req.record_enabled);
-  SetErrorCode(ErrorCode::kSuc, common_rsp);
+  switch (action_wrapper.UpdateTopicMetaRecord(std::move(topic_metas), req.record_enabled)) {
+    case RecordAction::UpdateResult::kOk:
+      SetErrorCode(ErrorCode::kSuc, common_rsp);
+      break;
+    case RecordAction::UpdateResult::kTopicNotFound:
+      SetErrorCode(ErrorCode::kTopicNotFound, common_rsp);
+      break;
+    case RecordAction::UpdateResult::kNotRunning:
+      SetErrorCode(ErrorCode::kActionNotRunning, common_rsp);
+      break;
+  }
 }
 
 void RecordPlaybackServiceImpl::HandleGetRecordActionStatus(

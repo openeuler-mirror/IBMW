@@ -4,6 +4,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 #include "cpp/service/rpc_handle.h"
@@ -46,9 +47,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleStartRecord(
-                  *static_cast<const StartRecordReq*>(req),
-                  *static_cast<StartRecordRsp*>(rsp));
+              auto& typed_rsp = *static_cast<StartRecordRsp*>(rsp);
+              InvokeGuarded("StartRecord", typed_rsp, [&] {
+                HandleStartRecord(*static_cast<const StartRecordReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
@@ -63,9 +65,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleStopRecord(
-                  *static_cast<const StopRecordReq*>(req),
-                  *static_cast<CommonRsp*>(rsp));
+              auto& typed_rsp = *static_cast<CommonRsp*>(rsp);
+              InvokeGuarded("StopRecord", typed_rsp, [&] {
+                HandleStopRecord(*static_cast<const StopRecordReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
@@ -80,9 +83,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleStartPlayback(
-                  *static_cast<const StartPlaybackReq*>(req),
-                  *static_cast<CommonRsp*>(rsp));
+              auto& typed_rsp = *static_cast<CommonRsp*>(rsp);
+              InvokeGuarded("StartPlayback", typed_rsp, [&] {
+                HandleStartPlayback(*static_cast<const StartPlaybackReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
@@ -97,9 +101,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleStopPlayback(
-                  *static_cast<const StopPlaybackReq*>(req),
-                  *static_cast<CommonRsp*>(rsp));
+              auto& typed_rsp = *static_cast<CommonRsp*>(rsp);
+              InvokeGuarded("StopPlayback", typed_rsp, [&] {
+                HandleStopPlayback(*static_cast<const StopPlaybackReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
@@ -114,9 +119,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleUpdateMetadata(
-                  *static_cast<const UpdateMetadataReq*>(req),
-                  *static_cast<CommonRsp*>(rsp));
+              auto& typed_rsp = *static_cast<CommonRsp*>(rsp);
+              InvokeGuarded("UpdateMetadata", typed_rsp, [&] {
+                HandleUpdateMetadata(*static_cast<const UpdateMetadataReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
@@ -131,9 +137,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleUpdateRecordAction(
-                  *static_cast<const UpdateRecordActionReq*>(req),
-                  *static_cast<UpdateRecordActionRsp*>(rsp));
+              auto& typed_rsp = *static_cast<UpdateRecordActionRsp*>(rsp);
+              InvokeGuarded("UpdateRecordAction", typed_rsp, [&] {
+                HandleUpdateRecordAction(*static_cast<const UpdateRecordActionReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
@@ -148,15 +155,21 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
             [this](const ibmw_service_context_base_t* ctx_ptr,
                    const void* req, void* rsp,
                    ibmw_function_base_t* callback) {
-              HandleGetRecordActionStatus(
-                  *static_cast<const GetRecordActionStatusReq*>(req),
-                  *static_cast<GetRecordActionStatusRsp*>(rsp));
+              auto& typed_rsp = *static_cast<GetRecordActionStatusRsp*>(rsp);
+              InvokeGuarded("GetRecordActionStatus", typed_rsp, [&] {
+                HandleGetRecordActionStatus(*static_cast<const GetRecordActionStatusReq*>(req), typed_rsp);
+              });
               auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
               ops->invoker(callback->object_buf, 0);
             }));
   }
 
   ~RecordPlaybackServiceImpl() override = default;
+
+  // Limits of one UpdateMetadata request (values are parsed as YAML).
+  static constexpr size_t kMaxMetadataPairs = 256;
+  static constexpr size_t kMaxMetadataKeySize = 256;
+  static constexpr size_t kMaxMetadataValueSize = 64 * 1024;
 
   void SetRecordActionMap(
       std::unordered_map<std::string_view, std::unique_ptr<RecordAction>>* record_action_map_ptr) {
@@ -204,6 +217,10 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
     kStartRecordFailed = 3,
     kStartPlaybackFailed = 4,
     kStopRecordFailed = 5,
+    kInvalidArgument = 6,
+    kTopicNotFound = 7,
+    kActionNotRunning = 8,
+    kInternalError = 9,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
@@ -212,7 +229,31 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
       "INVALID_ACTION_MODE",
       "START_RECORD_FAILED",
       "START_PLAYBACK_FAILED",
-      "STOP_RECORD_FAILED"};
+      "STOP_RECORD_FAILED",
+      "INVALID_ARGUMENT",
+      "TOPIC_NOT_FOUND",
+      "ACTION_NOT_RUNNING",
+      "INTERNAL_ERROR"};
+
+  // Handlers must not throw into the RPC layer: the response callback would
+  // never run. An escaped exception becomes INTERNAL_ERROR.
+  template <typename Rsp, typename F>
+  void InvokeGuarded(std::string_view func_name, Rsp& rsp, F&& handler) noexcept {
+    try {
+      handler();
+    } catch (...) {
+      if constexpr (requires { rsp.common_rsp; }) {
+        ReportHandlerException(func_name, rsp.common_rsp);
+      } else {
+        ReportHandlerException(func_name, rsp);
+      }
+    }
+  }
+
+  // Called from a catch block; logs the current exception.
+  void ReportHandlerException(
+      std::string_view func_name,
+      ibmw::protocols::record_playback_extension::CommonRsp& rsp) noexcept;
 
   template <typename T>
   void SetErrorCode(ErrorCode code, T& rsp) {

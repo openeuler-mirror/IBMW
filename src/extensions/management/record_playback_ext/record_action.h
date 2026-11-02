@@ -4,6 +4,7 @@
 #pragma once
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <condition_variable>
 #include <deque>
@@ -129,10 +130,24 @@ class RecordAction {
   bool StartSignalRecord(uint64_t preparation_duration_s, uint64_t record_duration_s, std::string& filefolder);
   bool StopSignalRecord();
 
+  // New keys beyond this many extra attributes are dropped (each update
+  // rewrites the whole metadata file).
+  static constexpr size_t kMaxExtraAttributes = 1024;
   void UpdateMetadata(
       std::unordered_map<std::string, std::string>&& kv_pairs);
 
-  void UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled);
+  enum class UpdateResult { kOk, kNotRunning, kTopicNotFound };
+  // Applies all entries or none of them.
+  UpdateResult UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled);
+
+  // 0 disables sampling; otherwise the interval 1/freq must fit uint64 ns.
+  static constexpr double kMinSampleFreq = 1e-9;
+  static bool IsValidSampleFreq(double freq) {
+    return freq == 0 || (std::isfinite(freq) && freq >= kMinSampleFreq);
+  }
+  static uint64_t SampleIntervalNs(double freq) {
+    return freq > 0 ? static_cast<uint64_t>(1.0 / freq * 1000000000) : 0;
+  }
 
  private:
   struct TaskState {

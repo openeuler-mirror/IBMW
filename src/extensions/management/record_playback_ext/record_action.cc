@@ -229,7 +229,9 @@ void RecordAction::Initialize(YAML::Node options) {
       topic_meta.serialization_type = type_support_ref.DefaultSerializationType();
     }
     // check sample freq
-    MW_REQUIRE(topic_meta.sample_freq >= 0, "Sample freq must be greater or equal to 0");
+    MW_REQUIRE(
+        IsValidSampleFreq(topic_meta.sample_freq),
+        "Sample freq must be 0 or a finite value >= {}", kMinSampleFreq);
   }
 
   for (auto& topic_meta_option : options_.topic_meta_list) {
@@ -304,7 +306,7 @@ void RecordAction::Initialize(YAML::Node options) {
             .transport_format = channel_encoding});
     // init topic runtime info for sample_freq
     topic_runtime_map_[topic_meta.id].last_timestamp = 0;
-    topic_runtime_map_[topic_meta.id].sample_interval = (topic_meta.sample_freq > 0) ? static_cast<uint64_t>(1.0 / topic_meta.sample_freq * 1000000000) : 0;
+    topic_runtime_map_[topic_meta.id].sample_interval = SampleIntervalNs(topic_meta.sample_freq);
     topic_runtime_map_[topic_meta.id].record_enabled = topic_meta.record_enabled;
     topic_runtime_map_[topic_meta.id].cache_last_msg = topic_meta.cache_last_msg;
   }
@@ -636,6 +638,12 @@ void RecordAction::UpdateMetadata(std::unordered_map<std::string, std::string>&&
       action->metadata_.extra_attributes = YAML::Node(YAML::NodeType::Map);
     }
     for (const auto& [key, value] : move_kv_pairs) {
+      const YAML::Node& attributes = action->metadata_.extra_attributes;
+      if (attributes.size() >= kMaxExtraAttributes && !attributes[key]) [[unlikely]] {
+        MW_WARN("Metadata already has {} extra attributes, dropping key '{}'.",
+                kMaxExtraAttributes, key);
+        continue;
+      }
       try {
         YAML::Node parsed_node = YAML::Load(value);
         action->metadata_.extra_attributes[key] = parsed_node;
@@ -652,39 +660,49 @@ void RecordAction::UpdateMetadata(std::unordered_map<std::string, std::string>&&
   });
 }
 
-void RecordAction::UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled) {
+RecordAction::UpdateResult RecordAction::UpdateTopicMetaRecord(
+    std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled) {
   util::DynamicLatch latch;
   auto task_state = task_state_;
-  if (!latch.TryAdd()) return;
+  auto result = UpdateResult::kNotRunning;
+  if (!latch.TryAdd()) return result;
   executor_.DispatchOrRun([task_state, move_topic_meta_list = std::move(topic_meta_list),
-                            action_record_enabled, &latch]() mutable {
+                            action_record_enabled, &result, &latch]() mutable {
     RecordAction* action = nullptr;
     if (task_state && task_state->Enter(action)) {
       struct Guard { std::shared_ptr<TaskState> state; ~Guard() { state->Leave(); } } guard{task_state};
       if (action->state_.load() == State::kStart) {
-        if (action_record_enabled.has_value()) {
-          action->options_.record_enabled = action_record_enabled.value();
-        }
-        for (auto& topic_meta : move_topic_meta_list) {
+        std::vector<uint32_t> ids;
+        ids.reserve(move_topic_meta_list.size());
+        for (const auto& topic_meta : move_topic_meta_list) {
           ibmw::transport::TopicMetaKey key{
               .topic_name = topic_meta.topic_name,
               .msg_type = topic_meta.msg_type};
           auto itr = action->topic_meta_map_.find(key);
           if (itr == action->topic_meta_map_.end()) [[unlikely]] {
             MW_WARN("Topic meta not found: {} {}", topic_meta.topic_name, topic_meta.msg_type);
-            continue;
+            result = UpdateResult::kTopicNotFound;
+            break;
           }
-          action->topic_runtime_map_[itr->second.id].record_enabled = topic_meta.record_enabled;
-          action->topic_runtime_map_[itr->second.id].sample_interval =
-              topic_meta.sample_freq > 0
-                  ? static_cast<uint64_t>(1.0 / topic_meta.sample_freq * 1000000000)
-                  : 0;
+          ids.push_back(itr->second.id);
+        }
+        if (result != UpdateResult::kTopicNotFound) {
+          if (action_record_enabled.has_value()) {
+            action->options_.record_enabled = action_record_enabled.value();
+          }
+          for (size_t i = 0; i < ids.size(); ++i) {
+            auto& runtime = action->topic_runtime_map_[ids[i]];
+            runtime.record_enabled = move_topic_meta_list[i].record_enabled;
+            runtime.sample_interval = SampleIntervalNs(move_topic_meta_list[i].sample_freq);
+          }
+          result = UpdateResult::kOk;
         }
       }
     }
     latch.CountDown();
   });
   latch.CloseAndWait();
+  return result;
 }
 
 void RecordAction::GetStatusSnapshot(StatusSnapshot& snapshot, ibmw::util::DynamicLatch& latch) {
