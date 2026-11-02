@@ -76,7 +76,23 @@ void PackageLoader::LoadPkg(std::string_view pkg_path,
     enable_or_disable_for_pkg_ = Enable_or_Disable::kUseNone;
   }
 
-  for (size_t ii = 0; ii < module_num; ++ii) {
+  try {
+    CreateModules(create_module_fn, disable_modules, enable_modules);
+  } catch (...) {
+    // The modules created so far would leak: nothing refers to them anymore.
+    for (auto itr = loaded_module_name_vec_.rbegin(); itr != loaded_module_name_vec_.rend(); ++itr) {
+      if (auto found = module_ptr_map_.find(*itr); found != module_ptr_map_.end()) DestroyModule(found->second);
+    }
+    module_ptr_map_.clear();
+    loaded_module_name_vec_.clear();
+    throw;
+  }
+}
+
+void PackageLoader::CreateModules(CreateModuleFunc create_module_fn,
+                                  const std::vector<std::string>& disable_modules,
+                                  const std::vector<std::string>& enable_modules) {
+  for (size_t ii = 0; ii < module_name_vec_.size(); ++ii) {
     const auto& module_name = module_name_vec_[ii];
     auto finditr_disable = std::find(disable_modules.begin(), disable_modules.end(), module_name);
     auto finditr_enable = std::find(enable_modules.begin(), enable_modules.end(), module_name);
@@ -97,6 +113,10 @@ void PackageLoader::LoadPkg(std::string_view pkg_path,
     MW_REQUIRE(module_ptr != nullptr,
                             "Cannot create module '{}' in lib {}.",
                             module_name, pkg_path_);
+    if (module_ptr->info == nullptr) [[unlikely]] {
+      DestroyModule(module_ptr);
+      MW_THROW("Module '{}' in lib {} has no info callback.", module_name, pkg_path_);
+    }
 
     auto module_info = module_ptr->info(module_ptr->ctx);
     auto real_module_name = ibmw::util::ToStdStringView(module_info.module_name);

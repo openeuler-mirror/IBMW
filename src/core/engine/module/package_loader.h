@@ -69,6 +69,11 @@ class PackageLoader {
   auto& GetDynamicLib() { return dynamic_lib_; }
 
  private:
+  using CreateModuleFunc = const ibmw_module_base_t* (*)(ibmw_string_view_t);
+  void CreateModules(CreateModuleFunc create_module_fn,
+                     const std::vector<std::string>& disable_modules,
+                     const std::vector<std::string>& enable_modules);
+
   std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_;
 
   std::string pkg_path_;

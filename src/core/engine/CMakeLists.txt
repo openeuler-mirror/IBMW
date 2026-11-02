@@ -48,8 +48,10 @@ set(EXTENSION_V2_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/test/extension_v2_fixture.cc)
 set(TYPE_SUPPORT_V1_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/type_support/test/type_support_pkg_v1_fixture.cc)
+set(PKG_FIXTURE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/module/test/package_fixture.cc)
 list(REMOVE_ITEM src ${EXTENSION_V2_FIXTURE_SRC}
-                     ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+                     ${TYPE_SUPPORT_V1_FIXTURE_SRC}
+                     ${PKG_FIXTURE_SRC})
 list(REMOVE_ITEM src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_query.cc)
 set(SELFDEV_E2E_BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/executor/selfdev_e2e_bench.cc)
 list(REMOVE_ITEM src ${SELFDEV_E2E_BENCH_SRC})
@@ -232,6 +234,10 @@ if(IBMW_BUILD_TESTS AND test_files)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
   endforeach()
+  add_library(pkg_fixture MODULE ${PKG_FIXTURE_SRC})
+  target_link_libraries(pkg_fixture PRIVATE ibmw::api::cpp)
+  set_target_properties(pkg_fixture PROPERTIES CXX_VISIBILITY_PRESET hidden
+                                               VISIBILITY_INLINES_HIDDEN ON)
   target_compile_definitions(extension_legacy_fixture
                              PRIVATE IBMW_EXT_FIXTURE_LEGACY)
   target_compile_definitions(extension_v2_bad_version_fixture
@@ -263,7 +269,8 @@ if(IBMW_BUILD_TESTS AND test_files)
                    type_support_bad_size_v1_fixture
                    type_support_bad_package_size_v1_fixture
                    type_support_null_type_v1_fixture
-                   type_support_duplicate_type_v1_fixture)
+                   type_support_duplicate_type_v1_fixture
+                   pkg_fixture)
   target_compile_definitions(
     ${CUR_TARGET_NAME}_test
     PRIVATE
@@ -279,7 +286,8 @@ if(IBMW_BUILD_TESTS AND test_files)
       "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""
       "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\""
       "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\""
-      "TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_duplicate_type_v1_fixture>\"")
+      "TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_duplicate_type_v1_fixture>\""
+      "PKG_FIXTURE_PATH=\"$<TARGET_FILE:pkg_fixture>\"")
 
   set(COMM_TRACE_COMPILE_OUT_TEST_TARGET
       ${CUR_TARGET_NAME}_comm_trace_compile_out_test)
