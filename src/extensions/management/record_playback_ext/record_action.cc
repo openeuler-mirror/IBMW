@@ -180,6 +180,29 @@ struct convert<ibmw::extensions::record_playback_extension::RecordAction::Option
 
 namespace ibmw::extensions::record_playback_extension {
 
+namespace {
+
+// Writes a temporary file and renames it over the old one, so a reader or a
+// crash sees the previous or the new metadata, never a truncated file. No
+// fsync: it could stall the record executor on slow storage.
+void WriteMetadataFile(const std::filesystem::path& path, const YAML::Node& node) {
+  auto tmp_path = path;
+  tmp_path += ".tmp";
+  std::ofstream ofs(tmp_path, std::ios::trunc);
+  ofs << node;
+  ofs.close();
+  std::error_code ec;
+  if (!ofs) {
+    MW_ERROR("Failed to write '{}', '{}' is not updated.", tmp_path.string(), path.string());
+    std::filesystem::remove(tmp_path, ec);
+    return;
+  }
+  std::filesystem::rename(tmp_path, path, ec);
+  if (ec) MW_ERROR("Failed to replace '{}': {}", path.string(), ec.message());
+}
+
+}  // namespace
+
 RecordAction::~RecordAction() noexcept {
   try {
     Shutdown();
@@ -664,9 +687,7 @@ void RecordAction::UpdateMetadata(std::unordered_map<std::string, std::string>&&
     YAML::Node node;
     node["ibmw_bagfile_information"] = action->metadata_;
 
-    std::ofstream ofs(action->metadata_yaml_file_path_);
-    ofs << node;
-    ofs.close();
+    WriteMetadataFile(action->metadata_yaml_file_path_, node);
   });
 }
 
@@ -1142,9 +1163,7 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
   YAML::Node node;
   node["ibmw_bagfile_information"] = metadata_;
 
-  std::ofstream ofs(metadata_yaml_file_path_);
-  ofs << node;
-  ofs.close();
+  WriteMetadataFile(metadata_yaml_file_path_, node);
 
   // write last msg in cache to mcap file
   writing_cached_messages_ = true;

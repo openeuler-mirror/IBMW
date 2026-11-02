@@ -6,10 +6,13 @@
 
 #include <gtest/gtest.h>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -209,6 +212,45 @@ TEST_F(RecordServiceTest, ExtraAttributeCountIsBounded) {
     return;
   }
   FAIL() << "no bag folder was created";
+}
+
+// EXT-027: metadata.yaml is replaced by a rename, never rewritten in place,
+// and a failed write keeps the previous file.
+TEST_F(RecordServiceTest, MetadataIsReplacedAtomically) {
+  auto& action = AddAction("imd", true);
+  const auto wait = [&action] {  // the action executor is single threaded
+    EXPECT_EQ(action.UpdateTopicMetaRecord({}, std::nullopt), RecordAction::UpdateResult::kOk);
+  };
+  wait();
+  fs::path metadata;
+  for (const auto& bag : fs::directory_iterator(root_)) metadata = bag.path() / "metadata.yaml";
+  ASSERT_TRUE(fs::exists(metadata));
+  const auto inode = [&metadata] {
+    struct stat st {};
+    EXPECT_EQ(::stat(metadata.c_str(), &st), 0);
+    return st.st_ino;
+  };
+  const auto read = [&metadata] {
+    std::ifstream in(metadata);
+    return std::string(std::istreambuf_iterator<char>(in), {});
+  };
+
+  const auto before = inode();
+  action.UpdateMetadata({{"k", "v1"}});
+  wait();
+  EXPECT_NE(inode(), before);
+  EXPECT_NE(read().find("v1"), std::string::npos);
+
+  // The temporary file can not be created: the old content stays.
+  auto tmp = metadata;
+  tmp += ".tmp";
+  ASSERT_TRUE(fs::create_directory(tmp));
+  const auto old_content = read();
+  action.UpdateMetadata({{"k", "v2"}});
+  wait();
+  EXPECT_EQ(read(), old_content);
+  fs::remove(tmp);
+  action.Shutdown();
 }
 
 }  // namespace
