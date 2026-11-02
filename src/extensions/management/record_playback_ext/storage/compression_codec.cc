@@ -62,7 +62,7 @@ std::string CompressZstd(std::string_view input, int compression_level) {
   return output;
 }
 
-std::string DecompressZstd(std::string_view input) {
+std::string DecompressZstd(std::string_view input, size_t max_output_size) {
   ZSTD_DStream* stream = ZSTD_createDStream();
   MW_ASSERT(stream != nullptr, "Cannot create a Zstd decompressor.");
   struct Guard {
@@ -77,6 +77,13 @@ std::string DecompressZstd(std::string_view input) {
   ZSTD_inBuffer source{input.data(), input.size(), 0};
   std::array<char, kStreamBufferSize> buffer{};
   std::string output;
+  // The declared size is only a reservation hint; the cap below still holds.
+  const unsigned long long declared =
+      ZSTD_getFrameContentSize(input.data(), input.size());
+  if (declared != ZSTD_CONTENTSIZE_UNKNOWN &&
+      declared != ZSTD_CONTENTSIZE_ERROR && declared <= max_output_size) {
+    output.reserve(static_cast<size_t>(declared));
+  }
   size_t remaining = 1;
   while (source.pos < source.size || remaining != 0) {
     ZSTD_outBuffer destination{buffer.data(), buffer.size(), 0};
@@ -84,6 +91,9 @@ std::string DecompressZstd(std::string_view input) {
     MW_ASSERT(
         !ZSTD_isError(remaining), "Zstd decompression failed: {}.",
         ZSTD_getErrorName(remaining));
+    MW_ASSERT(
+        destination.pos <= max_output_size - output.size(),
+        "Zstd output exceeds the {} byte limit.", max_output_size);
     output.append(buffer.data(), destination.pos);
     MW_ASSERT(
         destination.pos != 0 || source.pos < source.size || remaining == 0,
@@ -111,7 +121,7 @@ std::string CompressLz4(std::string_view input, int compression_level) {
   return output;
 }
 
-std::string DecompressLz4(std::string_view input) {
+std::string DecompressLz4(std::string_view input, size_t max_output_size) {
   LZ4F_dctx* context = nullptr;
   const size_t created =
       LZ4F_createDecompressionContext(&context, LZ4F_VERSION);
@@ -127,6 +137,19 @@ std::string DecompressLz4(std::string_view input) {
   size_t remaining = 1;
   std::array<char, kStreamBufferSize> buffer{};
   std::string output;
+  {
+    // The declared size is only a reservation hint; the cap below still holds.
+    LZ4F_frameInfo_t info{};
+    size_t source_size = input.size();
+    remaining = LZ4F_getFrameInfo(context, &info, input.data(), &source_size);
+    MW_ASSERT(
+        !LZ4F_isError(remaining), "LZ4 decompression failed: {}.",
+        LZ4F_getErrorName(remaining));
+    source_offset = source_size;
+    if (info.contentSize != 0 && info.contentSize <= max_output_size) {
+      output.reserve(static_cast<size_t>(info.contentSize));
+    }
+  }
   while (source_offset < input.size() || remaining != 0) {
     size_t source_size = input.size() - source_offset;
     size_t destination_size = buffer.size();
@@ -137,6 +160,9 @@ std::string DecompressLz4(std::string_view input) {
         !LZ4F_isError(remaining), "LZ4 decompression failed: {}.",
         LZ4F_getErrorName(remaining));
     source_offset += source_size;
+    MW_ASSERT(
+        destination_size <= max_output_size - output.size(),
+        "LZ4 output exceeds the {} byte limit.", max_output_size);
     output.append(buffer.data(), destination_size);
     MW_ASSERT(
         destination_size != 0 || source_size != 0 || remaining == 0,
@@ -164,12 +190,13 @@ std::string CompressBuffer(
 
 std::string DecompressBuffer(
     std::string_view input,
-    std::string_view format) {
+    std::string_view format,
+    size_t max_output_size) {
   if (format == "zstd") {
-    return DecompressZstd(input);
+    return DecompressZstd(input, max_output_size);
   }
   if (format == "lz4") {
-    return DecompressLz4(input);
+    return DecompressLz4(input, max_output_size);
   }
   MW_ASSERT(false, "Unsupported compression format '{}'.", format);
   return {};
@@ -197,8 +224,9 @@ std::filesystem::path CompressFile(
 
 std::string ReadCompressedFile(
     const std::filesystem::path& input_path,
-    std::string_view format) {
-  return DecompressBuffer(ReadFile(input_path), format);
+    std::string_view format,
+    size_t max_output_size) {
+  return DecompressBuffer(ReadFile(input_path), format, max_output_size);
 }
 
 }  // namespace ibmw::extensions::record_playback_extension
