@@ -296,7 +296,7 @@ class FibonacciActionClient {
     send_goal_request.goal.order = options_.order;
     const auto send_goal_call = CallService(send_goal_, send_goal_request, send_goal_sequence,
                                             std::chrono::seconds(options_.server_wait_seconds),
-                                            "[FAIL] send_goal write failed");
+                                            "send_goal write failed");
     if (!send_goal_call.write_ok) {
       return 1;
     }
@@ -315,7 +315,7 @@ class FibonacciActionClient {
     result_request.goal_id = goal_id;
     const auto result_call = CallService(get_result_, result_request, get_result_sequence,
                                          std::chrono::seconds(options_.result_wait_seconds),
-                                         "[FAIL] get_result write failed");
+                                         "get_result write failed");
     if (!result_call.write_ok) {
       return 1;
     }
@@ -361,7 +361,7 @@ class FibonacciActionClient {
     send_goal_request.goal.order = options_.order;
     const auto send_goal_call = CallService(send_goal_, send_goal_request, send_goal_sequence,
                                             std::chrono::seconds(options_.server_wait_seconds),
-                                            "[FAIL] send_goal write failed");
+                                            "send_goal write failed");
     if (!send_goal_call.write_ok) {
       return 1;
     }
@@ -382,7 +382,7 @@ class FibonacciActionClient {
     cancel_request.goal_info.stamp.nanosec = 0;
     const auto cancel_call = CallService(cancel_goal_, cancel_request, cancel_sequence,
                                          std::chrono::seconds(options_.server_wait_seconds),
-                                         "[FAIL] cancel_goal write failed");
+                                         "cancel_goal write failed");
     if (!cancel_call.write_ok) {
       return 1;
     }
@@ -409,7 +409,7 @@ class FibonacciActionClient {
     result_request.goal_id = goal_id;
     const auto result_call = CallService(get_result_, result_request, get_result_sequence,
                                          std::chrono::seconds(options_.result_wait_seconds),
-                                         "[FAIL] get_result write failed");
+                                         "get_result write failed");
     if (!result_call.write_ok) {
       return 1;
     }
