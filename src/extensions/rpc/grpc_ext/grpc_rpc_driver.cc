@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <strings.h>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -236,7 +237,12 @@ bool GrpcRpcDriver::RegisterServiceFunc(
       // Set the metadata. Peer headers must not override framework "ibmw-" keys.
       for (const auto& [key, value] : req->GetHeaders()) {
         MW_DEBUG("Http2 handle for service, key: {}, value: {}", key, http2::LoggableHeaderValue(key, value));
-        if (!ibmw::common::net::IsPeerMetaKeyAllowed(key)) [[unlikely]] {
+        // Remote-Endpoint is set by the server; HTTP/2 peers can only send
+        // the lower-case spelling, which would shadow it for readers that
+        // compare case-insensitively.
+        if (!ibmw::common::net::IsPeerMetaKeyAllowed(key) ||
+            (key.size() == http2::kRemoteEndpointKey.size() && key != http2::kRemoteEndpointKey &&
+             strncasecmp(key.data(), http2::kRemoteEndpointKey.data(), key.size()) == 0)) [[unlikely]] {
           MW_DEBUG("Ignore reserved meta key from peer: {}", key);
           continue;
         }

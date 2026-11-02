@@ -397,6 +397,7 @@ TEST_F(GrpcRpcDriverTest, PeerHeadersCannotSetReservedMeta) {
   EXPECT_EQ(seen[IBMW_RPC_CONTEXT_KEY_DRIVER], "grpc");
   EXPECT_EQ(seen["x-custom"], "v");
   EXPECT_EQ(seen["Remote-Endpoint"].rfind("127.0.0.1:", 0), 0u) << seen["Remote-Endpoint"];
+  EXPECT_EQ(seen["remote-endpoint"], "");
 }
 
 TEST(GrpcListenAddressTest, LoopbackIsRecognizedAndBadAddressesThrow) {

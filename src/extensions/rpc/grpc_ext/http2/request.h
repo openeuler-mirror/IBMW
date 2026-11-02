@@ -4,12 +4,16 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 #include "grpc_ext/http2/buffer.h"
 #include "grpc_ext/http2/header.h"
 #include "base/url_parser.h"
 
 namespace ibmw::extensions::grpc_extension::http2 {
+
+// Header the server sets to the real peer address of a request.
+inline constexpr std::string_view kRemoteEndpointKey = "Remote-Endpoint";
 
 class Request {
  public:
