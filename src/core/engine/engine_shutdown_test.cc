@@ -279,6 +279,47 @@ TEST_F(EngineShutdownFixture, InitFailureRollsBackFailingSubsystem) {
   EXPECT_EQ(engine.GetPhase(), Phase::kStopped);
 }
 
+// CORE-013: the rollback is the only teardown after a failed Initialize; the
+// destructor and Shutdown() do not run every subsystem's Shutdown() again.
+TEST_F(EngineShutdownFixture, NoSecondTeardownAfterInitRollback) {
+  std::vector<std::string> events;
+  ShutdownTestSubsystem ok("ok", &events, false);
+  ShutdownTestSubsystem bad("bad", &events, false);
+  ShutdownTestSubsystem never("never", &events, false);
+  bad.ThrowOnInit();
+  int stopping_hooks = 0;
+  {
+    Engine engine;
+    Entry(engine, Subsystem::kMainThread).instance = &ok;
+    Entry(engine, Subsystem::kWatchdog).instance = &bad;
+    Entry(engine, Subsystem::kExecutor).instance = &never;
+    SetInitOrder(engine, {IndexOf(engine, Subsystem::kConfigurator),
+                          IndexOf(engine, Subsystem::kMainThread),
+                          IndexOf(engine, Subsystem::kWatchdog),
+                          IndexOf(engine, Subsystem::kExecutor)});
+    engine.RegisterHook(BeforePhase(Phase::kStopping), [&] { ++stopping_hooks; });
+
+    EXPECT_ANY_THROW(engine.Initialize({.config_node = YAML::Load("ibmw: {}")}));
+    engine.Shutdown();
+    engine.Shutdown();
+  }
+  EXPECT_EQ(events, (std::vector<std::string>{"bad.init", "bad", "ok"}));
+  EXPECT_EQ(stopping_hooks, 0);
+}
+
+TEST_F(EngineShutdownFixture, NeverInitializedEngineHasNothingToTearDown) {
+  std::vector<std::string> events;
+  ShutdownTestSubsystem never("never", &events, false);
+  int stopping_hooks = 0;
+  {
+    Engine engine;
+    Entry(engine, Subsystem::kMainThread).instance = &never;
+    engine.RegisterHook(BeforePhase(Phase::kStopping), [&] { ++stopping_hooks; });
+  }
+  EXPECT_TRUE(events.empty());
+  EXPECT_EQ(stopping_hooks, 0);
+}
+
 // CORE-010: hooks may be registered (e.g. by extensions) while another thread
 // snapshots the same hook point.
 TEST_F(EngineShutdownFixture, ConcurrentHookRegistrationIsSafe) {

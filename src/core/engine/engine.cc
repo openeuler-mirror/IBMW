@@ -57,7 +57,10 @@ Engine::~Engine() {
   if (async_shutdown_thread_.joinable()) {
     async_shutdown_thread_.join();
   }
-  if (!shutdown_impl_flag_.load(std::memory_order_acquire)) {
+  // Nothing to tear down when Initialize never ran or already rolled back.
+  const Phase phase = GetPhase();
+  if (!shutdown_impl_flag_.load(std::memory_order_acquire) && phase != Phase::kConfigure &&
+      phase != Phase::kStopped) {
     MW_WARN("Engine teardown was not completed by the async worker; retrying once after join.");
     if (!ShutdownImpl()) {
       MW_ERROR("Engine destructor shutdown retry was vetoed during transport preparation.");
@@ -488,7 +491,14 @@ bool Engine::ShutdownImpl() {
   }
 
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-  if (shutdown_impl_flag_.load(std::memory_order_acquire)) {
+  // kConfigure: Initialize never ran, no subsystem holds anything.
+  // kStopped: torn down already, by an earlier call or the Initialize
+  // rollback; running every Shutdown() again would include subsystems that
+  // were never initialized. The flag stays unset so a later Initialize can
+  // still be shut down.
+  const Phase phase = phase_.load(std::memory_order_acquire);
+  if (shutdown_impl_flag_.load(std::memory_order_acquire) || phase == Phase::kConfigure ||
+      phase == Phase::kStopped) {
     shutdown_impl_in_progress_.store(false, std::memory_order_release);
     return true;
   }
