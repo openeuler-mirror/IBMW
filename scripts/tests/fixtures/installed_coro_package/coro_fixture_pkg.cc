@@ -7,7 +7,6 @@
 // With IBMW_CORO_FIXTURE_CRASH=overflow|null the module crashes in Run()
 // instead, to check the crash report for package code through bin/ibmw.
 
-#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>

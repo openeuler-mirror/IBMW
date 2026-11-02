@@ -5,9 +5,11 @@
 
 // Symbols of the libibmw_selfdev_coro shared library. The library holds the
 // one thread_local slot that Task's synchronous-completion handoff relies on
-// (see task.h); it must stay a single shared object so that every DSO of a
-// process (including modules loaded with RTLD_DEEPBIND, or linked with
-// -Bsymbolic / version scripts) uses the same slot.
+// (see task.h) and the process-wide StartDetached scope (start_detached.h);
+// it must stay a single shared object so that every DSO of a process
+// (including modules loaded with RTLD_DEEPBIND, or linked with -Bsymbolic /
+// version scripts) uses the same slot and scope. Only symbols marked
+// IBMW_SELFDEV_CORO_API are exported (src/libibmw_selfdev_coro.map).
 #if defined(_WIN32)
   #if defined(IBMW_SELFDEV_CORO_BUILDING)
     #define IBMW_SELFDEV_CORO_API __declspec(dllexport)

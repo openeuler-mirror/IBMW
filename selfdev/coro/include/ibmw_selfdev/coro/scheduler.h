@@ -4,9 +4,6 @@
 #pragma once
 
 #include <coroutine>
-#include <utility>
-
-#include "ibmw_selfdev/coro/concepts.h"
 
 namespace ibmw::selfdev::coro {
 

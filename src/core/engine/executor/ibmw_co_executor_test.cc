@@ -5,8 +5,9 @@
 // real IBMW executors. The IbmwExecutor tests (cpp/co/ibmw_context.h,
 // details::MakeResumer) only build with IBMW_EXECUTOR_USE_SELFDEV_CORO; the
 // coroutine RPC tests (IN-07, IN-09: CallAwaitable in cpp/service/rpc_handle.h,
-// shared by both branches) also build with the unifex branch
-// (IBMW_EXECUTOR_USE_SELFDEV_CORO=OFF). Nothing builds with stdexec.
+// shared by both branches) and the cpp/co/thread_ctx_scope.h test also build
+// with the unifex branch (IBMW_EXECUTOR_USE_SELFDEV_CORO=OFF). Nothing builds
+// with stdexec.
 
 #include "base/ibmw_config.h"
 
@@ -18,6 +19,7 @@
   #include <chrono>
   #include <coroutine>
   #include <future>
+  #include <memory>
   #include <mutex>
   #include <optional>
   #include <stdexcept>
@@ -31,6 +33,7 @@
   #include "cpp/co/schedule.h"
   #include "cpp/co/sync_wait.h"
   #include "cpp/co/task.h"
+  #include "cpp/co/thread_ctx_scope.h"
   #include "cpp/co/then.h"
   #include "cpp/service/rpc_handle.h"
   #include "engine/executor/executor_access.h"
@@ -313,6 +316,54 @@ TEST(IbmwCoExecutorTest, ConcurrentHopsKeepThreadContextConsistent) {
 }
 
   #endif  // IBMW_EXECUTOR_USE_SELFDEV_CORO
+
+// ThreadCtxScope (used by MakeResumer and by CallAwaitable's resumer) sets
+// only exe and restores the thread's whole previous context (exe, ctx_ptr,
+// active_rpc_context), also when the scope is left by an exception. The body
+// inside each scope clears ctx_ptr and active_rpc_context, so restoring only
+// exe would fail.
+TEST(IbmwCoExecutorTest, ThreadCtxScopeSetsExeAndRestoresContext) {
+  StartedExecutor<ParallelExecutor> exe_a("co_scope_a", "{thread_num: 1}");
+  StartedExecutor<ParallelExecutor> sentinel("co_scope_sentinel", "{thread_num: 1}");
+
+  const bool ok = RunOn(exe_a.Handle(), [&]() {
+    // A ctx_ptr identified by its owner (no Context is needed: the weak_ptr
+    // is only compared, never locked and dereferenced).
+    const auto owner = std::make_shared<int>(0);
+    const std::shared_ptr<ibmw::context::Context> ctx_marker(owner, nullptr);
+    const auto is_previous = [&]() {
+      const auto& ctx = g_thread_ctx.ctx_ptr;
+      return CurrentExeIs(sentinel.Handle()) && !ctx.owner_before(ctx_marker) && !ctx_marker.owner_before(ctx) &&
+             !ctx.expired() && g_thread_ctx.active_rpc_context.has_value();
+    };
+    g_thread_ctx.ctx_ptr = ctx_marker;
+    g_thread_ctx.exe = sentinel.Handle();
+    g_thread_ctx.active_rpc_context = ibmw::rpc::ContextRef();
+    const bool before = is_previous();
+    bool inside = false;
+    {
+      co::details::ThreadCtxScope scope(exe_a.Handle());
+      inside = CurrentExeIs(exe_a.Handle()) && !g_thread_ctx.ctx_ptr.expired() &&
+               g_thread_ctx.active_rpc_context.has_value();
+      g_thread_ctx.ctx_ptr.reset();
+      g_thread_ctx.active_rpc_context.reset();
+    }
+    const bool restored = is_previous();
+    bool threw = false;
+    try {
+      co::details::ThreadCtxScope scope(exe_a.Handle());
+      g_thread_ctx.ctx_ptr.reset();
+      g_thread_ctx.active_rpc_context.reset();
+      throw std::runtime_error("leave the scope");
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    const bool restored_after_throw = is_previous();
+    g_thread_ctx = {};
+    return before && inside && restored && threw && restored_after_throw;
+  });
+  EXPECT_TRUE(ok);
+}
 
 // IN-07: a coroutine RPC call (CoAccessBase::Call -> CallAwaitable) against a
 // fake service handle. Guards the GCC 11/12 aggregate co_await double

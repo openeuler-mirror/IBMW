@@ -121,9 +121,12 @@ class SdScheduler {
     explicit Awaiter(Pool* p) noexcept : PoolItem{&Resume}, pool(p) {}
     static void Resume(PoolItem* self) noexcept { static_cast<Awaiter*>(self)->h.resume(); }
     bool await_ready() const noexcept { return false; }
-    void await_suspend(std::coroutine_handle<> handle) {
+    // Awaiter rule 2 (coro/README.md): a worker may resume h, and destroy
+    // the frame holding *this, while Post() is still running.
+    IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> handle) {
+      Pool* const p = pool;
       h = handle;
-      pool->Post(this);
+      p->Post(this);
     }
     void await_resume() const noexcept {}
   };

@@ -32,5 +32,5 @@ ctest --test-dir build-selfdev
 Standalone builds use `-Wall -Wextra -Wshadow -Werror`. Sanitizers are
 enabled by passing e.g. `-DCMAKE_CXX_FLAGS=-fsanitize=thread`.
 
-Design documents, test plans and quality records are kept outside the
-source tree (`/oee_work/flx/st/selfdev_process/`).
+Design documents, test plans and quality records are maintained separately
+and are not part of the source delivery.

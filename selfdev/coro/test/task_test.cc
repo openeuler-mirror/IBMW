@@ -9,11 +9,16 @@
 #include <chrono>
 #include <condition_variable>
 #include <coroutine>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <utility>
 
+#include "ibmw_selfdev/coro/export.h"
 #include "ibmw_selfdev/coro/on.h"
 #include "ibmw_selfdev/coro/sync_wait.h"
 #include "ibmw_selfdev/coro/then.h"
@@ -131,7 +136,9 @@ struct OtherThreadAwaitable {
   explicit OtherThreadAwaitable(int v) noexcept : value(v) {}
   int value;
   bool await_ready() const noexcept { return false; }
-  void await_suspend(std::coroutine_handle<> h) const {
+  // noinline: the std::thread temporary must live on this stack, not in the
+  // frame the new thread may already have destroyed.
+  IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) const {
     std::thread([h] { h.resume(); }).detach();
   }
   int await_resume() const noexcept { return value; }
@@ -166,7 +173,7 @@ TEST(CoroTask, MoveConstructAndAssign) {
 
 // Resumes the awaiter on another thread, then keeps await_suspend (and so
 // the parent's Start()) busy for a moment, so the child usually completes
-// before Start() publishes that the parent suspended.
+// before Start() returns (before the parent counts as suspended).
 struct LateStartAwaitable {
   explicit LateStartAwaitable(std::thread::id* r) noexcept : resumer(r) {}
   std::thread::id* resumer;
@@ -235,11 +242,11 @@ struct ParkAwaitable {
   explicit ParkAwaitable(std::coroutine_handle<>* p) noexcept : parked(p) {}
   std::coroutine_handle<>* parked;
   bool await_ready() const noexcept { return false; }
-  void await_suspend(std::coroutine_handle<> h) const noexcept { *parked = h; }
+  IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) const noexcept { *parked = h; }
   void await_resume() const noexcept {}
 };
 
-// CO-12: the parent has fully suspended (Start() published kSuspended) before
+// CO-12: the parent has fully suspended (Start() returned true) before
 // the child is resumed on another thread -> the parent continues on that
 // thread through the final awaiter.
 TEST(CoroTask, HandoffParentSuspendsFirst) {
@@ -281,7 +288,8 @@ TEST(CoroTask, HandoffParentSuspendsFirst) {
 struct ResumeInlineAwaitable {
   ResumeInlineAwaitable() noexcept {}
   bool await_ready() const noexcept { return false; }
-  void await_suspend(std::coroutine_handle<> h) const { h.resume(); }
+  // The resumed coroutine may finish and destroy the frame holding *this.
+  IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) const { h.resume(); }
   void await_resume() const noexcept {}
 };
 

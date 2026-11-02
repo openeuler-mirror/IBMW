@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <coroutine>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <utility>
 
 #include "c/service/rpc_handle_base.h"
+#include "cpp/co/thread_ctx_scope.h"
 #include "cpp/context/details/thread_context.h"
 #include "cpp/service/rpc_co_filter.h"
 #include "cpp/util/function.h"
@@ -434,7 +436,7 @@ class CoAccessBase : public AccessBase {
   // (`co_await CallAwaitable{.x = ...}`): the shared_ptr members were released
   // twice, a heap use-after-free on every coroutine RPC call. A user-declared
   // constructor makes `co_await CallAwaitable(...)` / `{...}` safe on every
-  // compiler (see selfdev coro/接口设计.md, "awaiter rules").
+  // compiler (see selfdev/coro/README.md, "Rules for awaiters").
   struct CallAwaitable {
     CallAwaitable(ibmw::rpc::ServiceRef service_ref_in,
                   std::shared_ptr<const std::string> full_func_name_in,
@@ -521,16 +523,9 @@ class CoAccessBase : public AccessBase {
                 // Resume with g_thread_ctx.exe set to the calling executor, as
                 // co::IbmwExecutor's resumers do, so code after co_await (for
                 // example the next RPC call, which takes its resume executor
-                // from there) sees it. Only exe is set: ctx_ptr and
-                // active_rpc_context stay what the worker thread has (code
-                // after co_await that needs the module context calls
-                // Context::LetMe() first). The worker's own context is
-                // restored afterwards, also if resume() throws.
-                struct ThreadCtxRestore {
-                  decltype(ibmw::context::details::g_thread_ctx) previous = ibmw::context::details::g_thread_ctx;
-                  ~ThreadCtxRestore() { ibmw::context::details::g_thread_ctx = std::move(previous); }
-                } restore;
-                ibmw::context::details::g_thread_ctx.exe = resume_exe_copy;
+                // from there) sees it; the worker's own context is restored
+                // afterwards (see ThreadCtxScope).
+                ibmw::co::details::ThreadCtxScope scope(resume_exe_copy);
                 handle.resume();
               }
             });

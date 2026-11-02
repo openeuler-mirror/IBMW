@@ -10,12 +10,13 @@
 #include <condition_variable>
 #include <coroutine>
 #include <cstddef>
-#include <memory>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <thread>
 #include <vector>
 
+#include "ibmw_selfdev/coro/export.h"
 #include "ibmw_selfdev/coro/task.h"
 
 namespace ibmw::selfdev::coro::test {
@@ -62,19 +63,30 @@ class ThreadPool {
    public:
     explicit Scheduler(ThreadPool* pool) noexcept : pool_(pool) {}
 
-    struct Awaiter {
-      ThreadPool* pool;
-      Clock::time_point when;
+    // Follows the awaiter rules of README.md: not an aggregate; await_suspend
+    // is out of line and uses only local copies, because a worker may resume
+    // h (and destroy the frame holding *this) while Post() is still running.
+    class Awaiter {
+     public:
+      Awaiter(ThreadPool* pool, Clock::time_point when) noexcept : pool_(pool), when_(when) {}
       bool await_ready() const noexcept { return false; }
-      void await_suspend(std::coroutine_handle<> h) const { pool->Post(h, when); }
+      IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) const {
+        ThreadPool* const pool = pool_;
+        const Clock::time_point when = when_;
+        pool->Post(h, when);
+      }
       void await_resume() const noexcept {}
+
+     private:
+      ThreadPool* pool_;
+      Clock::time_point when_;
     };
 
-    Awaiter schedule() const noexcept { return {pool_, Clock::time_point::min()}; }
+    Awaiter schedule() const noexcept { return Awaiter(pool_, Clock::time_point::min()); }
     Awaiter schedule_after(std::chrono::nanoseconds d) const {
-      return {pool_, Clock::now() + std::chrono::duration_cast<Clock::duration>(d)};
+      return Awaiter(pool_, Clock::now() + std::chrono::duration_cast<Clock::duration>(d));
     }
-    Awaiter schedule_at(Clock::time_point tp) const noexcept { return {pool_, tp}; }
+    Awaiter schedule_at(Clock::time_point tp) const noexcept { return Awaiter(pool_, tp); }
 
     friend bool operator==(const Scheduler& a, const Scheduler& b) noexcept { return a.pool_ == b.pool_; }
 

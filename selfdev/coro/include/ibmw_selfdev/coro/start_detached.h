@@ -4,12 +4,10 @@
 #pragma once
 
 #include <type_traits>
-#include <utility>
 
 #include "ibmw_selfdev/coro/async_scope.h"
 #include "ibmw_selfdev/coro/concepts.h"
 #include "ibmw_selfdev/coro/export.h"
-#include "ibmw_selfdev/coro/sync_wait.h"
 
 namespace ibmw::selfdev::coro {
 

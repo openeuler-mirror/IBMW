@@ -221,6 +221,7 @@ class IbmwContext {
   #include "ibmw_selfdev/coro/concepts.h"
   #include "ibmw_selfdev/coro/export.h"
 
+  #include "cpp/co/thread_ctx_scope.h"
   #include "cpp/context/details/thread_context.h"
   #include "cpp/executor/executor_bus.h"
   #include "cpp/util/function.h"
@@ -229,20 +230,11 @@ namespace ibmw::co {
 
 namespace details {
 
-// Resumes h on the executor's thread with g_thread_ctx.exe set. Only exe is
-// set: ctx_ptr and active_rpc_context stay what the worker thread has, so
-// code after co_await that needs the module context (GetCurrentContext())
-// calls Context::LetMe() first. Coroutine bodies catch their own exceptions,
-// so resume() does not throw.
+// Resumes h on the executor's thread with g_thread_ctx.exe set (see
+// ThreadCtxScope for what is set and restored).
 inline auto MakeResumer(executor::ExecutorHandle executor_ref, std::coroutine_handle<> h) {
   return [executor_ref, h]() {
-    // Restored even if resume() throws (a foreign coroutine type whose
-    // unhandled_exception rethrows), so the worker keeps its own context.
-    struct ThreadCtxRestore {
-      decltype(ibmw::context::details::g_thread_ctx) previous = ibmw::context::details::g_thread_ctx;
-      ~ThreadCtxRestore() { ibmw::context::details::g_thread_ctx = std::move(previous); }
-    } restore;
-    ibmw::context::details::g_thread_ctx.exe = executor_ref;
+    ThreadCtxScope scope(executor_ref);
     h.resume();
   };
 }
@@ -253,12 +245,13 @@ inline auto MakeResumer(executor::ExecutorHandle executor_ref, std::coroutine_ha
 // awaiter that resumes the coroutine on the executor with g_thread_ctx.exe
 // set, as the unifex branch's receivers do.
 //
-// Awaiter rule (see selfdev coro 接口设计.md): once Dispatch*() has handed the
-// coroutine handle to the executor, the coroutine may run and be destroyed
-// on another thread, so await_suspend touches neither the awaiter nor any
-// other frame state afterwards, and is never inlined (Clang < 19 may place
-// the locals of an inlined await_suspend, e.g. the temporary task wrapper
-// destroyed after Dispatch() returns, in the coroutine frame).
+// Awaiter rule (see selfdev/coro/README.md, "Rules for awaiters"): once
+// Dispatch*() has handed the coroutine handle to the executor, the coroutine
+// may run and be destroyed on another thread, so await_suspend touches
+// neither the awaiter nor any other frame state afterwards, and is never
+// inlined (Clang < 19 may place the locals of an inlined await_suspend, e.g.
+// the temporary task wrapper destroyed after Dispatch() returns, in the
+// coroutine frame).
 class IbmwExecutor {
  public:
   // Awaiter
@@ -340,8 +333,8 @@ class IbmwExecutor {
 };
 
 // Awaiters that are co_await operands must not be aggregates (GCC 11/12
-// destroy an aggregate-initialized co_await operand twice; see selfdev coro
-// 接口设计.md, "awaiter rules").
+// destroy an aggregate-initialized co_await operand twice; see
+// selfdev/coro/README.md, "Rules for awaiters").
 static_assert(!std::is_aggregate_v<IbmwExecutor::ScheduleAwaiter>);
 static_assert(!std::is_aggregate_v<IbmwExecutor::ScheduleAfterAwaiter>);
 static_assert(!std::is_aggregate_v<IbmwExecutor::ScheduleAtAwaiter>);

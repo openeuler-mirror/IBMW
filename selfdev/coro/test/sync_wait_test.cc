@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <coroutine>
 #include <latch>
 
 #include "ibmw_selfdev/coro/coro.h"

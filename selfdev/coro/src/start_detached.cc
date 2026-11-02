@@ -3,6 +3,8 @@
 
 #include "ibmw_selfdev/coro/start_detached.h"
 
+#include "ibmw_selfdev/coro/sync_wait.h"
+
 namespace ibmw::selfdev::coro::detail {
 
 // Defined here, not inline in the header: one process-wide scope for every

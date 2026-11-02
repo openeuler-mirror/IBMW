@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cassert>
 #include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "ibmw_selfdev/coro/concepts.h"
+#include "ibmw_selfdev/coro/export.h"
 
 namespace ibmw::selfdev::coro {
 
@@ -88,10 +90,14 @@ class AsyncScope {
       return scope_->state_.load(std::memory_order_acquire) == 0;
     }
 
-    bool await_suspend(std::coroutine_handle<> h) {
-      std::lock_guard<std::mutex> lock(scope_->mu_);
-      if (scope_->state_.load(std::memory_order_acquire) == 0) return false;
-      scope_->waiters_.push_back(h);
+    // Publishes h to waiters_ under mu_; the last TaskDone() may resume it
+    // (and destroy the frame holding *this) as soon as mu_ is released, so
+    // only the local copy of scope_ is used.
+    IBMW_SELFDEV_CORO_NOINLINE bool await_suspend(std::coroutine_handle<> h) {
+      AsyncScope* const scope = scope_;
+      std::lock_guard<std::mutex> lock(scope->mu_);
+      if (scope->state_.load(std::memory_order_acquire) == 0) return false;
+      scope->waiters_.push_back(h);
       return true;
     }
 
@@ -108,7 +114,9 @@ class AsyncScope {
   /// No cancellation support: same as complete().
   [[nodiscard]] CompleteAwaiter cleanup() noexcept { return CompleteAwaiter(this); }
 
-  size_t ActiveCount() const noexcept { return static_cast<size_t>(state_.load(std::memory_order_acquire) >> 1); }
+  std::size_t ActiveCount() const noexcept {
+    return static_cast<std::size_t>(state_.load(std::memory_order_acquire) >> 1);
+  }
 
   bool Closed() const noexcept { return (state_.load(std::memory_order_acquire) & kOpen) == 0; }
 
@@ -153,7 +161,8 @@ class AsyncScope {
 };
 
 // co_await operand: must not be an aggregate (GCC 11/12 destroy an
-// aggregate-initialized co_await operand twice; see 接口设计.md).
+// aggregate-initialized co_await operand twice; see README.md, "Rules for
+// awaiters").
 static_assert(!std::is_aggregate_v<AsyncScope::CompleteAwaiter>);
 
 namespace detail {

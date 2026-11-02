@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-// Awaiter rules (see 接口设计.md, "awaiter 编写规则") and the review fixes
+// Awaiter rules (see README.md, "Rules for awaiters") and the review fixes
 // around them:
 //  - GCC 11/12 destroys the members of an aggregate-initialized co_await
 //    operand twice (`co_await Aw{x}`, `co_await Aw(x)` with C++20
@@ -27,6 +27,7 @@
 #include <utility>
 
 #include "ibmw_selfdev/coro/async_scope.h"
+#include "ibmw_selfdev/coro/export.h"
 #include "ibmw_selfdev/coro/on.h"
 #include "ibmw_selfdev/coro/scheduler.h"
 #include "ibmw_selfdev/coro/start_detached.h"
@@ -136,15 +137,18 @@ TEST(CoroAwaiterRules, NamedAwaiterDestroyedOnce) {
   }
 }
 
-// The library's own awaiters are never aggregates. (Awaiters that a library
-// function returns by value, e.g. InlineScheduler::schedule()'s
-// std::suspend_never, are safe whatever their type: the shape GCC gets wrong
-// is only a braced / parenthesized aggregate temporary written in the
-// co_await operand itself.)
+// The library's own awaiters are never aggregates, final awaiters included.
+// (Awaiters that a library function returns by value, e.g.
+// InlineScheduler::schedule()'s std::suspend_never, are safe whatever their
+// type: the shape GCC gets wrong is only a braced / parenthesized aggregate
+// temporary written in the co_await operand itself.)
 static_assert(!std::is_aggregate_v<std::remove_cvref_t<detail::AwaiterOf<Task<int>>>>);
 static_assert(!std::is_aggregate_v<std::remove_cvref_t<detail::AwaiterOf<Task<void>>>>);
+static_assert(!std::is_aggregate_v<detail::TaskPromiseBase::FinalAwaiter>);
+static_assert(!std::is_aggregate_v<detail::SyncWaitDriver<int>::promise_type::FinalAwaiter>);
 static_assert(!std::is_aggregate_v<AsyncScope::CompleteAwaiter>);
 static_assert(!std::is_aggregate_v<detail::OnAwaitable<InlineScheduler, Task<int>>>);
+static_assert(!std::is_aggregate_v<test::ThreadPool::Scheduler::Awaiter>);
 
 Task<Counter> MakeCounter(Counts* c, int v) { co_return Counter(c, v); }
 
@@ -321,7 +325,7 @@ TEST(CoroAsyncScopeDeathTest, DestroyedWithActiveWorkTerminates) {
          public:
           explicit Park(std::coroutine_handle<>* p) noexcept : p_(p) {}
           bool await_ready() const noexcept { return false; }
-          void await_suspend(std::coroutine_handle<> h) const noexcept { *p_ = h; }
+          IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) const noexcept { *p_ = h; }
           void await_resume() const noexcept {}
 
          private:
@@ -348,7 +352,9 @@ TEST(CoroStartDetachedDeathTest, ClosedScopeReportsDroppedWork) {
          public:
           Park() noexcept {}
           bool await_ready() const noexcept { return false; }
-          void await_suspend(std::coroutine_handle<> h) const noexcept {
+          // h is resumed by another thread once is_parked is set; parked and
+          // is_parked are statics, not frame state.
+          IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) const noexcept {
             parked = h;
             is_parked.store(true);
           }

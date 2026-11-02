@@ -50,15 +50,18 @@ describe what the algorithms accept.
    or name it (`Aw a(...); co_await a;`), or return it from a function /
    `operator co_await`. This applies to the operand itself: an aggregate
    wrapper with an `operator co_await`, written `co_await Wrap{...}`, is hit
-   the same way. Every awaiter in this library is a non-aggregate
-   (checked by `static_assert` in `test/awaiter_rules_test.cc`).
+   the same way. Every awaiter type this library defines, final awaiters
+   included, is a non-aggregate (checked by `static_assert` in
+   `test/awaiter_rules_test.cc`).
 2. **Nothing after publishing the handle.** Once `await_suspend` has handed
    the coroutine handle to another thread (executor queue, callback), the
    coroutine may already be resumed and its frame destroyed. Clang before 19
    may keep the awaiter and the locals of an inlined `await_suspend` in that
    frame. Copy what is needed into locals first, touch only those afterwards,
    and mark such an `await_suspend` `IBMW_SELFDEV_CORO_NOINLINE`
-   (`export.h`).
+   (`export.h`). Publishing under a mutex that the resuming side also takes
+   (`AsyncScope::CompleteAwaiter`, `SyncWait`'s final awaiter) counts as
+   publishing: the handle may run as soon as the mutex is released.
 
 ## One slot per process
 
@@ -69,6 +72,9 @@ thread_local used to be duplicated per DSO under `RTLD_DEEPBIND`,
 `-Bsymbolic` or version scripts (CO-17, `test/dso/`). Consequences:
 
 - Never build `src/task.cc` into a static library or into more than one DSO.
+- Only the `IBMW_SELFDEV_CORO_API` functions are exported (version script
+  `src/libibmw_selfdev_coro.map`); the `ibmw_selfdev_coro_exports` test
+  compares `nm -D --defined-only` of the library with `test/exports.txt`.
 - Installed with `ibmw` (`lib/`, Windows DLL in `bin/`); executables built by
   the IBMW project get `$ORIGIN/../lib` in their install RPATH. Downstream
   projects get the library through `find_package(ibmw)` and
@@ -83,8 +89,9 @@ thread_local used to be duplicated per DSO under `RTLD_DEEPBIND`,
 
 - No fibers / user-space stack switching (ucontext, boost.context): fibers
   sharing an OS thread would share the slot.
-- `STB_GNU_UNIQUE`: the library's own symbols are not unique, but GCC-built
-  modules that use coroutines still get libstdc++'s
+- `STB_GNU_UNIQUE`: the library exports no unique symbol (its copy of
+  libstdc++'s noop coroutine frame is local), but GCC-built modules that use
+  coroutines still get libstdc++'s
   `coroutine_handle<noop_coroutine_promise>::_S_fr` and `std::variant`
   vtable symbols as `STB_GNU_UNIQUE`, so `dlclose()` does not unload such a
   module. Build the module with `-fno-gnu-unique` if it must be unloadable.

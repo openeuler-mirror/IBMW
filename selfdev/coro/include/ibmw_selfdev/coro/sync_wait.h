@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "ibmw_selfdev/coro/concepts.h"
+#include "ibmw_selfdev/coro/export.h"
 
 namespace ibmw::selfdev::coro {
 
@@ -37,11 +38,12 @@ struct SyncWaitDriver {
     std::suspend_always initial_suspend() const noexcept { return {}; }
 
     struct FinalAwaiter {
+      FinalAwaiter() noexcept = default;
       bool await_ready() const noexcept { return false; }
       // Runs after the frame is suspended, so SyncWait may destroy it as
-      // soon as it observes `done`. Notify while holding the lock: the state
-      // lives on SyncWait's stack.
-      void await_suspend(std::coroutine_handle<promise_type> h) const noexcept {
+      // soon as it observes `done`: only the local `st` is used. Notify
+      // while holding the lock: the state lives on SyncWait's stack.
+      IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<promise_type> h) const noexcept {
         SyncWaitState<V>* st = h.promise().state;
         std::lock_guard<std::mutex> lock(st->mu);
         st->done = true;

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cassert>
+#include <concepts>
 #include <coroutine>
 #include <exception>
 #include <thread>
@@ -70,6 +71,7 @@ class TaskPromiseBase {
   //    continuation_ to the completing thread comes from whatever handed the
   //    task over (executor queue, RPC callback, ...).
   struct FinalAwaiter {
+    FinalAwaiter() noexcept = default;
     bool await_ready() const noexcept { return false; }
 
     template <class Promise>
