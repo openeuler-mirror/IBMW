@@ -92,6 +92,9 @@ details remain governed by the documentation for each release.
   longer reaches the message handler. Invalid frames and undecodable messages
   from a peer log at most once per second for each kind of problem; an invalid
   head or an oversized message is now a warning instead of an error.
+- Documentation: `listen_port` of the net extension's HTTP, TCP and UDP sections
+  is required when the section is set; it was wrongly listed with default `0`.
+  Missing `thread_num` or `listen_port` now names the option in the error.
 
 ### Added
 

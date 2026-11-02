@@ -1381,11 +1381,11 @@ Extension options:
 |-----|------|---------|-------------|
 | `thread_num` | uint32 | -- | Network I/O threads (required) |
 | `http_options.listen_ip` | string | `"127.0.0.1"` | HTTP listen IP (IPv4 or IPv6) |
-| `http_options.listen_port` | uint16 | `0` | HTTP listen port |
+| `http_options.listen_port` | uint16 | -- | HTTP listen port (required when `http_options` is set) |
 | `tcp_options.listen_ip` | string | `"127.0.0.1"` | TCP listen IP (IPv4 or IPv6) |
-| `tcp_options.listen_port` | uint16 | `0` | TCP listen port |
+| `tcp_options.listen_port` | uint16 | -- | TCP listen port (required when `tcp_options` is set) |
 | `udp_options.listen_ip` | string | `"127.0.0.1"` | UDP listen IP (IPv4 or IPv6) |
-| `udp_options.listen_port` | uint16 | `0` | UDP listen port |
+| `udp_options.listen_port` | uint16 | -- | UDP listen port (required when `udp_options` is set) |
 | `udp_options.max_pkg_size` | uint32 | `65535` | Max UDP datagram |
 
 #### MQTT Extension

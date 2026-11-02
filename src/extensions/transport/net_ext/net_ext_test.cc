@@ -23,6 +23,7 @@
 #include <optional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -115,6 +116,28 @@ TEST(NetDefaultsTest, ListenersDefaultToLoopback) {
   EXPECT_TRUE(ibmw::common::net::AsioTcpServer::Options{}.ep.address().is_loopback());
   EXPECT_TRUE(ibmw::common::net::AsioUdpServer::Options{}.ep.address().is_loopback());
   EXPECT_TRUE(ibmw::common::net::AsioHttpServer::Options{}.ep.address().is_loopback());
+}
+
+// TRANS-044: a missing required option is named in the error.
+TEST(NetOptionsTest, MissingRequiredOptionIsNamed) {
+  const auto expect_error = [](const char* yaml, const char* option) {
+    try {
+      NetExtension::ParseOptions(YAML::Load(yaml));
+      ADD_FAILURE() << yaml;
+    } catch (const std::exception& e) {
+      EXPECT_NE(std::string_view(e.what()).find(option), std::string_view::npos) << e.what();
+    }
+  };
+  expect_error("{http_options: {listen_port: 1}}", "thread_num");
+  expect_error("{thread_num: 1, http_options: {}}", "http_options.listen_port");
+  expect_error("{thread_num: 1, tcp_options: {listen_ip: 127.0.0.1}}", "tcp_options.listen_port");
+  expect_error("{thread_num: 1, udp_options: {}}", "udp_options.listen_port");
+
+  const auto options = NetExtension::ParseOptions(YAML::Load("{thread_num: 3, tcp_options: {listen_port: 7}}"));
+  EXPECT_EQ(options.thread_num, 3u);
+  ASSERT_TRUE(options.tcp_options);
+  EXPECT_EQ(options.tcp_options->listen_port, 7);
+  EXPECT_FALSE(options.http_options);
 }
 
 // ---------------------------------------------------------------- tcp / udp

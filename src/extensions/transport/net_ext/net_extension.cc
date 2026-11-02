@@ -45,9 +45,11 @@ struct convert<ibmw::extensions::net_extension::NetExtension::Options> {
   static bool decode(const Node& node, Options& rhs) {
     if (!node.IsMap()) return false;
 
+    MW_REQUIRE(node["thread_num"], "net_extension option thread_num is required.");
     rhs.thread_num = node["thread_num"].as<uint32_t>();
 
     if (node["http_options"]) {
+      MW_REQUIRE(node["http_options"]["listen_port"], "net_extension option http_options.listen_port is required.");
       rhs.http_options = Options::HttpOptions{
           .listen_ip = node["http_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["http_options"]["listen_port"].as<uint16_t>(),
@@ -55,6 +57,7 @@ struct convert<ibmw::extensions::net_extension::NetExtension::Options> {
     }
 
     if (node["tcp_options"]) {
+      MW_REQUIRE(node["tcp_options"]["listen_port"], "net_extension option tcp_options.listen_port is required.");
       rhs.tcp_options = Options::TcpOptions{
           .listen_ip = node["tcp_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["tcp_options"]["listen_port"].as<uint16_t>(),
@@ -62,6 +65,7 @@ struct convert<ibmw::extensions::net_extension::NetExtension::Options> {
     }
 
     if (node["udp_options"]) {
+      MW_REQUIRE(node["udp_options"]["listen_port"], "net_extension option udp_options.listen_port is required.");
       rhs.udp_options = Options::UdpOptions{
           .listen_ip = node["udp_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["udp_options"]["listen_port"].as<uint16_t>(),
@@ -100,11 +104,15 @@ NetExtension::NetExtension() {
   SetExtensionLogger(&g_logger);
 }
 
+NetExtension::Options NetExtension::ParseOptions(const YAML::Node& node) {
+  return node.as<Options>();
+}
+
 bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
   YAML::Node extension_options_node = core_ptr_->GetExtensionBus().GetExtensionOptionsNode(Name());
 
   if (extension_options_node && !extension_options_node.IsNull()) {
-    options_ = extension_options_node.as<Options>();
+    options_ = ParseOptions(extension_options_node);
   }
 
   asio_executor_ptr_ = std::make_shared<ibmw::common::net::AsioExecutor>(options_.thread_num);

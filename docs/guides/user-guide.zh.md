@@ -1307,11 +1307,11 @@ Extension 选项：
 |-----|------|------|------|
 | `thread_num` | uint32 | -- | 网络 I/O 线程数（必需） |
 | `http_options.listen_ip` | string | `"127.0.0.1"` | HTTP 监听 IP（IPv4 或 IPv6） |
-| `http_options.listen_port` | uint16 | `0` | HTTP 监听端口 |
+| `http_options.listen_port` | uint16 | -- | HTTP 监听端口（设置 `http_options` 时必填） |
 | `tcp_options.listen_ip` | string | `"127.0.0.1"` | TCP 监听 IP（IPv4 或 IPv6） |
-| `tcp_options.listen_port` | uint16 | `0` | TCP 监听端口 |
+| `tcp_options.listen_port` | uint16 | -- | TCP 监听端口（设置 `tcp_options` 时必填） |
 | `udp_options.listen_ip` | string | `"127.0.0.1"` | UDP 监听 IP（IPv4 或 IPv6） |
-| `udp_options.listen_port` | uint16 | `0` | UDP 监听端口 |
+| `udp_options.listen_port` | uint16 | -- | UDP 监听端口（设置 `udp_options` 时必填） |
 | `udp_options.max_pkg_size` | uint32 | `65535` | 最大 UDP 数据报 |
 
 #### MQTT Extension

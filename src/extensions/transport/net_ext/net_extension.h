@@ -15,6 +15,7 @@
 #include "net_base/asio_udp_cli.h"
 #include "net_base/asio_udp_svr.h"
 #include "net_ext/msg_handle_catalog.h"
+#include "yaml-cpp/yaml.h"
 
 namespace ibmw::extensions::net_extension {
 
@@ -28,19 +29,19 @@ class NetExtension : public ExtensionBase {
 
     struct HttpOptions {
       std::string listen_ip = kDefaultListenIp;
-      uint16_t listen_port;
+      uint16_t listen_port = 0;
     };
     std::optional<HttpOptions> http_options;
 
     struct TcpOptions {
       std::string listen_ip = kDefaultListenIp;
-      uint16_t listen_port;
+      uint16_t listen_port = 0;
     };
     std::optional<TcpOptions> tcp_options;
 
     struct UdpOptions {
       std::string listen_ip = kDefaultListenIp;
-      uint16_t listen_port;
+      uint16_t listen_port = 0;
       uint32_t max_pkg_size = 1024;
     };
     std::optional<UdpOptions> udp_options;
@@ -54,6 +55,9 @@ class NetExtension : public ExtensionBase {
 
   bool OnInit(runtime::core::Engine* core_ptr) override;
   void OnShutdown() override;
+
+  // Throws, naming the option, when a required one is missing.
+  static Options ParseOptions(const YAML::Node& node);
 
  private:
   void RegisterHttpRpcDriver();
