@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "engine/transport/transport_catalog.h"
@@ -43,7 +45,7 @@ class MessageHandlerTool {
       const runtime::core::transport::MessageHandlerWrapper& msg_msg_handler,
       const std::shared_ptr<void>& msg_ptr,
       CallbackInvoker&& callback_invoker) const {
-    MW_ASSERT(&msg_msg_handler == msg_handler_vec_[0], "Unexpected errors.");
+    MW_ASSERT(!msg_handler_vec_.empty() && &msg_msg_handler == msg_handler_vec_[0], "Unexpected errors.");
 
     runtime::core::transport::MessageFrame sub_msg_wrapper{
         .info = msg_msg_handler.info,
@@ -72,7 +74,15 @@ class MessageHandlerTool {
         buffer_array_ptr->AllocatorNativeHandle(),
         buffer_array_ptr->BufferArrayNativeHandle());
 
-    MW_ASSERT(serialize_ret, "Serialize failed.");
+    // The first handler already ran; a message that cannot be re-serialized
+    // only skips the remaining local subscribers.
+    if (!serialize_ret) [[unlikely]] {
+      serialize_failure_count_.fetch_add(1, std::memory_order_relaxed);
+      MW_LOG_INTERVAL(5000, FailureLogger(), ibmw::common::util::kLogLevelWarn,
+                      "Serialize failed, msg type: {}, topic: {}.",
+                      msg_msg_handler.info.msg_type, msg_msg_handler.info.topic_name);
+      return;
+    }
 
     auto* ptr = buffer_array_ptr.get();
     auto buffer_array_view_ptr = std::shared_ptr<ibmw::util::BufferArrayView>(
@@ -98,6 +108,14 @@ class MessageHandlerTool {
   }
 
   size_t MessageHandlerCount() const noexcept { return msg_handler_vec_.size(); }
+
+  uint64_t SerializeFailureCount() const noexcept {
+    return serialize_failure_count_.load(std::memory_order_relaxed);
+  }
+
+  uint64_t DeserializeFailureCount() const noexcept {
+    return deserialize_failure_count_.load(std::memory_order_relaxed);
+  }
 
   void DoMessageCallback(
       const std::shared_ptr<ibmw::transport::Context>& ctx_ptr,
@@ -153,6 +171,13 @@ class MessageHandlerTool {
   }
 
  private:
+  // The tool is shared by core and every driver and has no logger of its own;
+  // it is only used on the failure paths.
+  static const ibmw::common::util::LoggerWrapper& FailureLogger() {
+    static const ibmw::common::util::LoggerWrapper kLogger;
+    return kLogger;
+  }
+
   void DoMessageCallbackWithoutCache(
       const std::shared_ptr<ibmw::transport::Context>& ctx_ptr,
       const std::string& serialization_type,
@@ -165,7 +190,16 @@ class MessageHandlerTool {
       bool deserialize_ret = subscribe_type_support_ref.Deserialize(
           serialization_type, *(buffer_array_view.NativeHandle()), msg_ptr.get());
 
-      MW_ASSERT(deserialize_ret, "Msg deserialize failed.");
+      // The payload comes from the peer: a malformed message is dropped for
+      // this subscriber instead of throwing out of the transport thread.
+      if (!deserialize_ret) [[unlikely]] {
+        deserialize_failure_count_.fetch_add(1, std::memory_order_relaxed);
+        MW_LOG_INTERVAL(5000, FailureLogger(), ibmw::common::util::kLogLevelWarn,
+                        "Msg deserialize failed, msg type: {}, topic: {}, serialization type: {}.",
+                        msg_handler_ptr->info.msg_type, msg_handler_ptr->info.topic_name,
+                        serialization_type);
+        continue;
+      }
 
       runtime::core::transport::MessageFrame sub_msg_wrapper{
           .info = msg_handler_ptr->info,
@@ -201,6 +235,8 @@ class MessageHandlerTool {
  private:
   std::vector<const runtime::core::transport::MessageHandlerWrapper*> msg_handler_vec_;
   std::unordered_set<std::string> require_cache_serialization_types_;
+  mutable std::atomic<uint64_t> serialize_failure_count_{0};
+  mutable std::atomic<uint64_t> deserialize_failure_count_{0};
 };
 
 inline void CheckMsg(MessageFrame& msg_wrapper) {
