@@ -30,6 +30,11 @@ details remain governed by the documentation for each release.
   example the service's own code or `TIMEOUT`) instead of always
   `SVR_NOT_FOUND`; without the header the HTTP status is mapped (404 not found,
   408/504 timeout, 500 handle failed, 501 not implemented, 503 not ready).
+- Transport and RPC contexts: the arrays returned by `get_meta_keys` and
+  `get_meta_key_vals` are owned by the context and stay valid until its meta
+  data changes; reading no longer rewrites them, so concurrent readers are
+  safe and one call no longer invalidates the other's result. Entries are in
+  insertion order. The C ABI is unchanged.
 
 ### Added
 

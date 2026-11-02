@@ -16,6 +16,7 @@
 #endif
 
 #include "c/transport/transport_context_base.h"
+#include "cpp/util/meta_views.h"
 #include "cpp/util/string.h"
 #include "base/exception.h"
 #include "base/string_util.h"
@@ -49,7 +50,9 @@ class Context {
             .ops = GenOpsBase(),
             .ctx = this}) {
     for (const auto& [key, value] : other.meta_data_map_) {
-      meta_data_map_.emplace(key, value);
+      if (auto [it, inserted] = meta_data_map_.emplace(key, value); inserted) {
+        meta_views_.Add(it->first, it->second);
+      }
     }
   }
 
@@ -64,7 +67,9 @@ class Context {
             .ops = GenOpsBase(),
             .ctx = this}) {
     for (auto& [key, value] : other.meta_data_map_) {
-      meta_data_map_.emplace(key, std::move(value));
+      if (auto [it, inserted] = meta_data_map_.emplace(key, std::move(value)); inserted) {
+        meta_views_.Add(it->first, it->second);
+      }
     }
   }
 
@@ -80,6 +85,7 @@ class Context {
     used_ = false;
 
     meta_data_map_.clear();
+    meta_views_.Clear();
   }
 
   ibmw_transport_context_type_t GetType() const { return type_; }
@@ -94,9 +100,12 @@ class Context {
   void SetMetaValue(std::string_view key, std::string_view val) {
     auto finditr = meta_data_map_.find(key);
     if (finditr == meta_data_map_.end()) {
-      meta_data_map_.emplace(key, val);
+      if (auto [it, inserted] = meta_data_map_.emplace(key, val); inserted) {
+        meta_views_.Add(it->first, it->second);
+      }
     } else {
       finditr->second = std::string(val);
+      meta_views_.Update(finditr->first, finditr->second);
     }
   }
 
@@ -190,38 +199,10 @@ class Context {
               ibmw::util::ToStdStringView(key), ibmw::util::ToStdStringView(val));  //
         },
         .get_meta_keys = [](void* ctx) -> ibmw_string_view_array_t {
-          auto& self = *static_cast<Context*>(ctx);
-
-          const auto& meta_data_map = self.meta_data_map_;
-          auto& string_buffer_vec = self.string_buffer_vec_;
-
-          string_buffer_vec.clear();
-          string_buffer_vec.reserve(meta_data_map.size());
-
-          for (const auto& it : meta_data_map)
-            string_buffer_vec.emplace_back(ibmw::util::ToIbmwStringView(it.first));
-
-          return ibmw_string_view_array_t{
-              .str_array = string_buffer_vec.data(),
-              .len = string_buffer_vec.size()};
+          return static_cast<const Context*>(ctx)->meta_views_.Keys();
         },
         .get_meta_key_vals = [](void* ctx) -> ibmw_string_view_array_t {
-          auto& self = *static_cast<Context*>(ctx);
-
-          const auto& meta_data_map = self.meta_data_map_;
-          auto& string_buffer_vec = self.string_buffer_vec_;
-
-          string_buffer_vec.clear();
-          string_buffer_vec.reserve(meta_data_map.size() * 2);
-
-          for (const auto& it : meta_data_map) {
-            string_buffer_vec.emplace_back(ibmw::util::ToIbmwStringView(it.first));
-            string_buffer_vec.emplace_back(ibmw::util::ToIbmwStringView(it.second));
-          }
-
-          return ibmw_string_view_array_t{
-              .str_array = string_buffer_vec.data(),
-              .len = string_buffer_vec.size()};
+          return static_cast<const Context*>(ctx)->meta_views_.KeyVals();
         }};
 
     return &kOps;
@@ -235,7 +216,8 @@ class Context {
 
   MetaDataMap meta_data_map_;
 
-  std::vector<ibmw_string_view_t> string_buffer_vec_;
+  // Arrays returned by the get_meta_keys/get_meta_key_vals ops (API-026).
+  ibmw::util::MetaViews meta_views_;
 
   bool used_ = false;
 

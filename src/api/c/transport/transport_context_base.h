@@ -74,12 +74,18 @@ typedef struct {
   /**
    * @brief Function to get all meta keys
    *
+   * The array is owned by the context and stays valid until its meta data
+   * changes or it is destroyed. Concurrent calls are safe while the meta data
+   * is not modified.
    */
   ibmw_string_view_array_t (*get_meta_keys)(void* ctx);
 
   /**
    * @brief Function to get all meta keys and values
    *
+   * The array is owned by the context and stays valid until its meta data
+   * changes or it is destroyed. Concurrent calls are safe while the meta data
+   * is not modified.
    */
   ibmw_string_view_array_t (*get_meta_key_vals)(void* ctx);
 

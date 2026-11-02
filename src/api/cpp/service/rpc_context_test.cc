@@ -3,6 +3,11 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <string>
+#include <thread>
+#include <vector>
+
 #include "cpp/service/rpc_context.h"
 
 namespace ibmw::rpc {
@@ -27,6 +32,83 @@ TEST(RpcContext, OddKeyValCountIgnoresTrailingKey) {
   Context copied(ref);
   EXPECT_EQ(copied.GetMetaValue("k0"), "v0");
   EXPECT_EQ(copied.GetMetaValue("k1"), "");
+}
+
+// API-026: get_meta_keys/get_meta_key_vals hand out arrays owned by the
+// context; reading them never overwrites another reader's result.
+TEST(RpcContext, MetaArraysDoNotOverwriteEachOther) {
+  Context ctx;
+  ctx.SetMetaValue("k0", "v0");
+  ctx.SetMetaValue("k1", "v1");
+  ContextRef ref(ctx);
+  ref.GetMetaKeyValsArray();
+  const auto keys = ref.GetMetaKeysArray();
+  ref.GetMetaKeyValsArray();
+  ASSERT_EQ(keys.len, 2u);
+  for (size_t i = 0; i < keys.len; ++i) {
+    EXPECT_EQ(ibmw::util::ToStdStringView(keys.str_array[i]).front(), 'k');
+  }
+
+  ctx.SetMetaValue("k2", "v2");
+  EXPECT_EQ(ref.GetMetaKeysArray().len, 3u);
+  EXPECT_EQ(ref.GetMetaKeyValsArray().len, 6u);
+  ctx.Reset();
+  EXPECT_EQ(ref.GetMetaKeysArray().len, 0u);
+}
+
+TEST(RpcContext, ConcurrentMetaArrayReadsAreConsistent) {
+  Context ctx;
+  for (int i = 0; i < 8; ++i) ctx.SetMetaValue("k" + std::to_string(i), "v" + std::to_string(i));
+  ContextRef ref(ctx);
+  std::atomic<int> bad{0};
+  std::vector<std::thread> readers;
+  for (int t = 0; t < 4; ++t) {
+    readers.emplace_back([&] {
+      for (int i = 0; i < 20000; ++i) {
+        const auto arr = ref.GetMetaKeyValsArray();
+        if (arr.len != 16) {
+          ++bad;
+          continue;
+        }
+        for (size_t j = 0; j < arr.len; ++j) {
+          if (ibmw::util::ToStdStringView(arr.str_array[j]).front() != (j % 2 ? 'v' : 'k')) ++bad;
+        }
+      }
+    });
+  }
+  for (auto& reader : readers) reader.join();
+  EXPECT_EQ(bad.load(), 0);
+}
+
+// The arrays follow every change, including past the inline capacity.
+TEST(RpcContext, MetaArraysTrackChanges) {
+  const auto check = [](const Context& ctx, size_t expected) {
+    const auto kv = ContextRef(ctx).GetMetaKeyValsArray();
+    const auto keys = ContextRef(ctx).GetMetaKeysArray();
+    ASSERT_EQ(keys.len, expected);
+    ASSERT_EQ(kv.len, 2 * expected);
+    for (size_t i = 0; i < expected; ++i) {
+      const auto key = ibmw::util::ToStdStringView(kv.str_array[2 * i]);
+      EXPECT_EQ(ibmw::util::ToStdStringView(keys.str_array[i]), key);
+      EXPECT_EQ(ibmw::util::ToStdStringView(kv.str_array[2 * i + 1]), ctx.GetMetaValue(key)) << key;
+    }
+  };
+  Context ctx;
+  for (int i = 0; i < 10; ++i) ctx.SetMetaValue("k" + std::to_string(i), "v" + std::to_string(i));
+  check(ctx, 10);
+  ctx.SetMetaValue("k1", std::string(100, 'x'));
+  ctx.SetMetaValue("k7", std::string(100, 'y'));
+  check(ctx, 10);
+
+  const Context copy(ctx);
+  check(copy, 10);
+  EXPECT_NE(ContextRef(copy).GetMetaKeysArray().str_array[0].str,
+            ContextRef(ctx).GetMetaKeysArray().str_array[0].str);
+
+  ctx.Reset();
+  check(ctx, 0);
+  ctx.SetMetaValue("a", "b");
+  check(ctx, 1);
 }
 
 }  // namespace
