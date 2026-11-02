@@ -79,6 +79,9 @@ bench_results/
 *.bench.json
 perf.data
 perf.data.old
+*.jsonl
+managed_exact_candidate_runs/
+topology-artifacts/
 
 # ---- Python virtualenv ------------------------------------------------------
 venv/
@@ -90,6 +93,8 @@ env/
 local.cmake
 .envrc
 .omc/
+.opencode/
+selfdev/
 
 # ---- Generated regen tmp ----------------------------------------------------
 *.regen.tmp
