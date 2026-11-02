@@ -8,7 +8,7 @@
 #
 # Used by the verification workflow to regenerate all 14 in-tree samples.
 
-set -u
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -17,6 +17,11 @@ cd "${REPO_ROOT}"
 PASS=0
 FAIL=0
 FAIL_LIST=()
+
+# Private log directory: a fixed /tmp name could be a planted link or be
+# overwritten by a concurrent run. Kept when a sample fails.
+LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ibmw_regen.XXXXXX") || exit 2
+trap '[[ $FAIL -eq 0 ]] && rm -rf -- "$LOG_DIR"' EXIT
 
 shopt -s nullglob
 yaml_files=(src/samples/cpp/*/*.ibmw.yaml)
@@ -36,7 +41,7 @@ for y in "${yaml_files[@]}"; do
     else
         out="$sdir/${name}_gen"
     fi
-    log=/tmp/regen_$(basename "$y" .ibmw.yaml).log
+    log="$LOG_DIR/regen_$(basename "$y" .ibmw.yaml).log"
     if python3 src/tools/ibmw_gen/ibmw_gen.py "$y" -o "$out" --force > "$log" 2>&1; then
         PASS=$((PASS+1))
         n_new=$(grep -oE '[0-9]+ new'    "$log" | head -1)
