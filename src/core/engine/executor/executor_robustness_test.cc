@@ -165,6 +165,27 @@ TEST(ExecutorRobustness, TimerExecutorPlacesTasksDispatchedAtAnyTick) {
 // Before Start() there is no time origin and after Shutdown() no wheel: a
 // timed task is dropped instead of being lost in the far map (or touching
 // freed wheels); a time point before the start is due at once.
+// CORE-034: with the default steady ticks Now() is still system time, so a
+// target computed from system_clock::now() runs on time.
+TEST(ExecutorRobustness, TimerExecutorSpeaksSystemTimeOnSteadyTicks) {
+  executor::TimerExecutor exe;
+  exe.SetLogger(MakeLogger());
+  exe.RegisterGetExecutorFunc([](std::string_view) { return ibmw::executor::ExecutorHandle(); });
+  exe.Initialize("timer_system_time", YAML::Load("{dt_us: 1000, use_system_clock: false}"));
+  exe.Start();
+  EXPECT_LT(std::chrono::abs(exe.Now() - std::chrono::system_clock::now()), std::chrono::seconds(1));
+
+  std::atomic_bool ran{false};
+  exe.DispatchAt(std::chrono::system_clock::now() + std::chrono::milliseconds(20),
+                 ibmw::executor::Task([&ran] { ran = true; }));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!ran.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(ran.load());
+  exe.Shutdown();
+}
+
 TEST(ExecutorRobustness, TimerExecutorDispatchOutsideRunningState) {
   executor::TimerExecutor exe;
   exe.SetLogger(MakeLogger());

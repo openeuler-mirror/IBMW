@@ -280,11 +280,11 @@ void TimerExecutor::TimerLoop() {
   auto last_loop_sys_tp = std::chrono::system_clock::now();
   auto last_loop_std_tp = std::chrono::steady_clock::now();
 
-  // Record the initial time
+  // Record the initial time. Ticks follow the steady clock unless
+  // use_system_clock is set, but Now() and DispatchAt() always speak system
+  // time (like the thread pool executor), so system_clock::now() + d works.
   start_time_point_ =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          (options_.use_system_clock ? last_loop_sys_tp.time_since_epoch() : last_loop_std_tp.time_since_epoch()))
-          .count();
+      std::chrono::duration_cast<std::chrono::nanoseconds>(last_loop_sys_tp.time_since_epoch()).count();
 
   start_flag_.store(true);
   start_flag_.notify_all();

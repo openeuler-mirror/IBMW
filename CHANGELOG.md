@@ -44,6 +44,10 @@ details remain governed by the documentation for each release.
 - Discovery: a plugin found through `IBMW_DISCOVERY_PLUGIN_DIR` is only loaded
   when its directory and library belong to the current user or root and are
   not world writable; setuid processes ignore the variable.
+- Timer executor: with `use_system_clock: false` (the default) ticks still
+  follow the steady clock, but `Now()` and `DispatchAt()` now use system time
+  anchored at start, like the thread pool executor. Previously `Now()` returned
+  a steady clock value, so targets computed from `system_clock::now()` never ran.
 
 ### Added
 
