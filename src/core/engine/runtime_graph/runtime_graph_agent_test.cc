@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include <poll.h>
@@ -106,6 +107,88 @@ TEST_F(RuntimeGraphAgentTest, IncompleteRequestTimesOutWithoutStoppingService) {
 
   RuntimeGraphAgentClient client(agent.Registration().control_socket);
   EXPECT_TRUE(client.ListTopics().empty());
+}
+
+// A raw connection to the agent's control socket.
+struct RawClient {
+  explicit RawClient(const std::string& path) {
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    EXPECT_LT(path.size(), sizeof(address.sun_path));
+    std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+    EXPECT_EQ(::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    ConfigureRuntimeSocket(fd);
+  }
+  ~RawClient() { ::close(fd); }
+
+  void Send(std::string_view data) const {
+    EXPECT_EQ(::send(fd, data.data(), data.size(), MSG_NOSIGNAL), static_cast<ssize_t>(data.size()));
+  }
+
+  nlohmann::json ReadResponse() const {
+    std::string response;
+    while (response.find('\n') == std::string::npos) {
+      char buffer[1024];
+      const auto received = ::recv(fd, buffer, sizeof(buffer), 0);
+      if (received <= 0) return nullptr;
+      response.append(buffer, static_cast<size_t>(received));
+    }
+    return nlohmann::json::parse(response);
+  }
+
+  int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+};
+
+// COMM-026: one silent or slow client holds the serial agent for at most the
+// request deadline, not a socket timeout per received chunk.
+TEST_F(RuntimeGraphAgentTest, StalledClientsAreCutOffAtTheRequestDeadline) {
+  RuntimeGraphAgent agent({.registration = {.runtime_id = "deadline-agent"},
+                           .registry_path = directory_});
+  agent.Initialize();
+  agent.Start();
+  const auto& path = agent.Registration().control_socket;
+
+  for (const bool drip : {false, true}) {
+    RawClient stalled(path);
+    std::thread sender;
+    if (drip) {
+      sender = std::thread([&stalled] {
+        for (int i = 0; i < 12 && stalled.fd >= 0; ++i) {
+          if (::send(stalled.fd, " ", 1, MSG_NOSIGNAL) != 1) return;
+          std::this_thread::sleep_for(250ms);
+        }
+      });
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const auto response = stalled.ReadResponse();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    if (sender.joinable()) sender.join();
+    ASSERT_TRUE(response.is_object()) << "drip=" << drip;
+    EXPECT_FALSE(response.at("ok").get<bool>());
+    EXPECT_NE(response.at("error").get<std::string>().find("Runtime Agent request timed out."), std::string::npos);
+    EXPECT_LT(elapsed, kRuntimeRequestTimeout + 1s) << "drip=" << drip;
+  }
+
+  RuntimeGraphAgentClient client(path);
+  EXPECT_TRUE(client.ListTopics().empty());
+}
+
+// COMM-026: a request cut short by the peer is rejected, not parsed.
+TEST_F(RuntimeGraphAgentTest, RequestWithoutNewlineIsRejected) {
+  RuntimeGraphAgent agent({.registration = {.runtime_id = "newline-agent"},
+                           .registry_path = directory_});
+  agent.Initialize();
+  agent.Start();
+
+  RawClient client(agent.Registration().control_socket);
+  client.Send(nlohmann::json{{"protocol_version", kRuntimeProtocolVersion},
+                             {"id", 1}, {"method", "ListTopics"}, {"params", nlohmann::json::object()}}
+                  .dump());
+  ASSERT_EQ(::shutdown(client.fd, SHUT_WR), 0);
+  const auto response = client.ReadResponse();
+  ASSERT_TRUE(response.is_object());
+  EXPECT_FALSE(response.at("ok").get<bool>());
+  EXPECT_NE(response.at("error").get<std::string>().find("Runtime Agent request ended without a newline."), std::string::npos);
 }
 
 TEST_F(RuntimeGraphAgentTest, ShutdownWakesIdleListenerAndRemovesRegistration) {

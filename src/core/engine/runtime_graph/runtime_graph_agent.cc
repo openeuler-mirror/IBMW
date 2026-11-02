@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <optional>
@@ -302,7 +303,7 @@ void RuntimeGraphAgent::Serve() {
     }
     try {
       RequireSameUid(client);
-      ConfigureRuntimeSocket(client);
+      ConfigureRuntimeSocket(client, kRuntimeRequestTimeout);
       HandleClient(client);
     } catch (...) {
     }
@@ -318,18 +319,22 @@ void RuntimeGraphAgent::HandleClient(int client_fd) {
   try {
     std::string request_data;
     std::array<char, 4096> buffer{};
-    while (request_data.size() < kRuntimeMaxControlMessage) {
+    const auto deadline = std::chrono::steady_clock::now() + kRuntimeRequestTimeout;
+    bool complete = false;
+    while (!complete && request_data.size() < kRuntimeMaxControlMessage) {
       const ssize_t received = ::recv(client_fd, buffer.data(), buffer.size(), 0);
-      if (received <= 0) {
-        break;
+      if (received < 0 && errno == EINTR) {
+        continue;
       }
+      MW_ASSERT(received >= 0, "Runtime Agent request timed out.");
+      MW_ASSERT(received > 0, "Runtime Agent request ended without a newline.");
+      complete = std::memchr(buffer.data(), '\n', static_cast<size_t>(received)) != nullptr;
       request_data.append(buffer.data(), static_cast<size_t>(received));
-      if (request_data.find('\n') != std::string::npos) {
-        break;
-      }
+      MW_ASSERT(complete || std::chrono::steady_clock::now() < deadline,
+                "Runtime Agent request timed out.");
     }
     MW_ASSERT(
-        !request_data.empty() && request_data.size() < kRuntimeMaxControlMessage,
+        complete && request_data.size() < kRuntimeMaxControlMessage,
         "Invalid Runtime Agent request size.");
     response = HandleRequest(nlohmann::json::parse(request_data));
   } catch (const std::exception& error) {
