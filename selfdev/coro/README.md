@@ -100,6 +100,13 @@ thread_local used to be duplicated per DSO under `RTLD_DEEPBIND`,
   construction. Statics that detached work uses must be constructed before
   the first `StartDetached`; calling it after the drain is undefined;
   `quick_exit` / `_exit` skip the drain.
+- Unloading a module while its detached work is in flight: the scope is
+  process-wide and is only drained at exit, so `dlclose()` of a module does
+  not wait for coroutines it started with `StartDetached` (in IBMW, the
+  generated RPC handler coroutines of a package). If one is still running,
+  its remaining code runs from the unloaded module. Unload a package only
+  after its RPC calls and other detached work have finished, or do not
+  unload it.
 - Thread-local state read inside a coroutine (for example IBMW's
   `g_thread_ctx`) is re-read after each resume by GCC 11/12 and Clang 14 at
   -O1..-O3 (checked, including shared-library builds); do not keep a
