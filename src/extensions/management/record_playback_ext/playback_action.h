@@ -151,6 +151,7 @@ class PlaybackAction {
   std::unordered_map<uint64_t, TopicMeta> topic_meta_map_;
   std::unordered_map<std::string, uint64_t> topic_name_to_topic_id_map_;
   std::unordered_map<uint64_t, uint64_t> channel_id_to_topic_id_map_;
+  bool unknown_channel_warned_ = false;  // once per file
 
   std::unique_ptr<mcap::McapReader> reader_;
   std::unique_ptr<mcap::LinearMessageView> msg_reader_ptr_;

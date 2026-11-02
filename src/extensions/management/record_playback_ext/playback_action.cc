@@ -411,10 +411,13 @@ bool PlaybackAction::OpenNewMcaptoPlayBack() {
     return false;
   }
 
+  // Channel ids are per file.
+  channel_id_to_topic_id_map_.clear();
+  unknown_channel_warned_ = false;
   for (auto& [channel_id, channel] : reader_->channels()) {
     auto iter = topic_name_to_topic_id_map_.find(channel->topic);
     if (iter == topic_name_to_topic_id_map_.end()) continue;
-    channel_id_to_topic_id_map_[channel_id] = topic_name_to_topic_id_map_[channel->topic];
+    channel_id_to_topic_id_map_[channel_id] = iter->second;
   }
 
   mcap::ReadMessageOptions options;
@@ -469,8 +472,20 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
         }
       }
       const auto& message = (**msg_reader_itr_).message;
-      uint64_t topic_id = channel_id_to_topic_id_map_[message.channelId];
+      auto topic_itr = channel_id_to_topic_id_map_.find(message.channelId);
+      if (topic_itr == channel_id_to_topic_id_map_.end()) [[unlikely]] {
+        // A channel missing from the file summary: never published as
+        // another topic.
+        if (!unknown_channel_warned_) {
+          MW_WARN("Skip messages of unknown channel {} (not in the file summary).", message.channelId);
+          unknown_channel_warned_ = true;
+        }
+        (*msg_reader_itr_)++;
+        continue;
+      }
+      uint64_t topic_id = topic_itr->second;
       uint64_t timestamp = message.logTime;
+      // Bounded by the record the reader already holds in memory.
       size_t size = message.dataSize;
       std::unique_ptr<char[]> data = std::make_unique<char[]>(size);
       std::memcpy(data.get(), message.data, size);
