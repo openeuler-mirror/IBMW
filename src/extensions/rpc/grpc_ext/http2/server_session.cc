@@ -197,6 +197,7 @@ void ServerSession::OnFullRequest(const RequestPtr& request_ptr) {
 }
 
 std::forward_list<RequestPtr> ServerSession::GetFullRequestList() {
+  full_request_list_.reverse();  // OnFullRequest pushes to the front
   return std::move(full_request_list_);
 }
 

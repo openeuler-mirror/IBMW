@@ -38,6 +38,8 @@
 #include "grpc_ext/grpc_extension.h"
 #include "grpc_ext/grpc_rpc_driver.h"
 #include "grpc_ext/http2/header.h"
+#include "grpc_ext/http2/request.h"
+#include "grpc_ext/http2/server_session.h"
 
 namespace ibmw::extensions::grpc_extension {
 namespace {
@@ -110,6 +112,20 @@ const ibmw_type_support_base_t* IntTypeSupport() {
       .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
       .ctx = nullptr};
   return &ts;
+}
+
+// EXT-007: requests completed in one read are handed out in that order.
+TEST(GrpcServerSessionTest, FullRequestsKeepCompletionOrder) {
+  http2::ServerSession session;
+  for (int32_t id : {1, 3, 5}) {
+    auto request = std::make_shared<http2::Request>(0);
+    request->SetStreamId(id);
+    session.OnFullRequest(request);
+  }
+  std::vector<int32_t> ids;
+  for (const auto& request : session.GetFullRequestList()) ids.push_back(request->GetStreamId());
+  EXPECT_EQ(ids, (std::vector<int32_t>{1, 3, 5}));
+  EXPECT_TRUE(session.GetFullRequestList().empty());
 }
 
 TEST(GrpcTimeoutTest, ParsesUpToEightDigits) {

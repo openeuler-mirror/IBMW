@@ -22,6 +22,7 @@ class ServerSession : public Session {
 
   void OnFullRequest(const RequestPtr& request_ptr);
   [[nodiscard]] size_t MaxRequestBodySize() const { return settings_.max_request_body_size; }
+  // In the order the requests completed.
   [[nodiscard]] std::forward_list<RequestPtr> GetFullRequestList();
 
  private:
