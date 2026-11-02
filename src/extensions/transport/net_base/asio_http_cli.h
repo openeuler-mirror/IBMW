@@ -547,7 +547,7 @@ class AsioHttpClientPool
       const AsioHttpClient::Options& client_options) {
     return boost::asio::co_spawn(
         mgr_strand_,
-        [this, &client_options]() -> Awaitable<std::shared_ptr<AsioHttpClient>> {
+        [this, client_options]() -> Awaitable<std::shared_ptr<AsioHttpClient>> {
           if (state_.load() != State::kStart) [[unlikely]] {
             MW_WARN("Http cli pool is closed, will not return cli instance.");
             co_return std::shared_ptr<AsioHttpClient>();

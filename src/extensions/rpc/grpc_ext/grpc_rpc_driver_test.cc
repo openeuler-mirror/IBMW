@@ -648,5 +648,24 @@ TEST(GrpcServerAcceptTest, ConnectionLimitIsEnforced) {
   svr->Shutdown();
 }
 
+// TRANS-040: the pool key keeps host and service apart.
+TEST(GrpcClientPoolTest, HostAndServiceDoNotRunTogether) {
+  IoThreads io{2};
+  auto pool = std::make_shared<client::AsioHttp2ClientPool>(io.Io());
+  pool->Initialize(client::ClientPoolOptions{});
+  pool->Start();
+  const auto get = [&](std::string host, std::string service) {
+    client::ClientOptions options;
+    options.host = std::move(host);
+    options.service = std::move(service);
+    return asio::co_spawn(*io.Io(), pool->GetClient(options), asio::use_future).get();
+  };
+  const auto first = get("10.0.0.1", "23");
+  ASSERT_TRUE(first);
+  EXPECT_EQ(get("10.0.0.1", "23"), first);
+  EXPECT_NE(get("10.0.0.12", "3"), first);
+  pool->Shutdown();
+}
+
 }  // namespace
 }  // namespace ibmw::extensions::grpc_extension

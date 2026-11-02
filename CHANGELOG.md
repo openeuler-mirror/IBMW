@@ -85,6 +85,9 @@ details remain governed by the documentation for each release.
 - Net extension: `listen_ip` of the HTTP, TCP and UDP listeners may be an IPv6
   address, and the UDP client reaches IPv6 servers (previously only IPv4 was
   accepted and an IPv6 `listen_ip` failed startup).
+- TCP/UDP client pools and the gRPC client pool identify a client by its full
+  address. Previously two addresses could share a client, and messages for one
+  server went to the other.
 
 ### Added
 

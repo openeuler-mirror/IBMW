@@ -552,15 +552,13 @@ class AsioTcpClientPool
       const AsioTcpClient::Options& client_options) {
     return boost::asio::co_spawn(
         mgr_strand_,
-        [this, &client_options]() -> Awaitable<std::shared_ptr<AsioTcpClient>> {
+        [this, client_options]() -> Awaitable<std::shared_ptr<AsioTcpClient>> {
           if (state_.load() != State::kStart) [[unlikely]] {
             MW_WARN("Tcp cli pool is closed, will not return cli instance.");
             co_return std::shared_ptr<AsioTcpClient>();
           }
 
-          const size_t client_hash = AsioEndpointHash{}(client_options.svr_ep);
-
-          auto itr = client_map_.find(client_hash);
+          auto itr = client_map_.find(client_options.svr_ep);
           if (itr != client_map_.end()) {
             if (itr->second->IsRunning()) co_return itr->second;
             client_map_.erase(itr);
@@ -583,7 +581,7 @@ class AsioTcpClientPool
           client_ptr->Initialize(client_options);
           client_ptr->Start();
 
-          client_map_.emplace(client_hash, client_ptr);
+          client_map_.emplace(client_options.svr_ep, client_ptr);
           co_return client_ptr;
         },
         boost::asio::use_awaitable);
@@ -613,7 +611,7 @@ class AsioTcpClientPool
   std::atomic<State> state_ = State::kPreInit;
 
   // Client management
-  std::unordered_map<size_t, std::shared_ptr<AsioTcpClient>> client_map_;
+  std::unordered_map<AsioTcpClient::Tcp::endpoint, std::shared_ptr<AsioTcpClient>, AsioEndpointHash> client_map_;
 };
 
 }  // namespace ibmw::common::net

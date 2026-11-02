@@ -1156,5 +1156,101 @@ TEST(NetDriverPackageSizeTest, NormalPackageStillArrives) {
   udp_svr->Shutdown();
 }
 
+std::shared_ptr<asio::streambuf> MakeBuf(const std::string& data) {
+  auto buf = std::make_shared<asio::streambuf>();
+  asio::buffer_copy(buf->prepare(data.size()), asio::buffer(data));
+  buf->commit(data.size());
+  return buf;
+}
+
+// TRANS-040: these addresses have the same AsioEndpointHash on every port.
+const auto kCollidingA = asio::ip::make_address("127.214.200.135");
+const auto kCollidingB = asio::ip::make_address("127.214.201.198");
+
+TEST(NetClientPoolTest, EndpointsWithEqualHashReachTheirOwnServer) {
+  IoThreads io;
+  const uint16_t tcp_port = FreeTcpPort();
+  const Tcp::endpoint tcp_ep[2] = {{kCollidingA, tcp_port}, {kCollidingB, tcp_port}};
+  ASSERT_EQ(ibmw::common::net::AsioEndpointHash{}(tcp_ep[0]), ibmw::common::net::AsioEndpointHash{}(tcp_ep[1]));
+  Received tcp_received[2];
+  std::shared_ptr<ibmw::common::net::AsioTcpServer> tcp_svr[2];
+  auto tcp_pool = std::make_shared<ibmw::common::net::AsioTcpClientPool>(io.Io());
+  tcp_pool->Initialize({});
+  tcp_pool->Start();
+  for (int i = 0; i < 2; ++i) {
+    tcp_svr[i] = std::make_shared<ibmw::common::net::AsioTcpServer>(io.Io());
+    tcp_svr[i]->RegisterMsgHandle([r = &tcp_received[i]](const Tcp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+      r->Add(ep, buf);
+    });
+    tcp_svr[i]->Initialize({.ep = tcp_ep[i]});
+    tcp_svr[i]->Start();
+    auto cli = asio::co_spawn(*io.Io(), tcp_pool->GetClient({.svr_ep = tcp_ep[i]}), asio::use_future).get();
+    ASSERT_TRUE(cli);
+    cli->SendMsg(MakeBuf(std::to_string(i)));
+    ASSERT_TRUE(tcp_received[i].WaitFor(1)) << "tcp server " << i;
+    EXPECT_EQ(tcp_received[i].msgs[0].second, std::to_string(i));
+  }
+
+  const uint16_t udp_port = FreeUdpPort();
+  const Udp::endpoint udp_ep[2] = {{kCollidingA, udp_port}, {kCollidingB, udp_port}};
+  Received udp_received[2];
+  std::shared_ptr<ibmw::common::net::AsioUdpServer> udp_svr[2];
+  auto udp_pool = std::make_shared<ibmw::common::net::AsioUdpClientPool>(io.Io());
+  udp_pool->Initialize({});
+  udp_pool->Start();
+  for (int i = 0; i < 2; ++i) {
+    udp_svr[i] = std::make_shared<ibmw::common::net::AsioUdpServer>(io.Io());
+    udp_svr[i]->RegisterMsgHandle([r = &udp_received[i]](const Udp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+      r->Add(ep, buf);
+    });
+    udp_svr[i]->Initialize({.ep = udp_ep[i]});
+    udp_svr[i]->Start();
+    auto cli = asio::co_spawn(*io.Io(), udp_pool->GetClient({.svr_ep = udp_ep[i]}), asio::use_future).get();
+    ASSERT_TRUE(cli);
+    cli->SendMsg(MakeBuf(std::to_string(i)));
+    ASSERT_TRUE(udp_received[i].WaitFor(1)) << "udp server " << i;
+    EXPECT_EQ(udp_received[i].msgs[0].second, std::to_string(i));
+  }
+
+  tcp_pool->Shutdown();
+  udp_pool->Shutdown();
+  for (auto& svr : tcp_svr) svr->Shutdown();
+  for (auto& svr : udp_svr) svr->Shutdown();
+}
+
+// TRANS-040: GetClient starts when it is awaited; the options it uses are the
+// ones of the call, whatever happens to the caller's object until then.
+template <typename Pool, typename Options>
+void ExpectGetClientKeepsOptions(IoThreads& io, Options options, const Options& changed) {
+  auto pool = std::make_shared<Pool>(io.Io());
+  pool->Initialize({});
+  pool->Start();
+  auto first = asio::co_spawn(*io.Io(), pool->GetClient(options), asio::use_future).get();
+  auto pending = pool->GetClient(options);
+  options = changed;
+  auto second = asio::co_spawn(*io.Io(), std::move(pending), asio::use_future).get();
+  EXPECT_TRUE(first);
+  EXPECT_EQ(first, second);
+  pool->Shutdown();
+}
+
+TEST(NetClientPoolTest, GetClientKeepsOptionsUntilAwaited) {
+  IoThreads io;
+  Received received;
+  const uint16_t tcp_port = FreeTcpPort();
+  auto svr = MakeTcpServer(io, received, tcp_port);
+  svr->Start();
+  ExpectGetClientKeepsOptions<ibmw::common::net::AsioTcpClientPool>(
+      io, ibmw::common::net::AsioTcpClient::Options{.svr_ep = Tcp::endpoint(kLoopback, tcp_port)},
+      ibmw::common::net::AsioTcpClient::Options{.svr_ep = Tcp::endpoint(kCollidingA, tcp_port)});
+  ExpectGetClientKeepsOptions<ibmw::common::net::AsioUdpClientPool>(
+      io, ibmw::common::net::AsioUdpClient::Options{.svr_ep = Udp::endpoint(kLoopback, 9)},
+      ibmw::common::net::AsioUdpClient::Options{.svr_ep = Udp::endpoint(kCollidingA, 9)});
+  ExpectGetClientKeepsOptions<ibmw::common::net::AsioHttpClientPool>(
+      io, ibmw::common::net::AsioHttpClient::Options{.host = "127.0.0.1", .service = "80"},
+      ibmw::common::net::AsioHttpClient::Options{.host = "127.0.0.2", .service = "80"});
+  svr->Shutdown();
+}
+
 }  // namespace
 }  // namespace ibmw::extensions::net_extension
