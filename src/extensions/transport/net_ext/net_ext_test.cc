@@ -697,6 +697,10 @@ TEST_F(HttpRpcDriverTest, CorsVaryOnRejectAndHeadersOnErrors) {
   EXPECT_EQ(bad.find(http::field::access_control_allow_origin), bad.end());
   EXPECT_EQ(bad[http::field::vary], "Origin");
 
+  auto no_origin = Post("1", {});
+  EXPECT_EQ(no_origin.find(http::field::access_control_allow_origin), no_origin.end());
+  EXPECT_EQ(no_origin[http::field::vary], "Origin");
+
   auto error = Post("0", {{"Origin", "https://ok.example"}, {"Timeout", "1"}});
   EXPECT_EQ(error.result(), http::status::internal_server_error);
   EXPECT_EQ(error[http::field::access_control_allow_origin], "https://ok.example");

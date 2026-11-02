@@ -132,17 +132,20 @@ bool HttpRpcDriver::SetCorsAllowOrigin(
   namespace http = boost::beast::http;
   if (options_.cors_allow_origins.empty()) return false;
 
+  const bool any_origin =
+      std::find(options_.cors_allow_origins.begin(), options_.cors_allow_origins.end(), "*") !=
+      options_.cors_allow_origins.end();
+  // The answer depends on the origin, also when it is rejected or missing (caches).
+  if (!any_origin) rsp.set(http::field::vary, "Origin");
+
   auto origin_itr = req.find(http::field::origin);
   if (origin_itr == req.end()) return false;
   std::string_view origin(origin_itr->value().data(), origin_itr->value().size());
 
-  if (std::find(options_.cors_allow_origins.begin(), options_.cors_allow_origins.end(), "*") !=
-      options_.cors_allow_origins.end()) {
+  if (any_origin) {
     rsp.set(http::field::access_control_allow_origin, "*");
     return true;
   }
-  // The answer depends on the origin, also when it is rejected (caches).
-  rsp.set(http::field::vary, "Origin");
   for (const auto& allowed : options_.cors_allow_origins) {
     if (allowed == origin) {
       rsp.set(http::field::access_control_allow_origin, origin_itr->value());
