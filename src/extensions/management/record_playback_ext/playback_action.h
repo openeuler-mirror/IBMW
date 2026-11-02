@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <filesystem>
 #include <condition_variable>
 #include <memory>
@@ -125,9 +126,11 @@ class PlaybackAction {
     }
   };
 
-  void StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_duration_s);
+  void StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_duration_s, uint64_t generation);
 
-  void AddPlaybackTasks(const std::shared_ptr<TaskState>& task_state);
+  void AddPlaybackTasks(const std::shared_ptr<TaskState>& task_state, uint64_t generation);
+  // Ends the playback of this generation, unless a newer one started.
+  void EndPlayback(uint64_t generation);
 
   bool OpenNewMcaptoPlayBack();
 
@@ -180,6 +183,9 @@ class PlaybackAction {
   };
   PlayBackState playback_state_ = PlayBackState::kReadyToPlay;
   std::mutex playback_state_mutex_;
+  // Changed under playback_state_mutex_ by each start and stop: tasks of an
+  // older playback neither publish nor read.
+  std::atomic<uint64_t> playback_generation_{0};
 };
 
 }  // namespace ibmw::extensions::record_playback_extension

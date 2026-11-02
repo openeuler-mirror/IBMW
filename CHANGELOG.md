@@ -59,6 +59,10 @@ details remain governed by the documentation for each release.
   be opened, records are dropped and the open is retried every second, like a
   full disk; previously every record logged a failed write until the next
   split.
+- Playback: a signal playback can start again after `StopSignalPlayback` or
+  after its end (previously every later start reported "Playback is already
+  running"). A stop now also drops the records already queued for publishing;
+  previously up to two batches (about 1 s) were still published.
 
 ### Added
 

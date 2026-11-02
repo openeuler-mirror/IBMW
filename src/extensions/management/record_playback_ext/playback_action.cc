@@ -217,12 +217,14 @@ void PlaybackAction::Start() {
 
   // start imd mode
   if (options_.mode == Options::Mode::kImd) {
+    uint64_t generation = 0;
     {
       std::lock_guard<std::mutex> lck(playback_state_mutex_);
       if (playback_state_ != PlayBackState::kReadyToPlay) {
         return;
       }
       playback_state_ = PlayBackState::kPlaying;
+      generation = ++playback_generation_;
     }
 
     auto task_state = task_state_;
@@ -235,7 +237,7 @@ void PlaybackAction::Start() {
       ~Guard() { state->Leave(); }
     } guard{task_state};
     action->StartPlaybackImpl(options_.skip_duration_s,
-                              options_.play_duration_s);
+                              options_.play_duration_s, generation);
   }
 }
 
@@ -257,8 +259,8 @@ void PlaybackAction::Shutdown() {
 
   {
     std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    if (playback_state_ == PlayBackState::kPlaying)
-      playback_state_ = PlayBackState::kGetStopSignal;
+    playback_state_ = PlayBackState::kGetStopSignal;
+    ++playback_generation_;
   }
 
   if (task_state_) {
@@ -321,27 +323,29 @@ bool PlaybackAction::StartSignalPlayback(uint64_t skip_duration_s, uint64_t play
     return false;
   }
 
+  uint64_t generation = 0;
   {
     std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    if (playback_state_ != PlayBackState::kReadyToPlay) {
+    // A stopped or finished playback can start again.
+    if (playback_state_ == PlayBackState::kPlaying) {
       MW_WARN("Playback is already running.");
       return false;
     }
     playback_state_ = PlayBackState::kPlaying;
+    generation = ++playback_generation_;
   }
 
   auto task_state = task_state_;
   PlaybackAction* action = nullptr;
   if (!task_state || !task_state->Enter(action)) {
-    std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    playback_state_ = PlayBackState::kGetStopSignal;
+    EndPlayback(generation);
     return false;
   }
   struct Guard {
     std::shared_ptr<TaskState> state;
     ~Guard() { state->Leave(); }
   } guard{task_state};
-  action->StartPlaybackImpl(skip_duration_s, play_duration_s);
+  action->StartPlaybackImpl(skip_duration_s, play_duration_s, generation);
   return true;
 }
 
@@ -356,25 +360,41 @@ void PlaybackAction::StopSignalPlayback() {
   }
 
   std::lock_guard<std::mutex> lck(playback_state_mutex_);
-  if (playback_state_ == PlayBackState::kPlaying)
+  playback_state_ = PlayBackState::kGetStopSignal;
+  // Drops queued publishes, also those of a playback that read its last record.
+  ++playback_generation_;
+}
+
+void PlaybackAction::EndPlayback(uint64_t generation) {
+  std::lock_guard<std::mutex> lck(playback_state_mutex_);
+  if (playback_generation_.load(std::memory_order_relaxed) == generation)
     playback_state_ = PlayBackState::kGetStopSignal;
 }
 
-void PlaybackAction::StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_duration_s) {
-  start_playback_timestamp_ =
-      AddSaturated(metadata_.files[0].start_timestamp, SecondsToNsSaturated(skip_duration_s));
-  if (play_duration_s == 0) {
-    stop_playback_timestamp_ = 0;
-  } else {
-    stop_playback_timestamp_ =
-        AddSaturated(start_playback_timestamp_, SecondsToNsSaturated(play_duration_s));
+void PlaybackAction::StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_duration_s, uint64_t generation) {
+  {
+    // A previous playback may still hold the reader.
+    std::lock_guard<std::mutex> db_lck(db_mutex_);
+    ClosePlayback();
+    start_playback_timestamp_ =
+        AddSaturated(metadata_.files[0].start_timestamp, SecondsToNsSaturated(skip_duration_s));
+    if (play_duration_s == 0) {
+      stop_playback_timestamp_ = 0;
+    } else {
+      stop_playback_timestamp_ =
+          AddSaturated(start_playback_timestamp_, SecondsToNsSaturated(play_duration_s));
+    }
+    size_t ii = 1;
+    for (; ii < metadata_.files.size(); ++ii) {
+      if (metadata_.files[ii].start_timestamp > start_playback_timestamp_) break;
+    }
+    cur_mcap_file_index_ = ii - 1;
+    start_timestamp_ = ibmw::common::util::GetCurTimestampNs();
   }
 
   MW_TRACE("Start a new playback, skip_duration_s: {}, play_duration_s: {}, start_playback_timestamp: {}, stop_playback_timestamp: {}",
               skip_duration_s, play_duration_s,
               start_playback_timestamp_, stop_playback_timestamp_);
-
-  start_timestamp_ = ibmw::common::util::GetCurTimestampNs();
 
   auto task_state = task_state_;
   MW_ASSERT(task_state != nullptr, "Playback task state is not initialized.");
@@ -382,8 +402,8 @@ void PlaybackAction::StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_d
   // last task reads and schedules the next one. Reads are serialized by
   // db_mutex_, so the chains get consecutive batches without overlap, and one
   // batch is always queued ahead: reading never delays the next publish.
-  AddPlaybackTasks(task_state);
-  AddPlaybackTasks(task_state);
+  AddPlaybackTasks(task_state, generation);
+  AddPlaybackTasks(task_state, generation);
 }
 
 bool PlaybackAction::OpenNewMcaptoPlayBack() {
@@ -450,13 +470,14 @@ bool PlaybackAction::OpenNewMcaptoPlayBack() {
   return true;
 }
 
-void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_state) {
+void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_state, uint64_t generation) {
   if (!task_state) {
     return;
   }
   {
     std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    if (playback_state_ == PlayBackState::kGetStopSignal) [[unlikely]] {
+    if (playback_state_ == PlayBackState::kGetStopSignal ||
+        playback_generation_.load(std::memory_order_relaxed) != generation) [[unlikely]] {
       return;
     }
   }
@@ -466,8 +487,12 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
   std::vector<OneRecord> records;
   records.reserve(kMaxRecordSize);
 
+  uint64_t start_timestamp = 0;
   {
     std::lock_guard<std::mutex> db_lck(db_mutex_);
+    // A newer playback may have taken over the reader meanwhile.
+    if (playback_generation_.load(std::memory_order_relaxed) != generation) [[unlikely]] return;
+    start_timestamp = start_timestamp_;
     uint64_t cur_start_timestamp = 0;
 
     while (true) {
@@ -498,8 +523,7 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
 
       if (stop_playback_timestamp_ > 0 && timestamp > stop_playback_timestamp_) {
         MW_INFO("Stop playback");
-        std::lock_guard<std::mutex> lck(playback_state_mutex_);
-        playback_state_ = PlayBackState::kGetStopSignal;
+        EndPlayback(generation);
         break;
       }
 
@@ -529,8 +553,7 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
   MW_TRACE("Get {} record.", records.size());
 
   if (records.empty()) [[unlikely]] {
-    std::lock_guard<std::mutex> lck(playback_state_mutex_);
-    playback_state_ = PlayBackState::kGetStopSignal;
+    EndPlayback(generation);
     return;
   }
 
@@ -538,12 +561,12 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
   for (size_t ii = 0; ii < len; ++ii) {
     // add publish task
     auto& record = records[ii];
-    auto tp = ibmw::common::util::GetTimePointFromTimestampNs(start_timestamp_ + record.dt);
+    auto tp = ibmw::common::util::GetTimePointFromTimestampNs(start_timestamp + record.dt);
 
     if (ii < len - 1) {
       executor_.DispatchAt(
           tp,
-          [task_state, record{std::move(record)}]() {
+          [task_state, generation, record{std::move(record)}]() {
             PlaybackAction* action = nullptr;
             if (!task_state->Enter(action)) {
               return;
@@ -552,12 +575,13 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
               std::shared_ptr<TaskState> state;
               ~Guard() { state->Leave(); }
             } guard{task_state};
+            if (action->playback_generation_.load(std::memory_order_relaxed) != generation) [[unlikely]] return;
             action->pub_record_func_(record);
           });
     } else {
       executor_.DispatchAt(
           tp,
-          [task_state, record{std::move(record)}]() {
+          [task_state, generation, record{std::move(record)}]() {
             PlaybackAction* action = nullptr;
             if (!task_state->Enter(action)) {
               return;
@@ -566,10 +590,11 @@ void PlaybackAction::AddPlaybackTasks(const std::shared_ptr<TaskState>& task_sta
               std::shared_ptr<TaskState> state;
               ~Guard() { state->Leave(); }
             } guard{task_state};
+            if (action->playback_generation_.load(std::memory_order_relaxed) != generation) [[unlikely]] return;
             action->pub_record_func_(record);
 
             // add new playback tasks to last publish task
-            action->AddPlaybackTasks(task_state);
+            action->AddPlaybackTasks(task_state, generation);
           });
     }
   }

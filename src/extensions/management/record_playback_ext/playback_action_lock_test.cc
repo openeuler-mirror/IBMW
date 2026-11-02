@@ -7,9 +7,12 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 #include <unistd.h>
+#include <utility>
 
 #include "gtest/gtest.h"
 #include "mcap/writer.hpp"
@@ -197,6 +200,79 @@ TEST(PlaybackActionLockRegression, HugePlayDurationDoesNotWrap) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   EXPECT_EQ(published.load(), 128u);
+  action.Shutdown();
+  executor.Shutdown();
+  std::filesystem::remove_all(bag);
+}
+
+// EXT-033: a signal playback can start again after a stop or after its end;
+// a stop drops the publishes already queued, and they never mix into the
+// next playback.
+TEST(PlaybackActionLockRegression, SignalPlaybackRestarts) {
+  const auto bag = WriteTemporaryBag();
+  ASSERT_FALSE(bag.empty());
+  runtime::core::executor::ThreadPoolExecutor executor;
+  executor.Initialize("playback-restart-test", YAML::Load("{thread_num: 2}"));
+  executor.Start();
+  runtime::core::executor::ExecutorAccess access(&executor);
+  PlaybackAction action;
+  action.RegisterGetTypeSupportFunc([](std::string_view type) {
+    return type == "dummy:PlaybackMessage"
+               ? ibmw::util::TypeSupportRef(DummyTypeSupport())
+               : ibmw::util::TypeSupportRef();
+  });
+  action.RegisterGetExecutorFunc([&](std::string_view name) {
+    return name == "playback-restart-test"
+               ? ibmw::executor::ExecutorHandle(access.NativeHandle())
+               : ibmw::executor::ExecutorHandle();
+  });
+  action.Initialize(YAML::Load(
+      "{bag_path: '" + bag.string() +
+      "', mode: signal, executor: playback-restart-test, topic_meta_list: "
+      "[{topic: /playback_lock, msg_type: dummy:PlaybackMessage}]}"));
+  action.InitExecutor();
+  std::mutex mutex;
+  std::vector<int> payloads;
+  action.RegisterPubRecordFunc([&](const PlaybackAction::OneRecord& record) {
+    const auto data = record.buffer_view_ptr->JoinToString();
+    std::lock_guard<std::mutex> lock(mutex);
+    payloads.push_back(static_cast<unsigned char>(data.at(0)));
+  });
+  const auto take = [&] {
+    std::lock_guard<std::mutex> lock(mutex);
+    return std::exchange(payloads, {});
+  };
+  const auto wait_for = [&](size_t count) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (payloads.size() >= count) return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  };
+  std::vector<int> all(128);
+  for (int i = 0; i < 128; ++i) all[i] = i;
+  action.Start();
+
+  // Stopped early: the 128 queued publishes (one batch) are dropped.
+  ASSERT_TRUE(action.StartSignalPlayback(0, 0));
+  wait_for(1);
+  action.StopSignalPlayback();
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  EXPECT_LT(take().size(), 64u);
+
+  // Started again: the whole bag once, nothing from the first run.
+  ASSERT_TRUE(action.StartSignalPlayback(0, 0));
+  wait_for(128);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));  // and the end
+  EXPECT_EQ(take(), all);
+
+  // After the natural end it starts once more.
+  ASSERT_TRUE(action.StartSignalPlayback(0, 0));
+  wait_for(128);
+  EXPECT_EQ(take(), all);
   action.Shutdown();
   executor.Shutdown();
   std::filesystem::remove_all(bag);
