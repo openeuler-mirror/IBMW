@@ -13,7 +13,7 @@
 #include "dds_ext/dds_transport_driver.h"
 #include "dds_ext/ros2_type_helper.h"
 #include "engine/engine.h"
-#include "internal/typesupport/ros2/ros2_transport.h"
+#include "type_support/ros2/ros2_transport.h"
 namespace { using M=std_msgs::msg::UInt8MultiArray; constexpr char raw[]="/mw_perf/topology/raw";constexpr char derived[]="/mw_perf/topology/derived";constexpr char type[]="std_msgs/msg/UInt8MultiArray";ibmw::topology::Options o;ibmw::runtime::core::Engine* engine=nullptr;
 bool Touch(const char*path){if(!path||!*path)return true;std::ofstream f(path);return f.good();}
 bool WaitForStartGate(){const char*gate=std::getenv("MW_PERF_START_GATE");if(!gate||!*gate)return true;auto end=std::chrono::steady_clock::now()+std::chrono::seconds(30);while(std::chrono::steady_clock::now()<end){std::ifstream f(gate);if(f.good()){std::cerr<<"DDS start gate opened: "<<gate<<"\n";return true;}std::this_thread::sleep_for(std::chrono::milliseconds(50));}std::ifstream f(gate);std::cerr<<"DDS start gate timeout: path="<<gate<<" exists="<<(f.good()?"true":"false")<<"\n";return false;}
