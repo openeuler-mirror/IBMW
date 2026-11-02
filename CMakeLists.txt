@@ -494,8 +494,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # ============================================================================
 # Self-developed components must exist before src/ links them.
 if(IBMW_BUILD_SHM_EXTENSION)
-  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "IBMW_BUILD_SHM_EXTENSION requires Linux (memfd/futex/epoll).")
+  # OHOS runs a Linux kernel (musl userland); CMake reports it as "OHOS".
+  if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|OHOS)$")
+    message(FATAL_ERROR "IBMW_BUILD_SHM_EXTENSION requires a Linux kernel (memfd/futex/epoll).")
   endif()
   set(IBMW_SELFDEV_SHM ON)
 endif()

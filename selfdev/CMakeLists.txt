@@ -37,6 +37,11 @@ find_package(Threads REQUIRED)
 function(ibmw_selfdev_warnings target)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow)
+    # The OHOS toolchain passes --gcc-toolchain, which clang reports as an
+    # unused argument; same exemption as cmake/AddWerror.cmake.
+    if(CMAKE_CROSSCOMPILING AND DEFINED OHOS_PLATFORM AND NOT "${OHOS_PLATFORM}" STREQUAL "")
+      target_compile_options(${target} PRIVATE -Wno-unused-command-line-argument)
+    endif()
     if(IBMW_BUILD_WITH_WERROR)
       target_compile_options(${target} PRIVATE -Werror)
     endif()

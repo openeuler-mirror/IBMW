@@ -9,9 +9,34 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace ibmw::selfdev::shm::test {
+
+// std::jthread stand-in: libc++ before 18 (the OHOS SDK ships 15) has no
+// jthread. Joins on destruction and before move-assignment.
+class JoiningThread {
+ public:
+  JoiningThread() noexcept = default;
+  template <class F>
+  explicit JoiningThread(F&& f) : t_(std::forward<F>(f)) {}
+  JoiningThread(JoiningThread&&) noexcept = default;
+  JoiningThread& operator=(JoiningThread&& o) noexcept {
+    if (t_.joinable()) t_.join();
+    t_ = std::move(o.t_);
+    return *this;
+  }
+  ~JoiningThread() {
+    if (t_.joinable()) t_.join();
+  }
+  void join() { t_.join(); }
+
+ private:
+  std::thread t_;
+};
+
 
 // Every test binary uses a private service root (mkdtemp) exported through
 // IBMW_SHM_ROOT so child processes join the same discovery directory.

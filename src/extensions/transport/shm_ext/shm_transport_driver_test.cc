@@ -23,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -47,6 +48,28 @@ namespace {
 
 using namespace std::chrono_literals;
 namespace transport = runtime::core::transport;
+
+// std::jthread stand-in: libc++ before 18 (the OHOS SDK ships 15) has no
+// jthread. Joins on destruction and before move-assignment.
+class JoiningThread {
+ public:
+  JoiningThread() noexcept = default;
+  template <class F>
+  explicit JoiningThread(F&& f) : t_(std::forward<F>(f)) {}
+  JoiningThread(JoiningThread&&) noexcept = default;
+  JoiningThread& operator=(JoiningThread&& o) noexcept {
+    if (t_.joinable()) t_.join();
+    t_ = std::move(o.t_);
+    return *this;
+  }
+  ~JoiningThread() {
+    if (t_.joinable()) t_.join();
+  }
+  void join() { t_.join(); }
+
+ private:
+  std::thread t_;
+};
 
 // ------------------------------------------------------------------ helpers
 
@@ -1191,11 +1214,11 @@ TEST_F(ShmDriverTest, ShutdownUnblocksLosslessPublisher) {
   })));
   // Declared before the guard: joined only after shutdown unblocked them.
   std::atomic<int> sent{0};
-  std::jthread producer, closer;
+  JoiningThread producer, closer;
   StopGuard stop{this, [&] { release_handler = true; }};
   d.Start();
   ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(info.topic_name, kIntType)); }));
-  producer = std::jthread([&] {
+  producer = JoiningThread([&] {
     for (int32_t v = 0; v < 400; ++v) {
       SendInt(info, v);
       sent.fetch_add(1);
@@ -1205,7 +1228,7 @@ TEST_F(ShmDriverTest, ShutdownUnblocksLosslessPublisher) {
   ASSERT_TRUE(WaitFor([&] { return sent.load() >= 257; }));
   std::this_thread::sleep_for(50ms);
   EXPECT_LT(sent.load(), 400);
-  closer = std::jthread([&] {
+  closer = JoiningThread([&] {
     std::this_thread::sleep_for(50ms);
     release_handler = true;  // lets the in-flight callback finish
   });
@@ -1382,14 +1405,14 @@ TEST_F(ShmDriverTest, ShutdownUnblocksSendToStalledRemoteConsumer) {
   const auto url = StdUrl(info.topic_name, kIntType);
   ASSERT_TRUE(d.RegisterSendType(SendType(info)));
   std::atomic<int> sent{0};
-  std::jthread producer;
+  JoiningThread producer;
   StopGuard stop{this};
   d.Start();
   Peer peer;
   ASSERT_TRUE(peer.Spawn({"stall", url}));
   ASSERT_EQ(peer.ReadLine(), "ready");
   ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
-  producer = std::jthread([&] {
+  producer = JoiningThread([&] {
     for (int32_t v = 0; v < 64; ++v) {
       SendInt(info, v);
       sent.fetch_add(1);

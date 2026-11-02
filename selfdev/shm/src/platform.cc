@@ -171,6 +171,9 @@ ssize_t ReceiveMessage(int sock, void* data, size_t cap, std::vector<UniqueFd>* 
     n = ::recvmsg(sock, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
   } while (n < 0 && errno == EINTR);
   if (n < 0) return -1;
+  // musl's CMSG_NXTHDR compares size_t with ptrdiff_t (-Wsign-compare).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
   for (struct cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
     if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) continue;
     size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
@@ -184,6 +187,7 @@ ssize_t ReceiveMessage(int sock, void* data, size_t cap, std::vector<UniqueFd>* 
       }
     }
   }
+#pragma GCC diagnostic pop
   if ((msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0) {
     errno = EMSGSIZE;
     return -1;

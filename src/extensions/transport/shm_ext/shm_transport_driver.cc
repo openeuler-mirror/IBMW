@@ -372,7 +372,10 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
     }
     const size_t min_shm_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
 
-    auto write_header = [&](util::BufferOperator& buf_oper) {
+    // Structured bindings are re-bound explicitly: clang < 16 (OHOS SDK) cannot
+    // capture them implicitly.
+    auto write_header = [&, meta_key_vals_array = meta_key_vals_array,
+                         meta_key_vals_array_len = meta_key_vals_array_len](util::BufferOperator& buf_oper) {
       buf_oper.SetString(serialization_type, util::BufferLenType::kUInt8);
       buf_oper.SetUint8(static_cast<uint8_t>(meta_key_vals_array_len / 2));
       for (size_t ii = 0; ii < meta_key_vals_array_len; ++ii) {

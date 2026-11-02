@@ -672,7 +672,7 @@ TEST(ShmRegressionTest, StopBlockingReleasesBlockedPublish) {
     Publisher& pub;
     ~Unblock() { pub.StopBlocking(); }
   };
-  std::jthread blocked([&] {
+  test::JoiningThread blocked([&] {
     auto l = pub.Loan(64);
     if (l) pub.Publish(*l);
     returned = true;
