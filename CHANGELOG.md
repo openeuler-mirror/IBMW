@@ -102,6 +102,8 @@ details remain governed by the documentation for each release.
   send failed with "Reference is null"). `max_pkg_size_k` above 2097151
   (2 GiB - 1) fails initialization instead of wrapping the limit; its
   documented default is corrected to 1024. Failed unsubscribes are logged.
+- UDP transport: a send type registered after `Start` is refused, like on TCP;
+  previously it changed the publisher map while messages were being sent.
 
 ### Added
 

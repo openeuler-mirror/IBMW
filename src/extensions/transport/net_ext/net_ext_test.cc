@@ -1160,6 +1160,32 @@ TEST(NetDriverPackageSizeTest, OversizedPackageIsRefusedBeforeNarrowing) {
   ExpectOversizedPackageIsRefused<UdpTransportDriver, ibmw::common::net::AsioUdpClientPool>();
 }
 
+// TRANS-055: like the TCP driver, the UDP driver only takes send types before
+// Start; Send reads the publisher map without a lock.
+template <typename Driver, typename Pool>
+void ExpectSendTypeOnlyBeforeStart() {
+  IoThreads io;
+  auto pool = std::make_shared<Pool>(io.Io());
+  pool->Initialize({});
+  pool->Start();
+  Driver driver(io.Io(), pool, nullptr, nullptr);
+  driver.Initialize(YAML::Load("publishers: [{topic: /t, server_url_list: ['127.0.0.1:1']}]"));
+  runtime::core::transport::SendTypeWrapper wrapper;
+  wrapper.info.topic_name = "/t";
+  wrapper.info.msg_type = "test:Int";
+  wrapper.info.msg_type_support_ref = ibmw::util::TypeSupportRef(JsonIntTypeSupport());
+  driver.Start();
+  LogCapture capture;
+  EXPECT_FALSE(driver.RegisterSendType(wrapper));
+  EXPECT_NE(capture.Text().find("state is 'Init'"), std::string::npos) << capture.Text();
+  driver.Shutdown();
+}
+
+TEST(NetDriverStateTest, SendTypeOnlyBeforeStart) {
+  ExpectSendTypeOnlyBeforeStart<TcpTransportDriver, ibmw::common::net::AsioTcpClientPool>();
+  ExpectSendTypeOnlyBeforeStart<UdpTransportDriver, ibmw::common::net::AsioUdpClientPool>();
+}
+
 TEST(NetDriverPackageSizeTest, NormalPackageStillArrives) {
   IoThreads io;
   static const char kPayload[] = "payload";

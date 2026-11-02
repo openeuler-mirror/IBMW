@@ -83,6 +83,9 @@ void UdpTransportDriver::Shutdown() {
 bool UdpTransportDriver::RegisterSendType(
     const runtime::core::transport::SendTypeWrapper& send_type_wrapper) noexcept {
   try {
+    MW_REQUIRE(state_.load() == State::kInit,
+                            "Method can only be called when state is 'Init'.");
+
     namespace util = ibmw::common::util;
 
     const auto& info = send_type_wrapper.info;
