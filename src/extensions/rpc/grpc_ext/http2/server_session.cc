@@ -267,37 +267,24 @@ int OnFrameRecvCallback(nghttp2_session* session, const nghttp2_frame* frame, vo
     return 0;
   }
 
-  if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-    server_session->OnFullRequest(stream->GetRequest());
-    MW_TRACE("stream recv frame, stream id: {}, OnFullRequest", frame->hd.stream_id);
-    return 0;
-  }
-
-  auto request = stream->GetRequest();
   switch (frame->hd.type) {
     case NGHTTP2_DATA:
+    case NGHTTP2_HEADERS:
+      // END_STREAM on the last DATA frame, on request HEADERS without a body
+      // or on trailers completes the request.
       if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        server_session->OnFullRequest(request);
+        server_session->OnFullRequest(stream->GetRequest());
         MW_TRACE("stream recv frame, stream id: {}, OnFullRequest", frame->hd.stream_id);
       }
       break;
-    case NGHTTP2_HEADERS:
-      if (frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
-        MW_TRACE("stream recv frame, stream id: {}, NGHTTP2_HEADERS, but not request", frame->hd.stream_id);
-        break;
-      }
-      if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        server_session->OnFullRequest(request);
-        MW_TRACE("stream recv frame, stream id: {}, OnFullRequest", frame->hd.stream_id);
-        break;
-        case NGHTTP2_RST_STREAM:
-          // call OnRst
-          MW_TRACE("stream recv frame, stream id: {}, OnRst", frame->hd.stream_id);
-          break;
-        default:
-          MW_TRACE("stream recv frame, stream id: {}, default", frame->hd.stream_id);
-          break;
-      }
+    case NGHTTP2_RST_STREAM:
+      // The stream is released in OnStreamCloseCallback, which nghttp2 calls
+      // after RST_STREAM.
+      MW_TRACE("stream recv frame, stream id: {}, RST_STREAM", frame->hd.stream_id);
+      break;
+    default:
+      MW_TRACE("stream recv frame, stream id: {}, type: {}", frame->hd.stream_id, frame->hd.type);
+      break;
   }
 
   return 0;
