@@ -34,6 +34,7 @@
 #include <sys/socket.h>
 
 #include "cpp/util/string.h"
+#include "grpc_ext/grpc/message.h"
 #include "grpc_ext/grpc/status.h"
 #include "grpc_ext/grpc/timeout.h"
 #include "grpc_ext/grpc_extension.h"
@@ -113,6 +114,23 @@ const ibmw_type_support_base_t* IntTypeSupport() {
       .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return kTypes; },
       .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
       .ctx = nullptr};
+  return &ts;
+}
+
+// Like IntTypeSupport, but a negative value serializes to more than a gRPC
+// length prefix can express. The buffer stays untouched, so it costs no memory.
+const ibmw_type_support_base_t* OversizedNegativeIntTypeSupport() {
+  static const ibmw_type_support_base_t ts = [] {
+    ibmw_type_support_base_t base = *IntTypeSupport();
+    base.serialize = [](void* ctx, ibmw_string_view_t type, const void* msg,
+                        const ibmw_buffer_array_allocator_t* allocator, ibmw_buffer_array_t* buffer_array) {
+      if (*static_cast<const int*>(msg) >= 0) {
+        return IntTypeSupport()->serialize(ctx, type, msg, allocator, buffer_array);
+      }
+      return allocator->allocate(allocator->ctx, buffer_array, grpc::kMaxGrpcMessageLength + 1).data != nullptr;
+    };
+    return base;
+  }();
   return &ts;
 }
 
@@ -235,8 +253,8 @@ class GrpcRpcDriverTest : public ::testing::Test {
     info_.func_name = "cdr:/test/svc";
     info_.pkg_path = "pkg";
     info_.module_name = "mod";
-    info_.req_type_support_ref = ibmw::util::TypeSupportRef(IntTypeSupport());
-    info_.rsp_type_support_ref = ibmw::util::TypeSupportRef(IntTypeSupport());
+    info_.req_type_support_ref = ibmw::util::TypeSupportRef(type_support_);
+    info_.rsp_type_support_ref = ibmw::util::TypeSupportRef(type_support_);
     service_.info = info_;
     service_.service_func = std::move(func);
     client_.info = info_;
@@ -289,6 +307,7 @@ class GrpcRpcDriverTest : public ::testing::Test {
   }
 
   IoThreads io_{2};
+  const ibmw_type_support_base_t* type_support_ = IntTypeSupport();
   std::string svr_addr_;
   std::shared_ptr<server::AsioHttp2Server> svr_;
   std::shared_ptr<client::AsioHttp2ClientPool> pool_;
@@ -424,6 +443,29 @@ TEST_F(GrpcRpcDriverTest, ServiceErrorEndsTheCallAtOnce) {
       EXPECT_EQ(rsp, 4);
     }
   }
+}
+
+// EXT-011: a message above 4 GiB - 1 would get a truncated length prefix, so
+// neither side sends it, and the next call works.
+TEST_F(GrpcRpcDriverTest, MessageTooLongForLengthPrefixIsRefused) {
+  type_support_ = OversizedNegativeIntTypeSupport();
+  SetUpDriver([](const std::shared_ptr<ServiceMessageFrame>& frame) {
+    *static_cast<int*>(frame->rsp_ptr) = *static_cast<const int*>(frame->req_ptr) - 1;
+    Answer(frame, IBMW_RPC_STATUS_OK);
+  });
+  int rsp = 0;
+  auto code = Call(-1, &rsp);  // oversized request
+  ASSERT_TRUE(code) << "no answer";
+  EXPECT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED));
+
+  code = Call(0, &rsp);  // oversized response
+  ASSERT_TRUE(code) << "no answer";
+  EXPECT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR));
+
+  code = Call(5, &rsp);
+  ASSERT_TRUE(code) << "server no longer answers";
+  EXPECT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+  EXPECT_EQ(rsp, 4);
 }
 
 // EXT-001: the plaintext server warns unless it is reachable from this

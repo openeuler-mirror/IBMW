@@ -48,6 +48,9 @@ details remain governed by the documentation for each release.
   follow the steady clock, but `Now()` and `DispatchAt()` now use system time
   anchored at start, like the thread pool executor. Previously `Now()` returned
   a steady clock value, so targets computed from `system_clock::now()` never ran.
+- gRPC: a request or response above 4 GiB - 1 is refused (client
+  `CLI_SERIALIZATION_FAILED`, server `grpc-status` 13) instead of being sent
+  with a truncated length prefix.
 
 ### Added
 

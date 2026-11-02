@@ -399,6 +399,12 @@ bool GrpcRpcDriver::RegisterServiceFunc(
         rsp_buf = std::move(call_state->rsp_buf);
       }
 
+      const size_t rsp_size = ret_code == 0 ? rsp_buf->BufferSize() : 0;
+      if (rsp_size > grpc::kMaxGrpcMessageLength) [[unlikely]] {
+        MW_WARN("Response is too long for a grpc message, size: {}", rsp_size);
+        ret_code = IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED;
+      }
+
       // A failed call (also a timeout) still ends the stream, with a gRPC
       // error status and no message, so the client neither waits for its own
       // timeout nor keeps the stream open.
@@ -412,7 +418,7 @@ bool GrpcRpcDriver::RegisterServiceFunc(
       // Fill the response data
       auto prefix = grpc::EncodeGrpcMessagePrefix(grpc::GrpcMessagePrefix{
           .compression_flag = 0,
-          .message_length = static_cast<uint32_t>(rsp_buf->BufferSize())});
+          .message_length = static_cast<uint32_t>(rsp_size)});
       rsp->Write(prefix);
       for (size_t i = 0; i < rsp_buf->Size(); ++i) {
         auto buffer_view = rsp_buf->Data()[i];
@@ -586,9 +592,16 @@ void GrpcRpcDriver::Call(
               co_return;
             }
 
+            const size_t req_size = buffer_array_view_ptr->BufferSize();
+            if (req_size > grpc::kMaxGrpcMessageLength) [[unlikely]] {
+              MW_WARN("Request is too long for a grpc message, size: {}", req_size);
+              deliver_completion(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED));
+              co_return;
+            }
+
             auto prefix = grpc::EncodeGrpcMessagePrefix(grpc::GrpcMessagePrefix{
                 .compression_flag = 0,
-                .message_length = static_cast<uint32_t>(buffer_array_view_ptr->BufferSize())});
+                .message_length = static_cast<uint32_t>(req_size)});
             req_ptr->Write(prefix);
 
             for (size_t i = 0; i < buffer_array_view_ptr->Size(); ++i) {
@@ -625,7 +638,7 @@ void GrpcRpcDriver::Call(
               deliver_completion(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
               co_return;
             }
-            if (body_str_view.size() != 5 + rsp_prefix->message_length) [[unlikely]] {
+            if (body_str_view.size() != grpc::kGrpcMessagePrefixSize + rsp_prefix->message_length) [[unlikely]] {
               MW_WARN("Http2 response body size not equal to grpc message length, body_len: {}, message_len: {}",
                          body_str_view.size(), rsp_prefix->message_length);
               deliver_completion(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
@@ -633,7 +646,7 @@ void GrpcRpcDriver::Call(
             }
 
             // Skip the grpc compression flag and length prefix
-            body_str_view.remove_prefix(5);
+            body_str_view.remove_prefix(grpc::kGrpcMessagePrefixSize);
 
             // Deserialize the response
             std::vector<ibmw_buffer_view_t> buffer_view_vec;
