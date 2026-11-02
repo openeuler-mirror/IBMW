@@ -249,7 +249,7 @@ void TimerExecutor::DispatchAt(
 
 void TimerExecutor::WarnTimedTaskDropped() const noexcept {
   try {
-    MW_WARN("Timer executor '{}' is not running, timed task dropped.", name_);
+    MW_WARN_INTERVAL(1000, "Timer executor '{}' is not running, timed task dropped.", name_);
   } catch (...) {
   }
 }
