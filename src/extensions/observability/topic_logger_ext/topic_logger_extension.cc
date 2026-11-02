@@ -101,13 +101,13 @@ void TopicLoggerExtension::RegisterTopicLoggerDriver() {
             // startup publisher
             post_start_transport_hook_task_vec_.emplace_back(
                 [topic_logger_driver = topic_logger_driver_ptr.get()]() {
-                  topic_logger_driver->StartupPulisher();
+                  topic_logger_driver->StartupPublisher();
                 });
 
             // stop publisher
             pre_shutdown_transport_hook_task_vec_.emplace_back(
                 [topic_logger_driver = topic_logger_driver_ptr.get()]() {
-                  topic_logger_driver->StopPulisher();
+                  topic_logger_driver->StopPublisher();
                 });
 
             return topic_logger_driver_ptr;
