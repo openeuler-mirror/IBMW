@@ -44,10 +44,10 @@ class OpLog;
 
 class Context : public std::enable_shared_from_this<Context> {
  public:
+  // Does not make itself current: weak_from_this() is still empty inside the
+  // constructor, so that would only clear the thread's current context.
   Context() noexcept
-      : id_(++global_unique_id_) {
-    LetMe();
-  }
+      : id_(++global_unique_id_) {}
 
   explicit Context(ibmw::Runtime core) noexcept
       : core_(core), id_(++global_unique_id_) {}
