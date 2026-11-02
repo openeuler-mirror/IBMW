@@ -7,7 +7,9 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <cstdlib>
@@ -295,6 +297,30 @@ std::filesystem::path DefaultOutputPath() {
   return name.str();
 }
 
+// The whole value must parse: no sign, whitespace or trailing text, and no
+// out-of-range value (std::stoull wraps "-1" and accepts "10abc").
+template <typename T>
+T ParseUnsigned(std::string_view value, std::string_view option) {
+  T result{};
+  const char* end = value.data() + value.size();
+  const auto [ptr, ec] = std::from_chars(value.data(), end, result);
+  MW_ASSERT(ec == std::errc() && ptr == end, "{} requires a valid non-negative integer.", option);
+  return result;
+}
+
+size_t ParseSize(std::string_view value, std::string_view option) {
+  return ParseUnsigned<size_t>(value, option);
+}
+
+double ParseDouble(std::string_view value, std::string_view option) {
+  double result = 0;
+  const char* end = value.data() + value.size();
+  const auto [ptr, ec] = std::from_chars(value.data(), end, result);
+  MW_ASSERT(ec == std::errc() && ptr == end && std::isfinite(result),
+            "{} requires a numeric value.", option);
+  return result;
+}
+
 RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
   RecordCliOptions options;
   for (int index = 2; index < argc; ++index) {
@@ -329,10 +355,10 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
     } else if (argument == "-p" || argument == "--polling-interval") {
       MW_ASSERT(index + 1 < argc, "{} requires milliseconds.", argument);
       options.polling_interval_ms =
-          static_cast<uint32_t>(std::stoul(argv[++index]));
+          ParseUnsigned<uint32_t>(argv[++index], argument);
     } else if (argument.starts_with("--polling-interval=")) {
-      options.polling_interval_ms = static_cast<uint32_t>(std::stoul(
-          argument.substr(std::string("--polling-interval=").size())));
+      options.polling_interval_ms = ParseUnsigned<uint32_t>(
+          argument.substr(std::string("--polling-interval=").size()), argument);
     } else if (argument == "-s" || argument == "--storage") {
       MW_ASSERT(index + 1 < argc, "{} requires a storage ID.", argument);
       options.storage_id = argv[++index];
@@ -346,22 +372,22 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
           std::string("--serialization-format=").size());
     } else if (argument == "-b" || argument == "--max-bag-size") {
       MW_ASSERT(index + 1 < argc, "{} requires bytes.", argument);
-      options.max_bag_size = std::stoull(argv[++index]);
+      options.max_bag_size = ParseUnsigned<uint64_t>(argv[++index], argument);
     } else if (argument.starts_with("--max-bag-size=")) {
-      options.max_bag_size = std::stoull(
-          argument.substr(std::string("--max-bag-size=").size()));
+      options.max_bag_size = ParseUnsigned<uint64_t>(
+          argument.substr(std::string("--max-bag-size=").size()), argument);
     } else if (argument == "-d" || argument == "--max-bag-duration") {
       MW_ASSERT(index + 1 < argc, "{} requires seconds.", argument);
-      options.max_bag_duration_seconds = std::stod(argv[++index]);
+      options.max_bag_duration_seconds = ParseDouble(argv[++index], argument);
     } else if (argument.starts_with("--max-bag-duration=")) {
-      options.max_bag_duration_seconds = std::stod(
-          argument.substr(std::string("--max-bag-duration=").size()));
+      options.max_bag_duration_seconds = ParseDouble(
+          argument.substr(std::string("--max-bag-duration=").size()), argument);
     } else if (argument == "--max-cache-size") {
       MW_ASSERT(index + 1 < argc, "{} requires bytes.", argument);
-      options.max_cache_size = static_cast<size_t>(std::stoull(argv[++index]));
+      options.max_cache_size = ParseSize(argv[++index], argument);
     } else if (argument.starts_with("--max-cache-size=")) {
-      options.max_cache_size = static_cast<size_t>(std::stoull(
-          argument.substr(std::string("--max-cache-size=").size())));
+      options.max_cache_size = ParseSize(
+          argument.substr(std::string("--max-cache-size=").size()), argument);
     } else if (argument == "--compression-mode") {
       MW_ASSERT(index + 1 < argc, "{} requires a mode.", argument);
       options.compression_mode = argv[++index];
@@ -377,18 +403,17 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
     } else if (argument == "--compression-queue-size") {
       MW_ASSERT(index + 1 < argc, "{} requires a count.", argument);
       options.compression_queue_size =
-          static_cast<size_t>(std::stoull(argv[++index]));
+          ParseSize(argv[++index], argument);
     } else if (argument.starts_with("--compression-queue-size=")) {
-      options.compression_queue_size = static_cast<size_t>(std::stoull(
-          argument.substr(
-              std::string("--compression-queue-size=").size())));
+      options.compression_queue_size = ParseSize(
+          argument.substr(std::string("--compression-queue-size=").size()), argument);
     } else if (argument == "--compression-threads") {
       MW_ASSERT(index + 1 < argc, "{} requires a count.", argument);
       options.compression_threads =
-          static_cast<size_t>(std::stoull(argv[++index]));
+          ParseSize(argv[++index], argument);
     } else if (argument.starts_with("--compression-threads=")) {
-      options.compression_threads = static_cast<size_t>(std::stoull(
-          argument.substr(std::string("--compression-threads=").size())));
+      options.compression_threads = ParseSize(
+          argument.substr(std::string("--compression-threads=").size()), argument);
     } else if (argument == "--snapshot-mode") {
       options.snapshot_mode = true;
     } else if (argument == "--storage-preset-profile") {
@@ -497,23 +522,6 @@ InfoCliOptions ParseInfoOptions(int argc, const char* const* argv) {
   }
   MW_ASSERT(!options.bag_path.empty(), "bag info requires a bag path.");
   return options;
-}
-
-double ParseDouble(std::string_view value, std::string_view option) {
-  size_t consumed = 0;
-  const double result = std::stod(std::string(value), &consumed);
-  MW_ASSERT(
-      consumed == value.size(), "{} requires a numeric value.", option);
-  return result;
-}
-
-size_t ParseSize(std::string_view value, std::string_view option) {
-  size_t consumed = 0;
-  const auto result = std::stoull(std::string(value), &consumed);
-  MW_ASSERT(
-      consumed == value.size() && result <= std::numeric_limits<size_t>::max(),
-      "{} requires a valid size.", option);
-  return static_cast<size_t>(result);
 }
 
 void ParseRemap(std::string_view value, PlayCliOptions& options) {
@@ -692,10 +700,10 @@ ConvertCliOptions ParseConvertOptions(int argc, const char* const* argv) {
           std::string("--input-storage=").size());
     } else if (argument == "-b" || argument == "--max-bag-size") {
       MW_ASSERT(index + 1 < argc, "{} requires bytes.", argument);
-      options.max_bag_size = std::stoull(argv[++index]);
+      options.max_bag_size = ParseUnsigned<uint64_t>(argv[++index], argument);
     } else if (argument.starts_with("--max-bag-size=")) {
-      options.max_bag_size = std::stoull(
-          argument.substr(std::string("--max-bag-size=").size()));
+      options.max_bag_size = ParseUnsigned<uint64_t>(
+          argument.substr(std::string("--max-bag-size=").size()), argument);
     } else if (argument == "-d" || argument == "--max-bag-duration") {
       MW_ASSERT(index + 1 < argc, "{} requires seconds.", argument);
       options.max_bag_duration_seconds = ParseDouble(argv[++index], argument);
