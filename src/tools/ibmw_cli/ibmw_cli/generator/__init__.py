@@ -71,4 +71,6 @@ class GeneratorBase:
                 f.write(output_stream)
 
         if platform.system().lower() == "linux" and template_info['template_name'] in chmod_shell_name:
-            os.chmod(output_file_path, 0o777)
+            # Owner-writable only: group/other must not be able to alter a
+            # script the developer later executes.
+            os.chmod(output_file_path, 0o755)
