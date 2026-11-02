@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <iostream>
+#include <streambuf>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +27,22 @@ class ActionLogTest : public testing::Test {
   void SetUp() override { g_records.clear(); }
   void TearDown() override { SetActionLogSink(nullptr); }
 };
+
+static_assert(noexcept(ActionLog(ActionLogLevel::kError, std::string_view())));
+
+// A stream that throws on failure does not let the exception escape.
+TEST_F(ActionLogTest, ThrowingStreamIsSwallowed) {
+  struct FailingBuf : std::streambuf {
+    int_type overflow(int_type) override { return traits_type::eof(); }
+  } failing;
+  auto* old_buf = std::cerr.rdbuf(&failing);
+  const auto old_mask = std::cerr.exceptions();
+  std::cerr.exceptions(std::ios::badbit);
+  EXPECT_NO_THROW(ActionLog(ActionLogLevel::kError, "lost"));
+  std::cerr.exceptions(old_mask);
+  std::cerr.rdbuf(old_buf);
+  std::cerr.clear();
+}
 
 TEST_F(ActionLogTest, DefaultWritesInfoToStdoutAndOthersToStderr) {
   testing::internal::CaptureStdout();

@@ -4,6 +4,10 @@
 // Diagnostics sink of the public DDS-only action layers. These layers run
 // without a framework logger, so they write to stdout/stderr by default;
 // SetActionLogSink() lets the application redirect or silence the output.
+//
+// The sink is a header-local inline variable: with hidden symbol visibility
+// every shared object that includes this header has its own copy, so call
+// SetActionLogSink() from each shared object that uses the action layers.
 
 #ifndef IBMW_API_CPP_ACTION_ACTION_LOG_H_
 #define IBMW_API_CPP_ACTION_ACTION_LOG_H_
@@ -42,12 +46,17 @@ inline void SetActionLogSink(ActionLogSink sink) noexcept {
   detail::g_action_log_sink.store(sink, std::memory_order_release);
 }
 
-inline void ActionLog(ActionLogLevel level, std::string_view message) {
+// Never throws: it is called from DDS listener threads.
+inline void ActionLog(ActionLogLevel level, std::string_view message) noexcept {
   if (const auto sink = detail::g_action_log_sink.load(std::memory_order_acquire)) {
     sink(level, message);
     return;
   }
-  detail::WriteActionLogToStdStreams(level, message);
+  try {
+    detail::WriteActionLogToStdStreams(level, message);
+  } catch (...) {
+    // A diagnostic that cannot be written is dropped.
+  }
 }
 
 }  // namespace ibmw::action
