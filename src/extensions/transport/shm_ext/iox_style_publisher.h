@@ -7,7 +7,8 @@
 // means changing the include ("iceoryx_ext/iox_style_publisher.h" ->
 // "shm_ext/iox_style_publisher.h") and the namespace (iceoryx_extension ->
 // shm_extension); IceoryxTransportDriver names ShmTransportDriver here, and
-// the R8.2 mixed-API check (IbmwR82SlotMixCheck) is provided as well.
+// the R8.2 mixed-API check (IbmwR82SlotMixCheck) comes with
+// shm_ext/shm_transport_driver.h, as with iceoryx_transport_driver.h.
 //
 // One deliberate difference: publish() returns what really happened. It is
 // false when the sample/buffer is invalid or when the driver did not publish
@@ -58,6 +59,21 @@ namespace ibmw::extensions::shm_extension {
 // and never the iceoryx driver.
 using IceoryxTransportDriver = ShmTransportDriver;
 
+namespace detail {
+
+// Publishes a loan through `driver`. A driver that does not own the handle
+// (the sample was borrowed from another driver's publisher) leaves it
+// untouched, still carrying its token: it is then released through `owner`,
+// the driver that loaned it, so the chunk does not leak.
+inline bool PublishOrReturnLoan(ShmTransportDriver* driver, ShmTransportDriver* owner,
+                                runtime::core::transport::LoanedSampleHandle& handle) noexcept {
+  if (driver->TryPublishLoaned(handle)) return true;
+  if (handle.driver_token != nullptr && owner != nullptr) owner->ReleaseLoaned(handle);
+  return false;
+}
+
+}  // namespace detail
+
 // Move-only loan of a typed POD T. Destroying it unpublished returns the
 // chunk to the driver.
 template <typename T>
@@ -107,6 +123,10 @@ class IoxLoanedSample {
   }
 
  private:
+  template <typename>
+  friend class IoxStylePublisher;
+  friend class IoxRawPodPublisher;
+
   void Release() noexcept {
     if (driver_ != nullptr && handle_.user_payload_ptr != nullptr) driver_->ReleaseLoaned(handle_);
     driver_ = nullptr;
@@ -137,11 +157,13 @@ class IoxStylePublisher {
     return Borrow(bytes);
   }
 
-  // False if the sample is invalid or its chunk was not published.
+  // False if the sample is invalid or its chunk was not published; the loan
+  // is given back either way.
   bool publish(IoxLoanedSample<T>&& sample) noexcept {
     if (!sample.is_valid()) return false;
+    ShmTransportDriver* const owner = sample.driver_;
     auto handle = sample.ExtractForPublish();
-    return driver_->TryPublishLoaned(handle);
+    return detail::PublishOrReturnLoan(driver_, owner, handle);
   }
 
   const std::string& topic_name() const noexcept { return info_.topic_name; }
@@ -205,11 +227,13 @@ class IoxRawPodPublisher {
     return IoxLoanedSample<std::byte>(driver_, handle);
   }
 
-  // False if the sample is invalid or its chunk was not published.
+  // False if the sample is invalid or its chunk was not published; the loan
+  // is given back either way.
   bool publish(IoxLoanedSample<std::byte>&& sample) noexcept {
     if (!sample.is_valid()) return false;
+    ShmTransportDriver* const owner = sample.driver_;
     auto handle = sample.ExtractForPublish();
-    return driver_->TryPublishLoaned(handle);
+    return detail::PublishOrReturnLoan(driver_, owner, handle);
   }
 
   const std::string& topic_name() const noexcept { return info_.topic_name; }
@@ -278,6 +302,8 @@ class IoxCtxMetaLoanedBuffer {
   }
 
  private:
+  friend class IoxCtxMetaPublisher;
+
   void Release() noexcept {
     if (driver_ != nullptr && handle_.user_payload_ptr != nullptr) driver_->ReleaseLoaned(handle_);
     driver_ = nullptr;
@@ -309,11 +335,13 @@ class IoxCtxMetaPublisher {
     return IoxCtxMetaLoanedBuffer(driver_, handle);
   }
 
-  // False if the buffer is invalid or its chunk was not published.
+  // False if the buffer is invalid or its chunk was not published; the loan
+  // is given back either way.
   bool publish(IoxCtxMetaLoanedBuffer&& buf) noexcept {
     if (!buf.is_valid()) return false;
+    ShmTransportDriver* const owner = buf.driver_;
     auto handle = buf.ExtractForPublish();
-    return driver_->TryPublishLoaned(handle);
+    return detail::PublishOrReturnLoan(driver_, owner, handle);
   }
 
   const std::string& topic_name() const noexcept { return info_.topic_name; }
@@ -369,31 +397,5 @@ inline std::shared_ptr<IoxCtxMetaTypedPublisher<MsgType>> CreateCtxMetaTypedPubl
   if (driver == nullptr) return nullptr;
   return std::make_shared<IoxCtxMetaTypedPublisher<MsgType>>(driver, std::string(topic), std::string(msg_type));
 }
-
-// R8.2 trip wire, identical to iceoryx_ext's: a module typedef'ing both
-// `legacy_iox_marker` (handwritten against the helpers above) and
-// `v2_driver_slot_marker` (publisher_for<T>() / subscriber_for<T>()) mixes API
-// surfaces, and instantiating IbmwR82SlotMixCheck<ModuleT> fails to compile.
-template <typename ModuleT, typename = void>
-struct IbmwUsesLegacyIceoryxApi : std::false_type {};
-
-template <typename ModuleT>
-struct IbmwUsesLegacyIceoryxApi<ModuleT, std::void_t<typename ModuleT::legacy_iox_marker>> : std::true_type {};
-
-template <typename ModuleT, typename = void>
-struct IbmwHasV2DriverSlot : std::false_type {};
-
-template <typename ModuleT>
-struct IbmwHasV2DriverSlot<ModuleT, std::void_t<typename ModuleT::v2_driver_slot_marker>> : std::true_type {};
-
-template <typename ModuleT>
-struct IbmwR82SlotMixCheck {
-  static_assert(!(IbmwUsesLegacyIceoryxApi<ModuleT>::value && IbmwHasV2DriverSlot<ModuleT>::value),
-                "R8.2: cannot mix v2 publisher_for<T>()/subscriber_for<T>() "
-                "factory API with legacy IoxStylePublisher<T>/"
-                "IoxRawPodPublisher/IoxCtxMetaPublisher in the same module. "
-                "Pick one API surface per module. "
-                "See skills/transport_decoupling.md §3.2.");
-};
 
 }  // namespace ibmw::extensions::shm_extension

@@ -112,13 +112,23 @@ TEST(PubCommandTest, RejectsShmOptionsForOtherDriversAndInvalidValues) {
   EXPECT_THROW(Parse({{"--local", ""}, {"--shm-init-size", "1024"}}), std::invalid_argument);
   EXPECT_THROW(Parse({{"--shm", ""}, {"--iceoryx", ""}}), std::invalid_argument);
   for (const auto& [option, value] : std::vector<std::pair<std::string, std::string>>{
-           {"--shm-init-size", "0"}, {"--shm-init-size", "4294967296"}, {"--shm-init-size", "1k"},
+           {"--shm-init-size", "0"}, {"--shm-init-size", "268435457"}, {"--shm-init-size", "4294967296"},
+           {"--shm-init-size", "1k"},
            {"--shm-runtime-id", ""}, {"--shm-domain", ""}, {"--shm-root-dir", ""},
            {"--shm-group", "4294967295"}, {"--shm-group", "-1"}, {"--shm-group", "staff"}, {"--shm-group", ""},
            {"--shm-max-bytes-per-publisher", "0"}, {"--shm-max-bytes-per-publisher", "x"}}) {
     EXPECT_THROW(Parse({{"--shm", ""}, {option, value}}), std::invalid_argument) << option << "=" << value;
   }
   EXPECT_THROW(Parse({{"--shm", ""}, {"--shm-domain", "a"}, {"--shm-domain", "b"}}), std::invalid_argument);
+  // 256 MiB is the largest shm loan; iceoryx keeps the full uint32 range.
+  EXPECT_EQ(Parse({{"--shm", ""}, {"--shm-init-size", "268435456"}})
+                .root["ibmw"]["extensions"]["items"][0]["options"]["shm_init_size"]
+                .as<uint64_t>(),
+            268435456u);
+  EXPECT_EQ(Parse({{"--iceoryx", ""}, {"--iceoryx-runtime-id", "rt"}, {"--shm-init-size", "268435457"}})
+                .root["ibmw"]["extensions"]["items"][0]["options"]["shm_init_size"]
+                .as<uint64_t>(),
+            268435457u);
   EXPECT_EQ(Parse({{"--shm", ""}, {"--shm-group", "0"}}).root["ibmw"]["extensions"]["items"][0]["options"]["group"]
                 .as<std::string>(),
             "0");

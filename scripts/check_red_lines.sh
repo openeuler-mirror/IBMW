@@ -251,7 +251,7 @@ grep_yaml() {
 #─────────────────────────────────────────────
 emit_rule "R1" "HIGH" "user-facing 不得 include transport-private header"
 # skill §R1 grep 模式
-R1_PAT='^[[:space:]]*#include[[:space:]]+["<](dds_ext|iceoryx_ext|ros2_ext|mqtt_ext|net_ext|zenoh_ext|extensions/transport|dds_types|ros2_types|fastdds|iox/|json_transport\.h)'
+R1_PAT='^[[:space:]]*#include[[:space:]]+["<](dds_ext|iceoryx_ext|shm_ext|ros2_ext|mqtt_ext|net_ext|zenoh_ext|extensions/transport|dds_types|ros2_types|fastdds|iox/|json_transport\.h)'
 grep_user_facing "R1" "$R1_PAT"
 
 #─────────────────────────────────────────────
@@ -280,10 +280,10 @@ grep_user_facing "R4" "$R4_PAT"
 # 8. R5 — YAML schema 红线
 #─────────────────────────────────────────────
 emit_rule "R5" "MEDIUM" "用户 yaml 不得含 transport-specific 字段"
-# 禁字段（skill §R5）：iceoryx_msg_type / dds_type_name / dds_namespace_cpp / ros2_type_name /
+# 禁字段（skill §R5）：iceoryx_msg_type / shm_msg_type / dds_type_name / dds_namespace_cpp / ros2_type_name /
 #                     ros2_msg_include / ros2_package / zero_copy_config / enable_drivers
 # 注意：prefer_transport: shm/network/local 是允许的（v0.3 决议）
-R5_PAT='^[[:space:]]*(iceoryx_msg_type|dds_type_name|dds_namespace_cpp|ros2_type_name|ros2_msg_include|ros2_package|zero_copy_config|enable_drivers)[[:space:]]*:'
+R5_PAT='^[[:space:]]*(iceoryx_msg_type|shm_msg_type|dds_type_name|dds_namespace_cpp|ros2_type_name|ros2_msg_include|ros2_package|zero_copy_config|enable_drivers)[[:space:]]*:'
 grep_yaml "R5" "$R5_PAT"
 
 #─────────────────────────────────────────────

@@ -77,6 +77,11 @@ if(IBMW_BUILD_TESTS AND test_files)
   add_executable(ibmw_shm_ext_peer test_peer/shm_ext_peer.cc)
   target_link_libraries(ibmw_shm_ext_peer PRIVATE ibmw::selfdev::shm)
   add_dependencies(${CUR_TARGET_NAME}_test ibmw_shm_ext_peer)
+  # selfdev's operator new replacement (test::FailAllocations) makes the
+  # library refuse a publish on demand (EXT-53/54).
+  get_target_property(selfdev_shm_source_dir ibmw_selfdev_shm SOURCE_DIR)
+  target_sources(${CUR_TARGET_NAME}_test PRIVATE ${selfdev_shm_source_dir}/test/fail_alloc.cc)
+  target_include_directories(${CUR_TARGET_NAME}_test PRIVATE ${selfdev_shm_source_dir}/test)
   target_compile_definitions(${CUR_TARGET_NAME}_test
     PRIVATE IBMW_SHM_EXT_PEER_PATH="$<TARGET_FILE:ibmw_shm_ext_peer>")
 endif()

@@ -27,14 +27,19 @@ def _has_type(modules: list[str], module_map: dict, mod_type: str) -> bool:
 
 # ── Module type taxonomy (messaging) ────────────────────────────────────────
 
+# direct_shm_* publish through the shm messaging driver, so their topics
+# need the messaging block like any other messaging module.
 _MSG_TYPES_ALL = {"publisher", "subscriber",
                   "ros2_interop_publisher", "ros2_interop_subscriber",
                   "direct_ros2_publisher", "direct_ros2_subscriber",
+                  "direct_shm_publisher", "direct_shm_subscriber",
                   "loaned_publisher", "loaned_subscriber"}
 _MSG_PUB_TYPES = {"publisher", "ros2_interop_publisher",
-                  "direct_ros2_publisher", "loaned_publisher"}
+                  "direct_ros2_publisher", "direct_shm_publisher",
+                  "loaned_publisher"}
 _MSG_SUB_TYPES = {"subscriber", "ros2_interop_subscriber",
-                  "direct_ros2_subscriber", "loaned_subscriber"}
+                  "direct_ros2_subscriber", "direct_shm_subscriber",
+                  "loaned_subscriber"}
 
 
 def _collect_topics(modules: list[str], module_map: dict) -> dict[str, set[str]]:
@@ -117,16 +122,6 @@ def _collect_ros2_rpc_remaps(modules: list[str], module_map: dict, mod_type: str
     return remaps
 
 
-_MSG_TYPES_ALL = {"publisher", "subscriber",
-                  "ros2_interop_publisher", "ros2_interop_subscriber",
-                  "direct_ros2_publisher", "direct_ros2_subscriber",
-                  "loaned_publisher", "loaned_subscriber"}
-_MSG_PUB_TYPES = {"publisher", "ros2_interop_publisher",
-                  "direct_ros2_publisher", "loaned_publisher"}
-_MSG_SUB_TYPES = {"subscriber", "ros2_interop_subscriber",
-                  "direct_ros2_subscriber", "loaned_subscriber"}
-
-
 def _needs_messaging(modules: list[str], module_map: dict) -> bool:
     """Check if any module needs messaging infrastructure."""
     for mod_name in modules:
@@ -151,8 +146,22 @@ def _get_messaging_driver(modules: list[str], module_map: dict) -> str:
     Priority: iceoryx > shm > dds > local. The driver chosen here is wired into
     every topic's `enable_drivers:` list. (For mixed-transport apps the
     user must hand-edit the generated cfg or use multiple apps.)
+
+    iceoryx and shm in one app is an error: the shm driver serves the same
+    URLs as iceoryx (it is its drop-in replacement), and the priority would
+    silently move the shm modules onto iceoryx.
     """
     drivers = {module_map.get(m, {}).get("transport") for m in modules}
+    if "iceoryx" in drivers and "shm" in drivers:
+        by_transport = {
+            t: sorted(m for m in modules if module_map.get(m, {}).get("transport") == t)
+            for t in ("iceoryx", "shm")
+        }
+        raise ValueError(
+            "An app cannot mix iceoryx and shm modules (iceoryx: "
+            f"{', '.join(by_transport['iceoryx'])}; shm: {', '.join(by_transport['shm'])}). "
+            "The shm transport replaces iceoryx on the same topics; put the modules "
+            "in separate apps or move them to one transport.")
     if "iceoryx" in drivers:
         return "iceoryx"
     if "shm" in drivers:

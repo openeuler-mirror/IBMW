@@ -186,7 +186,10 @@ PublicationConfig ParsePublicationOptions(const Invocation& invocation) {
   } else if (driver == "shm") {
     // Keys of the shm_extension YAML node; omitted ones keep its defaults.
     settings["runtime_id"] = RequiredValue(invocation, "--shm-runtime-id", identity);
-    settings["shm_init_size"] = Integer(OptionValue(invocation, "--shm-init-size", "1024"), "--shm-init-size", 1, std::numeric_limits<uint32_t>::max());
+    // The shm driver loans at most 256 MiB (shm_ext kMaxLoanSize, the largest
+    // selfdev payload class) and rejects a larger first loan at Initialize().
+    constexpr uint64_t kShmMaxLoanSize = uint64_t{1} << 28;
+    settings["shm_init_size"] = Integer(OptionValue(invocation, "--shm-init-size", "1024"), "--shm-init-size", 1, kShmMaxLoanSize);
     if (invocation.HasOption("--shm-domain")) settings["domain"] = RequiredValue(invocation, "--shm-domain");
     if (invocation.HasOption("--shm-root-dir")) settings["root_dir"] = RequiredValue(invocation, "--shm-root-dir");
     if (invocation.HasOption("--shm-group")) {

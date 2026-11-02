@@ -51,6 +51,7 @@ def _gen_direct_shm_publisher_header(mod: dict, ns: str) -> str:
 
 #include "cpp/module_base.h"
 #include "cpp/transport/transport_factory.h"
+#include "type_support/ros2/ros2_transport.h"
 // IBMW_R1_EXEMPT_BEGIN
 #include "shm_ext/shm_transport_driver.h"
 // IBMW_R1_EXEMPT_END
@@ -167,6 +168,7 @@ def _gen_direct_shm_subscriber_header(mod: dict, ns: str) -> str:
 
 #include "cpp/module_base.h"
 #include "cpp/transport/transport_factory.h"
+#include "type_support/ros2/ros2_transport.h"
 // IBMW_R1_EXEMPT_BEGIN
 #include "shm_ext/shm_transport_driver.h"
 // IBMW_R1_EXEMPT_END

@@ -258,7 +258,11 @@ void* ShmPublisher::TakeSlot(void* token) noexcept {
 
 bool ShmPublisher::PublishSlot(void* token) noexcept {
   void* chunk = TakeSlot(token);
-  return chunk != nullptr && Publish(chunk);
+  if (chunk == nullptr) return false;
+  if (Publish(chunk)) return true;
+  // Still on loan, and the token that could give it back is spent.
+  Release(chunk);
+  return false;
 }
 
 void ShmPublisher::ReleaseSlot(void* token) noexcept {
@@ -607,6 +611,7 @@ ShmBus::~ShmBus() {
   listeners_.Abandon();
   new std::shared_ptr<ShmSubscriptionRegistry>(registry_);  // NOLINT: leaked on purpose
   (void)gate_.release();
+  (void)loan_return_gate_.release();
 }
 
 void ShmBus::Initialize(const ShmBusOptions& options) {
@@ -658,7 +663,9 @@ void ShmBus::ResetForNewGenerationLocked() {
   }
   listeners_.SetThreadSetup(nullptr);
   generation_.fetch_add(1, std::memory_order_release);
-  gate_->Reopen();  // last: a lease from here on sees all of the above
+  // Last: a lease from here on sees all of the above.
+  loan_return_gate_->Reopen();
+  gate_->Reopen();
 }
 
 void ShmBus::SetDeliveryOptions(const ShmDeliveryOptions& options) noexcept {
@@ -889,6 +896,10 @@ bool ShmBus::Shutdown() noexcept {
       return false;
     }
   }
+  // Phase one left no loan, so a handle call still inside the gate holds a
+  // stale token and returns at once; it must not look at a freed publisher.
+  loan_return_gate_->Close();
+  loan_return_gate_->WaitIdle(std::chrono::steady_clock::time_point::max());
   std::unordered_map<std::string, std::shared_ptr<ShmSubscription>, ibmw::common::util::StringHash, std::equal_to<>>
       subscriptions;
   {

@@ -188,6 +188,8 @@ class IBMW_SHM_EXPORT ShmPublisher {
   ShmLoanSlot* LoanSlot(size_t size, size_t alignment = shm::kDefaultPayloadAlignment) noexcept;
   // Take a slot token (ShmLoanSlot::Token). No-ops for a token of another
   // publisher or of a loan already given back; PublishSlot() then returns false.
+  // A chunk the library refuses to publish (out of memory) is released, so a
+  // spent token never strands its loan.
   bool PublishSlot(void* token) noexcept;
   void ReleaseSlot(void* token) noexcept;
 
@@ -366,6 +368,10 @@ class IBMW_SHM_EXPORT ShmBus {
   void SetListenerThreadSetup(std::function<void()> setup);
 
   ShmOperationGate::Lease TryAcquireOperation() noexcept { return gate_->TryAcquire(); }
+  // Admits giving back a loan handle (publish or release of its slot token)
+  // until Shutdown() frees the publishers. Unlike TryAcquireOperation() it
+  // stays open while shutdown prepares, which waits for exactly those loans.
+  ShmOperationGate::Lease TryAcquireLoanReturn() noexcept { return loan_return_gate_->TryAcquire(); }
   // Bumped by a re-Initialize before it reopens the gate. A pointer cached from
   // a publisher is valid while a lease is held and the generation is unchanged:
   // a lease that succeeded on a reopened gate also sees the new value.
@@ -396,7 +402,8 @@ class IBMW_SHM_EXPORT ShmBus {
   // Phase one: stop intake, stop callbacks, wait for loans and retained
   // samples. Retryable; never frees resources. Rejected on a callback thread.
   bool TryPrepareShutdown(std::chrono::milliseconds timeout) noexcept;
-  // Phase two: frees everything. Requires a successful phase one. If the bus
+  // Phase two: frees everything. Requires a successful phase one. Closes the
+  // loan-return gate and waits for the handle calls still inside it first. If the bus
   // is destroyed without it and cannot be prepared, publishers, subscriptions,
   // listener threads and the gate are leaked rather than freed under
   // threads that still use them. The bus object's own members (options,
@@ -419,6 +426,7 @@ class IBMW_SHM_EXPORT ShmBus {
   ShmBusOptions options_;
   // Heap-held so a failed destruction can leak it (leases point into it).
   std::unique_ptr<ShmOperationGate> gate_ = std::make_unique<ShmOperationGate>();
+  std::unique_ptr<ShmOperationGate> loan_return_gate_ = std::make_unique<ShmOperationGate>();
   std::atomic_uint64_t generation_{0};
 
   mutable std::mutex lifecycle_mu_;

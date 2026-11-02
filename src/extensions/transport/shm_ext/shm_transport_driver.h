@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -93,9 +94,16 @@ class IBMW_SHM_EXPORT ShmTransportDriver
   void PublishLoaned(runtime::core::transport::LoanedSampleHandle& handle) noexcept override;
   void ReleaseLoaned(runtime::core::transport::LoanedSampleHandle& handle) noexcept override;
   // PublishLoaned() that tells whether the chunk was published: false for a
-  // handle of another driver or mode, a stale or duplicate token, or a chunk
-  // the library refused. The handle is left untouched only when it is not one
-  // of this driver's (as PublishLoaned()); otherwise it is cleared.
+  // handle of another driver or mode, a stale or duplicate token, a handle
+  // given back after Shutdown(), or a chunk the library refused (that chunk is
+  // released). A handle that is not one of this driver's (another source
+  // driver, or a mode other than kPodOnly / kCtxMetaThenPayloadUnreported) is
+  // left untouched, as by PublishLoaned() and ReleaseLoaned(); otherwise the
+  // handle is cleared.
+  // Telling a duplicate or stale token apart is best effort: the token carries
+  // the slot's loan generation modulo ShmLoanSlot::kTagCount (64), so a copy
+  // that is exactly a multiple of 64 loans of the same slot old is taken for
+  // the current loan.
   bool TryPublishLoaned(runtime::core::transport::LoanedSampleHandle& handle) noexcept;
 
   // Zero-copy POD registration under "/transport_zc_pod/<topic>/<msg_type>".
@@ -169,6 +177,35 @@ class IBMW_SHM_EXPORT ShmTransportDriver
   std::atomic_uint64_t send_failures_{0};
   std::atomic_uint64_t send_failure_logs_suppressed_{0};
   std::atomic_int64_t last_send_failure_log_ns_{std::numeric_limits<int64_t>::min() / 2};
+};
+
+// R8.2 trip wire, identical to iceoryx_ext's (iceoryx_transport_driver.h): a
+// module typedef'ing both `legacy_iox_marker` (handwritten against the
+// helpers of shm_ext/iox_style_publisher.h) and `v2_driver_slot_marker`
+// (publisher_for<T>() / subscriber_for<T>()) mixes API surfaces, and
+// instantiating IbmwR82SlotMixCheck<ModuleT> fails to compile. Declared here,
+// in this namespace, so both headers provide it without a second definition
+// and it never collides with the iceoryx_extension one.
+template <typename ModuleT, typename = void>
+struct IbmwUsesLegacyIceoryxApi : std::false_type {};
+
+template <typename ModuleT>
+struct IbmwUsesLegacyIceoryxApi<ModuleT, std::void_t<typename ModuleT::legacy_iox_marker>> : std::true_type {};
+
+template <typename ModuleT, typename = void>
+struct IbmwHasV2DriverSlot : std::false_type {};
+
+template <typename ModuleT>
+struct IbmwHasV2DriverSlot<ModuleT, std::void_t<typename ModuleT::v2_driver_slot_marker>> : std::true_type {};
+
+template <typename ModuleT>
+struct IbmwR82SlotMixCheck {
+  static_assert(!(IbmwUsesLegacyIceoryxApi<ModuleT>::value && IbmwHasV2DriverSlot<ModuleT>::value),
+                "R8.2: cannot mix v2 publisher_for<T>()/subscriber_for<T>() "
+                "factory API with legacy IoxStylePublisher<T>/"
+                "IoxRawPodPublisher/IoxCtxMetaPublisher in the same module. "
+                "Pick one API surface per module. "
+                "See skills/transport_decoupling.md §3.2.");
 };
 
 }  // namespace ibmw::extensions::shm_extension

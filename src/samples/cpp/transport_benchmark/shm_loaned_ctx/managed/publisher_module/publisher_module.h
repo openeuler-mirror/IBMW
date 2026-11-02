@@ -23,7 +23,9 @@
 
 #include "bench_options.h"
 #include "bench_plain_payloads.h"
+// IBMW_R1_EXEMPT_BEGIN
 #include "shm_ext/shm_ctx_publisher.h"
+// IBMW_R1_EXEMPT_END
 
 namespace ibmw::samples::transport_benchmark::shm_loaned_ctx {
 

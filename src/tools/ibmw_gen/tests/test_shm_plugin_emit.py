@@ -283,6 +283,8 @@ class TestShmPluginEmit(unittest.TestCase):
         self.assertLess(begin, include)
         self.assertLess(include, end)
         self.assertIn("cpp/transport/transport_factory.h", header)
+        # publisher_for<T>() needs the ROS2 type-support traits of T.
+        self.assertIn('#include "type_support/ros2/ros2_transport.h"', header)
         self.assertIn("publisher_for<geometry_msgs::msg::Point>", source)
 
     def test_direct_shm_subscriber_emit_with_r1_anchor(self):
@@ -307,6 +309,7 @@ class TestShmPluginEmit(unittest.TestCase):
         self.assertLess(begin, include)
         self.assertLess(include, end)
         self.assertIn("cpp/transport/transport_factory.h", header)
+        self.assertIn('#include "type_support/ros2/ros2_transport.h"', header)
         self.assertIn("subscriber_for<geometry_msgs::msg::Point>", source)
 
     def test_direct_shm_publisher_implicit_transport(self):
@@ -559,8 +562,7 @@ class TestFullPipelineDirectShm(unittest.TestCase):
             f"no generated app cfg yaml found under {cfg_dir}")
         # The generated cfgs (app-mode and pkg-mode) must load the shm
         # extension — the v2→v1 expansion must have promoted the module
-        # to `transport: shm`. Like direct_iceoryx_*, direct modules add
-        # no messaging block (see the loaned pipeline test below).
+        # to `transport: shm`.
         joined = "\n".join(p.read_text() for p in app_cfgs)
         self.assertIn(
             "name: shm_extension", joined,
@@ -570,6 +572,18 @@ class TestFullPipelineDirectShm(unittest.TestCase):
         self.assertIn("libibmw_shm_transport.so", joined)
         self.assertNotIn("RouDi", joined)
         self.assertNotIn("iceoryx", joined)
+
+        # (4) publisher_for<T>() / subscriber_for<T>() route through the
+        # messaging layer: without the shm driver and the topic in the
+        # messaging block nothing is sent or received.
+        for cfg in app_cfgs:
+            text = cfg.read_text()
+            msg = text[text.index("  messaging:"):]
+            self.assertIn("- type: shm", msg, cfg.name)
+            for section in ("publishers:", "subscribers:"):
+                block = msg[msg.index(section):]
+                self.assertIn('- topic: "/r8_pipeline/point"', block, f"{cfg.name} {section}")
+                self.assertIn("enable_drivers: [shm]", block, f"{cfg.name} {section}")
 
 
 SYNTHETIC_LOANED_SHM_YAML = """\
@@ -712,6 +726,35 @@ class TestShmSchemaAndImportWiring(unittest.TestCase):
         self.assertIn("shm_init_size: 4096", text)
         self.assertIn('domain: "demo"', text)
         self.assertNotIn("iceoryx", text)
+
+    def test_config_gen_direct_shm_topics_reach_messaging(self):
+        from generators import config_gen
+
+        module_map = {
+            "p": {"name": "p", "type": "direct_shm_publisher", "transport": "shm", "topic": "/t"},
+            "s": {"name": "s", "type": "direct_shm_subscriber", "transport": "shm", "topic": "/t"},
+        }
+        self.assertTrue(config_gen._needs_messaging(["p"], module_map))
+        self.assertEqual(config_gen._collect_topics(["p", "s"], module_map),
+                         {"/t": {"publisher", "subscriber"}})
+
+    def test_config_gen_rejects_iceoryx_and_shm_in_one_app(self):
+        from generators import config_gen
+
+        module_map = {
+            "ipub": {"name": "ipub", "type": "loaned_publisher", "transport": "iceoryx", "topic": "/a"},
+            "ssub": {"name": "ssub", "type": "direct_shm_subscriber", "transport": "shm", "topic": "/b"},
+            "dsub": {"name": "dsub", "type": "subscriber", "transport": "dds", "topic": "/c"},
+        }
+        with self.assertRaises(ValueError) as ctx:
+            config_gen._get_messaging_driver(["ipub", "ssub", "dsub"], module_map)
+        message = str(ctx.exception)
+        self.assertIn("cannot mix iceoryx and shm", message)
+        self.assertIn("iceoryx: ipub", message)
+        self.assertIn("shm: ssub", message)
+        # Either one alone (with other transports) is still fine.
+        self.assertEqual(config_gen._get_messaging_driver(["ipub", "dsub"], module_map), "iceoryx")
+        self.assertEqual(config_gen._get_messaging_driver(["ssub", "dsub"], module_map), "shm")
 
     def test_ros2_import_shm_target_metadata(self):
         from ros2_interface_import import emit_reference_existing_interface_report

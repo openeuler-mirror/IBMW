@@ -204,7 +204,6 @@ void ShmTransportDriver::Initialize(YAML::Node options_node) {
     });
   }
   options_ = std::move(options);
-  delivery_started_ = false;
   state_.store(State::kInit);
 }
 
@@ -213,7 +212,7 @@ void ShmTransportDriver::Start() {
   // A Start() that threw while attaching may be retried: attaching is
   // idempotent, so the retry attaches the rest.
   MW_REQUIRE(state_.load() == State::kInit || (state_.load() == State::kStart && !delivery_started_),
-             "Method can only be called when state is 'Init'.");
+             "Start() can only be called in state 'Init', or again after a Start() that threw.");
   // kStart first: a callback may Send() as soon as its subscription attaches.
   state_.store(State::kStart);
   bus_.StartDelivery();
@@ -451,8 +450,10 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
       for (size_t ii = 0; ii < buffer_count; ++ii) {
         buf_oper.SetBuffer(static_cast<const char*>(buffers[ii].data), buffers[ii].len);
       }
-      guard.Disarm();
-      pub->Publish(chunk);
+      // A chunk the library refuses stays on loan: the guard gives it back.
+      const bool published = pub->Publish(chunk);
+      if (published) guard.Disarm();
+      SHM_SEND_REQUIRE(published, "Shm publish of {} bytes on '{}' was refused.", total_size, url);
       MW_TRACE("Shm publish to '{}'", url);
       return;
     }
@@ -488,8 +489,9 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
       buf_oper.JumpTo(0);
       buf_oper.SetUint32(static_cast<uint32_t>(min_shm_size + buffer_array.BufferSize()));
       pub->RaiseSizeHint(*loan_size);
-      guard.Disarm();
-      pub->Publish(chunk);
+      const bool published = pub->Publish(chunk);
+      if (published) guard.Disarm();
+      SHM_SEND_REQUIRE(published, "Shm publish of {} bytes on '{}' was refused.", *loan_size, url);
       MW_TRACE("Shm publish to '{}'", url);
       return;
     }
@@ -692,18 +694,24 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
     if (!operation) return false;
     if (bus_.Generation() != bus_generation_) return false;
     // pod_pub_map_ is written under lifecycle_mutex_ in Init state only and is
-    // frozen once kStart is stored (seq_cst); before that, look up under the lock.
-    std::unique_lock<std::mutex> init_lock(lifecycle_mutex_, std::defer_lock);
-    if (state_.load() != State::kStart) init_lock.lock();
-    auto it = pod_pub_map_.find(TopicKey(info.topic_name, info.msg_type));
-    if (it == pod_pub_map_.end()) {
+    // frozen once kStart is stored (seq_cst); before that, look up under the
+    // lock. The endpoint is copied: the lease keeps its publisher alive.
+    std::optional<PodPublisherEndpoint> endpoint;
+    {
+      std::unique_lock<std::mutex> init_lock(lifecycle_mutex_, std::defer_lock);
+      if (state_.load() != State::kStart) init_lock.lock();
+      if (auto it = pod_pub_map_.find(TopicKey(info.topic_name, info.msg_type)); it != pod_pub_map_.end()) {
+        endpoint = it->second;
+      }
+    }
+    if (!endpoint) {
       MW_WARN("LoanSample: POD topic not registered. Call EnsurePodTopic first. topic={} msg_type={}",
               info.topic_name, info.msg_type);
       return false;
     }
     // A slot, like ctx-meta loans: its tagged token tells a stale handle
     // from a new loan of the same chunk.
-    ShmLoanSlot* slot = it->second.publisher->LoanSlot(requested_size, it->second.alignment);
+    ShmLoanSlot* slot = endpoint->publisher->LoanSlot(requested_size, endpoint->alignment);
     if (slot == nullptr) return false;
     out_handle.user_payload_ptr = slot->Chunk();
     out_handle.user_payload_size = requested_size;
@@ -837,32 +845,38 @@ void ShmTransportDriver::PublishLoaned(transport::LoanedSampleHandle& handle) no
   TryPublishLoaned(handle);
 }
 
+namespace {
+
+bool IsShmLoanMode(transport::LoanMode mode) noexcept {
+  return mode == transport::LoanMode::kCtxMetaThenPayloadUnreported || mode == transport::LoanMode::kPodOnly;
+}
+
+}  // namespace
+
+// The slot lives in its publisher, which ShmBus::Shutdown() frees, so a
+// token is looked at only under a loan-return lease of this driver's bus
+// generation. That gate stays open while shutdown prepares: a loan still held
+// then can be given back, which is what the preparation waits for.
 bool ShmTransportDriver::TryPublishLoaned(transport::LoanedSampleHandle& handle) noexcept {
-  if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this) {
+  if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this ||
+      !IsShmLoanMode(handle.mode)) {
     return false;
   }
   bool published = false;
-  switch (handle.mode) {
-    case transport::LoanMode::kCtxMetaThenPayloadUnreported:
-    case transport::LoanMode::kPodOnly:
-      published = ShmLoanSlot::FromToken(handle.driver_token)->owner->PublishSlot(handle.driver_token);
-      break;
-    default:
-      return false;
+  if (auto lease = bus_.TryAcquireLoanReturn(); lease && bus_.Generation() == bus_generation_) {
+    published = ShmLoanSlot::FromToken(handle.driver_token)->owner->PublishSlot(handle.driver_token);
   }
   ClearHandle(handle);
   return published;
 }
 
 void ShmTransportDriver::ReleaseLoaned(transport::LoanedSampleHandle& handle) noexcept {
-  if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this) return;
-  switch (handle.mode) {
-    case transport::LoanMode::kCtxMetaThenPayloadUnreported:
-    case transport::LoanMode::kPodOnly:
-      ShmLoanSlot::FromToken(handle.driver_token)->owner->ReleaseSlot(handle.driver_token);
-      break;
-    default:
-      return;
+  if (handle.driver_token == nullptr || handle.user_payload_ptr == nullptr || handle.source_driver != this ||
+      !IsShmLoanMode(handle.mode)) {
+    return;
+  }
+  if (auto lease = bus_.TryAcquireLoanReturn(); lease && bus_.Generation() == bus_generation_) {
+    ShmLoanSlot::FromToken(handle.driver_token)->owner->ReleaseSlot(handle.driver_token);
   }
   ClearHandle(handle);
 }

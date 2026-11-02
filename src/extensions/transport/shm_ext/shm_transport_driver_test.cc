@@ -45,6 +45,7 @@
 #include "shm_ext/shm_extension.h"
 #include "shm_ext/shm_pod_publisher.h"
 #include "shm_ext/shm_transport_driver.h"
+#include "test_util.h"
 #include "yaml-cpp/yaml.h"
 
 #ifndef IBMW_SHM_EXT_PEER_PATH
@@ -2181,6 +2182,9 @@ TEST_F(ShmDriverTest, BusReinitializesAfterShutdown) {
   ASSERT_TRUE(WaitFor([&] { return rx2.Ints() == 1; }));
   EXPECT_EQ(rx2.Int(0), 2);
   EXPECT_EQ(rx1.Ints(), 1u);
+  auto* fresh = Publisher(StdUrl(info.topic_name, kIntType));
+  ASSERT_NE(fresh, nullptr);
+  EXPECT_EQ(fresh->Stats().publishes, 1u);
 
   // The old driver's cached publishers are gone: refused, not dereferenced.
   transport::LoanedSampleHandle h;
@@ -2190,16 +2194,236 @@ TEST_F(ShmDriverTest, BusReinitializesAfterShutdown) {
   transport::MessageFrame frame{.info = info, .msg_ptr = &msg, .ctx_ref = ctx};
   stale->Send(frame);
   // Refused quietly like any send of a stopped driver: not a send failure,
-  // and nothing reaches the new generation.
+  // and nothing reaches the new generation. Send() publishes synchronously,
+  // so the new publisher's count is final when it returns.
   EXPECT_EQ(stale->SendFailures(), 0u);
-  std::this_thread::sleep_for(20ms);
-  EXPECT_EQ(rx2.Ints(), 1u);
+  EXPECT_EQ(fresh->Stats().publishes, 1u);
   // Nor can it shut the new generation down.
   EXPECT_TRUE(stale->TryPrepareShutdown(1s));
   stale->Shutdown();
   EXPECT_TRUE(bus_->TryAcquireOperation());
   SendInt(info, 4);
-  EXPECT_TRUE(WaitFor([&] { return rx2.Ints() == 2; }));
+  ASSERT_TRUE(WaitFor([&] { return rx2.Ints() == 2; }));
+  EXPECT_EQ(rx2.Int(1), 4);
+  EXPECT_EQ(fresh->Stats().publishes, 2u);
+}
+
+// EXT-53 A publish the library refuses (out of memory while a subscriber is
+// connected) gives the loan back: for a POD and a ctx-meta handle, and in
+// Send(), which also counts the failure. Nothing is published, every slot
+// stays usable and shutdown prepares at once.
+TEST_F(ShmDriverTest, RefusedPublishReleasesLoan) {
+  auto& d = Init();
+  const auto info = BlobInfo(UniqueTopic());
+  Received rx;
+  PodValues pods;
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kBlobType, 8, 8));
+  ASSERT_TRUE(d.OnMessage(Handler(info, &rx)));
+  ASSERT_TRUE(d.RegisterPodSubscriber(info.topic_name, kBlobType, RecordPod(&pods)));
+  StopGuard stop{this};
+  d.Start();
+  const auto std_url = StdUrl(info.topic_name, kBlobType);
+  const auto pod_url = PodUrl(info.topic_name, kBlobType);
+  // The library only allocates in a publish when it has a subscriber.
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(std_url) && HasSubscribers(pod_url); }));
+  auto* std_pub = Publisher(std_url);
+  auto* pod_pub = Publisher(pod_url);
+  ASSERT_NE(std_pub, nullptr);
+  ASSERT_NE(pod_pub, nullptr);
+
+  transport::LoanedSampleHandle pod;
+  ASSERT_TRUE(d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, pod));
+  shm::test::FailAllocations(1);
+  EXPECT_FALSE(d.TryPublishLoaned(pod));
+  shm::test::FailAllocations(0);
+  EXPECT_EQ(pod.driver_token, nullptr);
+  EXPECT_EQ(pod_pub->Outstanding(), 0u);
+  EXPECT_EQ(pod_pub->Stats().publishes, 0u);
+
+  auto ctx = PubContext();
+  transport::LoanedSampleHandle meta;
+  ASSERT_TRUE(d.LoanSample(info, 4, transport::LoanMode::kCtxMetaThenPayload, ctx.get(), meta));
+  std::memcpy(meta.user_payload_ptr, "lost", 4);
+  shm::test::FailAllocations(1);
+  EXPECT_FALSE(d.TryPublishLoaned(meta));
+  shm::test::FailAllocations(0);
+  EXPECT_EQ(std_pub->Outstanding(), 0u);
+  EXPECT_EQ(std_pub->Stats().publishes, 0u);
+
+  // Send() from a serialization cache allocates nothing of its own once warm,
+  // so the injected failure hits the library's publish.
+  BlobMsg msg{MakeBlob(100, 'r')};
+  auto array = std::make_shared<ibmw::util::BufferArray>();
+  ASSERT_TRUE(info.msg_type_support_ref.Serialize(kSerType, &msg, array->AllocatorNativeHandle(),
+                                                  array->BufferArrayNativeHandle()));
+  transport::MessageFrame frame{.info = info, .msg_ptr = nullptr, .ctx_ref = ctx};
+  frame.serialization_cache.emplace(kSerType, std::shared_ptr<ibmw::util::BufferArrayView>(
+                                                  new ibmw::util::BufferArrayView(*array),
+                                                  [array](const ibmw::util::BufferArrayView* p) { delete p; }));
+  d.Send(frame);
+  ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == 1; }));
+  {
+    ScopedLogCounter log;
+    shm::test::FailAllocations(1);
+    d.Send(frame);
+    shm::test::FailAllocations(0);
+    EXPECT_EQ(log.Errors(), 1u);
+    EXPECT_NE(log.Last().find("was refused"), std::string::npos) << log.Last();
+  }
+  EXPECT_EQ(d.SendFailures(), 1u);
+  EXPECT_EQ(std_pub->Outstanding(), 0u);
+  EXPECT_EQ(std_pub->Stats().publishes, 1u);
+
+  d.Send(frame);
+  ASSERT_TRUE(WaitFor([&] { return rx.Blobs() == 2; }));
+  EXPECT_EQ(rx.Blob(1), msg.data);
+  PublishPod(d, info, 7);
+  ASSERT_TRUE(WaitFor([&] { return pods.count.load() == 1; }));
+  EXPECT_EQ(pods.Snapshot().at(0), 7u);
+  EXPECT_TRUE(d.TryPrepareShutdown(1s));
+}
+
+// EXT-54 A Start() that throws while attaching (out of memory) can be
+// retried and the retry delivers; once a Start() succeeded, another throws.
+TEST_F(ShmDriverTest, StartCanBeRetriedAfterFailure) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+  Received rx;
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.OnMessage(Handler(info, &rx)));
+  StopGuard stop{this};
+  shm::test::FailAllocations(1);
+  EXPECT_THROW(d.Start(), std::bad_alloc);
+  shm::test::FailAllocations(0);
+  EXPECT_EQ(bus_->ListenerThreads(), 0u);
+  d.Start();
+  EXPECT_EQ(bus_->ListenerThreads(), 1u);
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(info.topic_name, kIntType)); }));
+  SendInt(info, 7);
+  ASSERT_TRUE(WaitFor([&] { return rx.Ints() == 1; }));
+  EXPECT_EQ(rx.Int(0), 7);
+  try {
+    d.Start();
+    ADD_FAILURE() << "a second Start() after a successful one must throw";
+  } catch (const std::exception& e) {
+    EXPECT_NE(std::string(e.what()).find("again after a Start() that threw"), std::string::npos) << e.what();
+  }
+  EXPECT_EQ(bus_->ListenerThreads(), 1u);
+}
+
+// EXT-55 Before Start() a POD loan looks its topic up while another thread
+// registers POD topics: no data race (TSAN build) and every loan succeeds.
+TEST_F(ShmDriverTest, PreStartPodLoanRacesPodTopicRegistration) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  std::atomic_bool done{false};
+  size_t loans = 0;
+  {
+    JoiningThread registrar([&] {
+      for (int i = 0; i < 64; ++i) {
+        EXPECT_TRUE(d.EnsurePodTopic(info.topic_name + "/" + std::to_string(i), kIntType, 8, 8));
+      }
+      done.store(true);
+    });
+    do {
+      transport::LoanedSampleHandle h;
+      if (!d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, h)) break;
+      d.ReleaseLoaned(h);
+      ++loans;
+    } while (!done.load());
+  }
+  EXPECT_TRUE(done.load());
+  EXPECT_GT(loans, 0u);
+  transport::LoanedSampleHandle last;
+  EXPECT_TRUE(d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, last));
+  d.ReleaseLoaned(last);
+  EXPECT_EQ(Publisher(PodUrl(info.topic_name, kIntType))->Outstanding(), 0u);
+  EXPECT_EQ(bus_->PublisherCount(), 65u);
+}
+
+// EXT-56 A loan held across TryPrepareShutdown() makes it fail, and the
+// holder can still publish or give back its handles while shutdown prepares;
+// then preparation and Shutdown() succeed.
+TEST_F(ShmDriverTest, LoansHeldAcrossPrepareCanStillBeReturned) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  StopGuard stop{this};
+  d.Start();
+  auto* std_pub = Publisher(StdUrl(info.topic_name, kIntType));
+  auto* pod_pub = Publisher(PodUrl(info.topic_name, kIntType));
+  ASSERT_NE(std_pub, nullptr);
+  ASSERT_NE(pod_pub, nullptr);
+
+  auto ctx = PubContext();
+  transport::LoanedSampleHandle meta, pod;
+  ASSERT_TRUE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kCtxMetaThenPayload, ctx.get(), meta));
+  ASSERT_TRUE(d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, pod));
+  const IntMsg msg{5};
+  std::memcpy(meta.user_payload_ptr, &msg, sizeof(msg));
+  EXPECT_FALSE(d.TryPrepareShutdown(50ms));
+  EXPECT_FALSE(d.TryPrepareShutdown(10ms));  // retryable
+  transport::LoanedSampleHandle refused;
+  EXPECT_FALSE(d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, refused));
+
+  EXPECT_TRUE(d.TryPublishLoaned(meta));
+  EXPECT_EQ(std_pub->Outstanding(), 0u);
+  EXPECT_EQ(std_pub->Stats().publishes, 1u);
+  EXPECT_FALSE(d.TryPrepareShutdown(10ms));  // the POD loan is still out
+  d.ReleaseLoaned(pod);
+  EXPECT_EQ(pod.driver_token, nullptr);
+  EXPECT_EQ(pod_pub->Outstanding(), 0u);
+  EXPECT_TRUE(d.TryPrepareShutdown(1s));
+  d.Shutdown();
+  EXPECT_EQ(bus_->PublisherCount(), 0u);
+}
+
+// EXT-57 After Shutdown() every loan fails cleanly, and copies of handles
+// from before are refused without touching the freed publishers (ASAN build).
+TEST_F(ShmDriverTest, LoansAfterShutdownFailCleanly) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+  constexpr std::string_view kRawType = "shm_ext_test/AfterShutdownRaw";
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  auto raw = CreateRawPodPublisher(&d, info.topic_name, kRawType, 64);
+  auto ctx_pub = CreateCtxMetaPublisher(&d, info.topic_name, kIntType);
+  ASSERT_NE(raw, nullptr);
+  ASSERT_NE(ctx_pub, nullptr);
+  d.Start();
+
+  auto ctx = PubContext();
+  transport::LoanedSampleHandle pod, meta;
+  ASSERT_TRUE(d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, pod));
+  ASSERT_TRUE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kCtxMetaThenPayload, ctx.get(), meta));
+  const auto pod_copy = pod;
+  const auto meta_copy = meta;
+  d.ReleaseLoaned(pod);
+  d.ReleaseLoaned(meta);
+  d.Shutdown();
+  ASSERT_EQ(bus_->PublisherCount(), 0u);
+
+  transport::LoanedSampleHandle h;
+  EXPECT_FALSE(d.LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, h));
+  EXPECT_FALSE(d.LoanSample(info, sizeof(IntMsg), transport::LoanMode::kCtxMetaThenPayload, ctx.get(), h));
+  const IntMsg msg{1};
+  EXPECT_FALSE(d.LoanSerializedSample(info, *ctx, &msg, h));
+  EXPECT_EQ(h.driver_token, nullptr);
+  EXPECT_FALSE(raw->borrow_loaned_sample(8).is_valid());
+  EXPECT_FALSE(ctx_pub->borrow_loaned_buffer(*ctx, 8).is_valid());
+
+  auto s1 = pod_copy, s2 = pod_copy, s3 = meta_copy, s4 = meta_copy;
+  EXPECT_FALSE(d.TryPublishLoaned(s1));
+  d.ReleaseLoaned(s2);
+  EXPECT_FALSE(d.TryPublishLoaned(s3));
+  d.ReleaseLoaned(s4);
+  EXPECT_EQ(s2.driver_token, nullptr);
+  EXPECT_EQ(s4.driver_token, nullptr);
+  SendInt(info, 2);
+  EXPECT_EQ(d.SendFailures(), 0u);  // refused quietly, like any send after shutdown
 }
 
 }  // namespace
@@ -2526,6 +2750,63 @@ TEST_F(ShmDriverTest, IoxCompatCtxMetaTypedPublisher) {
 
   auto unregistered = CreateCtxMetaTypedPublisher<BlobMsg>(&d, UniqueTopic("/unregistered"), kBlobType);
   EXPECT_FALSE(unregistered->publish(*ctx, BlobMsg{"x"}));
+}
+
+// EXT-58 A sample or buffer borrowed from one driver and handed to a
+// publisher of another driver is not published there; its own driver takes
+// the loan back (typed, raw and ctx-meta publish()).
+TEST_F(ShmDriverTest, IoxCompatForeignSampleGoesBackToItsDriver) {
+  auto& a = Init();
+  ShmTransportDriver b(*bus_, "shm_b");
+  b.Initialize(YAML::Node());
+  const std::string topic = UniqueTopic();
+  constexpr std::string_view kType = "shm_ext_test/CompatPod";
+  constexpr std::string_view kRawType = "shm_ext_test/CompatRaw";
+  const auto info_a = BlobInfo(topic + "/a");
+  const auto info_b = BlobInfo(topic + "/b");
+  auto typed_a = CreatePodPublisher<CompatPod>(&a, info_a.topic_name, kType);
+  auto typed_b = CreatePodPublisher<CompatPod>(&b, info_b.topic_name, kType);
+  auto raw_a = CreateRawPodPublisher(&a, info_a.topic_name, kRawType, 64);
+  auto raw_b = CreateRawPodPublisher(&b, info_b.topic_name, kRawType, 64);
+  ASSERT_TRUE(a.RegisterSendType(SendType(info_a)));
+  ASSERT_TRUE(b.RegisterSendType(SendType(info_b)));
+  auto meta_a = CreateCtxMetaPublisher(&a, info_a.topic_name, kBlobType);
+  auto meta_b = CreateCtxMetaPublisher(&b, info_b.topic_name, kBlobType);
+  ASSERT_TRUE(typed_a && typed_b && raw_a && raw_b && meta_a && meta_b);
+  a.Start();
+  b.Start();
+  auto* typed_pub = Publisher(PodUrl(info_a.topic_name, std::string(kType)));
+  auto* raw_pub = Publisher(PodUrl(info_a.topic_name, std::string(kRawType)));
+  auto* meta_pub = Publisher(StdUrl(info_a.topic_name, kBlobType));
+  ASSERT_TRUE(typed_pub && raw_pub && meta_pub);
+
+  auto sample = typed_a->borrow_loaned_sample();
+  ASSERT_TRUE(sample.is_valid());
+  EXPECT_EQ(typed_pub->Outstanding(), 1u);
+  EXPECT_FALSE(typed_b->publish(std::move(sample)));
+  EXPECT_EQ(typed_pub->Outstanding(), 0u);
+
+  auto bytes = raw_a->borrow_loaned_sample(16);
+  ASSERT_TRUE(bytes.is_valid());
+  EXPECT_EQ(raw_pub->Outstanding(), 1u);
+  EXPECT_FALSE(raw_b->publish(std::move(bytes)));
+  EXPECT_EQ(raw_pub->Outstanding(), 0u);
+
+  auto buf = meta_a->borrow_loaned_buffer(*PubContext(), 16);
+  ASSERT_TRUE(buf.is_valid());
+  EXPECT_EQ(meta_pub->Outstanding(), 1u);
+  EXPECT_FALSE(meta_b->publish(std::move(buf)));
+  EXPECT_EQ(meta_pub->Outstanding(), 0u);
+
+  EXPECT_EQ(typed_pub->Stats().publishes + raw_pub->Stats().publishes + meta_pub->Stats().publishes, 0u);
+  for (const auto& url : {PodUrl(info_b.topic_name, std::string(kType)),
+                          PodUrl(info_b.topic_name, std::string(kRawType)), StdUrl(info_b.topic_name, kBlobType)}) {
+    auto* pub = Publisher(url);
+    ASSERT_NE(pub, nullptr) << url;
+    EXPECT_EQ(pub->Stats().publishes, 0u) << url;
+    EXPECT_EQ(pub->Outstanding(), 0u) << url;
+  }
+  b.Shutdown();  // shuts the shared bus down; `a` finds it done
 }
 
 }  // namespace
