@@ -95,6 +95,60 @@ TEST(RuntimeTapStreamTest, SharesOwnedFormatsAndRemovesPublisherIndexEntries) {
   std::filesystem::remove_all(directory);
 }
 
+// COMM-034: publishes are pre-filtered by topic. The filter must never hide
+// a topic that still has a session, including after other sessions stop and
+// with more topics than filter bits.
+TEST(RuntimeTapStreamTest, TopicFilterKeepsEveryOpenSessionVisible) {
+  std::string directory = "/tmp/ibmw-tap-filter-XXXXXX";
+  ASSERT_NE(::mkdtemp(directory.data()), nullptr);
+  DirectPublishTap tap;
+  RuntimeTapServer server(tap, "runtime", directory);
+  server.Start();
+  TopicAdvertisement advertisement;
+  advertisement.runtime_id = "runtime";
+  advertisement.publisher_id = "module-7";
+  advertisement.topic = {.msg_type = "test:Bytes", .serialization_type = "cdr"};
+  constexpr int kTopics = 600;
+  std::vector<std::string> session_ids;
+  for (int i = 0; i < kTopics; ++i) {
+    advertisement.topic.topic = "/t" + std::to_string(i);
+    session_ids.push_back(server.StartSession(advertisement).session_id);
+  }
+
+  std::string bytes = "payload";
+  unsigned acquired = 0;
+  ibmw::transport::Context context;
+  const auto publish = [&](const std::string& topic) {
+    const unsigned before = acquired;
+    ibmw::extension::MessageView view{
+        .topic = topic, .msg_type = "test:Bytes", .module_name = "module", .endpoint_index = 7,
+        .context = ibmw::transport::ContextRef(context), .available_serialization_types = {"cdr"},
+        .acquire_serialized = [&](std::string_view) {
+          ++acquired;
+          return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
+        }};
+    tap.callback(view);
+    return acquired != before;
+  };
+
+  for (int i = 0; i < kTopics; ++i) EXPECT_TRUE(publish("/t" + std::to_string(i))) << i;
+  // Stop every even topic: the odd ones stay visible.
+  for (int i = 0; i < kTopics; i += 2) ASSERT_TRUE(server.StopSession(session_ids[i]));
+  for (int i = 0; i < kTopics; ++i) {
+    EXPECT_EQ(publish("/t" + std::to_string(i)), i % 2 == 1) << i;
+  }
+  for (int i = 1; i < kTopics; i += 2) ASSERT_TRUE(server.StopSession(session_ids[i]));
+  EXPECT_FALSE(tap.callback);
+
+  // A new session after the filter was emptied is visible again.
+  advertisement.topic.topic = "/again";
+  const auto again = server.StartSession(advertisement);
+  EXPECT_TRUE(publish("/again"));
+  EXPECT_FALSE(publish("/t1"));
+  server.Shutdown();
+  std::filesystem::remove_all(directory);
+}
+
 class TestPublishTap final : public PublishTapCapability {
  public:
   explicit TestPublishTap(

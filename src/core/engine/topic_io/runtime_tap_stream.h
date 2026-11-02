@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -57,6 +58,11 @@ class RuntimeTapServer {
   struct Session;
 
   void OnPublish(ibmw::extension::MessageView& frame);
+  // Out of line so the filtered-out OnPublish stays a short tail call.
+  [[gnu::noinline]] void CapturePublish(ibmw::extension::MessageView& frame);
+  void RebuildTopicFilterLocked();
+
+  static constexpr size_t kTopicFilterWords = 4;
 
   PublishTapCapability& publish_tap_;
   const std::string runtime_id_;
@@ -68,6 +74,10 @@ class RuntimeTapServer {
   std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
   std::unordered_multimap<std::string, std::shared_ptr<Session>> sessions_by_publisher_;
   uint64_t next_session_id_ = 1;
+  // One bit per hashed topic of an open session, written under
+  // sessions_mutex_. A publish whose bit is clear has no session, so
+  // OnPublish returns without the lock or an allocation.
+  std::array<std::atomic<uint64_t>, kTopicFilterWords> topic_filter_{};
 };
 
 class UnixRuntimeTapClient final : public RuntimeTapClient {

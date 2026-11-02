@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -139,6 +140,16 @@ ReceiveResult ReceivePayload(int fd, std::vector<uint8_t>& out, size_t size) {
     received = target;
   }
   return {};
+}
+
+struct TopicFilterBits {
+  size_t word;
+  uint64_t mask;
+};
+
+TopicFilterBits TopicFilterBit(std::string_view topic, size_t words) noexcept {
+  const size_t hash = std::hash<std::string_view>{}(topic);
+  return {(hash >> 6) % words, uint64_t{1} << (hash & 63)};
 }
 
 uint64_t ParseUint64(std::string_view value) {
@@ -470,6 +481,8 @@ TapSessionDescriptor RuntimeTapServer::StartSession(
     std::lock_guard lock(sessions_mutex_);
     sessions_.emplace(id, session);
     sessions_by_publisher_.emplace(advertisement.publisher_id, session);
+    const auto [word, mask] = TopicFilterBit(advertisement.topic.topic, kTopicFilterWords);
+    topic_filter_[word].fetch_or(mask, std::memory_order_relaxed);
     if (publish_tap_handle_ == 0) {
       publish_tap_handle_ = publish_tap_.Register(
           [this](ibmw::extension::MessageView& frame) { OnPublish(frame); });
@@ -498,6 +511,7 @@ bool RuntimeTapServer::StopSession(std::string_view session_id) {
         break;
       }
     }
+    RebuildTopicFilterLocked();
     if (sessions_.empty()) {
       tap_handle = publish_tap_handle_;
       publish_tap_handle_ = 0;
@@ -523,6 +537,7 @@ void RuntimeTapServer::Shutdown() {
     std::lock_guard lock(sessions_mutex_);
     sessions.swap(sessions_);
     sessions_by_publisher_.clear();
+    RebuildTopicFilterLocked();
     tap_handle = publish_tap_handle_;
     publish_tap_handle_ = 0;
   }
@@ -539,7 +554,26 @@ void RuntimeTapServer::Shutdown() {
   }
 }
 
+void RuntimeTapServer::RebuildTopicFilterLocked() {
+  std::array<uint64_t, kTopicFilterWords> words{};
+  for (const auto& [id, session] : sessions_) {
+    const auto [word, mask] = TopicFilterBit(session->advertisement.topic.topic, kTopicFilterWords);
+    words[word] |= mask;
+  }
+  for (size_t i = 0; i < kTopicFilterWords; ++i) {
+    topic_filter_[i].store(words[i], std::memory_order_relaxed);
+  }
+}
+
 void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
+  const auto [word, mask] = TopicFilterBit(frame.topic, kTopicFilterWords);
+  if ((topic_filter_[word].load(std::memory_order_relaxed) & mask) == 0) {
+    return;
+  }
+  CapturePublish(frame);
+}
+
+void RuntimeTapServer::CapturePublish(ibmw::extension::MessageView& frame) {
   const std::string publisher_id =
       std::string(frame.module_name) + "-" +
       std::to_string(frame.endpoint_index);
@@ -549,9 +583,9 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
     const auto [first, last] = sessions_by_publisher_.equal_range(publisher_id);
     for (auto item = first; item != last; ++item) {
       const auto& session = item->second;
+      // equal_range already matched publisher_id.
       if (session->advertisement.topic.topic == frame.topic &&
-          session->advertisement.topic.msg_type == frame.msg_type &&
-          session->advertisement.publisher_id == publisher_id) {
+          session->advertisement.topic.msg_type == frame.msg_type) {
         matching.emplace_back(session);
       }
     }
