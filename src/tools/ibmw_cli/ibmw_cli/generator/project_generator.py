@@ -45,7 +45,8 @@ class ProjectGenerator(GeneratorBase):
         yaml_path = os.path.join(root_path, self.path_)
 
         with open(yaml_path, 'r', encoding='utf-8') as cfg_file:
-            root_cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
+            # Plain data only: no python object tags from a user supplied file.
+            root_cfg = yaml.safe_load(cfg_file)
             check_format(root_cfg)
 
             if root_cfg['base_info'] is None:
