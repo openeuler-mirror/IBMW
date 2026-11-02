@@ -619,6 +619,10 @@ void ZenohRpcDriver::Call(
 
     // record this req with timeout
     bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::move(record_ptr));
+    if (!ret) [[unlikely]] {
+      ret = client_tool_ptr_->RetryRecord(
+          cur_req_id, timeout, client_call_wrapper_ptr, [this] { return req_id_++; });
+    }
 
     if (!ret) [[unlikely]] {
       MW_ERROR("Failed to record msg.");

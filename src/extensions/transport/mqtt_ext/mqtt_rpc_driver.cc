@@ -670,10 +670,9 @@ void MqttRpcDriver::Call(
     // Record the callbacks and other contents
     auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();
     bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::shared_ptr(client_call_wrapper_ptr));
-    // After a wrap of the 32-bit ids: skip ids of calls still pending.
-    for (int retry = 0; !ret && retry < 8; ++retry) [[unlikely]] {
-      cur_req_id = req_id_++;
-      ret = client_tool_ptr_->Record(cur_req_id, timeout, std::shared_ptr(client_call_wrapper_ptr));
+    if (!ret) [[unlikely]] {
+      ret = client_tool_ptr_->RetryRecord(
+          cur_req_id, timeout, client_call_wrapper_ptr, [this] { return req_id_++; });
     }
 
     if (!ret) [[unlikely]] {

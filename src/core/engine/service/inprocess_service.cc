@@ -297,6 +297,10 @@ void InProcessServiceDriver::Call(
 
       bool ret = cb_ctx->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
       if (!ret) [[unlikely]] {
+        ret = cb_ctx->client_tool.RetryRecord(
+            cur_req_id, timeout, client_call_wrapper_ptr, [this] { return req_id_++; });
+      }
+      if (!ret) [[unlikely]] {
         MW_ERROR("Failed to record msg.");
         CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
         return;
@@ -324,6 +328,10 @@ void InProcessServiceDriver::Call(
     auto record_ptr = client_call_wrapper_ptr;
 
     bool ret = cb_ctx->client_tool.Record(cur_req_id, timeout, std::move(record_ptr));
+    if (!ret) [[unlikely]] {
+      ret = cb_ctx->client_tool.RetryRecord(
+          cur_req_id, timeout, client_call_wrapper_ptr, [this] { return req_id_++; });
+    }
 
     if (!ret) [[unlikely]] {
       // It is unlikely to appear generally

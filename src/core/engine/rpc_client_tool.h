@@ -84,6 +84,19 @@ class RpcClientTool {
     return true;
   }
 
+  // For a failed Record(): the id is taken by a call still pending after a wrap
+  // of the 32-bit ids, so try the next ones. Out of line, Record() stays the only
+  // cost of a normal call. `req_id` is the id recorded under on success.
+  template <typename NextId>
+  [[gnu::noinline, gnu::cold]] bool RetryRecord(
+      uint32_t& req_id, std::chrono::nanoseconds timeout, const MsgRecorder& msg_recorder, NextId&& next_id) {
+    for (int retry = 0; retry < 8; ++retry) {
+      req_id = next_id();
+      if (Record(req_id, timeout, MsgRecorder(msg_recorder))) return true;
+    }
+    return false;
+  }
+
   std::optional<MsgRecorder> GetRecord(uint32_t req_id) { return state_->Take(req_id); }
 
   // Takes the record only if `matches(record)`: an answer that does not

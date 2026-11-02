@@ -117,6 +117,33 @@ TEST(RpcClientToolTest, TimeoutCompletesPendingRecord) {
 
 // A timeout handler still running on another thread is waited for: each
 // record still gets exactly one result (timeout or abandon).
+// COMM-013: after a wrap a new call skips the ids of calls still pending.
+TEST(RpcClientToolTest, RetryRecordUsesNextFreeId) {
+  RpcClientTool<int> tool;
+  ASSERT_TRUE(tool.Record(7, 1s, 70));
+  ASSERT_TRUE(tool.Record(8, 1s, 80));
+
+  uint32_t counter = 7;
+  uint32_t id = 7;
+  EXPECT_FALSE(tool.Record(id, 1s, 90));
+  EXPECT_TRUE(tool.RetryRecord(id, 1s, 90, [&] { return ++counter; }));
+  EXPECT_EQ(id, 9u);
+  EXPECT_EQ(tool.GetRecord(7), 70);
+  EXPECT_EQ(tool.GetRecord(8), 80);
+  EXPECT_EQ(tool.GetRecord(9), 90);
+
+  // Bounded: gives up when every id tried is taken.
+  ASSERT_TRUE(tool.Record(100, 1s, 1));
+  id = 100;
+  int attempts = 0;
+  EXPECT_FALSE(tool.RetryRecord(id, 1s, 2, [&] {
+    ++attempts;
+    return 100u;
+  }));
+  EXPECT_EQ(attempts, 8);
+  EXPECT_EQ(tool.GetRecord(100), 1);
+}
+
 TEST(RpcClientToolTest, AbandonAllWaitsForRunningTimeoutTask) {
   ManualTimedExecutor executor;
   RpcClientTool<int> tool;

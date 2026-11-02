@@ -480,6 +480,10 @@ void DdsRpcDriver::Call(
     auto record_copy = client_call_wrapper_ptr;
     bool record_ret = ep.client_tool.Record(seq, timeout, std::move(record_copy));
     if (!record_ret) [[unlikely]] {
+      record_ret = ep.client_tool.RetryRecord(
+          seq, timeout, client_call_wrapper_ptr, [&ep] { return ep.seq_counter.fetch_add(1) + 1; });
+    }
+    if (!record_ret) [[unlikely]] {
       MW_ERROR("Failed to record DDS RPC request seq={}.", seq);
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
       return;
