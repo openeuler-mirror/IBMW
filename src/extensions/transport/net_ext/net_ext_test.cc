@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -28,6 +29,7 @@
 #include <boost/beast.hpp>
 
 #include "base/buffer_util.h"
+#include "base/url_encode.h"
 #include "cpp/util/string.h"
 #include "engine/service/service_catalog.h"
 #include "net_base/asio_endpoint_parse.h"
@@ -37,6 +39,7 @@
 #include "net_base/asio_udp_svr.h"
 #include "net_base/http_media_type.h"
 #include "net_ext/http/http_rpc_driver.h"
+#include "net_ext/http/http_transport_driver.h"
 #include "net_ext/meta_filter.h"
 #include "net_ext/net_extension.h"
 #include "net_ext/tcp/tcp_transport_driver.h"
@@ -787,6 +790,86 @@ TEST_F(HttpRpcDriverTest, ZeroTimeoutHeaderDoesNotFailAsyncAnswers) {
   auto rsp = Post("1", {{"Timeout", "0"}});
   EXPECT_EQ(rsp.result(), http::status::ok);
   EXPECT_EQ(rsp.body(), "7");
+}
+
+// One publish fans out to several servers: each server must see its own Host
+// header and the full body, and an unreachable target must not affect others.
+TEST(HttpTransportDriverTest, FanOutGivesEachTargetItsOwnHostAndBody) {
+  IoThreads io(4);
+  const std::string pattern = "/transport/" + ibmw::common::util::UrlEncode("/t") + "/" +
+                              ibmw::common::util::UrlEncode("test:Int");
+
+  struct Received {
+    std::mutex mtx;
+    std::vector<std::string> hosts;
+    std::vector<std::string> bodies;
+  };
+  Received rcv[2];
+  std::shared_ptr<ibmw::common::net::AsioHttpServer> svrs[2];
+  uint16_t ports[2];
+  for (int i = 0; i < 2; ++i) {
+    ports[i] = FreeTcpPort();
+    svrs[i] = std::make_shared<ibmw::common::net::AsioHttpServer>(io.Io());
+    svrs[i]->RegisterHttpHandleFunc<http::dynamic_body>(
+        pattern,
+        [r = &rcv[i]](const http::request<http::dynamic_body>& req, http::response<http::dynamic_body>& rsp,
+                      std::chrono::nanoseconds) -> asio::awaitable<ibmw::common::net::AsioHttpServer::HttpHandleStatus> {
+          std::lock_guard<std::mutex> lock(r->mtx);
+          r->hosts.emplace_back(req[http::field::host]);
+          r->bodies.emplace_back(boost::beast::buffers_to_string(req.body().data()));
+          rsp.result(http::status::ok);
+          co_return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
+        });
+    svrs[i]->Initialize({.ep = Tcp::endpoint(kLoopback, ports[i])});
+    svrs[i]->Start();
+  }
+  const uint16_t dead_port = FreeTcpPort();
+
+  auto cli = std::make_shared<ibmw::common::net::AsioHttpClientPool>(io.Io());
+  cli->Initialize({});
+  cli->Start();
+  HttpTransportDriver driver(io.Io(), cli, nullptr);
+  driver.Initialize(YAML::Load(
+      "publishers: [{topic: /t, server_url_list: ['http://127.0.0.1:" + std::to_string(ports[0]) +
+      "', 'http://127.0.0.1:" + std::to_string(dead_port) + "', 'http://localhost:" + std::to_string(ports[1]) +
+      "']}]"));
+  runtime::core::transport::SendTypeWrapper wrapper;
+  wrapper.info.topic_name = "/t";
+  wrapper.info.msg_type = "test:Int";
+  wrapper.info.msg_type_support_ref = ibmw::util::TypeSupportRef(JsonIntTypeSupport());
+  ASSERT_TRUE(driver.RegisterSendType(wrapper));
+  driver.Start();
+
+  constexpr int kMsgs = 200;
+  for (int v = 0; v < kMsgs; ++v) {
+    runtime::core::transport::MessageFrame frame{.info = wrapper.info, .msg_ptr = &v};
+    driver.Send(frame);
+  }
+
+  auto deadline = std::chrono::steady_clock::now() + 20s;
+  auto count = [&](int i) {
+    std::lock_guard<std::mutex> lock(rcv[i].mtx);
+    return rcv[i].bodies.size();
+  };
+  while ((count(0) < kMsgs || count(1) < kMsgs) && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(10ms);
+
+  const char* expect_host[2] = {"127.0.0.1", "localhost"};
+  for (int i = 0; i < 2; ++i) {
+    std::lock_guard<std::mutex> lock(rcv[i].mtx);
+    ASSERT_EQ(rcv[i].bodies.size(), static_cast<size_t>(kMsgs)) << "server " << i;
+    std::vector<bool> seen(kMsgs, false);
+    for (size_t k = 0; k < rcv[i].bodies.size(); ++k) {
+      EXPECT_EQ(rcv[i].hosts[k], expect_host[i]) << "server " << i;
+      int v = std::stoi(rcv[i].bodies[k]);
+      ASSERT_TRUE(v >= 0 && v < kMsgs);
+      seen[v] = true;
+    }
+    EXPECT_EQ(std::count(seen.begin(), seen.end(), true), kMsgs) << "server " << i;
+  }
+
+  driver.Shutdown();
+  for (auto& svr : svrs) svr->Shutdown();
 }
 
 }  // namespace
