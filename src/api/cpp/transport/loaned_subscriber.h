@@ -47,7 +47,13 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
 #include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -185,27 +191,55 @@ class LoanedSubscriber {
   }
 
  private:
-  // The loan fast lane is keyed on (topic, msg_type) strings only —
-  // SHM-capable drivers that override AttachLoaned do not deserialize
-  // the payload, so they only need the type-name string for URL
-  // composition, not a full type-support vtable. We hand them a thin
-  // static stub that carries the type-name and trivially noop-reports
-  // for size, so the dispatcher's TypeSupportRef::TypeName() lookup
-  // succeeds.
+  // The loan fast lane is keyed on (topic, msg_type) strings only: SHM-capable
+  // drivers that override AttachLoaned do not deserialize the payload. The
+  // dispatcher still keeps the type support in every driver's handler info,
+  // so each (T, msg_type) gets a complete one that lives for the process
+  // (API-030). POD payloads are never serialized: those ops report failure.
   static const ibmw_type_support_base_t* GetPodTypeSupport(
       std::string_view msg_type) {
-    // Per-call thread-local stub: msg_type lifetime is the caller's
-    // responsibility (typically a string literal).
-    thread_local ibmw_type_support_base_t stub{};
-    thread_local std::string ts_storage;
-    ts_storage.assign(msg_type);
-    stub.type_name = [](void* ctx) -> ibmw_string_view_t {
-      auto* s = static_cast<std::string*>(ctx);
-      return ibmw_string_view_t{s->data(), s->size()};
+    struct Entry {
+      std::string name;
+      ibmw_type_support_base_t base;
     };
-    stub.ctx = &ts_storage;
-    return &stub;
+    static std::mutex mutex;
+    // Leaked on purpose: drivers may use the pointers during static destruction.
+    static auto& entries = *new std::map<std::string, std::unique_ptr<Entry>, std::less<>>();
+
+    // Built before the lookup so an unrepresentable name throws first.
+    std::string name(msg_type);
+    std::lock_guard lock(mutex);
+    auto itr = entries.find(name);
+    if (itr == entries.end()) {
+      auto entry = std::make_unique<Entry>(Entry{.name = std::move(name), .base = kPodTypeSupportOps});
+      entry->base.ctx = &entry->name;
+      itr = entries.emplace(entry->name, std::move(entry)).first;
+    }
+    return &itr->second->base;
   }
+
+  static constexpr ibmw_type_support_base_t kPodTypeSupportOps{
+      .type_name = [](void* ctx) -> ibmw_string_view_t {
+        const auto* name = static_cast<const std::string*>(ctx);
+        return ibmw_string_view_t{name->data(), name->size()};
+      },
+      .create = [](void*) -> void* {
+        if constexpr (std::is_default_constructible_v<T>) {
+          return new (std::nothrow) T();
+        } else {
+          return nullptr;
+        }
+      },
+      .destroy = [](void*, void* msg) { delete static_cast<T*>(msg); },
+      .copy = [](void*, const void* from, void* to) { std::memcpy(to, from, sizeof(T)); },
+      .move = [](void*, void* from, void* to) { std::memcpy(to, from, sizeof(T)); },
+      .serialize = [](void*, ibmw_string_view_t, const void*, const ibmw_buffer_array_allocator_t*,
+                      ibmw_buffer_array_t*) -> bool { return false; },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) -> bool { return false; },
+      .serialization_types_supported_num = [](void*) -> size_t { return 0; },
+      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return nullptr; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .ctx = nullptr};
 };
 
 }  // namespace ibmw::transport

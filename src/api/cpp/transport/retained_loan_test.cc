@@ -6,6 +6,8 @@
 #include <chrono>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <thread>
 #include <type_traits>
 
 #include <sys/mman.h>
@@ -428,6 +430,63 @@ TEST(LoanedSubscriber, TypeNameAllocationFailureReturnsFalseFromNoexceptApi) {
   EXPECT_FALSE(LoanedSubscriber<Pod>::Attach(
       ReceiverRef(&receiver), oversized_type, [](const Pod&) {}));
   EXPECT_FALSE(dispatcher_called);
+}
+
+// API-030: the dispatcher keeps the type support pointer in every driver's
+// handler info, so it must outlive the call and stay complete.
+TEST(LoanedSubscriber, PodTypeSupportIsStableAndComplete) {
+  struct Captured {
+    const ibmw_type_support_base_t* type_support = nullptr;
+  };
+  auto capture = [](void* ctx, const ibmw_type_support_base_t* type_support,
+                    ibmw_function_base_t*) -> bool {
+    static_cast<Captured*>(ctx)->type_support = type_support;
+    return true;
+  };
+  auto attach = [&](std::string_view msg_type) {
+    Captured captured;
+    ibmw_transport_receiver_base_t receiver{};
+    receiver.ctx = &captured;
+    receiver.attach_loaned = capture;
+    EXPECT_TRUE(LoanedSubscriber<Pod>::Attach(ReceiverRef(&receiver), msg_type,
+                                              [](const Pod&) {}));
+    return captured.type_support;
+  };
+  auto name_of = [](const ibmw_type_support_base_t* ts) {
+    const auto view = ts->type_name(ts->ctx);
+    return std::string(view.str, view.len);
+  };
+
+  const auto* first = attach("pod/A");
+  ASSERT_NE(first, nullptr);
+  const auto* second = attach("pod/B");
+  const ibmw_type_support_base_t* from_thread = nullptr;
+  std::thread([&] { from_thread = attach("pod/C"); }).join();
+
+  EXPECT_EQ(name_of(first), "pod/A");
+  EXPECT_EQ(name_of(second), "pod/B");
+  EXPECT_EQ(name_of(from_thread), "pod/C");
+  EXPECT_EQ(attach("pod/A"), first);
+
+  for (const auto* ts : {first, second, from_thread}) {
+    ASSERT_NE(ts->create, nullptr);
+    ASSERT_NE(ts->destroy, nullptr);
+    ASSERT_NE(ts->copy, nullptr);
+    ASSERT_NE(ts->move, nullptr);
+    ASSERT_NE(ts->serialize, nullptr);
+    ASSERT_NE(ts->deserialize, nullptr);
+    ASSERT_NE(ts->serialization_types_supported_num, nullptr);
+    ASSERT_NE(ts->serialization_types_supported_list, nullptr);
+    ASSERT_NE(ts->custom_type_support_ptr, nullptr);
+  }
+  void* msg = first->create(first->ctx);
+  ASSERT_NE(msg, nullptr);
+  void* other = first->create(first->ctx);
+  first->copy(first->ctx, msg, other);
+  first->destroy(first->ctx, other);
+  first->destroy(first->ctx, msg);
+  EXPECT_EQ(first->serialization_types_supported_num(first->ctx), 0u);
+  EXPECT_FALSE(first->serialize(first->ctx, {}, nullptr, nullptr, nullptr));
 }
 
 }  // namespace
