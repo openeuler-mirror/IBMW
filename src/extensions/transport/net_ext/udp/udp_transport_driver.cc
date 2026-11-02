@@ -10,7 +10,7 @@
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
 #include "net_ext/meta_filter.h"
-#include "base/url_parser.h"
+#include "net_base/asio_endpoint_parse.h"
 
 namespace YAML {
 template <>
@@ -106,12 +106,13 @@ bool UdpTransportDriver::RegisterSendType(
 
     std::vector<boost::asio::ip::udp::endpoint> server_ep_vec;
     for (const auto& publish_add : server_url_list) {
-      auto v = ibmw::common::util::SplitToVec<std::string>(publish_add, ":");
-      boost::asio::ip::udp::endpoint ep{
-          boost::asio::ip::make_address(v[0].c_str()),
-          static_cast<uint16_t>(atoi(v[1].c_str()))};
-
-      server_ep_vec.emplace_back(ep);
+      auto ep = ibmw::common::net::ParseIpEndpoint<boost::asio::ip::udp>(publish_add);
+      if (!ep) {
+        MW_ERROR("Invalid server url: '{}' for topic: {}, expect 'ip:port' or '[ipv6]:port'",
+                 publish_add, info.topic_name);
+        return false;
+      }
+      server_ep_vec.emplace_back(*ep);
     }
 
     pub_cfg_info_map_.emplace(
@@ -229,11 +230,9 @@ void UdpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
       if (!to_addr.starts_with(udp_prefix)) {
         continue;
       }
-      if (auto url_op = util::ParseUrl<std::string>(to_addr.substr(udp_prefix.size()))) {  // remove "udp://" and parse url
-        boost::asio::ip::udp::endpoint ep{
-            boost::asio::ip::make_address(url_op->host.c_str()),
-            static_cast<uint16_t>(std::stoi(url_op->service))};
-        to_addr_server_ep_vec.emplace_back(ep);
+      if (auto ep = ibmw::common::net::ParseIpEndpoint<boost::asio::ip::udp>(
+              ibmw::common::net::ExtractUrlAuthority(std::string_view(to_addr).substr(udp_prefix.size())))) {
+        to_addr_server_ep_vec.emplace_back(*ep);
       } else {
         MW_WARN("Can not parse to_addr: {} for topic: {}", to_addr, info.topic_name);
       }

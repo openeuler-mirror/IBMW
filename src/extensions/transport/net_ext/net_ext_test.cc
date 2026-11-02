@@ -30,6 +30,7 @@
 #include "base/buffer_util.h"
 #include "cpp/util/string.h"
 #include "engine/service/service_catalog.h"
+#include "net_base/asio_endpoint_parse.h"
 #include "net_base/asio_tcp_cli.h"
 #include "net_base/asio_tcp_svr.h"
 #include "net_base/asio_udp_cli.h"
@@ -37,6 +38,8 @@
 #include "net_ext/http/http_rpc_driver.h"
 #include "net_ext/meta_filter.h"
 #include "net_ext/net_extension.h"
+#include "net_ext/tcp/tcp_transport_driver.h"
+#include "net_ext/udp/udp_transport_driver.h"
 
 namespace ibmw::extensions::net_extension {
 namespace {
@@ -402,6 +405,61 @@ TEST(NetUdpClientTest, OversizedMessageIsNotSent) {
   EXPECT_EQ(received.msgs[0].second, "ok");
   cli->Shutdown();
   svr->Shutdown();
+}
+
+TEST(NetEndpointParseTest, AcceptsIpv4AndBracketedIpv6) {
+  using ibmw::common::net::ParseIpEndpoint;
+  auto v4 = ParseIpEndpoint<Tcp>("127.0.0.1:9000");
+  ASSERT_TRUE(v4);
+  EXPECT_EQ(v4->address().to_string(), "127.0.0.1");
+  EXPECT_EQ(v4->port(), 9000);
+
+  auto v6 = ParseIpEndpoint<Udp>("[::1]:65535");
+  ASSERT_TRUE(v6);
+  EXPECT_TRUE(v6->address().is_v6());
+  EXPECT_EQ(v6->port(), 65535);
+}
+
+TEST(NetEndpointParseTest, RejectsMalformedInputWithoutThrowing) {
+  using ibmw::common::net::ParseIpEndpoint;
+  for (std::string_view bad : {"", "127.0.0.1", "127.0.0.1:", ":80", "127.0.0.1:abc", "127.0.0.1:80x",
+                               "127.0.0.1:-1", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:99999999999",
+                               "localhost:80", "::1:80", "[::1]", "[::1]80", "[::1:80", "[]:80",
+                               "300.0.0.1:80"}) {
+    EXPECT_FALSE(ParseIpEndpoint<Tcp>(bad)) << bad;
+  }
+}
+
+TEST(NetEndpointParseTest, ExtractsAuthorityFromUrl) {
+  using ibmw::common::net::ExtractUrlAuthority;
+  EXPECT_EQ(ExtractUrlAuthority("127.0.0.1:80"), "127.0.0.1:80");
+  EXPECT_EQ(ExtractUrlAuthority("tcp://127.0.0.1:80/p?q#f"), "127.0.0.1:80");
+  EXPECT_EQ(ExtractUrlAuthority("[::1]:80?x"), "[::1]:80");
+}
+
+// Registers one publisher whose server_url_list holds `url`; returns the result.
+template <typename Driver>
+bool RegisterWithServerUrl(const std::string& url) {
+  Driver driver(nullptr, nullptr, nullptr, nullptr);
+  driver.Initialize(YAML::Load("publishers: [{topic: /t, server_url_list: ['" + url + "']}]"));
+  runtime::core::transport::SendTypeWrapper wrapper;
+  wrapper.info.topic_name = "/t";
+  wrapper.info.msg_type = "pb:test.Msg";
+  return driver.RegisterSendType(wrapper);
+}
+
+TEST(NetDriverServerUrlTest, MalformedServerUrlFailsRegistration) {
+  for (const char* bad : {"127.0.0.1", "127.0.0.1:abc", "127.0.0.1:70000", "not-an-ip:80"}) {
+    EXPECT_FALSE(RegisterWithServerUrl<TcpTransportDriver>(bad)) << bad;
+    EXPECT_FALSE(RegisterWithServerUrl<UdpTransportDriver>(bad)) << bad;
+  }
+}
+
+TEST(NetDriverServerUrlTest, ValidServerUrlRegisters) {
+  for (const char* good : {"127.0.0.1:9000", "[::1]:9000"}) {
+    EXPECT_TRUE(RegisterWithServerUrl<TcpTransportDriver>(good)) << good;
+    EXPECT_TRUE(RegisterWithServerUrl<UdpTransportDriver>(good)) << good;
+  }
 }
 
 TEST(NetUdpServerTest, StartReportsBindFailure) {
