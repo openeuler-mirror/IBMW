@@ -1319,11 +1319,11 @@ TEST(NetTcpServerTest, InvalidHeadLogIsLimited) {
 // interval, and good messages keep being handled.
 TEST(NetMsgCatalogTest, PeerGarbageLogIsLimited) {
   LogCapture capture;
-  MsgHandleCatalog<Tcp::endpoint> catalog;
+  auto catalog = std::make_shared<MsgHandleCatalog<Tcp::endpoint>>();
   size_t handled = 0;
-  catalog.RegisterMsgHandle("/a", [&handled](const std::shared_ptr<asio::streambuf>&) { ++handled; });
-  catalog.RegisterMsgHandle("/throws", [](const std::shared_ptr<asio::streambuf>&) { throw std::runtime_error("bad"); });
-  const auto handle = catalog.GetMsgHandleFunc();
+  catalog->RegisterMsgHandle("/a", [&handled](const std::shared_ptr<asio::streambuf>&) { ++handled; });
+  catalog->RegisterMsgHandle("/throws", [](const std::shared_ptr<asio::streambuf>&) { throw std::runtime_error("bad"); });
+  const auto handle = catalog->GetMsgHandleFunc();
   const auto msg = [](std::string_view uri) { return std::string(1, static_cast<char>(uri.size())) + std::string(uri) + "d"; };
 
   constexpr size_t kRounds = 100;
@@ -1336,6 +1336,22 @@ TEST(NetMsgCatalogTest, PeerGarbageLogIsLimited) {
   }
   EXPECT_EQ(handled, kRounds);
   EXPECT_LT(capture.Lines(), kRounds) << capture.Text();
+}
+
+// TRANS-043: the function given to a server keeps the catalog alive, whatever
+// the destruction order of their owners.
+TEST(NetMsgCatalogTest, HandleFuncKeepsCatalogAlive) {
+  auto catalog = std::make_shared<MsgHandleCatalog<Tcp::endpoint>>();
+  size_t handled = 0;
+  catalog->RegisterMsgHandle("/a", [&handled](const std::shared_ptr<asio::streambuf>&) { ++handled; });
+  const std::weak_ptr<MsgHandleCatalog<Tcp::endpoint>> observer = catalog;
+  auto handle = catalog->GetMsgHandleFunc();
+  catalog.reset();
+  ASSERT_FALSE(observer.expired());
+  handle({}, MakeBuf(std::string(1, '\x02') + "/ad"));
+  EXPECT_EQ(handled, 1u);
+  handle = nullptr;
+  EXPECT_TRUE(observer.expired());
 }
 
 }  // namespace

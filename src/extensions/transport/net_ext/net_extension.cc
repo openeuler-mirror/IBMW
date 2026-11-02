@@ -173,12 +173,6 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
                                                   runtime::core::Subsystem::kTransport),
                           [this] { RegisterTcpTransportDriver(); });
 
-  core_ptr_->RegisterHook(
-      runtime::core::AfterPhase(runtime::core::Phase::kStopping),
-      [this] {
-        tcp_cli_pool_ptr_->Shutdown();
-      });
-
   if (options_.tcp_options) {
     tcp_msg_handle_catalog_ptr_ = std::make_shared<MsgHandleCatalog<boost::asio::ip::tcp::endpoint>>();
     tcp_svr_ptr_ = std::make_shared<ibmw::common::net::AsioTcpServer>(asio_executor_ptr_->IO());

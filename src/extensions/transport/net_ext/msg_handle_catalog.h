@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -15,7 +16,7 @@
 namespace ibmw::extensions::net_extension {
 
 template <typename EndPointType>
-class MsgHandleCatalog {
+class MsgHandleCatalog : public std::enable_shared_from_this<MsgHandleCatalog<EndPointType>> {
  public:
   using MsgHandleFunc =
       std::function<void(const std::shared_ptr<boost::asio::streambuf>&)>;
@@ -28,8 +29,10 @@ class MsgHandleCatalog {
   MsgHandleCatalog(const MsgHandleCatalog&) = delete;
   MsgHandleCatalog& operator=(const MsgHandleCatalog&) = delete;
 
+  // The returned function keeps the catalog alive: the server owning it decides
+  // how long messages can arrive. The catalog must be held by a shared_ptr.
   ServerMsgHandleFunc GetMsgHandleFunc() const {
-    return [this](const auto& ep, const auto& buf) { HandleServerMsg(ep, buf); };
+    return [self = this->shared_from_this()](const auto& ep, const auto& buf) { self->HandleServerMsg(ep, buf); };
   }
 
   template <typename... Args>
