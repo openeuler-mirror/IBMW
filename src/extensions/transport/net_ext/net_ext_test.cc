@@ -929,6 +929,28 @@ TEST_F(HttpRpcDriverTest, ServerTimeoutCarriesTimeoutStatus) {
 
 // One publish fans out to several servers: each server must see its own Host
 // header and the full body, and an unreachable target must not affect others.
+// TRANS-024: an exception thrown by a handler is only logged; the client gets
+// a generic error without its text.
+TEST_F(HttpRpcDriverTest, HandlerExceptionTextIsNotSentToClient) {
+  port_ = FreeTcpPort();
+  svr_ = std::make_shared<ibmw::common::net::AsioHttpServer>(io_.Io());
+  svr_->RegisterHttpHandleFunc<http::string_body>(
+      "/rpc/test/svc",
+      [](const http::request<http::dynamic_body>&, http::response<http::string_body>&,
+         std::chrono::nanoseconds) -> asio::awaitable<ibmw::common::net::AsioHttpServer::HttpHandleStatus> {
+        throw std::runtime_error("secret /internal/path");
+        co_return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
+      });
+  svr_->Initialize({.ep = Tcp::endpoint(kLoopback, port_)});
+  svr_->Start();
+
+  const auto rsp = Post("1");
+  EXPECT_EQ(rsp.result(), http::status::internal_server_error);
+  EXPECT_EQ(rsp.body().find("secret"), std::string::npos) << rsp.body();
+  EXPECT_FALSE(rsp.body().empty());
+  svr_->Shutdown();
+}
+
 TEST(HttpTransportDriverTest, FanOutGivesEachTargetItsOwnHostAndBody) {
   IoThreads io(4);
   const std::string pattern = "/transport/" + ibmw::common::util::UrlEncode("/t") + "/" +

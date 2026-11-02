@@ -79,6 +79,9 @@ details remain governed by the documentation for each release.
 - Runtime playback server: at most 64 stream sessions may be active (not yet
   ended) at once; further `StartSession` requests fail. Ended sessions no
   longer count and their threads are released.
+- HTTP server: when a registered handler throws, the 500 response body reads
+  `An error occurred: 'internal error'`; the exception text is only logged.
+  Previously it was sent to the client.
 
 ### Added
 

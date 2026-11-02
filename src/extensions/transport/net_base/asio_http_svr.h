@@ -623,6 +623,9 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
         }
 
         std::string err_info;
+        // An exception text can name internal paths and types: it is logged,
+        // the client only gets a generic message.
+        bool handler_threw = false;
         try {
           handle_status = co_await boost::asio::co_spawn(
               *(session_ptr->io_ptr_),
@@ -635,10 +638,11 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
             err_info = "handle failed, status: " + std::to_string(static_cast<uint8_t>(handle_status));
         } catch (const std::exception& e) {
           err_info = e.what();
+          handler_threw = true;
         }
 
         if (!err_info.empty()) [[unlikely]] {
-          auto rsp = ServerErrorHandle(req, err_info);
+          auto rsp = ServerErrorHandle(req, handler_threw ? "internal error" : err_info);
           // Keep the CORS decision of the handler: a browser can read the error.
           for (const auto field : {boost::beast::http::field::access_control_allow_origin,
                                    boost::beast::http::field::vary}) {
