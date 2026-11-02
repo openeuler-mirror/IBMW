@@ -123,7 +123,9 @@ class ProjectGenerator(GeneratorBase):
             workspace_generator.generate()
             deploy_generator.generate()
 
-            # run the format shell
-            os.chdir(output_dir)
-            if os.path.exists('format.sh'):
-                subprocess.run('sh format.sh', shell=True, check=True)
+            # run the format shell generated above (output() refuses to
+            # overwrite, so it cannot be a pre-existing file); no shell, and
+            # the process working directory is left unchanged.
+            format_script = os.path.join(output_dir, 'format.sh')
+            if os.path.isfile(format_script):
+                subprocess.run(['sh', 'format.sh'], cwd=output_dir, check=True)
