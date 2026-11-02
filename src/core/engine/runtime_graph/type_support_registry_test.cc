@@ -97,5 +97,23 @@ TEST_F(TypeSupportRegistryTest, ExistingLookupsProceedWhileAnotherPackageLoads) 
   EXPECT_TRUE(lookup.get());
   EXPECT_EQ(count_(), 1u);
 }
+
+// COMM-032: a package rejected half way leaves no entry behind; its library
+// is already unloaded when the error is reported.
+TEST_F(TypeSupportRegistryTest, RejectedPackageLeavesNoEntries) {
+  TypeSupportRegistry registry;
+  EXPECT_ANY_THROW(registry.Load(TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH));
+  const auto rejected = std::filesystem::canonical(TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH).string();
+  EXPECT_FALSE(registry.Find("json:fixture.Message"));
+  EXPECT_FALSE(registry.Find("json:fixture.Message", rejected));
+  EXPECT_FALSE(registry.FindSchema("json:fixture.Message", "json"));
+  EXPECT_ANY_THROW(registry.Load(TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH));
+
+  registry.Load(TYPE_SUPPORT_V1_FIXTURE_PATH);
+  EXPECT_TRUE(registry.Find("json:fixture.Message"));
+  EXPECT_EQ(registry.PackagePath("json:fixture.Message"),
+            std::filesystem::canonical(TYPE_SUPPORT_V1_FIXTURE_PATH).string());
+  EXPECT_TRUE(registry.FindSchema("json:fixture.Message", "json"));
+}
 }  // namespace
 }  // namespace ibmw::runtime::core::runtime_graph
