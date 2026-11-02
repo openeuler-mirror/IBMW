@@ -16,7 +16,7 @@ cmake --preset together-ros2-minimal-sdk
 cmake --build --preset together-ros2-minimal-sdk
 ```
 
-OpenCode 可使用 `/dds-compatibility`；新增或更新 skill 后若命令未出现，请重启 OpenCode。相邻仓库的可复制命令：
+OpenCode 可使用 `/dds-compatibility`；新增或更新 skill 后若命令未出现，请重启 OpenCode。`IBMW_together` 是独立的配套仓库，不包含在本仓库中：需要先把它检出到本仓库的同级目录，否则下列命令会报文件不存在。相邻仓库的可复制命令：
 ```bash
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py doctor --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
@@ -91,7 +91,7 @@ cmake --build build/source-fastdds2-deps --target ibmw_third_party_source_prefix
 | [性能采集指南](docs/guides/performance-collection.zh.md) | ROS2/IBMW 配置、运行、验证、报告与 A/B/C 原型流程 |
 | [AArch64 交叉编译](docs/guides/cross-compilation.md) | Linux target DDS source-prefix、sysroot 与支持边界 |
 | [OHOS 小艺 Humble 交叉构建指南](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only 指南 |
-| minimal ROS2 编译部署 | 第一入口：`IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`；[IBMW 指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md)仅作概念与边界索引 |
+| minimal ROS2 编译部署 | 需要独立的配套仓库 `IBMW_together`。第一入口：`IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`；[IBMW 指南](docs/guides/ohos-dds-ros2-minimal-interop.zh.md)仅作概念与边界索引 |
 | [ROS2 Interface Import](docs/guides/ros2-interface-import-user-guide.md) | `ibmw-gen import` 的 installed/source/workspace 模式、产物与验证边界 |
 | [ROS2 Action DDS-only Adapter](docs/experimental/ros2-action-dds-only-adapter-guide.md) | 实验性 Action adapter 开发路径与明确支持边界 |
 | [API Reference](docs/reference/api-reference.zh.md) | 完整的 C++ SDK、C ABI、Extension 与 Package API |

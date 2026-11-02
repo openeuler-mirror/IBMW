@@ -50,7 +50,7 @@ all with DDS IDL / FastCDR as the primary type system.
 | [Developer Guide](docs/contributing/developer-guide.md) | Build system, code structure, writing modules and extensions |
 | [Cross-compilation Configure Guide](docs/guides/cross-compilation.md) | aarch64 Linux configure approach, target dependency model, and scoped validation boundaries |
 | [OHOS Xiaoyi Humble Cross-build Guide, Chinese](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only guide for the Xiaoyi Humble environment |
-| Minimal ROS2 build/deploy | Start with `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`; the [IBMW guide](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) is a concept/boundary index only |
+| Minimal ROS2 build/deploy | Requires the separate `IBMW_together` companion repository. Start with `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`; the [IBMW guide](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) is a concept/boundary index only |
 | [ROS2 Interface Import User Guide](docs/guides/ros2-interface-import-user-guide.md) | User-facing guide for `ibmw-gen import` modes, artifacts, and verification lanes |
 | [ROS2 Action DDS-only Adapter Guide](docs/experimental/ros2-action-dds-only-adapter-guide.md) | Experimental low-code developer guide for DDS-only Action servers |
 | [API Reference](docs/reference/api-reference.md) | Complete C++ SDK, C ABI, extension, and package API |
@@ -137,7 +137,8 @@ cmake --build --preset together-ros2-minimal-sdk
 The sibling `ros2_minimal_deps/scripts/ibmw_dds_compat.py` CLI is the recommended
 entrypoint for OHOS ARM64 because it diagnoses the prefix/toolchain, owns a
 dedicated build directory, and validates the resulting CMake cache.
-OpenCode users can invoke `/dds-compatibility`. Copyable sibling workflow:
+OpenCode users can invoke `/dds-compatibility`. `IBMW_together` is a separate companion repository, not part of this repository: check it out next to this repository first, or the commands below fail with file not found.
+Copyable sibling workflow:
 ```bash
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py doctor --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
