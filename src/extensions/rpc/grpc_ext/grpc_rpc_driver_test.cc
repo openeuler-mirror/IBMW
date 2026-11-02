@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -28,6 +29,7 @@
 
 #include <dirent.h>
 #include <sys/resource.h>
+#include <unistd.h>
 #include <sys/socket.h>
 
 #include "cpp/util/string.h"
@@ -435,6 +437,11 @@ TEST(GrpcServerAcceptTest, AcceptFailureBacksOffAndRecovers) {
   rlimit low_lim = old_lim;
   low_lim.rlim_cur = static_cast<rlim_t>(max_fd + 1);
   ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &low_lim), 0);
+  // Take the descriptors still free below the limit (e.g. the one opendir
+  // used), so that accept() really has none left.
+  std::vector<int> fillers;
+  for (int fd; (fd = dup(STDERR_FILENO)) >= 0;) fillers.push_back(fd);
+  EXPECT_EQ(errno, EMFILE);
 
   sock.connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));  // sits in the backlog
   auto cpu_seconds = [] {
@@ -446,6 +453,7 @@ TEST(GrpcServerAcceptTest, AcceptFailureBacksOffAndRecovers) {
   std::this_thread::sleep_for(500ms);
   const double cpu_used = cpu_seconds() - cpu0;
   ASSERT_EQ(setrlimit(RLIMIT_NOFILE, &old_lim), 0);
+  for (int fd : fillers) close(fd);
 
   // A spinning accept loop burns about the whole 500ms on one core.
   EXPECT_LT(cpu_used, 0.15) << "accept loop spins on EMFILE";
