@@ -49,13 +49,9 @@ class GeneratorBase:
 
         if platform.system().lower() == "linux":
             output_dir = self.output_dir_.replace('~', str(os.path.expanduser("~")))
-            output_path = os.path.join(output_dir, output_path)
         else:
-            output_path = os.path.join(self.output_dir_, output_path)
-
-        if not os.path.exists(output_path):
-            print("creating folder:", output_path)
-            os.makedirs(output_path)
+            output_dir = self.output_dir_
+        output_path = os.path.join(output_dir, output_path)
 
         if isinstance(template_info['output_file'], str):
             # output file name is not Template.
@@ -63,6 +59,18 @@ class GeneratorBase:
         else:
             output_file = template_info['output_file'].render(name=name)
         output_file_path = os.path.join(output_path, output_file)
+
+        # Names from the yaml file are part of the path: none may lead out of
+        # the output directory (e.g. "../x" or an absolute path).
+        real_output_dir = os.path.realpath(output_dir)
+        if os.path.commonpath([real_output_dir, os.path.realpath(output_file_path)]) != real_output_dir:
+            raise Exception("Generated file " + output_file_path + " is outside of the output directory "
+                            + output_dir + ", check the names in your yaml file!")
+
+        if not os.path.exists(output_path):
+            print("creating folder:", output_path)
+            os.makedirs(output_path)
+
         if os.path.exists(output_file_path):
             raise Exception("The file is already exist in" + output_file_path)
         else:
