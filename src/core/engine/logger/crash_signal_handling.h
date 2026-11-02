@@ -7,6 +7,7 @@
 #include <csignal>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -26,13 +27,23 @@ namespace ibmw::runtime::core::logger {
 class CrashSignalHandling {
  public:
   CrashSignalHandling();
-  ~CrashSignalHandling() = default;
+  // Puts back the handlers found at construction (where they are still ours)
+  // and detaches the logger: a crash afterwards no longer reaches objects
+  // whose owner is gone.
+  ~CrashSignalHandling();
 
   CrashSignalHandling(const CrashSignalHandling&) = delete;
   CrashSignalHandling& operator=(const CrashSignalHandling&) = delete;
 
-  static void SetLogger(const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr) { logger_ptr_ = logger_ptr; }
-  static const ibmw::common::util::LoggerWrapper& GetLogger() { return *logger_ptr_; }
+  // The signal handler reads the logger without a lock, so the pointer it
+  // reads is switched before the previous owner is released.
+  static void SetLogger(const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr) {
+    logger_.store(logger_ptr ? logger_ptr.get() : &default_logger_, std::memory_order_release);
+    logger_owner_ = logger_ptr;
+  }
+  static const ibmw::common::util::LoggerWrapper& GetLogger() {
+    return *logger_.load(std::memory_order_acquire);
+  }
 
   // Called by the handler right after it logged the report, before the
   // process ends: the log drivers write asynchronously, so fn(ctx) waits
@@ -92,8 +103,9 @@ class CrashSignalHandling {
 #endif
 
  private:
-  inline static std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_ =
-      std::make_shared<ibmw::common::util::LoggerWrapper>();
+  inline static const ibmw::common::util::LoggerWrapper default_logger_{};
+  inline static std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_owner_;
+  inline static std::atomic<const ibmw::common::util::LoggerWrapper*> logger_{&default_logger_};
   // Runs the hook from signal context: lock-free atomics, no allocation.
   static void RunCrashFlush() {
     crash_flush_readers_.fetch_add(1);
@@ -107,8 +119,17 @@ class CrashSignalHandling {
   inline static std::atomic<const CrashFlushHook*> crash_flush_hook_{nullptr};
   // Crash handlers between loading the hook and returning from it.
   inline static std::atomic<int> crash_flush_readers_{0};
-#if !defined(_WIN32) && !defined(IBMW_SELFDEV_CRASH_HANDLER)
+#if defined(_WIN32)
+  LPTOP_LEVEL_EXCEPTION_FILTER previous_filter_ = nullptr;
+  void (*previous_abort_handler_)(int) = SIG_DFL;
+#elif defined(IBMW_SELFDEV_CRASH_HANDLER)
+  // The selfdev handler is process-wide: the last instance uninstalls it.
+  inline static std::atomic<int> selfdev_instances_{0};
+#else
   std::unique_ptr<char, FreeDeleter> alt_stack_{nullptr};
+  stack_t previous_alt_stack_{};
+  std::thread::id alt_stack_thread_;
+  std::vector<std::pair<int, struct sigaction>> previous_actions_;
 #endif
 #if !defined(_WIN32)
   bool loaded_{false};

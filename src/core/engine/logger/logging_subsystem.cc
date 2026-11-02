@@ -106,6 +106,7 @@ void LoggingSubsystem::Initialize(YAML::Node options_node) {
   MW_CHECK_WARN(!logger_driver_vec_.empty(), "No log driver!");
 
   if (options_.enable_crash_log) {
+    crash_signal_handling_.reset();  // restores what it replaced first
     crash_signal_handling_ = std::make_unique<CrashSignalHandling>();
     CrashSignalHandling::SetLogger(logger_ptr_);
     // The drivers write on their log executor: wait (bounded) for the report

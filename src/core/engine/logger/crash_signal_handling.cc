@@ -36,6 +36,7 @@
   #include <signal.h>
   #include <ucontext.h>
   #include <unistd.h>
+  #include <cstdlib>
   #include <cstring>
 #endif
 
@@ -71,8 +72,17 @@ void CrashSignalHandling::AbortHandler(int) {
 }
 
 CrashSignalHandling::CrashSignalHandling() {
-  ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
-  std::signal(SIGABRT, &AbortHandler);
+  previous_filter_ = ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
+  const auto previous_abort = std::signal(SIGABRT, &AbortHandler);
+  previous_abort_handler_ = previous_abort == SIG_ERR ? SIG_DFL : previous_abort;
+}
+
+CrashSignalHandling::~CrashSignalHandling() {
+  const auto current_filter = ::SetUnhandledExceptionFilter(previous_filter_);
+  if (current_filter != &UnhandledExceptionFilter) ::SetUnhandledExceptionFilter(current_filter);
+  const auto current_abort = std::signal(SIGABRT, previous_abort_handler_);
+  if (current_abort != &AbortHandler && current_abort != SIG_ERR) std::signal(SIGABRT, current_abort);
+  SetLogger(nullptr);
 }
 
 #elif defined(_WIN32)
@@ -125,8 +135,18 @@ void CrashSignalHandling::AbortHandler(int) {
 }
 
 CrashSignalHandling::CrashSignalHandling() {
-  ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
-  std::signal(SIGABRT, &AbortHandler);
+  previous_filter_ = ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
+  const auto previous_abort = std::signal(SIGABRT, &AbortHandler);
+  previous_abort_handler_ = previous_abort == SIG_ERR ? SIG_DFL : previous_abort;
+}
+
+CrashSignalHandling::~CrashSignalHandling() {
+  const auto current_filter = ::SetUnhandledExceptionFilter(previous_filter_);
+  // Somebody installed a filter after us: keep theirs.
+  if (current_filter != &UnhandledExceptionFilter) ::SetUnhandledExceptionFilter(current_filter);
+  const auto current_abort = std::signal(SIGABRT, previous_abort_handler_);
+  if (current_abort != &AbortHandler && current_abort != SIG_ERR) std::signal(SIGABRT, current_abort);
+  SetLogger(nullptr);
 }
 
 #elif defined(IBMW_SELFDEV_CRASH_HANDLER)
@@ -145,10 +165,20 @@ CrashSignalHandling::CrashSignalHandling() {
   // The raw report also goes to stderr (async-signal-safe) in case logging
   // itself is what crashed.
   options.output_fd = STDERR_FILENO;
+  selfdev_instances_.fetch_add(1);
   loaded_ = ibmw::selfdev::crash::Install(options);
   #else
   loaded_ = false;
   #endif
+}
+
+CrashSignalHandling::~CrashSignalHandling() {
+  #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  // Restores the actions from before Install() where the handler is still
+  // ours, so no crash reports through a logger that is gone.
+  if (selfdev_instances_.fetch_sub(1) == 1) ibmw::selfdev::crash::Uninstall();
+  #endif
+  SetLogger(nullptr);
 }
 
 #elif IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
@@ -157,17 +187,31 @@ std::vector<int> DefaultSignals() {
   return backward::SignalHandling::make_default_signals();
 }
 
-void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
-  // [Intentional Leak]
-  // This memory is registered via sigaltstack() as the alternative signal stack.
-  // The kernel retains this address independent of this object's lifecycle.
-  //
-  // Freeing this memory poses a critical risk: if a signal occurs after destruction,
-  // the kernel will write to the freed memory, causing heap corruption.
-  // This memory must remain valid for the entire process lifetime.
-}
+void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept { std::free(p); }
 
 CrashSignalHandling::CrashSignalHandling() { InstallHandlers(DefaultSignals()); }
+
+CrashSignalHandling::~CrashSignalHandling() {
+  for (auto it = previous_actions_.rbegin(); it != previous_actions_.rend(); ++it) {
+    struct sigaction current;
+    // SA_RESETHAND or a later installer may have replaced ours: keep that.
+    if (sigaction(it->first, nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) != 0 &&
+        current.sa_sigaction == &SigHandler) {
+      (void)sigaction(it->first, &it->second, nullptr);
+    }
+  }
+  SetLogger(nullptr);
+
+  if (!alt_stack_) return;
+  // The alternate stack belongs to the installing thread. Free it only when
+  // that thread can switch back to its previous one; otherwise the kernel
+  // may still use it, so it stays allocated for the process lifetime.
+  stack_t current{};
+  if (std::this_thread::get_id() != alt_stack_thread_ || sigaltstack(nullptr, &current) != 0 ||
+      current.ss_sp != alt_stack_.get() || sigaltstack(&previous_alt_stack_, nullptr) != 0) {
+    (void)alt_stack_.release();
+  }
+}
 
 void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   ucontext_t* uctx = static_cast<ucontext_t*>(_ctx);
@@ -281,9 +325,12 @@ void CrashSignalHandling::EnsureAltStack() {
   ss.ss_sp = alt_stack_.get();
   ss.ss_size = stack_size;
   ss.ss_flags = 0;
-  if (sigaltstack(&ss, nullptr) < 0) {
+  if (sigaltstack(&ss, &previous_alt_stack_) < 0) {
+    alt_stack_.reset();  // never installed
     loaded_ = false;
+    return;
   }
+  alt_stack_thread_ = std::this_thread::get_id();
 }
 
 void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
@@ -299,9 +346,12 @@ void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
     sigdelset(&action.sa_mask, SIGALRM);  // crash-report watchdog, see SigHandler
     action.sa_sigaction = &SigHandler;
 
-    if (sigaction(sig, &action, nullptr) < 0) {
+    struct sigaction previous;
+    if (sigaction(sig, &action, &previous) < 0) {
       loaded_ = false;
+      continue;
     }
+    previous_actions_.emplace_back(sig, previous);
   }
 }
 
@@ -316,6 +366,8 @@ void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
 }
 
 CrashSignalHandling::CrashSignalHandling() { loaded_ = false; }
+
+CrashSignalHandling::~CrashSignalHandling() { SetLogger(nullptr); }
 
 void CrashSignalHandling::HandleSignal(int, siginfo_t*, void*) {}
 

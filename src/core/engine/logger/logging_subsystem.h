@@ -92,8 +92,6 @@ class LoggingSubsystem : public ISubsystem {
  private:
   Options options_;
 
-  std::unique_ptr<CrashSignalHandling> crash_signal_handling_;
-
   // Published to the crash handler while this object's crash log is on:
   // waits (bounded) for the drivers to write the report.
   const CrashSignalHandling::CrashFlushHook crash_flush_hook_{
@@ -111,6 +109,10 @@ class LoggingSubsystem : public ISubsystem {
       ibmw::common::util::StringHash,
       std::equal_to<>>
       logger_access_map_;
+
+  // Last member: destroyed first, so its handlers are gone before the
+  // loggers they report through.
+  std::unique_ptr<CrashSignalHandling> crash_signal_handling_;
 };
 
 }  // namespace ibmw::runtime::core::logger
