@@ -3,6 +3,7 @@
 
 // Regression tests for the time manipulator executor:
 // EXT-016: invalid dt / wheel sizes are rejected at initialization.
+// EXT-018: time ratios are validated and rounded.
 // EXT-017: virtual time is in the system clock domain, time points before
 // the start are due at once, and tasks on every wheel level (and beyond)
 // run at their tick.
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -61,6 +63,36 @@ TEST(TimeManipulatorExecutorInit, RejectsInvalidDtAndWheelSizes) {
     TimeManipulatorExecutor executor;
     executor.RegisterGetExecutorFunc([&](std::string_view) { return inline_executor.Handle(); });
     EXPECT_ANY_THROW(executor.Initialize("tm", YAML::Load(options))) << options;
+  }
+}
+
+// EXT-018: NaN, infinity and ratios above max_ratio are rejected (casting
+// them to uint32_t is undefined behavior); ratios round to the nearest step.
+TEST(TimeManipulatorExecutorInit, RejectsInvalidRatios) {
+  for (const char* options : {"{bind_executor: x, init_ratio: .nan}", "{bind_executor: x, init_ratio: .inf}",
+                              "{bind_executor: x, init_ratio: 1e12}", "{bind_executor: x, init_ratio: 1001}",
+                              "{bind_executor: x, max_ratio: 0.5}", "{bind_executor: x, max_ratio: .inf}"}) {
+    InlineExecutor inline_executor;
+    TimeManipulatorExecutor executor;
+    executor.RegisterGetExecutorFunc([&](std::string_view) { return inline_executor.Handle(); });
+    EXPECT_ANY_THROW(executor.Initialize("tm", YAML::Load(options))) << options;
+  }
+}
+
+TEST_F(TimeManipulatorExecutorTest, SetTimeRatioValidatesAndRounds) {
+  Init("{bind_executor: x, init_ratio: 4}");
+  EXPECT_DOUBLE_EQ(executor_.GetTimeRatio(), 4.0);
+  for (double bad : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+                     -std::numeric_limits<double>::infinity(), 1e12, 1000.5, 5e9}) {
+    EXPECT_FALSE(executor_.SetTimeRatio(bad)) << bad;
+    EXPECT_DOUBLE_EQ(executor_.GetTimeRatio(), 4.0) << bad;
+  }
+  const std::pair<double, double> cases[] = {
+      {1000.0, 1000.0}, {1.9, 2.0}, {1.4, 1.0}, {1.0, 1.0}, {0.3, 1.0 / 3}, {0.25, 0.25},
+      {0.0, 0.0}, {-1.0, 0.0}, {1e-20, 0.0}};
+  for (auto [ratio, applied] : cases) {
+    EXPECT_TRUE(executor_.SetTimeRatio(ratio)) << ratio;
+    EXPECT_DOUBLE_EQ(executor_.GetTimeRatio(), applied) << ratio;
   }
 }
 

@@ -2,6 +2,10 @@
 // All rights reserved.
 
 #include "time_manipulator_ext/time_manipulator_executor.h"
+
+#include <cmath>
+#include <limits>
+
 #include "engine/thread_tools.h"
 #include "time_manipulator_ext/global.h"
 #include "base/time_util.h"
@@ -18,6 +22,7 @@ struct convert<ibmw::extensions::time_manipulator_extension::TimeManipulatorExec
     node["dt_us"] = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(rhs.dt).count());
     node["init_ratio"] = rhs.init_ratio;
+    node["max_ratio"] = rhs.max_ratio;
     node["wheel_size"] = rhs.wheel_size;
     node["thread_sched_policy"] = rhs.thread_sched_policy;
     node["thread_bind_cpu"] = rhs.thread_bind_cpu;
@@ -35,6 +40,8 @@ struct convert<ibmw::extensions::time_manipulator_extension::TimeManipulatorExec
       rhs.dt = std::chrono::microseconds(node["dt_us"].as<uint64_t>());
     if (node["init_ratio"])
       rhs.init_ratio = node["init_ratio"].as<double>();
+    if (node["max_ratio"])
+      rhs.max_ratio = node["max_ratio"].as<double>();
     if (node["wheel_size"])
       rhs.wheel_size = node["wheel_size"].as<std::vector<size_t>>();
     if (node["thread_sched_policy"])
@@ -78,7 +85,13 @@ void TimeManipulatorExecutor::Initialize(std::string_view name,
 
   thread_safe_ = bind_executor_ref_.ThreadSafe();
 
-  SetTimeRatio(options_.init_ratio);
+  MW_REQUIRE(std::isfinite(options_.max_ratio) && options_.max_ratio >= 1.0 &&
+                 options_.max_ratio < static_cast<double>(std::numeric_limits<uint32_t>::max()),
+             "Time manipulator executor '{}': max_ratio must be in [1, 2^32-1), got {}.", name_,
+             options_.max_ratio);
+  MW_REQUIRE(SetTimeRatio(options_.init_ratio),
+             "Time manipulator executor '{}': invalid init_ratio {} (max_ratio {}).", name_,
+             options_.init_ratio, options_.max_ratio);
 
   dt_count_ = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(options_.dt).count());
@@ -253,27 +266,35 @@ void TimeManipulatorExecutor::RegisterGetExecutorFunc(
   get_executor_func_ = get_executor_func;
 }
 
-void TimeManipulatorExecutor::SetTimeRatio(double ratio) {
+bool TimeManipulatorExecutor::SetTimeRatio(double ratio) {
+  // Checked before any cast: converting NaN, infinity or a value out of the
+  // uint32_t range is undefined behavior.
+  if (std::isnan(ratio) || std::isinf(ratio) || ratio > options_.max_ratio) [[unlikely]] {
+    MW_WARN("Time manipulator executor '{}': reject time ratio {} (max_ratio {}).", name_, ratio,
+            options_.max_ratio);
+    return false;
+  }
+
   std::unique_lock<std::shared_mutex> lck(ratio_mutex_);
 
-  // Greater than 1, fast forward
+  // 1 or more, fast forward
   if (ratio >= 1.0) {
     ratio_direction_ = true;
-    real_ratio_ = static_cast<uint32_t>(ratio);
-    return;
+    real_ratio_ = static_cast<uint32_t>(std::lround(ratio));
+    return true;
   }
 
   ratio_direction_ = false;
 
   // Greater than 0 and less than 1, slow release
-  if (ratio > 1e-15 && ratio < 1.0 &&
-      (1.0 / ratio) < std::numeric_limits<uint32_t>::max()) {
-    real_ratio_ = static_cast<uint32_t>(1.0 / ratio);
-    return;
+  if (ratio > 1e-15 && (1.0 / ratio) < std::numeric_limits<uint32_t>::max() - 1.0) {
+    real_ratio_ = static_cast<uint32_t>(std::lround(1.0 / ratio));
+    return true;
   }
 
-  // Less than 0 is equal to 0, pause
+  // 0, negative or too small: pause
   real_ratio_ = std::numeric_limits<uint32_t>::max();
+  return true;
 }
 
 double TimeManipulatorExecutor::GetTimeRatio() const {

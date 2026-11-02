@@ -15,7 +15,9 @@ void TimeManipulatorServiceImpl::HandleSetTimeRatio(
     return;
   }
 
-  itr->second->SetTimeRatio(req.time_ratio);
+  if (!itr->second->SetTimeRatio(req.time_ratio)) [[unlikely]] {
+    SetErrorCode(ErrorCode::kInvalidTimeRatio, rsp);
+  }
   rsp.time_ratio = itr->second->GetTimeRatio();
 }
 

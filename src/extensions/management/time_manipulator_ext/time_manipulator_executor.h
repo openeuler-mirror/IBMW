@@ -21,6 +21,9 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
     std::string bind_executor;
     std::chrono::nanoseconds dt = std::chrono::microseconds(100000);  // 100 ms
     double init_ratio = 1.0;
+    // Largest accepted fast-forward ratio: each dt advances this many ticks
+    // under the tick lock.
+    double max_ratio = 1000.0;
     std::vector<size_t> wheel_size = {100, 360};  // 1 h
     std::string thread_sched_policy;
     std::vector<uint32_t> thread_bind_cpu;
@@ -62,7 +65,10 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);
 
-  void SetTimeRatio(double ratio);
+  // Ratios are applied in whole steps: N (fast) or 1/N (slow), N rounded to
+  // the nearest integer; 0 or negative pauses. Returns false, leaving the
+  // ratio unchanged, for NaN, infinity or a ratio above max_ratio.
+  bool SetTimeRatio(double ratio);
   double GetTimeRatio() const;
 
  private:
