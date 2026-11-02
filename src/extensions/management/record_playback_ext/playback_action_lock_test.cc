@@ -161,6 +161,47 @@ TEST(PlaybackActionLockRegression, ConcurrentStopReadCloseCompletes) {
   std::filesystem::remove_all(bag);
 }
 
+// EXT-034: play_duration_s * 1e9 wraps to 5.12 ms for this value, which used
+// to stop playback after a few of the 128 messages.
+TEST(PlaybackActionLockRegression, HugePlayDurationDoesNotWrap) {
+  const auto bag = WriteTemporaryBag();
+  ASSERT_FALSE(bag.empty());
+  runtime::core::executor::ThreadPoolExecutor executor;
+  executor.Initialize("playback-duration-test", YAML::Load("{thread_num: 2}"));
+  executor.Start();
+  runtime::core::executor::ExecutorAccess access(&executor);
+  PlaybackAction action;
+  action.RegisterGetTypeSupportFunc([](std::string_view type) {
+    return type == "dummy:PlaybackMessage"
+               ? ibmw::util::TypeSupportRef(DummyTypeSupport())
+               : ibmw::util::TypeSupportRef();
+  });
+  action.RegisterGetExecutorFunc([&](std::string_view name) {
+    return name == "playback-duration-test"
+               ? ibmw::executor::ExecutorHandle(access.NativeHandle())
+               : ibmw::executor::ExecutorHandle();
+  });
+  action.Initialize(YAML::Load(
+      "{bag_path: '" + bag.string() +
+      "', mode: signal, executor: playback-duration-test, topic_meta_list: "
+      "[{topic: /playback_lock, msg_type: dummy:PlaybackMessage}]}"));
+  action.InitExecutor();
+  std::atomic<uint64_t> published{0};
+  action.RegisterPubRecordFunc([&](const PlaybackAction::OneRecord&) {
+    published.fetch_add(1, std::memory_order_relaxed);
+  });
+  action.Start();
+  ASSERT_TRUE(action.StartSignalPlayback(0, 29549378163073488u));
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (published.load() < 128 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(published.load(), 128u);
+  action.Shutdown();
+  executor.Shutdown();
+  std::filesystem::remove_all(bag);
+}
+
 TEST(PlaybackActionLockRegression, DoesNotManuallyUnlockGuardedMutexes) {
   const auto source_path =
       std::filesystem::path(__FILE__).parent_path() / "playback_action.cc";

@@ -4,6 +4,7 @@
 #include "record_playback_ext/playback_action.h"
 #include "record_playback_ext/global.h"
 #include "record_playback_ext/storage/path_safety.h"
+#include "record_playback_ext/time_math.h"
 #include "base/string_util.h"
 
 #include <filesystem>
@@ -186,13 +187,15 @@ void PlaybackAction::Initialize(YAML::Node options_node) {
 
   MW_REQUIRE(metadata_.files.size() > 0, "Can not find useful bag file in metadata.yaml.");
 
-  start_playback_timestamp_ = metadata_.files[0].start_timestamp + options_.skip_duration_s * 1000000000;
+  start_playback_timestamp_ =
+      AddSaturated(metadata_.files[0].start_timestamp, SecondsToNsSaturated(options_.skip_duration_s));
   real_bag_path_ = std::filesystem::absolute(options_.bag_path);
 
   if (options_.play_duration_s == 0) {
     stop_playback_timestamp_ = 0;
   } else {
-    stop_playback_timestamp_ = start_playback_timestamp_ + options_.play_duration_s * 1000000000;
+    stop_playback_timestamp_ =
+        AddSaturated(start_playback_timestamp_, SecondsToNsSaturated(options_.play_duration_s));
   }
 
   size_t ii = 1;
@@ -358,11 +361,13 @@ void PlaybackAction::StopSignalPlayback() {
 }
 
 void PlaybackAction::StartPlaybackImpl(uint64_t skip_duration_s, uint64_t play_duration_s) {
-  start_playback_timestamp_ = metadata_.files[0].start_timestamp + skip_duration_s * 1000000000;
+  start_playback_timestamp_ =
+      AddSaturated(metadata_.files[0].start_timestamp, SecondsToNsSaturated(skip_duration_s));
   if (play_duration_s == 0) {
     stop_playback_timestamp_ = 0;
   } else {
-    stop_playback_timestamp_ = start_playback_timestamp_ + play_duration_s * 1000000000;
+    stop_playback_timestamp_ =
+        AddSaturated(start_playback_timestamp_, SecondsToNsSaturated(play_duration_s));
   }
 
   MW_TRACE("Start a new playback, skip_duration_s: {}, play_duration_s: {}, start_playback_timestamp: {}, stop_playback_timestamp: {}",
