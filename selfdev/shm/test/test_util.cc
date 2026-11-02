@@ -31,7 +31,7 @@ namespace {
 
 std::string MakeRoot() {
   const char* base = std::getenv("TMPDIR");
-  std::string tmpl = std::string(base != nullptr && *base != '\0' ? base : "/tmp") + "/ibmw_shm_test.XXXXXX";
+  std::string tmpl = std::string(base != nullptr && *base != '\0' ? base : "/tmp") + "/ibmwt.XXXXXX";
   std::vector<char> buf(tmpl.begin(), tmpl.end());
   buf.push_back('\0');
   if (::mkdtemp(buf.data()) == nullptr) std::abort();

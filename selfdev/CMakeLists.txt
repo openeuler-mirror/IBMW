@@ -73,7 +73,7 @@ function(ibmw_selfdev_install target)
             EXPORT ${INSTALL_CONFIG_NAME}
             LIBRARY DESTINATION lib
             ARCHIVE DESTINATION lib)
-    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION include)
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION include PATTERN ".omc" EXCLUDE)
   endif()
 endfunction()
 
