@@ -8,12 +8,14 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <vector>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -264,8 +266,12 @@ struct RuntimePlaybackServer::Session {
   TopicAdvertisement advertisement;
   MessageHandler message_handler;
   std::atomic<bool> stopping{false};
+  // Set when the stream thread is done; the server then joins it.
+  std::atomic<bool> finished{false};
   std::atomic<int> server_fd{-1};
-  std::atomic<int> client_fd{-1};
+  // Guards client_fd so Stop never shuts down a closed and reused number.
+  std::mutex client_mutex;
+  int client_fd = -1;
   std::thread stream_thread;
 
   void Start() {
@@ -273,6 +279,9 @@ struct RuntimePlaybackServer::Session {
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime playback socket.");
     server_fd = fd;
+    // Linux creates the socket file with this mode, so it is never more open
+    // than 0600; the permissions below cover other systems.
+    static_cast<void>(::fchmod(fd, S_IRUSR | S_IWUSR));
     const auto address = MakeSocketAddress(socket_path.string());
     MW_ASSERT(
         ::bind(fd, reinterpret_cast<const sockaddr*>(&address),
@@ -287,50 +296,68 @@ struct RuntimePlaybackServer::Session {
     MW_ASSERT(
         ::listen(fd, 1) == 0,
         "Failed to listen on Runtime playback socket.");
-    stream_thread = std::thread([this] {
-      const int accepted = ::accept(server_fd.load(), nullptr, nullptr);
-      if (accepted < 0) {
+    // The listening fd is only closed after the thread is joined, so the
+    // thread never accepts on a reused number.
+    stream_thread = std::thread([this, fd] {
+      Stream(fd);
+      finished = true;
+    });
+  }
+
+  void Stream(int listen_fd) {
+    const int accepted = ::accept(listen_fd, nullptr, nullptr);
+    if (accepted < 0) {
+      return;
+    }
+    {
+      std::lock_guard lock(client_mutex);
+      if (stopping.load()) {
+        ::close(accepted);
         return;
       }
       client_fd = accepted;
-      try {
-        RequireSameUid(accepted);
-        ConfigureRuntimeSocket(accepted);
-      } catch (...) {
-        ::close(accepted);
-        client_fd = -1;
-        return;
-      }
-      bool ok = true;
-      uint64_t message_count = 0;
-      std::string terminal_error;
-      try {
-        while (!stopping.load()) {
-          bool clean_end = false;
-          auto message = ReceiveMessage(
-              accepted, advertisement, clean_end);
-          if (!message) {
-            MW_ASSERT(
-                clean_end || stopping.load(),
-                "Runtime playback stream ended without a complete frame.");
-            break;
-          }
-          message_handler(advertisement, std::move(*message));
-          ++message_count;
+    }
+    try {
+      RequireSameUid(accepted);
+      ConfigureRuntimeSocket(accepted);
+    } catch (...) {
+      CloseClient(accepted);
+      return;
+    }
+    bool ok = true;
+    uint64_t message_count = 0;
+    std::string terminal_error;
+    try {
+      while (!stopping.load()) {
+        bool clean_end = false;
+        auto message = ReceiveMessage(
+            accepted, advertisement, clean_end);
+        if (!message) {
+          MW_ASSERT(
+              clean_end || stopping.load(),
+              "Runtime playback stream ended without a complete frame.");
+          break;
         }
-      } catch (const std::exception& error) {
-        ok = false;
-        terminal_error = error.what();
-      } catch (...) {
-        ok = false;
-        terminal_error = "unknown Runtime playback error";
+        message_handler(advertisement, std::move(*message));
+        ++message_count;
       }
-      static_cast<void>(SendTerminal(
-          accepted, ok, message_count, terminal_error));
-      ::shutdown(accepted, SHUT_RDWR);
-      ::close(accepted);
-      client_fd = -1;
-    });
+    } catch (const std::exception& error) {
+      ok = false;
+      terminal_error = error.what();
+    } catch (...) {
+      ok = false;
+      terminal_error = "unknown Runtime playback error";
+    }
+    static_cast<void>(SendTerminal(
+        accepted, ok, message_count, terminal_error));
+    ::shutdown(accepted, SHUT_RDWR);
+    CloseClient(accepted);
+  }
+
+  void CloseClient(int fd) {
+    std::lock_guard lock(client_mutex);
+    client_fd = -1;
+    ::close(fd);
   }
 
   void Stop() {
@@ -339,15 +366,19 @@ struct RuntimePlaybackServer::Session {
     }
     const int listen_fd = server_fd.exchange(-1);
     if (listen_fd >= 0) {
-      ::shutdown(listen_fd, SHUT_RDWR);
-      ::close(listen_fd);
+      ::shutdown(listen_fd, SHUT_RDWR);  // wakes a pending accept
     }
-    const int connected_fd = client_fd.load();
-    if (connected_fd >= 0) {
-      ::shutdown(connected_fd, SHUT_RDWR);
+    {
+      std::lock_guard lock(client_mutex);
+      if (client_fd >= 0) {
+        ::shutdown(client_fd, SHUT_RDWR);
+      }
     }
     if (stream_thread.joinable()) {
       stream_thread.join();
+    }
+    if (listen_fd >= 0) {
+      ::close(listen_fd);
     }
     std::filesystem::remove(socket_path);
   }
@@ -374,10 +405,11 @@ void RuntimePlaybackServer::Start() {
   MW_ASSERT(
       started_.compare_exchange_strong(expected, true),
       "Runtime playback server is already started.");
-  const auto root = ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(
-      socket_directory_.parent_path(), true);
-  const auto directory = ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(
-      socket_directory_, true);
+  // Creates the private socket directories, or checks that they are private.
+  static_cast<void>(ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(
+      socket_directory_.parent_path(), true));
+  static_cast<void>(ibmw::runtime::core::runtime_graph::OpenRuntimeDirectory(
+      socket_directory_, true));
 }
 
 TapSessionDescriptor RuntimePlaybackServer::StartSession(
@@ -387,11 +419,23 @@ TapSessionDescriptor RuntimePlaybackServer::StartSession(
       advertisement.runtime_id == runtime_id_,
       "Playback request runtime '{}' does not match '{}'.",
       advertisement.runtime_id, runtime_id_);
-  uint64_t numeric_id = 0;
-  {
-    std::lock_guard lock(sessions_mutex_);
-    numeric_id = next_session_id_++;
+  // Counting, starting and adding under one lock keeps concurrent requests
+  // within the limit. An ended session stays until StopSession so its id
+  // remains valid, but its thread is joined here.
+  std::lock_guard lock(sessions_mutex_);
+  size_t active_sessions = 0;
+  for (auto& [session_id, session] : sessions_) {
+    static_cast<void>(session_id);
+    if (!session->finished.load()) {
+      ++active_sessions;
+    } else if (session->stream_thread.joinable()) {
+      session->stream_thread.join();
+    }
   }
+  MW_ASSERT(
+      active_sessions < kMaxActiveSessions,
+      "Runtime playback already has {} active sessions.", active_sessions);
+  const uint64_t numeric_id = next_session_id_++;
   const std::string id =
       runtime_id_ + "-play-" + std::to_string(numeric_id);
   auto session = std::make_shared<Session>();
@@ -402,10 +446,7 @@ TapSessionDescriptor RuntimePlaybackServer::StartSession(
   session->advertisement = advertisement;
   session->message_handler = message_handler_;
   session->Start();
-  {
-    std::lock_guard lock(sessions_mutex_);
-    sessions_.emplace(id, session);
-  }
+  sessions_.emplace(id, session);
   return {
       .session_id = id,
       .stream_socket = session->socket_path.string()};

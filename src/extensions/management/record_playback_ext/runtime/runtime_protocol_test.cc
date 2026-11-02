@@ -9,7 +9,10 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <optional>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -536,6 +539,42 @@ TEST(RuntimeProtocolTest, PlaybackRejectsAnUnknownStreamVersion) {
       std::string::npos);
   ::close(fd);
   EXPECT_TRUE(server.StopSession(session.session_id));
+  server.Shutdown();
+}
+
+// EXT-042: sessions whose client never connects are bounded; one that ended
+// no longer counts, and its id can still be stopped.
+TEST(RuntimeProtocolTest, PlaybackActiveSessionsAreBounded) {
+  RuntimeTemporaryDirectory temporary;
+  RuntimePlaybackServer server(
+      "play-runtime", temporary.Path(), [](const auto&, auto&&) {});
+  server.Start();
+  std::vector<TapSessionDescriptor> sessions;
+  for (size_t i = 0; i < RuntimePlaybackServer::kMaxActiveSessions; ++i) {
+    sessions.push_back(server.StartSession(TestAdvertisement("play-runtime")));
+  }
+  EXPECT_THROW(server.StartSession(TestAdvertisement("play-runtime")),
+               ibmw::common::util::IbmwException);
+
+  // The client of the first session ends its stream cleanly.
+  const int fd = ConnectUnixSocket(sessions.front().stream_socket);
+  ASSERT_GE(fd, 0);
+  ASSERT_EQ(::shutdown(fd, SHUT_WR), 0);
+  char byte;
+  while (::recv(fd, &byte, 1, 0) > 0) {
+  }
+  ::close(fd);
+  std::optional<TapSessionDescriptor> replacement;
+  for (int attempt = 0; attempt < 100 && !replacement; ++attempt) {
+    try {
+      replacement = server.StartSession(TestAdvertisement("play-runtime"));
+    } catch (const ibmw::common::util::IbmwException&) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  ASSERT_TRUE(replacement);
+  EXPECT_TRUE(server.StopSession(sessions.front().session_id));
+  EXPECT_TRUE(server.StopSession(replacement->session_id));
   server.Shutdown();
 }
 
