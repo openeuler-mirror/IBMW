@@ -141,6 +141,13 @@ void ApplySqliteReaderConfiguration(
   }
 }
 
+// Finalizes a statement on scope exit, also when a check throws: an
+// unfinalized statement makes sqlite3_close fail and leak the connection.
+struct StatementGuard {
+  sqlite3_stmt** statement;
+  ~StatementGuard() { sqlite3_finalize(*statement); }
+};
+
 bool SqliteIntegrityOk(sqlite3* database) {
   sqlite3_stmt* statement = nullptr;
   if (sqlite3_prepare_v2(
@@ -267,6 +274,7 @@ void SqliteBagReader::Open(
                 ? file_nodes[file_index]["split_reason"].as<std::string>("")
                 : ""};
     sqlite3_stmt* statistics = nullptr;
+    StatementGuard statistics_guard{&statistics};
     MW_ASSERT(sqlite3_prepare_v2(
         database,
         "SELECT COUNT(*),COALESCE(MIN(log_time),0),COALESCE(MAX(log_time),0) "
@@ -277,7 +285,6 @@ void SqliteBagReader::Open(
     file.message_count = static_cast<uint64_t>(sqlite3_column_int64(statistics, 0));
     file.start_timestamp = static_cast<uint64_t>(sqlite3_column_int64(statistics, 1));
     file.end_timestamp = static_cast<uint64_t>(sqlite3_column_int64(statistics, 2));
-    sqlite3_finalize(statistics);
     info_.closed_cleanly =
         info_.closed_cleanly &&
         MetadataFileMatches(file_nodes[file_index], file);
@@ -297,6 +304,7 @@ void SqliteBagReader::Open(
 
     std::unordered_map<uint16_t, BagSchemaInfo> schemas;
     sqlite3_stmt* schema_query = nullptr;
+    StatementGuard schema_query_guard{&schema_query};
     MW_ASSERT(sqlite3_prepare_v2(
         database,
         "SELECT id,type_name,serialization_type,schema_name,schema_encoding,"
@@ -331,9 +339,9 @@ void SqliteBagReader::Open(
     }
     MW_ASSERT(schema_result == SQLITE_DONE,
               "Cannot read SQLite schemas: {}.", sqlite3_errmsg(database));
-    sqlite3_finalize(schema_query);
 
     sqlite3_stmt* channel_query = nullptr;
+    StatementGuard channel_query_guard{&channel_query};
     MW_ASSERT(sqlite3_prepare_v2(
         database,
         "SELECT c.id,c.schema_id,c.topic,c.msg_type,c.serialization_type,"
@@ -380,7 +388,6 @@ void SqliteBagReader::Open(
     }
     MW_ASSERT(channel_result == SQLITE_DONE,
               "Cannot read SQLite channels: {}.", sqlite3_errmsg(database));
-    sqlite3_finalize(channel_query);
   }
   if (metadata && metadata.IsMap()) {
     info_.closed_cleanly =

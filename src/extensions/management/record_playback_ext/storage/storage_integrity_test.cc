@@ -6,6 +6,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -192,6 +193,12 @@ TEST(BagPathSafetyTest, RejectsAbsoluteParentAndSymlinkEscapes) {
       ibmw::common::util::IbmwException);
 }
 
+size_t OpenFileDescriptorCount() {
+  return static_cast<size_t>(std::distance(
+      std::filesystem::directory_iterator("/proc/self/fd"),
+      std::filesystem::directory_iterator()));
+}
+
 TEST(SqliteBagReaderIntegrityTest, RejectsCorruptAndMissingTables) {
   TemporaryDirectory temporary("ibmw-sqlite-corrupt");
   const auto corrupt = temporary.Path() / "corrupt.db3";
@@ -223,9 +230,14 @@ TEST(SqliteBagReaderIntegrityTest, RejectsInvalidReferencesAndNarrowing) {
         kSchemasTable, kChannelsTable, kMessagesTable};
     statements.insert(statements.end(), rows.begin(), rows.end());
     ExecuteSql(path, statements);
-    SqliteBagReader reader;
-    EXPECT_THROW(reader.Open(path), ibmw::common::util::IbmwException)
-        << name;
+    const size_t open_fds = OpenFileDescriptorCount();
+    {
+      SqliteBagReader reader;
+      EXPECT_THROW(reader.Open(path), ibmw::common::util::IbmwException)
+          << name;
+    }
+    // A rejected file is closed again (no statement keeps it open).
+    EXPECT_EQ(OpenFileDescriptorCount(), open_fds) << name;
   };
 
   expect_rejected("schema-overflow", {InsertSchema(65536)});
