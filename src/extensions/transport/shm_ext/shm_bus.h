@@ -51,17 +51,31 @@ IBMW_SHM_EXPORT std::optional<gid_t> ParseShmGroupId(std::string_view text) noex
 
 // Admits hot-path operations until Close(); Close() + WaitIdle() lets shutdown
 // observe that no Send/Loan is still running.
+//
+// The gate is shared by every topic of the bus, so the in-flight count is
+// split into per-thread stripes on separate cache lines: threads publishing on
+// different topics do not contend on one counter. A lease gives back to the
+// stripe it took from, so the sum of the stripes only reads zero when no lease
+// is held.
 class IBMW_SHM_EXPORT ShmOperationGate {
+  static constexpr size_t kCacheLine = 64;
+  struct alignas(kCacheLine) Stripe {
+    std::atomic_size_t active{0};
+  };
+
  public:
+  static constexpr size_t kStripes = 16;
+
   class Lease {
    public:
     Lease() noexcept = default;
     ~Lease() { Reset(); }
-    Lease(Lease&& other) noexcept : gate_(other.gate_) { other.gate_ = nullptr; }
+    Lease(Lease&& other) noexcept : gate_(other.gate_), stripe_(other.stripe_) { other.gate_ = nullptr; }
     Lease& operator=(Lease&& other) noexcept {
       if (this != &other) {
         Reset();
         gate_ = other.gate_;
+        stripe_ = other.stripe_;
         other.gate_ = nullptr;
       }
       return *this;
@@ -72,9 +86,10 @@ class IBMW_SHM_EXPORT ShmOperationGate {
 
    private:
     friend class ShmOperationGate;
-    explicit Lease(ShmOperationGate* gate) noexcept : gate_(gate) {}
+    Lease(ShmOperationGate* gate, Stripe* stripe) noexcept : gate_(gate), stripe_(stripe) {}
     void Reset() noexcept;
     ShmOperationGate* gate_ = nullptr;
+    Stripe* stripe_ = nullptr;
   };
 
   Lease TryAcquire() noexcept;
@@ -83,12 +98,15 @@ class IBMW_SHM_EXPORT ShmOperationGate {
   void Reopen() noexcept;
   bool Accepting() const noexcept { return accepting_.load(std::memory_order_seq_cst); }
   bool WaitIdle(std::chrono::steady_clock::time_point deadline) noexcept;
-  size_t Active() const noexcept { return active_.load(std::memory_order_acquire); }
+  // Leases currently held (sum over the stripes).
+  size_t Active() const noexcept;
 
  private:
-  void Release() noexcept;
-  std::atomic_bool accepting_{true};
-  std::atomic_size_t active_{0};
+  void Release(Stripe& stripe) noexcept;
+  size_t SumActive() const noexcept;
+  // Own cache line: read by every acquire, written only by Close()/Reopen().
+  alignas(kCacheLine) std::atomic_bool accepting_{true};
+  std::array<Stripe, kStripes> stripes_;
   std::mutex mu_;
   std::condition_variable cv_;
 };

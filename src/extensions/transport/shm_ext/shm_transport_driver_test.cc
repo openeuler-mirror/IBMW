@@ -1864,6 +1864,84 @@ TEST(ShmGateTest, ReleaseNeverOvertakesWaiterThatFreesTheGate) {
   }
 }
 
+// EXT-59 Leases held by threads on different stripes: the gate stays busy
+// until the last one is released, whichever stripe it holds, and a lease
+// moved to another thread gives back to the stripe it took from.
+TEST(ShmGateTest, StripedLeasesKeepTheGateBusyUntilAllAreReleased) {
+  constexpr size_t kThreads = ShmOperationGate::kStripes + 3;  // some stripes shared
+  ShmOperationGate gate;
+  std::vector<ShmOperationGate::Lease> leases(kThreads);
+  {
+    std::vector<JoiningThread> threads;
+    for (size_t i = 0; i < kThreads; ++i) {
+      threads.emplace_back([&gate, &lease = leases[i]] { lease = gate.TryAcquire(); });
+    }
+  }
+  for (const auto& lease : leases) ASSERT_TRUE(lease);
+  EXPECT_EQ(gate.Active(), kThreads);
+  gate.Close();
+  EXPECT_FALSE(gate.TryAcquire());
+  EXPECT_EQ(gate.Active(), kThreads);  // refused acquires leave no count behind
+  // Released in reverse on other threads than the ones that acquired them.
+  for (size_t i = kThreads; i-- > 1;) {
+    JoiningThread([l = std::move(leases[i])]() mutable { l = ShmOperationGate::Lease(); });
+    EXPECT_FALSE(gate.WaitIdle(std::chrono::steady_clock::now())) << i;
+    EXPECT_EQ(gate.Active(), i);
+  }
+  JoiningThread waiter([&gate] { EXPECT_TRUE(gate.WaitIdle(std::chrono::steady_clock::now() + 10s)); });
+  std::this_thread::sleep_for(5ms);
+  leases[0] = ShmOperationGate::Lease();
+  // waiter joins here: it saw the last release (notify or its next poll slice)
+}
+
+// EXT-60 Close() racing acquires on every stripe: the gate reads idle only
+// when no admitted lease is held. Holders touch a heap object that is freed as
+// soon as WaitIdle succeeds, so under ASan a holder still inside its lease is a
+// use after free; the held count catches it in plain builds.
+TEST(ShmGateTest, CloseRacingStripedAcquiresNeverReadsIdleEarly) {
+  constexpr size_t kThreads = ShmOperationGate::kStripes;
+  for (int round = 0; round < 200; ++round) {
+    auto gate = std::make_unique<ShmOperationGate>();
+    auto* touched = new std::atomic_int{0};
+    std::atomic_size_t held{0};
+    std::atomic_size_t admitted{0};
+    std::atomic_bool stop{false};
+    std::vector<JoiningThread> threads;
+    for (size_t t = 0; t < kThreads; ++t) {
+      threads.emplace_back([&] {
+        bool counted = false;
+        while (!stop.load()) {
+          auto lease = gate->TryAcquire();
+          if (!lease) {
+            std::this_thread::yield();
+            continue;
+          }
+          held.fetch_add(1);
+          touched->fetch_add(1);
+          std::this_thread::yield();  // widen the window Close() must not miss
+          touched->fetch_sub(1);
+          held.fetch_sub(1);
+          if (!counted) {
+            counted = true;
+            admitted.fetch_add(1);
+          }
+        }
+      });
+    }
+    while (admitted.load() < kThreads) std::this_thread::yield();  // every round really races
+    gate->Close();
+    const bool idle = gate->WaitIdle(std::chrono::steady_clock::now() + 10s);
+    const size_t held_at_idle = held.load();
+    if (idle) delete touched;  // a holder still inside its lease now touches freed memory
+    stop = true;
+    threads.clear();  // also on failure, so the test fails instead of hanging
+    if (!idle) delete touched;
+    ASSERT_TRUE(idle);
+    EXPECT_EQ(held_at_idle, 0u);
+    EXPECT_EQ(gate->Active(), 0u);
+  }
+}
+
 // EXT-40 Shutdown under concurrent multi-topic Send and handle publishing: every
 // counted operation finished before anything is freed, on the fast paths too.
 TEST_F(ShmDriverTest, ShutdownRacesConcurrentSendAndLoans) {

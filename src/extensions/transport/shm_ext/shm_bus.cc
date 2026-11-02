@@ -84,9 +84,28 @@ std::optional<gid_t> ParseShmGroupId(std::string_view text) noexcept {
 // ============================================================ gate
 
 void ShmOperationGate::Lease::Reset() noexcept {
-  if (gate_ != nullptr) gate_->Release();
+  if (gate_ != nullptr) gate_->Release(*stripe_);
   gate_ = nullptr;
 }
+
+namespace {
+
+// Stripe of the calling thread, the same for every gate: threads take the
+// stripes round robin, so up to kStripes threads never share one. The
+// thread_local is constant-initialized and assigned on first use, which
+// spares the hot path the guard of a dynamically initialized one.
+std::atomic_size_t g_next_stripe{0};
+constexpr size_t kNoStripe = ~size_t{0};
+thread_local size_t t_stripe = kNoStripe;
+
+size_t ThreadStripe() noexcept {
+  if (t_stripe == kNoStripe) [[unlikely]] {
+    t_stripe = g_next_stripe.fetch_add(1, std::memory_order_relaxed) % ShmOperationGate::kStripes;
+  }
+  return t_stripe;
+}
+
+}  // namespace
 
 // The gate and the loan count use "publish my flag, then read the other's"
 // on both sides (Dekker); that needs seq_cst, acquire/release alone allows
@@ -95,14 +114,23 @@ void ShmOperationGate::Lease::Reset() noexcept {
 // The first load only refuses early: callers that keep retrying after Close()
 // must not keep the count from ever reading zero. Admission is decided by the
 // load after the increment.
+//
+// With stripes the waiter reads them one after another, not in one snapshot.
+// That is still exact for admitted leases: each keeps its own stripe above zero
+// until it is released, so no stripe is read as zero while its lease is held.
+// Changes behind the waiter's back are increments of refused acquires and
+// fast-path decrements of releases that loaded accepting_ before Close(); both
+// can only make the sum too high (the waiter retries), never read a held
+// lease's stripe as zero.
 ShmOperationGate::Lease ShmOperationGate::TryAcquire() noexcept {
   if (!accepting_.load(std::memory_order_seq_cst)) return Lease();
-  active_.fetch_add(1, std::memory_order_seq_cst);
+  Stripe& stripe = stripes_[ThreadStripe()];
+  stripe.active.fetch_add(1, std::memory_order_seq_cst);
   if (!accepting_.load(std::memory_order_seq_cst)) {
-    Release();
+    Release(stripe);
     return Lease();
   }
-  return Lease(this);
+  return Lease(this, &stripe);
 }
 
 // While the gate is open nobody can be waiting yet, so the mutex is skipped:
@@ -114,16 +142,28 @@ ShmOperationGate::Lease ShmOperationGate::TryAcquire() noexcept {
 // After Close() the slow path decrements under the mutex: WaitIdle checks its
 // predicate under it too, so a waiter that sees zero cannot overtake a releaser
 // still about to notify.
-void ShmOperationGate::Release() noexcept {
+//
+// The last stripe to drop to zero notifies once the sum reads zero; the waiter
+// checks the same sum under the same mutex.
+void ShmOperationGate::Release(Stripe& stripe) noexcept {
   if (accepting_.load(std::memory_order_seq_cst)) [[likely]] {
-    active_.fetch_sub(1, std::memory_order_seq_cst);
+    stripe.active.fetch_sub(1, std::memory_order_seq_cst);
     return;
   }
   std::lock_guard<std::mutex> lock(mu_);
-  if (active_.fetch_sub(1, std::memory_order_seq_cst) == 1 && !accepting_.load(std::memory_order_seq_cst)) {
+  if (stripe.active.fetch_sub(1, std::memory_order_seq_cst) == 1 && !accepting_.load(std::memory_order_seq_cst) &&
+      SumActive() == 0) {
     cv_.notify_all();
   }
 }
+
+size_t ShmOperationGate::SumActive() const noexcept {
+  size_t sum = 0;
+  for (const auto& stripe : stripes_) sum += stripe.active.load(std::memory_order_seq_cst);
+  return sum;
+}
+
+size_t ShmOperationGate::Active() const noexcept { return SumActive(); }
 
 void ShmOperationGate::Close() noexcept { accepting_.store(false, std::memory_order_seq_cst); }
 
@@ -131,7 +171,7 @@ void ShmOperationGate::Reopen() noexcept { accepting_.store(true, std::memory_or
 
 bool ShmOperationGate::WaitIdle(std::chrono::steady_clock::time_point deadline) noexcept {
   std::unique_lock<std::mutex> lock(mu_);
-  return WaitWithDeadline(cv_, lock, deadline, [this] { return active_.load(std::memory_order_seq_cst) == 0; });
+  return WaitWithDeadline(cv_, lock, deadline, [this] { return SumActive() == 0; });
 }
 
 // ============================================================ publisher
