@@ -12,6 +12,8 @@
 import os
 from typing import Optional
 
+from generators._common import output_file_path
+
 # ── Type mapping ─────────────────────────────────────────────────────────────
 
 YAML_TO_CPP = {
@@ -873,7 +875,7 @@ def generate(project: dict, out_dir: str) -> list:
 
     generated_files = []
     for rel_path, content in results:
-        filepath = os.path.join(out_dir, rel_path)
+        filepath = output_file_path(out_dir, rel_path)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)

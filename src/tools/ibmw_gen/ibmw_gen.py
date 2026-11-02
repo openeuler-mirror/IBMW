@@ -39,6 +39,7 @@ from generators.pkg_gen import generate_pkg_mains
 from generators.type_support_pkg_gen import generate_type_support_package_sources
 from generators.config_gen import generate_configs
 from generators.cmake_gen import generate_cmake
+from generators._common import output_file_path
 from generators.action_gen import generate_experimental_actions
 
 __version__ = "0.1.0"
@@ -92,7 +93,7 @@ def write_file(output_dir: str, rel_path: str, content: str,
 
     Returns one of: "overwrite", "skip", "new"
     """
-    abs_path = os.path.join(output_dir, rel_path)
+    abs_path = output_file_path(output_dir, rel_path)
     exists = os.path.exists(abs_path)
 
     if exists and not _is_always_overwrite(rel_path) and _is_user_file(rel_path):
