@@ -421,6 +421,36 @@ TEST(NetUdpServerTest, OversizedDatagramIsDroppedNotTruncated) {
   svr->Shutdown();
 }
 
+// TRANS-035: the client socket follows the address family of the server.
+TEST(NetUdpClientTest, SendsToIpv6Server) {
+  IoThreads io;
+  Received received;
+  const auto v6_loopback = asio::ip::address_v6::loopback();
+  uint16_t port = 0;
+  {
+    asio::io_context probe;
+    port = Udp::socket(probe, Udp::endpoint(v6_loopback, 0)).local_endpoint().port();
+  }
+  auto svr = std::make_shared<ibmw::common::net::AsioUdpServer>(io.Io());
+  svr->RegisterMsgHandle([&received](const Udp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    received.Add(ep, buf);
+  });
+  svr->Initialize({.ep = Udp::endpoint(v6_loopback, port)});
+  svr->Start();
+
+  auto cli = std::make_shared<ibmw::common::net::AsioUdpClient>(io.Io());
+  cli->Initialize({.svr_ep = Udp::endpoint(v6_loopback, port)});
+  cli->Start();
+  auto buf = std::make_shared<asio::streambuf>();
+  std::ostream(buf.get()) << "v6";
+  cli->SendMsg(buf);
+  ASSERT_TRUE(received.WaitFor(1));
+  std::lock_guard lock(received.mutex);
+  EXPECT_EQ(received.msgs[0].second, "v6");
+  cli->Shutdown();
+  svr->Shutdown();
+}
+
 TEST(NetUdpClientTest, OversizedMessageIsNotSent) {
   IoThreads io;
   Received received;

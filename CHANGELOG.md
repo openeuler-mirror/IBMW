@@ -82,6 +82,9 @@ details remain governed by the documentation for each release.
 - HTTP server: when a registered handler throws, the 500 response body reads
   `An error occurred: 'internal error'`; the exception text is only logged.
   Previously it was sent to the client.
+- Net extension: `listen_ip` of the HTTP, TCP and UDP listeners may be an IPv6
+  address, and the UDP client reaches IPv6 servers (previously only IPv4 was
+  accepted and an IPv6 `listen_ip` failed startup).
 
 ### Added
 

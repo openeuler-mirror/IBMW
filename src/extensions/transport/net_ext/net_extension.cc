@@ -141,7 +141,7 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
         [this] {
           http_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
           http_svr_ptr_->Initialize(ibmw::common::net::AsioHttpServer::Options{
-              .ep = {boost::asio::ip::make_address_v4(options_.http_options->listen_ip),
+              .ep = {boost::asio::ip::make_address(options_.http_options->listen_ip),
                      options_.http_options->listen_port}});
           http_svr_ptr_->Start();
         });
@@ -189,7 +189,7 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
           tcp_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
           tcp_svr_ptr_->RegisterMsgHandle(tcp_msg_handle_catalog_ptr_->GetMsgHandleFunc());
           tcp_svr_ptr_->Initialize(ibmw::common::net::AsioTcpServer::Options{
-              .ep = {boost::asio::ip::make_address_v4(options_.tcp_options->listen_ip),
+              .ep = {boost::asio::ip::make_address(options_.tcp_options->listen_ip),
                      options_.tcp_options->listen_port}});
           tcp_svr_ptr_->Start();
         });
@@ -232,7 +232,7 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
           udp_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
           udp_svr_ptr_->RegisterMsgHandle(udp_msg_handle_catalog_ptr_->GetMsgHandleFunc());
           udp_svr_ptr_->Initialize(ibmw::common::net::AsioUdpServer::Options{
-              .ep = {boost::asio::ip::make_address_v4(options_.udp_options->listen_ip),
+              .ep = {boost::asio::ip::make_address(options_.udp_options->listen_ip),
                      options_.udp_options->listen_port},
               .max_package_size = options_.udp_options->max_pkg_size});
           udp_svr_ptr_->Start();

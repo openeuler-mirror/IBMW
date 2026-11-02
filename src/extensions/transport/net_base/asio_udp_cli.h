@@ -162,7 +162,7 @@ class AsioUdpClient : public std::enable_shared_from_this<AsioUdpClient> {
           std::atomic_exchange(&state_, SessionState::kStart) == SessionState::kInit,
           "Method can only be called when state is 'Init'.");
 
-      sock_.open(boost::asio::ip::udp::v4());
+      sock_.open(session_options_ptr_->svr_ep.protocol());
 
       auto self = shared_from_this();
 
