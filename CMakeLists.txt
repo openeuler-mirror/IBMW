@@ -72,6 +72,7 @@ if(IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY)
 endif()
 
 option(IBMW_BUILD_WITH_WERROR "IBMW build with -Werror option." ON)
+option(IBMW_ENABLE_HARDENING "IBMW build with stack protector, FORTIFY_SOURCE, PIE, full RELRO and non-executable stack." OFF)
 option(IBMW_INSTALL "Enable installation of IBMW." ON)
 
 cmake_dependent_option(IBMW_BUILD_EXAMPLES "IBMW build examples." OFF "IBMW_BUILD_RUNTIME" OFF)
@@ -315,6 +316,28 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
   add_compile_options(/utf-8 /wd4819)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus")
+endif()
+
+# Security hardening baseline (checksec). Off by default: the stack protector
+# and eager symbol binding cost some run/startup time, and many toolchains
+# already enable part of it. Enable for artifacts bound to a hardening policy.
+if(IBMW_ENABLE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+   AND NOT WIN32 AND NOT APPLE)
+  set(_ibmw_hardening_flags "-fstack-protector-strong")
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    # FORTIFY_SOURCE needs optimization; replace any toolchain default level.
+    string(APPEND _ibmw_hardening_flags " -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2")
+  endif()
+  string(APPEND CMAKE_C_FLAGS " ${_ibmw_hardening_flags}")
+  string(APPEND CMAKE_CXX_FLAGS " ${_ibmw_hardening_flags}")
+  foreach(_ibmw_link_kind EXE SHARED MODULE)
+    string(APPEND CMAKE_${_ibmw_link_kind}_LINKER_FLAGS
+           " -Wl,-z,relro,-z,now -Wl,-z,noexecstack")
+  endforeach()
+  # Objects are built with -fPIC above, which also satisfies PIE.
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " -pie")
+  unset(_ibmw_link_kind)
+  unset(_ibmw_hardening_flags)
 endif()
 
 if(WIN32)
@@ -756,7 +779,8 @@ list(
   IBMW_ENABLE_CORE_METRICS
   IBMW_ENABLE_COMM_TRACE
   IBMW_ENABLE_REPORTER_V1
-  IBMW_BUILD_WITH_WERROR)
+  IBMW_BUILD_WITH_WERROR
+  IBMW_ENABLE_HARDENING)
 
 foreach(var ${ibmw_vars})
   string(LENGTH ${var} var_length)
