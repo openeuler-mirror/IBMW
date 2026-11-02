@@ -10,7 +10,14 @@
 //   sub_hold <url> <n>                        take n chunks, keep them, wait to be killed
 //   pub_hold <url>                            publish one chunk, wait to be killed
 //   sub_write <url>                           write into a received chunk (must die by SIGSEGV)
+//   sub_hold_drop <url> <n>                   like sub_hold, then shut its control sockets down
+//                                             without an orderly close and wait to be killed
+//   probe <url> [domain|-] [root|-]           Init() with these options (if given), then print
+//                                             "init <error>", "dir <service dir>", "pub <error>",
+//                                             "sub <error>" ("ok" on success)
 
+#include <dirent.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -144,6 +151,55 @@ int RunPubHold(const std::string& url) {
   Park();
 }
 
+// Simulates control-socket trouble under a live subscriber: every
+// SOCK_SEQPACKET socket of this process (only the shm connections) is shut
+// down, the held chunks stay mapped.
+int RunSubHoldDrop(const std::string& url, uint32_t n) {
+  SubscriberOptions so;
+  so.queue_capacity = 16;
+  Subscriber sub(url, so);
+  if (!sub.Valid()) return 4;
+  uint32_t held = 0;
+  if (!Wait([&] {
+        while (held < n && sub.Take()) ++held;  // never released
+        return held == n;
+      }, 10000)) {
+    return 3;
+  }
+  if (DIR* d = ::opendir("/proc/self/fd")) {
+    while (auto* de = ::readdir(d)) {
+      int fd = std::atoi(de->d_name);
+      int type = 0;
+      socklen_t len = sizeof(type);
+      if (de->d_name[0] != '.' && ::getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &len) == 0 && type == SOCK_SEQPACKET) {
+        ::shutdown(fd, SHUT_RDWR);
+      }
+    }
+    ::closedir(d);
+  }
+  if (!Wait([&] { return sub.Stats().connections == 0; }, 10000)) return 3;
+  Say("ready");
+  Park();
+}
+
+int RunProbe(const std::string& url, const std::string& domain, const std::string& root) {
+  if (domain != "-" || root != "-") {
+    RuntimeOptions ro;
+    if (domain != "-") ro.domain = domain;
+    if (root != "-") ro.root_dir = root;
+    auto r = Runtime::Init(ro);
+    Say(std::string("init ") + ErrorName(r.ok() ? Error::kOk : r.error()));
+  } else {
+    Say("init -");
+  }
+  Say("dir " + Runtime::ServiceDirectory());
+  Publisher pub(url);
+  Say(std::string("pub ") + ErrorName(pub.InitError()));
+  Subscriber sub(url);
+  Say(std::string("sub ") + ErrorName(sub.InitError()));
+  return 0;
+}
+
 int RunSubWrite(const std::string& url) {
   Subscriber sub(url);
   if (!sub.Valid()) return 4;
@@ -171,5 +227,7 @@ int main(int argc, char** argv) {
   if (mode == "sub_hold") return RunSubHold(url, static_cast<uint32_t>(arg(3, 1)));
   if (mode == "pub_hold") return RunPubHold(url);
   if (mode == "sub_write") return RunSubWrite(url);
+  if (mode == "sub_hold_drop") return RunSubHoldDrop(url, static_cast<uint32_t>(arg(3, 1)));
+  if (mode == "probe") return RunProbe(url, argc > 3 ? argv[3] : "-", argc > 4 ? argv[4] : "-");
   return 64;
 }

@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include <errno.h>
+#include <poll.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -91,6 +92,35 @@ void Log(const char* what, const std::string& url) {
   std::fprintf(stderr, "[ibmw_shm] publisher %s: %s\n", url.c_str(), what);
 }
 
+uint32_t CountBits(const std::vector<std::vector<uint64_t>>& outstanding) noexcept {
+  uint32_t n = 0;
+  for (auto& seg : outstanding) {
+    for (uint64_t w : seg) n += static_cast<uint32_t>(__builtin_popcountll(w));
+  }
+  return n;
+}
+
+// Polling interval for a quarantined subscriber without pidfd: 10 ms
+// doubling to 1 s.
+uint32_t PollDelayMs(uint32_t attempt) noexcept { return std::min<uint32_t>(10u << std::min<uint32_t>(attempt, 7), 1000); }
+
+}  // namespace
+
+// Control thread: the pidfd of a quarantined subscriber became readable.
+class PeerWatch : public EventHandler {
+ public:
+  PeerWatch(std::weak_ptr<PublisherImpl> pub, uint64_t id) : pub_(std::move(pub)), id_(id) {}
+  void OnEvent(uint32_t /*events*/) noexcept override {
+    if (auto p = pub_.lock()) p->PeerExited(id_);
+  }
+
+ private:
+  std::weak_ptr<PublisherImpl> pub_;
+  uint64_t id_;
+};
+
+namespace {
+
 }  // namespace
 
 // --------------------------------------------------------------- creation
@@ -99,7 +129,7 @@ Result<std::shared_ptr<PublisherImpl>> PublisherImpl::Create(std::string_view ur
                                                              const PublisherOptions& options) {
   if (url.empty() || url.size() > kMaxUrlLength) return Error::kInvalidArg;
   auto* rt = RuntimeImpl::Instance();
-  if (rt == nullptr) return Error::kSystem;
+  if (rt == nullptr) return RuntimeImpl::LastInitError();
 
   std::shared_ptr<PublisherImpl> self(new PublisherImpl());
   self->rt_ = rt;
@@ -174,6 +204,12 @@ void PublisherImpl::Shutdown() noexcept {
       rt_->RemoveFd(c->sock.Get());
       ::shutdown(c->sock.Get(), SHUT_RDWR);
     }
+    // No new watches after shutting_down_ (ArmQuarantineLocked).
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& q : quarantine_) {
+      if (q->watched) rt_->RemoveFd(q->pidfd.Get());
+      q->watched = false;
+    }
   });
   std::lock_guard<std::mutex> lock(mu_);
   conns_.clear();
@@ -194,16 +230,38 @@ Result<uint32_t> PublisherImpl::GrowLocked(uint32_t class_shift, uint32_t exact_
   uint64_t size = stride * count;
   auto seg = CreateSegment("ibmw_shm_data", size, true, options_.prefault);
   if (!seg) return seg.error();
+  if (!seg->read_only_enforced) {
+    // Kernel without F_SEAL_FUTURE_WRITE: subscribers could map the data
+    // writable. Either refuse or carry on and say so.
+    if (options_.require_read_only) {
+      Log("F_SEAL_FUTURE_WRITE unavailable and require_read_only is set: not creating the pool", url_);
+      return Error::kSystem;
+    }
+    if (!unsealed_logged_) {
+      unsealed_logged_ = true;
+      Log("warning: F_SEAL_FUTURE_WRITE unavailable, subscribers can write to published chunks", url_);
+    }
+    ++stats_.unsealed_segments;
+  }
 
-  auto ps = std::make_unique<PoolSegment>();
+  std::unique_ptr<PoolSegment> ps;
+  try {
+    ps = std::make_unique<PoolSegment>();
+    ps->refcount.assign(count, 0);
+    ps->generation.assign(count, 0);
+    ps->state.assign(count, static_cast<uint8_t>(ChunkState::kFree));
+    // Every chunk of the class can be on the free list at once; with the
+    // capacity reserved here DropRefLocked() never allocates.
+    free_[class_shift].reserve(class_chunks_[class_shift] + count);
+    segments_.reserve(segments_.size() + 1);
+  } catch (...) {  // std::bad_alloc
+    return Error::kNoMemory;
+  }
   ps->id = static_cast<uint32_t>(segments_.size());
   ps->class_shift = class_shift;
   ps->count = count;
   ps->stride = stride;
   ps->seg = std::move(seg.value());
-  ps->refcount.assign(count, 0);
-  ps->generation.assign(count, 0);
-  ps->state.assign(count, static_cast<uint8_t>(ChunkState::kFree));
   read_only_enforced_ = read_only_enforced_ && ps->seg.read_only_enforced;
   for (uint32_t i = count; i-- > 0;) {
     free_[class_shift].push_back((static_cast<uint64_t>(ps->id) << 32) | i);
@@ -214,10 +272,17 @@ Result<uint32_t> PublisherImpl::GrowLocked(uint32_t class_shift, uint32_t exact_
   const PoolSegment& ref = *ps;
   segments_.push_back(std::move(ps));
   for (auto& c : conns_) {
-    c->outstanding.emplace_back((count + 63) / 64, 0);
-    c->segment_acked.push_back(0);
+    try {
+      c->outstanding.emplace_back((count + 63) / 64, 0);
+      c->segment_acked.push_back(0);
+    } catch (...) {  // std::bad_alloc: cannot track this connection any more
+      c->outstanding.resize(std::min(c->outstanding.size(), segments_.size() - 1));
+      Log("out of memory: dropping subscriber", url_);
+      CloseConnLocked(*c, true);
+      continue;
+    }
     if (c->state == PubConn::State::kAwaitConnAck || c->state == PubConn::State::kActive) {
-      if (!SendSegmentLocked(*c, ref)) MarkCorruptLocked(*c);
+      SendSegmentLocked(*c, ref);  // closes the connection on failure
     }
   }
   return ref.id;
@@ -230,8 +295,29 @@ bool PublisherImpl::SendSegmentLocked(PubConn& conn, const PoolSegment& seg) noe
   m.chunk_count = seg.count;
   m.chunk_stride = seg.stride;
   m.segment_size = seg.seg.map.Size();
-  int fd = seg.seg.fd.Get();
-  return SendMessage(conn.sock.Get(), &m, sizeof(m), &fd, 1);
+  // The segment (and its fd) lives as long as the publisher, so a queued
+  // message can refer to it.
+  return SendLocked(conn, &m, sizeof(m), seg.seg.fd.Get());
+}
+
+bool PublisherImpl::SendLocked(PubConn& conn, const void* msg, size_t len, int fd, UniqueFd owned) noexcept {
+  const bool was_empty = conn.out.Empty();
+  switch (conn.out.Send(conn.sock.Get(), msg, len, fd, std::move(owned))) {
+    case SendQueue::Status::kSent: return true;
+    case SendQueue::Status::kQueued:
+      // The subscriber's socket is full: not a fault. EPOLLOUT sends the
+      // rest in order (FlushOut). mu_ serialises the ModFd calls.
+      ++stats_.deferred_sends;
+      if (was_empty) rt_->ModFd(conn.sock.Get(), conn.epoll_tag, EPOLLIN | EPOLLRDHUP | EPOLLOUT);
+      return true;
+    case SendQueue::Status::kOverflow:
+      ++stats_.send_queue_overflows;
+      Log("subscriber stopped reading control messages (send queue full), dropping it", url_);
+      break;
+    case SendQueue::Status::kFailed: Log("control socket failed, dropping subscriber", url_); break;
+  }
+  CloseConnLocked(conn, false);
+  return false;
 }
 
 bool PublisherImpl::LocateLocked(void* user_payload, uint32_t* seg, uint32_t* idx) noexcept {
@@ -319,12 +405,178 @@ void PublisherImpl::MarkCorruptLocked(PubConn& conn) noexcept {
   if (conn.state == PubConn::State::kClosed) return;
   Log("connection corrupted, dropping subscriber", url_);
   conn.corrupted = true;
-  conn.state = PubConn::State::kClosed;
   ++stats_.corrupted_connections;
-  ReclaimAllLocked(conn);
+  // A proven protocol violation: the subscriber gets no say over our chunks
+  // any more, reclaim them now.
+  CloseConnLocked(conn, true);
+}
+
+void PublisherImpl::CloseConnLocked(PubConn& conn, bool reclaim) noexcept {
+  if (conn.state == PubConn::State::kClosed) return;
+  conn.state = PubConn::State::kClosed;
+  conn.out = SendQueue();  // undelivered messages and the fds they own
+  // closed: the subscriber's release store before it shut its socket down
+  // (it stores it only once it holds nothing); acquire makes everything it
+  // did before visible.
+  if (reclaim || (conn.hdr != nullptr && conn.hdr->closed.load(std::memory_order_acquire) != 0)) {
+    ReclaimAllLocked(conn);
+  } else {
+    QuarantineLocked(conn);
+  }
   WakeSpace(conn);
   // The control thread sees the hang-up and unregisters the socket.
   ::shutdown(conn.sock.Get(), SHUT_RDWR);
+}
+
+void PublisherImpl::QuarantineLocked(PubConn& conn) noexcept {
+  // Never handed to the subscriber: reuse at once.
+  for (uint64_t hd : conn.pending) ReclaimLocked(conn, hd);
+  conn.pending.clear();
+  uint32_t chunks = CountBits(conn.outstanding);
+  if (chunks == 0) return;
+  stats_.quarantined += chunks;
+  quarantined_now_ += chunks;
+  char msg[160];
+  std::unique_ptr<Quarantine> q;
+  try {
+    q = std::make_unique<Quarantine>();
+    quarantine_.reserve(quarantine_.size() + 1);
+  } catch (...) {  // std::bad_alloc: never reuse what we cannot track
+    std::snprintf(msg, sizeof(msg), "out of memory: %u chunks of a lost subscriber kept until destruction", chunks);
+    Log(msg, url_);
+    return;
+  }
+  q->id = next_quarantine_id_++;
+  q->conn = conn.shared_from_this();
+  q->pid = conn.peer.pid;
+  q->chunks = chunks;
+  // SO_PEERCRED pid 0: the subscriber lives in a pid namespace we cannot
+  // see. Our own pid: the subscriber is in this process and only goes away
+  // with us. Either way only an orderly close (closed flag) releases.
+  const bool verifiable = q->pid > 0 && q->pid != ::getpid();
+  if (verifiable) {
+    // Opened after the hang-up, so the pid could already belong to another
+    // process; that only delays the release (see Quarantine in the docs).
+    int fd = PidfdOpen(q->pid);
+    if (fd >= 0) q->pidfd = UniqueFd(fd);
+  }
+  if (PeerGoneLocked(*q)) {
+    ReleaseLocked(*q);
+    return;
+  }
+  if (!verifiable) {
+    ++stats_.unverifiable_peers;
+    if (!unverifiable_logged_) {
+      unverifiable_logged_ = true;
+      Log("lost a subscriber whose process cannot be checked; its chunks stay quarantined", url_);
+    }
+  }
+  std::snprintf(msg, sizeof(msg), "subscriber (pid %d) hung up without closing, %u chunks quarantined",
+                static_cast<int>(q->pid), chunks);
+  Log(msg, url_);
+  quarantine_.push_back(std::move(q));
+}
+
+bool PublisherImpl::PeerGoneLocked(const Quarantine& q) const noexcept {
+  const ConnHeader* h = q.conn->hdr;
+  // A late orderly close: the subscriber dropped its last chunk after the
+  // connection broke (see SubscriberImpl::RemoveConnLocked).
+  if (h != nullptr && h->closed.load(std::memory_order_acquire) != 0) return true;
+  if (q.pidfd.Valid()) {
+    struct pollfd p {};
+    p.fd = q.pidfd.Get();
+    p.events = POLLIN;
+    return ::poll(&p, 1, 0) > 0;
+  }
+  // Without pidfd: kill(pid, 0). A zombie still exists, so a subscriber that
+  // is our own unreaped child is only seen gone once reaped.
+  return q.pid > 0 && q.pid != ::getpid() && PidGone(q.pid) == 1;
+}
+
+void PublisherImpl::ReleaseLocked(Quarantine& q) noexcept {
+  if (q.released) return;
+  q.released = true;
+  ReclaimAllLocked(*q.conn);  // counts them as reclaimed
+  quarantined_now_ -= q.chunks;
+  exhausted_logged_ = false;
+}
+
+void PublisherImpl::ReapQuarantineLocked() noexcept {
+  for (auto it = quarantine_.begin(); it != quarantine_.end();) {
+    Quarantine& q = **it;
+    if (!q.released && PeerGoneLocked(q)) ReleaseLocked(q);
+    if (q.released && !q.watched) {
+      it = quarantine_.erase(it);
+      continue;
+    }
+    if (q.released && !q.removing && !shutting_down_) {
+      // The pidfd watch belongs to the control thread; for a late orderly
+      // close it would only fire when the process exits.
+      q.removing = true;
+      try {
+        rt_->Post([w = weak_from_this(), id = q.id] {
+          if (auto p = w.lock()) p->PeerExited(id);
+        });
+      } catch (...) {  // std::bad_alloc: the watch goes when the process exits
+      }
+    }
+    ++it;
+  }
+}
+
+void PublisherImpl::ArmQuarantineLocked() noexcept {
+  if (shutting_down_) return;
+  for (auto& q : quarantine_) {
+    if (q->armed || q->released) continue;
+    q->armed = true;
+    if (q->pidfd.Valid()) {
+      try {
+        q->watched = rt_->AddFd(q->pidfd.Get(), EPOLLIN, std::make_shared<PeerWatch>(weak_from_this(), q->id));
+      } catch (...) {  // std::bad_alloc: fall back to polling
+      }
+      if (q->watched) continue;
+    }
+    if (q->pid <= 0 || q->pid == ::getpid()) continue;  // unverifiable: closed flag only
+    try {
+      rt_->RunAfter(PollDelayMs(0), [w = weak_from_this(), id = q->id] {
+        if (auto p = w.lock()) p->PollPeer(id, 1);
+      });
+    } catch (...) {  // std::bad_alloc: Loan() and Stats() still check
+    }
+  }
+}
+
+void PublisherImpl::PollPeer(uint64_t id, uint32_t attempt) noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = std::find_if(quarantine_.begin(), quarantine_.end(), [id](const auto& q) { return q->id == id; });
+  if (it == quarantine_.end()) return;
+  if (PeerGoneLocked(**it)) {
+    ReleaseLocked(**it);
+    quarantine_.erase(it);
+    return;
+  }
+  if (shutting_down_) return;
+  try {
+    rt_->RunAfter(PollDelayMs(attempt), [w = weak_from_this(), id, attempt] {
+      if (auto p = w.lock()) p->PollPeer(id, attempt + 1);
+    });
+  } catch (...) {  // std::bad_alloc: Loan() and Stats() still check
+  }
+}
+
+void PublisherImpl::PeerExited(uint64_t id) noexcept {
+  std::unique_ptr<Quarantine> q;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = std::find_if(quarantine_.begin(), quarantine_.end(), [id](const auto& e) { return e->id == id; });
+    if (it == quarantine_.end()) return;
+    ReleaseLocked(**it);
+    q = std::move(*it);
+    quarantine_.erase(it);
+    if (!q->watched) return;
+    q->watched = false;
+  }
+  rt_->RemoveFd(q->pidfd.Get());
 }
 
 // ---------------------------------------------------------------- loaning
@@ -343,10 +595,19 @@ Result<void*> PublisherImpl::Loan(uint32_t payload_size, uint32_t alignment) noe
   // instead of alternating with a cold one. Costs one load per connection
   // when nothing was returned.
   DrainAllLocked();
+  // Slow path only: a lost subscriber may have exited since.
+  if (free_[shift].empty() && !quarantine_.empty()) ReapQuarantineLocked();
   if (free_[shift].empty()) {
     auto g = GrowLocked(shift);
     if (!g) {
       ++stats_.pool_exhausted;
+      if (quarantined_now_ != 0 && !exhausted_logged_) {
+        exhausted_logged_ = true;
+        char msg[160];
+        std::snprintf(msg, sizeof(msg), "pool exhausted while %u chunks are quarantined (Stats().quarantined_chunks)",
+                      quarantined_now_);
+        Log(msg, url_);
+      }
       return g.error();
     }
   }
@@ -505,7 +766,11 @@ PublisherImpl::Delivery PublisherImpl::DeliverLocked(PubConn& conn, uint64_t han
       conn.pending.pop_front();
       ++stats_.evictions;
     }
-    conn.pending.push_back(handle);
+    try {
+      conn.pending.push_back(handle);
+    } catch (...) {  // std::bad_alloc: this subscriber misses the sample
+      return Delivery::kSkipped;
+    }
   }
   conn.outstanding[seg][idx / 64] |= 1ull << (idx % 64);
   ++segments_[seg]->refcount[idx];
@@ -523,6 +788,13 @@ bool PublisherImpl::Publish(void* user_payload) noexcept {
     if (!LocateLocked(user_payload, &seg, &idx)) return false;
     auto& s = *segments_[seg];
     if (s.state[idx] != static_cast<uint8_t>(ChunkState::kLoaned)) return false;
+    // One allocation, as the first push_back did before. `waiting` is only
+    // filled when a lossless subscriber is full (rare), so it stays lazy.
+    try {
+      wake.reserve(conns_.size());
+    } catch (...) {  // std::bad_alloc: nothing happened, the chunk stays loaned
+      return false;
+    }
     s.state[idx] = static_cast<uint8_t>(ChunkState::kPublished);
     --loans_;
     ++stats_.publishes;
@@ -543,7 +815,11 @@ bool PublisherImpl::Publish(void* user_payload) noexcept {
             if (stop_blocking_) {
               ++stats_.block_timeouts;
             } else {
-              waiting.push_back(c);
+              try {
+                waiting.push_back(c);
+              } catch (...) {  // std::bad_alloc: cannot wait, as if timed out
+                ++stats_.block_timeouts;
+              }
             }
             break;
           default: break;
@@ -620,9 +896,11 @@ bool PublisherImpl::HasSubscribers() const noexcept {
   return false;
 }
 
-PublisherStats PublisherImpl::Stats() const noexcept {
+PublisherStats PublisherImpl::Stats() noexcept {
   std::lock_guard<std::mutex> lock(mu_);
+  if (!quarantine_.empty()) ReapQuarantineLocked();
   PublisherStats s = stats_;
+  s.quarantined_chunks = quarantined_now_;
   s.connections = 0;
   for (auto& c : conns_) s.connections += c->state == PubConn::State::kActive ? 1 : 0;
   s.segments = static_cast<uint32_t>(segments_.size());
@@ -640,7 +918,14 @@ void PublisherImpl::OnEvent(uint32_t /*events*/) noexcept {
       if (errno == EINTR) continue;
       return;
     }
-    auto conn = std::make_shared<PubConn>();
+    std::shared_ptr<PubConn> conn;
+    try {
+      conn = std::make_shared<PubConn>();
+    } catch (...) {  // std::bad_alloc
+      ::close(fd);
+      Log("out of memory: connection refused", url_);
+      continue;
+    }
     conn->sock = UniqueFd(fd);
     conn->pub = weak_from_this();
     if (!GetPeerCredentials(fd, &conn->peer) || !rt_->PeerAllowed(conn->peer)) {
@@ -654,10 +939,19 @@ void PublisherImpl::OnEvent(uint32_t /*events*/) noexcept {
         Log("rejected peer: too many connections", url_);
         continue;
       }
-      conns_.push_back(conn);
+      try {
+        conns_.push_back(conn);
+      } catch (...) {  // std::bad_alloc
+        Log("out of memory: connection refused", url_);
+        continue;
+      }
     }
-    if (!rt_->AddFd(fd, EPOLLIN | EPOLLRDHUP, conn)) {
-      std::lock_guard<std::mutex> lock(mu_);
+    uint64_t tag = 0;
+    bool added = rt_->AddFd(fd, EPOLLIN | EPOLLRDHUP, conn, &tag);
+    std::lock_guard<std::mutex> lock(mu_);
+    if (added) {
+      conn->epoll_tag = tag;  // before any message: those come through epoll
+    } else {
       conns_.erase(std::find(conns_.begin(), conns_.end(), conn));
     }
   }
@@ -667,9 +961,11 @@ void PubConn::OnEvent(uint32_t events) noexcept {
   auto self = shared_from_this();
   auto p = pub.lock();
   if (!p) return;
+  if ((events & EPOLLOUT) != 0) p->FlushOut(self);
   if ((events & EPOLLIN) != 0) {
     alignas(8) uint8_t buf[kMaxMsgSize];
     for (;;) {
+      if (!sock.Valid()) return;  // HandleHangup ran
       std::vector<UniqueFd> fds;
       ssize_t n = ReceiveMessage(sock.Get(), buf, sizeof(buf), &fds);
       if (n < 0 && errno == EAGAIN) break;
@@ -685,15 +981,30 @@ void PubConn::OnEvent(uint32_t events) noexcept {
 
 void PublisherImpl::HandleMessage(const std::shared_ptr<PubConn>& conn, const uint8_t* data, size_t len,
                                   std::vector<UniqueFd>& fds) noexcept {
+  // Not our protocol at all: drop the connection and its chunks.
+  auto violation = [&] {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      CloseConnLocked(*conn, true);
+    }
+    HandleHangup(conn);
+  };
   MsgHeader mh{};
-  if (len < sizeof(mh)) return HandleHangup(conn);
+  if (len < sizeof(mh)) return violation();
   std::memcpy(&mh, data, sizeof(mh));
-  if (mh.magic != kMsgMagic) return HandleHangup(conn);
+  if (mh.magic != kMsgMagic) return violation();
+  if (mh.type < MsgType::kHello || mh.type > MsgType::kReject) {
+    // Forward compatibility: a newer subscriber's message we do not know.
+    // Ignored; fds that came with it are closed with `fds`.
+    std::lock_guard<std::mutex> lock(mu_);
+    ++stats_.unknown_messages;
+    return;
+  }
 
   if (mh.type == MsgType::kHello) {
     HelloMsg hello{};
     constexpr size_t kFixed = offsetof(HelloMsg, url);
-    if (len < kFixed) return HandleHangup(conn);
+    if (len < kFixed) return violation();
     std::memcpy(&hello, data, std::min(len, sizeof(hello)));
     Error reject = Error::kOk;
     if (hello.abi != kAbiVersion) {
@@ -742,12 +1053,18 @@ void PublisherImpl::HandleMessage(const std::shared_ptr<PubConn>& conn, const ui
     conn->return_slots = rslots;
     conn->sub_blocking = hello.queue_full == static_cast<uint32_t>(QueueFullPolicy::kBlockProducer);
     conn->blocking = conn->sub_blocking && options_.too_slow == TooSlowPolicy::kWaitForConsumer;
-    conn->shadow.assign(dslots, 0);
-    conn->outstanding.clear();
-    conn->segment_acked.clear();
-    for (auto& s : segments_) {
-      conn->outstanding.emplace_back((s->count + 63) / 64, 0);
-      conn->segment_acked.push_back(0);
+    try {
+      conn->shadow.assign(dslots, 0);
+      conn->outstanding.clear();
+      conn->segment_acked.clear();
+      for (auto& s : segments_) {
+        conn->outstanding.emplace_back((s->count + 63) / 64, 0);
+        conn->segment_acked.push_back(0);
+      }
+    } catch (...) {  // std::bad_alloc: nothing delivered yet
+      Log("out of memory: connection dropped", url_);
+      CloseConnLocked(*conn, true);
+      return;
     }
     WelcomeMsg wm{};
     wm.h = {kMsgMagic, MsgType::kWelcome};
@@ -756,15 +1073,11 @@ void PublisherImpl::HandleMessage(const std::shared_ptr<PubConn>& conn, const ui
     wm.delivery_slots = dslots;
     wm.return_slots = rslots;
     wm.segment_size = size;
-    int fd = conn->conn_seg.fd.Get();
-    bool ok = SendMessage(conn->sock.Get(), &wm, sizeof(wm), &fd, 1);
+    // The queue owns the descriptor and closes it once the subscriber got
+    // it; we keep only the mapping.
+    bool ok = SendLocked(*conn, &wm, sizeof(wm), -1, std::move(conn->conn_seg.fd));
     for (auto& s : segments_) ok = ok && SendSegmentLocked(*conn, *s);
-    // The subscriber holds its own descriptor now; keep only the mapping.
-    conn->conn_seg.fd.Reset();
-    if (!ok) {
-      MarkCorruptLocked(*conn);
-      return;
-    }
+    if (!ok) return;  // SendLocked closed the connection
     conn->state = PubConn::State::kAwaitConnAck;
     return;
   }
@@ -796,15 +1109,28 @@ void PublisherImpl::HandleMessage(const std::shared_ptr<PubConn>& conn, const ui
 void PublisherImpl::HandleHangup(const std::shared_ptr<PubConn>& conn) noexcept {
   {
     std::lock_guard<std::mutex> lock(mu_);
-    if (conn->state != PubConn::State::kClosed) {
-      conn->state = PubConn::State::kClosed;
-      ReclaimAllLocked(*conn);
-      WakeSpace(*conn);
-    }
+    // Reclaims after an orderly close, quarantines otherwise.
+    CloseConnLocked(*conn, false);
     auto it = std::find(conns_.begin(), conns_.end(), conn);
     if (it != conns_.end()) conns_.erase(it);
+    ArmQuarantineLocked();
   }
   rt_->RemoveFd(conn->sock.Get());
+  // A quarantined connection lives on; its socket is of no further use.
+  // Other threads only touch `sock` under mu_ while the state is not
+  // kClosed, and the control thread is this one.
+  conn->sock.Reset();
+}
+
+void PublisherImpl::FlushOut(const std::shared_ptr<PubConn>& conn) noexcept {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (conn->state == PubConn::State::kClosed) return;
+  if (!conn->out.Flush(conn->sock.Get())) {
+    Log("control socket failed, dropping subscriber", url_);
+    CloseConnLocked(*conn, false);
+    return;
+  }
+  if (conn->out.Empty()) rt_->ModFd(conn->sock.Get(), conn->epoll_tag, EPOLLIN | EPOLLRDHUP);
 }
 
 }  // namespace detail

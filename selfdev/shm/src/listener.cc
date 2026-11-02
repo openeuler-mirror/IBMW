@@ -4,6 +4,7 @@
 #include <pthread.h>
 
 #include <algorithm>
+#include <chrono>
 #include <future>
 
 #include "impl.h"
@@ -41,7 +42,7 @@ namespace detail {
 
 Result<std::shared_ptr<ListenerImpl>> ListenerImpl::Create(const ListenerOptions& options) {
   auto* rt = RuntimeImpl::Instance();
-  if (rt == nullptr) return Error::kSystem;
+  if (rt == nullptr) return RuntimeImpl::LastInitError();
   auto slot = rt->AllocListenerSlot();
   if (!slot) return Error::kNoMemory;
   std::shared_ptr<ListenerImpl> self(new ListenerImpl());
@@ -113,7 +114,12 @@ Result<void> ListenerImpl::Attach(Subscriber& sub, Listener::Callback cb, void* 
     if (entries_.size() >= options_.capacity) return Error::kNoMemory;
     if (!impl->ClaimListener(shared_from_this())) return Error::kInvalidArg;  // attached elsewhere
     // ~0: fire once if data is already waiting at attach time.
-    entries_.push_back(Entry{&sub, impl, cb, ctx, ~0ull});
+    try {
+      entries_.push_back(Entry{&sub, impl, cb, ctx, ~0ull});
+    } catch (...) {  // std::bad_alloc
+      impl->ClearListener(this);
+      return Error::kNoMemory;
+    }
   }
   impl->SetNotifySlot(slot_);
   Wake();
@@ -146,6 +152,11 @@ void ListenerImpl::Loop() noexcept {
     uint64_t version;
   };
   std::vector<Ready> ready;
+  // At most `capacity` entries: with this reserved push_back never allocates.
+  try {
+    ready.reserve(options_.capacity);
+  } catch (...) {  // std::bad_alloc: push_back below copes
+  }
   while (true) {
     // Read the epoch BEFORE announcing sleep: if a publisher bumps it after
     // our HasData check, futex_wait sees the new value and returns at once.
@@ -154,12 +165,25 @@ void ListenerImpl::Loop() noexcept {
     std::atomic_thread_fence(std::memory_order_seq_cst);  // store->load, pairs with WakeListener
     if (stop_.load(std::memory_order_relaxed)) break;
     ready.clear();
+    bool nomem = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       for (auto& en : entries_) {
         uint64_t v;
-        if (en.impl->Poll(&v) && v != en.last_version) ready.push_back({en.impl.get(), v});
+        if (!en.impl->Poll(&v) || v == en.last_version) continue;
+        try {
+          ready.push_back({en.impl.get(), v});
+        } catch (...) {  // std::bad_alloc: the rest wait for the next round
+          nomem = true;
+          break;
+        }
       }
+    }
+    if (ready.empty() && nomem) {
+      // Data is waiting, so sleeping on the epoch could miss it: retry.
+      notify_->sleeping.store(0, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
     }
     if (ready.empty()) {
       FutexWait(&notify_->epoch, e, -1);

@@ -12,11 +12,23 @@
 
 namespace ibmw::selfdev::shm {
 
+// Every setting is resolved the same way: the option if set, else its
+// environment variable, else the default.
+//   root_dir  $IBMW_SHM_ROOT    Linux: /dev/shm if writable, else /tmp;
+//                               OHOS: none, Init fails with kInvalidArg
+//   domain    $IBMW_SHM_DOMAIN  "default"
+//   group     $IBMW_SHM_GROUP   none (numeric gid)
+// The service directory is <root>/ibmw_shm.<euid or g<gid>>.<domain> and may
+// be at most 63 bytes (socket paths must fit sun_path); a longer one fails
+// with kInvalidArg and a message on stderr.
 struct RuntimeOptions {
-  std::string name;                // informational, e.g. "iceoryx<pid>"
-  std::string domain = "default";  // overridden by $IBMW_SHM_DOMAIN
-  std::string root_dir;            // empty: $IBMW_SHM_ROOT, else /tmp
-  std::optional<gid_t> group;      // allow peers of this group (dir 0770)
+  std::string name;         // informational, e.g. "iceoryx<pid>"
+  std::string domain;       // empty: $IBMW_SHM_DOMAIN, else "default"
+  std::string root_dir;     // empty: $IBMW_SHM_ROOT, else the platform default
+  // Processes of different users only meet through a shared group: every
+  // one of them must set the same gid (directory 0770, sockets 0660, peers
+  // of that gid accepted). Without it each user gets its own directory.
+  std::optional<gid_t> group;
 };
 
 // Per-process runtime: owns the control thread (epoll, no timeout) and the
@@ -24,7 +36,9 @@ struct RuntimeOptions {
 // the first Publisher/Subscriber/Listener initialises it with defaults.
 // Init() on a running runtime succeeds if it resolves to the same service
 // directory (root, owner, domain) and fails with kAlreadyInitialized
-// otherwise, so a conflicting domain is never silently ignored.
+// otherwise, so a conflicting domain is never silently ignored. When the
+// implicit initialisation fails, Publisher/Subscriber/Listener report its
+// error as their InitError().
 class Runtime {
  public:
   static Result<void> Init(const RuntimeOptions& options);

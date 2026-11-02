@@ -6,9 +6,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/futex.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -37,8 +39,17 @@
 #ifndef F_SEAL_FUTURE_WRITE
 #define F_SEAL_FUTURE_WRITE 0x0010
 #endif
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434  // same number on every architecture
+#endif
 
 namespace ibmw::selfdev::shm::detail {
+
+namespace fault {
+std::atomic<uint32_t> send_would_block{0};
+std::atomic<bool> no_future_write_seal{false};
+std::atomic<bool> no_pidfd{false};
+}  // namespace fault
 
 void UniqueFd::Reset(int fd) noexcept {
   if (fd_ >= 0) ::close(fd_);
@@ -89,7 +100,8 @@ Result<Segment> CreateSegment(const char* name, size_t size, bool seal_write, bo
   if (p == MAP_FAILED) return errno == ENOMEM ? Error::kNoMemory : Error::kSystem;
   seg.map = Mapping(p, size);
   int seals = F_SEAL_SHRINK | F_SEAL_GROW;
-  if (seal_write && ::fcntl(seg.fd.Get(), F_ADD_SEALS, seals | F_SEAL_FUTURE_WRITE) == 0) {
+  if (seal_write && !fault::no_future_write_seal.load(std::memory_order_relaxed) &&
+      ::fcntl(seg.fd.Get(), F_ADD_SEALS, seals | F_SEAL_FUTURE_WRITE) == 0) {
     seg.read_only_enforced = true;
   } else if (::fcntl(seg.fd.Get(), F_ADD_SEALS, seals) != 0) {
     return Error::kSystem;
@@ -98,6 +110,14 @@ Result<Segment> CreateSegment(const char* name, size_t size, bool seal_write, bo
 }
 
 Result<Mapping> MapSegment(int fd, size_t size, bool writable) {
+  // Only shmem (memfd, tmpfs) is accepted: a hugetlbfs memfd or a file on a
+  // disk filesystem behaves differently on access, truncation and
+  // writeback. memfds report TMPFS_MAGIC on Linux and on OHOS (HongMeng or
+  // Linux kernel, measured).
+  constexpr unsigned long kTmpfsMagic = 0x01021994ul;  // linux/magic.h TMPFS_MAGIC
+  struct statfs sfs {};
+  if (::fstatfs(fd, &sfs) != 0) return Error::kSystem;
+  if (static_cast<unsigned long>(sfs.f_type) != kTmpfsMagic) return Error::kCorrupted;
   struct stat st {};
   if (::fstat(fd, &st) != 0) return Error::kSystem;
   if (!S_ISREG(st.st_mode) || size == 0 || static_cast<uint64_t>(st.st_size) < size) return Error::kCorrupted;
@@ -130,7 +150,16 @@ void FutexWake(std::atomic<uint32_t>* word, int count) noexcept {
 }
 
 bool SendMessage(int sock, const void* data, size_t len, const int* fds, size_t nfds) noexcept {
-  if (nfds > 4) return false;
+  if (nfds > 4) {
+    errno = EINVAL;
+    return false;
+  }
+  for (uint32_t n = fault::send_would_block.load(std::memory_order_relaxed); n != 0;) {
+    if (fault::send_would_block.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) {
+      errno = EAGAIN;
+      return false;
+    }
+  }
   struct iovec iov {};
   iov.iov_base = const_cast<void*>(data);
   iov.iov_len = len;
@@ -152,8 +181,43 @@ bool SendMessage(int sock, const void* data, size_t len, const int* fds, size_t 
     ssize_t n = ::sendmsg(sock, &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
     if (n == static_cast<ssize_t>(len)) return true;
     if (n < 0 && errno == EINTR) continue;
+    if (n >= 0) errno = EMSGSIZE;  // SEQPACKET never sends a partial record
     return false;
   }
+}
+
+bool SendWouldBlock(int err) noexcept {
+  return err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS || err == ENOMEM;
+}
+
+SendQueue::Status SendQueue::Send(int sock, const void* data, size_t len, int fd, UniqueFd owned) noexcept {
+  if (owned.Valid()) fd = owned.Get();
+  if (msgs_.empty()) {
+    if (SendMessage(sock, data, len, &fd, fd >= 0 ? 1 : 0)) return Status::kSent;
+    if (!SendWouldBlock(errno)) return Status::kFailed;
+  }
+  if (msgs_.size() >= kMaxMessages) return Status::kOverflow;
+  if (len > kMaxBytes) return Status::kFailed;
+  try {
+    msgs_.emplace_back();
+  } catch (...) {  // std::bad_alloc: cannot keep the order any more
+    return Status::kFailed;
+  }
+  Msg& m = msgs_.back();
+  std::memcpy(m.data, data, len);
+  m.len = static_cast<uint32_t>(len);
+  m.fd = fd;
+  m.owned = std::move(owned);
+  return Status::kQueued;
+}
+
+bool SendQueue::Flush(int sock) noexcept {
+  while (!msgs_.empty()) {
+    Msg& m = msgs_.front();
+    if (!SendMessage(sock, m.data, m.len, &m.fd, m.fd >= 0 ? 1 : 0)) return SendWouldBlock(errno);
+    msgs_.pop_front();
+  }
+  return true;
 }
 
 ssize_t ReceiveMessage(int sock, void* data, size_t cap, std::vector<UniqueFd>* fds) noexcept {
@@ -171,6 +235,16 @@ ssize_t ReceiveMessage(int sock, void* data, size_t cap, std::vector<UniqueFd>* 
     n = ::recvmsg(sock, &msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
   } while (n < 0 && errno == EINTR);
   if (n < 0) return -1;
+  // At most 8 fds fit `ctrl`: with room for them reserved up front the
+  // emplace_back below cannot throw. Without it the fds are closed.
+  bool nomem = false;
+  if (fds != nullptr) {
+    try {
+      fds->reserve(fds->size() + 8);
+    } catch (...) {  // std::bad_alloc
+      nomem = true;
+    }
+  }
   // musl's CMSG_NXTHDR compares size_t with ptrdiff_t (-Wsign-compare).
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-compare"
@@ -180,7 +254,7 @@ ssize_t ReceiveMessage(int sock, void* data, size_t cap, std::vector<UniqueFd>* 
     for (size_t i = 0; i < count; ++i) {
       int fd;
       std::memcpy(&fd, CMSG_DATA(c) + i * sizeof(int), sizeof(int));
-      if (fds != nullptr) {
+      if (fds != nullptr && !nomem) {
         fds->emplace_back(fd);
       } else {
         ::close(fd);
@@ -190,6 +264,10 @@ ssize_t ReceiveMessage(int sock, void* data, size_t cap, std::vector<UniqueFd>* 
 #pragma GCC diagnostic pop
   if ((msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) != 0) {
     errno = EMSGSIZE;
+    return -1;
+  }
+  if (nomem) {
+    errno = ENOMEM;
     return -1;
   }
   return n;
@@ -204,6 +282,16 @@ bool GetPeerCredentials(int sock, PeerCredentials* out) noexcept {
   out->gid = cred.gid;
   return true;
 }
+
+int PidfdOpen(pid_t pid) noexcept {
+  if (fault::no_pidfd.load(std::memory_order_relaxed)) {
+    errno = ENOSYS;
+    return -1;
+  }
+  return static_cast<int>(::syscall(SYS_pidfd_open, pid, 0));
+}
+
+int PidGone(pid_t pid) noexcept { return ::kill(pid, 0) != 0 && errno == ESRCH ? 1 : 0; }
 
 uint64_t Hash64(std::string_view s) noexcept {
   // FNV-1a; collisions are resolved by comparing the full URL at handshake.

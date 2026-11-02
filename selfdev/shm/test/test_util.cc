@@ -65,7 +65,12 @@ class ShmEnvironment : public ::testing::Environment {
     auto r = Runtime::Init(RuntimeOptions{});
     ASSERT_TRUE(r.ok()) << ErrorName(r.error());
   }
-  void TearDown() override { RemoveTree(TestRoot()); }
+  void TearDown() override {
+    // Stop the control thread first: it would re-create the service
+    // directory it watches while the tree is being removed.
+    Runtime::Shutdown();
+    RemoveTree(TestRoot());
+  }
 };
 
 const auto* const g_env = ::testing::AddGlobalTestEnvironment(new ShmEnvironment());

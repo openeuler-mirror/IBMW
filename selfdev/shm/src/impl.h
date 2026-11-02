@@ -75,6 +75,25 @@ class PubConn : public EventHandler, public std::enable_shared_from_this<PubConn
   std::vector<std::vector<uint64_t>> outstanding;  // [segment][chunk bit]
   std::vector<uint8_t> segment_acked;
   std::deque<uint64_t> pending;  // delivered but waiting for segment ack
+  SendQueue out;                 // control messages the subscriber has not taken yet
+  uint64_t epoll_tag = 0;        // for RuntimeImpl::ModFd (EPOLLOUT while `out` is not empty)
+};
+
+// Chunks of a connection that hung up without an orderly close. The
+// subscriber may still be reading them, so they are not reused until its
+// process is known to be gone. Guarded by the publisher mutex.
+struct Quarantine {
+  uint64_t id = 0;
+  // Closed connection; its `outstanding` bits are the quarantined chunks and
+  // its connection segment stays mapped to see a late orderly close.
+  std::shared_ptr<PubConn> conn;
+  pid_t pid = 0;          // SO_PEERCRED of the subscriber; 0: other pid namespace
+  UniqueFd pidfd;         // readable once `pid` exited; invalid if unavailable
+  bool watched = false;   // pidfd registered with the control thread's epoll
+  bool armed = false;     // watch or polling timer set up
+  bool released = false;  // chunks are back in the pool
+  bool removing = false;  // control thread asked to drop the watch
+  uint32_t chunks = 0;
 };
 
 class PublisherImpl : public EventHandler, public std::enable_shared_from_this<PublisherImpl> {
@@ -87,7 +106,8 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
   bool Release(void* user_payload) noexcept;
   void StopBlocking() noexcept;
   bool HasSubscribers() const noexcept;
-  PublisherStats Stats() const noexcept;
+  // Not const: releases quarantined chunks whose subscriber is gone first.
+  PublisherStats Stats() noexcept;
   void Shutdown() noexcept;
 
   // Listening socket (control thread).
@@ -96,6 +116,10 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
   void HandleMessage(const std::shared_ptr<PubConn>& conn, const uint8_t* data, size_t len,
                      std::vector<UniqueFd>& fds) noexcept;
   void HandleHangup(const std::shared_ptr<PubConn>& conn) noexcept;
+  void FlushOut(const std::shared_ptr<PubConn>& conn) noexcept;
+  // Quarantine watch callbacks (control thread).
+  void PeerExited(uint64_t id) noexcept;
+  void PollPeer(uint64_t id, uint32_t attempt) noexcept;
 
  private:
   enum class Delivery : uint8_t { kDelivered, kQueued, kFull, kFullFlushed, kSkipped };
@@ -112,7 +136,20 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
   bool PushRingLocked(PubConn& conn, uint64_t handle, bool* full) noexcept;
   void FlushPendingLocked(PubConn& conn, bool* delivered) noexcept;
   void MarkCorruptLocked(PubConn& conn) noexcept;
+  // Stops using a connection. Its chunks are reclaimed when `reclaim` is set
+  // (proven protocol violation) or the subscriber closed in order; otherwise
+  // they are quarantined.
+  void CloseConnLocked(PubConn& conn, bool reclaim) noexcept;
   void ReclaimAllLocked(PubConn& conn) noexcept;
+  void QuarantineLocked(PubConn& conn) noexcept;
+  // Control thread: sets up death detection for new quarantine entries.
+  void ArmQuarantineLocked() noexcept;
+  bool PeerGoneLocked(const Quarantine& q) const noexcept;
+  void ReleaseLocked(Quarantine& q) noexcept;
+  // Releases entries whose subscriber is gone (any thread).
+  void ReapQuarantineLocked() noexcept;
+  // Sends or queues a control message; false when the connection was closed.
+  bool SendLocked(PubConn& conn, const void* msg, size_t len, int fd, UniqueFd owned = UniqueFd()) noexcept;
   bool SendSegmentLocked(PubConn& conn, const PoolSegment& seg) noexcept;
   static void WakeListener(PubConn& conn) noexcept;
   static void WakeSpace(PubConn& conn) noexcept;
@@ -139,6 +176,12 @@ class PublisherImpl : public EventHandler, public std::enable_shared_from_this<P
   uint64_t sequence_ = 0;
   std::vector<std::shared_ptr<PubConn>> conns_;
   bool read_only_enforced_ = true;
+  std::vector<std::unique_ptr<Quarantine>> quarantine_;
+  uint64_t next_quarantine_id_ = 1;
+  uint32_t quarantined_now_ = 0;
+  bool exhausted_logged_ = false;  // "pool exhausted while chunks are quarantined"
+  bool unsealed_logged_ = false;
+  bool unverifiable_logged_ = false;
   PublisherStats stats_;
 };
 
@@ -175,6 +218,9 @@ class SubConn : public EventHandler, public std::enable_shared_from_this<SubConn
   // takeable until the ring is empty.
   bool draining = false;
   std::deque<uint64_t> return_backlog;  // returns that did not fit the ring
+  // Control thread only.
+  SendQueue out;           // acks the publisher has not taken yet
+  uint64_t epoll_tag = 0;  // for RuntimeImpl::ModFd (EPOLLOUT while `out` is not empty)
 };
 
 class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
@@ -192,11 +238,13 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
   void SetNotifySlot(uint32_t slot) noexcept;
   void Shutdown() noexcept;
 
-  // Control thread.
-  void ConnectTo(const std::string& path) noexcept;
+  // Control thread. `attempt` > 0: retry of a connect that found the
+  // publisher's listen backlog full.
+  void ConnectTo(const std::string& path, uint32_t attempt = 0) noexcept;
   void HandleMessage(const std::shared_ptr<SubConn>& conn, const uint8_t* data, size_t len,
                      std::vector<UniqueFd>& fds) noexcept;
   void HandleHangup(const std::shared_ptr<SubConn>& conn) noexcept;
+  void FlushOut(const std::shared_ptr<SubConn>& conn) noexcept;
 
   uint64_t Hash() const noexcept { return hash_; }
 
@@ -217,6 +265,9 @@ class SubscriberImpl : public std::enable_shared_from_this<SubscriberImpl> {
   // Drops orphaned connections nothing refers to any more.
   void PruneOrphansLocked() noexcept;
   void MarkCorruptLocked(SubConn& conn) noexcept;
+  // Control thread: sends or queues an ack; false when the connection broke.
+  bool Send(const std::shared_ptr<SubConn>& conn, const void* msg, size_t len) noexcept;
+  void RetryConnect(const std::string& path, uint32_t attempt) noexcept;
 
   RuntimeImpl* rt_ = nullptr;
   std::string url_;

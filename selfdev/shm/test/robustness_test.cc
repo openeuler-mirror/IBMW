@@ -12,6 +12,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -133,6 +135,9 @@ class RawSubscriber {
       std::memcpy(&sm, buf.data(), sizeof(sm));
       if (sm.h.type != MsgType::kSegmentAdd || fds.size() != 1) return false;
       writable_data_map_refused = writable_data_map_refused && !MapSegment(fds[0].Get(), sm.segment_size, true).ok();
+      auto dm = MapSegment(fds[0].Get(), sm.segment_size, false);
+      if (!dm) return false;
+      data_.push_back({std::move(dm.value()), sm.chunk_stride});
       SegmentAckMsg sa{{kMsgMagic, MsgType::kSegmentAck}, sm.segment_id};
       if (!SendRaw(&sa, sizeof(sa))) return false;
     }
@@ -163,14 +168,29 @@ class RawSubscriber {
     }
   }
 
+  // Payload of a delivered handle, through our read-only data mapping.
+  const void* Payload(uint64_t handle) const {
+    const auto& d = data_.at(HandleSegment(handle));
+    return d.map.Data() + HandleIndex(handle) * d.stride + kChunkHeaderSize;
+  }
+
+  // Drops the control socket without an orderly close (no `closed` flag):
+  // what a broken connection looks like to the publisher. Mappings stay.
+  void DropSocket() { sock_.Reset(); }
+
   ConnHeader* hdr = nullptr;
   uint32_t dslots = 0, rslots = 0;
   bool writable_data_map_refused = true;
 
  private:
+  struct DataMap {
+    Mapping map;
+    uint64_t stride;
+  };
   UniqueFd sock_;
   Segment notify_;
   Mapping conn_;
+  std::vector<DataMap> data_;
 };
 
 PublisherOptions EagerPool() {
@@ -447,6 +467,194 @@ TEST(ShmRobustnessTest, DomainIsolation) {
   EXPECT_EQ(sub.Stats().connections, 0u);
   test::KillPeer(peer, SIGKILL);
   test::WaitPeer(peer);
+}
+
+// RB-13 (third review, H1) A control message of unknown type from a
+// compatible subscriber (a newer version) is ignored, fds and all; the
+// connection keeps working. Before: the publisher dropped the subscriber.
+TEST(ShmRobustnessTest, UnknownSubscriberMessageIsIgnored) {
+  auto url = UniqueUrl("rb13");
+  Publisher pub(url, EagerPool());
+  RawSubscriber raw;
+  ASSERT_TRUE(raw.Connect(url));
+  ASSERT_TRUE(raw.Handshake(url, 1));
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+  MsgHeader future{kMsgMagic, static_cast<MsgType>(77)};
+  ASSERT_TRUE(raw.SendRaw(&future, sizeof(future)));
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().unknown_messages == 1; }));
+  PublishSeq(pub, 1);
+  uint64_t h = 0;
+  ASSERT_TRUE(WaitFor([&] { return raw.TakeHandle(&h); }));
+  EXPECT_EQ(CheckPattern(raw.Payload(h), 64), 1u);
+  auto st = pub.Stats();
+  EXPECT_EQ(st.connections, 1u);
+  EXPECT_EQ(st.corrupted_connections, 0u);
+}
+
+// RB-14 (third review, H1) A subscriber whose control socket breaks without
+// an orderly close may still read what it holds: the publisher quarantines
+// those chunks instead of reusing them. The subscriber is in this process,
+// so its death cannot be checked (unverifiable_peers); a late orderly close
+// (the `closed` flag) releases them. Before: the chunk was reclaimed at the
+// hang-up and overwritten by the next loans.
+TEST(ShmRobustnessTest, BrokenConnectionQuarantinesHeldChunks) {
+  auto url = UniqueUrl("rb14");
+  PublisherOptions po;
+  po.pools = {{64, kMaxChunksAllocatedPerPublisher}};
+  Publisher pub(url, po);
+  RawSubscriber raw;
+  ASSERT_TRUE(raw.Connect(url));
+  ASSERT_TRUE(raw.Handshake(url, 1));
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+  PublishSeq(pub, 1);
+  uint64_t h = 0;
+  ASSERT_TRUE(WaitFor([&] { return raw.TakeHandle(&h); }));
+  const void* held = raw.Payload(h);
+  raw.DropSocket();
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }));
+  auto st = pub.Stats();
+  EXPECT_EQ(st.quarantined, 1u);
+  EXPECT_EQ(st.quarantined_chunks, 1u);
+  EXPECT_EQ(st.unverifiable_peers, 1u);
+  EXPECT_EQ(st.reclaimed, 0u);
+  // Every other chunk of the pool is loaned and written many times over;
+  // the quarantined one is never among them.
+  for (uint64_t seq = 100; seq < 400; ++seq) {
+    std::vector<void*> loans;
+    for (uint32_t i = 0; i + 1 < kMaxChunksAllocatedPerPublisher; ++i) {
+      auto l = pub.Loan(64);
+      ASSERT_TRUE(l.ok()) << ErrorName(l.error());
+      FillPattern(*l, 64, seq);
+      loans.push_back(*l);
+    }
+    for (auto* l : loans) pub.Publish(l);
+  }
+  EXPECT_EQ(CheckPattern(held, 64), 1u);
+  EXPECT_EQ(pub.Stats().segments, 1u);
+  // The last chunk is the quarantined one: the pool has to grow for it.
+  {
+    std::vector<void*> loans;
+    for (uint32_t i = 0; i < kMaxChunksAllocatedPerPublisher; ++i) {
+      auto l = pub.Loan(64);
+      ASSERT_TRUE(l.ok());
+      loans.push_back(*l);
+    }
+    EXPECT_EQ(pub.Stats().segments, 2u);
+    for (auto* l : loans) pub.Release(l);
+  }
+  EXPECT_EQ(CheckPattern(held, 64), 1u);
+  // Done reading: the late orderly close gives the chunk back.
+  raw.hdr->closed.store(1, std::memory_order_release);
+  st = pub.Stats();
+  EXPECT_EQ(st.quarantined_chunks, 0u);
+  EXPECT_EQ(st.reclaimed, 1u);
+}
+
+// RB-15 (third review, H1) An orderly close still reclaims at once: a
+// Subscriber destroyed while holding samples, and a raw subscriber that
+// sets `closed` before its socket goes down.
+TEST(ShmRobustnessTest, OrderlyCloseReclaimsAtOnce) {
+  auto url = UniqueUrl("rb15");
+  Publisher pub(url, EagerPool());
+  {
+    Subscriber sub(url);
+    ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+    PublishSeq(pub, 1);
+    ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+    ASSERT_TRUE(sub.Take().ok());  // held at destruction
+  }
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }));
+  auto st = pub.Stats();
+  EXPECT_EQ(st.reclaimed, 1u);
+  EXPECT_EQ(st.quarantined, 0u);
+  RawSubscriber raw;
+  ASSERT_TRUE(raw.Connect(url));
+  ASSERT_TRUE(raw.Handshake(url, 1));
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+  PublishSeq(pub, 2);
+  uint64_t h = 0;
+  ASSERT_TRUE(WaitFor([&] { return raw.TakeHandle(&h); }));
+  raw.hdr->closed.store(1, std::memory_order_release);
+  raw.DropSocket();
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }));
+  st = pub.Stats();
+  EXPECT_EQ(st.reclaimed, 2u);
+  EXPECT_EQ(st.quarantined, 0u);
+  EXPECT_EQ(st.quarantined_chunks, 0u);
+}
+
+// Shared by RB-16/RB-17: a live subscriber process holding 5 chunks loses
+// its control sockets. Its chunks are quarantined while it lives and given
+// back once it is dead (and reaped).
+void QuarantineUntilPeerDies(const std::string& url) {
+  PublisherOptions po;
+  po.pools = {{64, kMaxChunksAllocatedPerPublisher}};
+  Publisher pub(url, po);
+  auto peer = test::SpawnPeer({"sub_hold_drop", url, "5"});
+  struct Reap {  // a failed assertion must not leave the child parked
+    test::Peer& p;
+    ~Reap() {
+      if (p.pid > 0) {
+        test::KillPeer(p, SIGKILL);
+        test::WaitPeer(p);
+      }
+    }
+  } reap{peer};
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }, 10s));
+  std::vector<void*> held;  // the child takes the first 5 samples
+  for (uint64_t s = 1; s <= 5; ++s) {
+    auto l = pub.Loan(64);
+    ASSERT_TRUE(l.ok());
+    FillPattern(*l, 64, s);
+    held.push_back(*l);
+    pub.Publish(*l);
+  }
+  ASSERT_EQ(test::ReadLine(peer), "ready");
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().connections == 0; }));
+  auto st = pub.Stats();
+  EXPECT_EQ(st.quarantined_chunks, 5u);
+  EXPECT_EQ(st.unverifiable_peers, 0u);
+  // While it lives none of its chunks comes back, however often we loan.
+  for (int round = 0; round < 50; ++round) {
+    std::vector<void*> loans;
+    for (uint32_t i = 0; i + 5 < kMaxChunksAllocatedPerPublisher; ++i) {
+      auto l = pub.Loan(64);
+      ASSERT_TRUE(l.ok());
+      EXPECT_EQ(std::count(held.begin(), held.end(), *l), 0);
+      loans.push_back(*l);
+    }
+    for (auto* l : loans) pub.Release(l);
+  }
+  std::this_thread::sleep_for(100ms);  // pidfd watch / polling timer had time to misfire
+  EXPECT_EQ(pub.Stats().quarantined_chunks, 5u);
+  test::KillPeer(peer, SIGKILL);
+  EXPECT_EQ(test::WaitPeer(peer), 128 + SIGKILL);
+  ASSERT_TRUE(WaitFor([&] { return pub.Stats().quarantined_chunks == 0; }));
+  EXPECT_EQ(pub.Stats().reclaimed, 5u);
+  // All chunks are back: no growth.
+  std::vector<void*> loans;
+  for (uint32_t i = 0; i < kMaxChunksAllocatedPerPublisher; ++i) {
+    auto l = pub.Loan(64);
+    ASSERT_TRUE(l.ok());
+    loans.push_back(*l);
+  }
+  for (auto* l : loans) pub.Release(l);
+  EXPECT_EQ(pub.Stats().segments, 1u);
+}
+
+// RB-16 (third review, H1) ... death seen through pidfd.
+TEST(ShmRobustnessTest, QuarantineEndsWithPeerProcess) {
+  QuarantineUntilPeerDies(UniqueUrl("rb16"));
+}
+
+// RB-17 (third review, H1) ... without pidfd (old kernel, sandbox): death
+// seen by kill(pid, 0) polling.
+TEST(ShmRobustnessTest, QuarantineEndsWithPeerProcessWithoutPidfd) {
+  struct NoPidfd {
+    NoPidfd() { fault::no_pidfd.store(true); }
+    ~NoPidfd() { fault::no_pidfd.store(false); }
+  } no_pidfd;
+  QuarantineUntilPeerDies(UniqueUrl("rb17"));
 }
 
 }  // namespace

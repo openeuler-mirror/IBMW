@@ -60,13 +60,18 @@ void Log(const char* what, const std::string& url) {
   std::fprintf(stderr, "[ibmw_shm] subscriber %s: %s\n", url.c_str(), what);
 }
 
+// A full listen backlog (connect: EAGAIN) is retried after 1, 2, 4 ... ms,
+// at most 500 ms apart: about 4 s in all.
+constexpr uint32_t kMaxConnectAttempts = 16;
+uint32_t ConnectDelayMs(uint32_t attempt) noexcept { return std::min<uint32_t>(1u << std::min<uint32_t>(attempt, 9), 500); }
+
 }  // namespace
 
 Result<std::shared_ptr<SubscriberImpl>> SubscriberImpl::Create(std::string_view url,
                                                                const SubscriberOptions& options) {
   if (url.empty() || url.size() > kMaxUrlLength) return Error::kInvalidArg;
   auto* rt = RuntimeImpl::Instance();
-  if (rt == nullptr) return Error::kSystem;
+  if (rt == nullptr) return RuntimeImpl::LastInitError();
   std::shared_ptr<SubscriberImpl> self(new SubscriberImpl());
   self->rt_ = rt;
   self->url_ = std::string(url);
@@ -89,7 +94,17 @@ void SubscriberImpl::Shutdown() noexcept {
   {
     std::lock_guard<std::mutex> lock(mu_);
     shutting_down_ = true;
-    conns = conns_;
+    try {
+      conns = conns_;
+    } catch (...) {  // std::bad_alloc: sockets close with the connections
+    }
+    // Orderly close: `closed` is stored (release) before the socket goes
+    // down, so the publisher sees it when it handles the hang-up and reuses
+    // our chunks at once instead of quarantining them. Samples still held
+    // are invalid from here on (see ~Subscriber).
+    for (auto& c : conns_) {
+      if (c->hdr != nullptr) c->hdr->closed.store(1, std::memory_order_release);
+    }
   }
   rt_->Call([&] {
     for (auto& c : conns) {
@@ -98,30 +113,52 @@ void SubscriberImpl::Shutdown() noexcept {
     }
   });
   std::lock_guard<std::mutex> lock(mu_);
-  for (auto& c : conns_) {
-    if (c->hdr != nullptr) c->hdr->closed.store(1, std::memory_order_release);
-  }
   held_.clear();
   conns_.clear();
 }
 
 // ------------------------------------------------------- control thread
 
-void SubscriberImpl::ConnectTo(const std::string& path) noexcept {
+void SubscriberImpl::ConnectTo(const std::string& path, uint32_t attempt) noexcept {
   {
     std::lock_guard<std::mutex> lock(mu_);
-    if (shutting_down_ || known_paths_.count(path) != 0) return;
+    if (shutting_down_) {
+      if (attempt != 0) known_paths_.erase(path);
+      return;
+    }
+    // A retry already owns its entry; a first attempt claims one so that
+    // rescans do not connect twice while a retry is pending.
+    if (attempt == 0) {
+      if (known_paths_.count(path) != 0) return;
+      try {
+        known_paths_.insert(path);
+      } catch (...) {  // std::bad_alloc: a later scan tries again
+        return;
+      }
+    }
   }
+  auto give_up = [&] {
+    std::lock_guard<std::mutex> lock(mu_);
+    known_paths_.erase(path);
+  };
   struct sockaddr_un addr {};
-  if (path.size() >= sizeof(addr.sun_path)) return;
+  if (path.size() >= sizeof(addr.sun_path)) {  // the runtime keeps names shorter
+    Log("publisher socket path too long", url_);
+    return give_up();
+  }
   addr.sun_family = AF_UNIX;
   std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
   struct stat before {};
-  if (::lstat(path.c_str(), &before) != 0) return;
+  if (::lstat(path.c_str(), &before) != 0) return give_up();
 
   UniqueFd sock(::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
-  if (!sock.Valid()) return;
+  if (!sock.Valid()) return give_up();
   if (::connect(sock.Get(), reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+    if (errno == EAGAIN) {
+      // The publisher's listen backlog is full (it accepts on its control
+      // thread): try again later without blocking ours.
+      return RetryConnect(path, attempt);
+    }
     if (errno == ECONNREFUSED) {
       // Publisher died without unlinking. The file name carries a random
       // nonce, so only remove it if it is still the same inode.
@@ -132,12 +169,12 @@ void SubscriberImpl::ConnectTo(const std::string& path) noexcept {
     } else {
       Log("connect failed", url_);
     }
-    return;
+    return give_up();
   }
   PeerCredentials peer;
   if (!GetPeerCredentials(sock.Get(), &peer) || !rt_->PeerAllowed(peer)) {
     Log("publisher credentials not allowed", url_);
-    return;
+    return give_up();
   }
   HelloMsg hello{};
   hello.h = {kMsgMagic, MsgType::kHello};
@@ -148,29 +185,65 @@ void SubscriberImpl::ConnectTo(const std::string& path) noexcept {
   hello.url_length = static_cast<uint32_t>(url_.size());
   std::memcpy(hello.url, url_.data(), url_.size());
   int nfd = rt_->NotifyFd();
-  if (!SendMessage(sock.Get(), &hello, offsetof(HelloMsg, url) + url_.size(), &nfd, 1)) return;
+  if (!SendMessage(sock.Get(), &hello, offsetof(HelloMsg, url) + url_.size(), &nfd, 1)) {
+    // Nothing is shared yet: start over rather than queue the Hello.
+    if (SendWouldBlock(errno)) return RetryConnect(path, attempt);
+    return give_up();
+  }
 
-  auto conn = std::make_shared<SubConn>();
+  std::shared_ptr<SubConn> conn;
+  try {
+    conn = std::make_shared<SubConn>();
+    conn->path = path;
+  } catch (...) {  // std::bad_alloc
+    return give_up();
+  }
   conn->sub = weak_from_this();
-  conn->path = path;
   conn->sock = std::move(sock);
   {
     std::lock_guard<std::mutex> lock(mu_);
-    if (shutting_down_) return;
-    known_paths_.insert(path);
-    conns_.push_back(conn);
+    if (shutting_down_) {
+      known_paths_.erase(path);
+      return;
+    }
+    try {
+      conns_.push_back(conn);
+    } catch (...) {  // std::bad_alloc
+      known_paths_.erase(path);
+      return;
+    }
   }
-  if (!rt_->AddFd(conn->sock.Get(), EPOLLIN | EPOLLRDHUP, conn)) {
+  if (!rt_->AddFd(conn->sock.Get(), EPOLLIN | EPOLLRDHUP, conn, &conn->epoll_tag)) {
     std::lock_guard<std::mutex> lock(mu_);
     known_paths_.erase(path);
     RemoveConnLocked(conn.get());
   }
 }
 
+void SubscriberImpl::RetryConnect(const std::string& path, uint32_t attempt) noexcept {
+  if (attempt + 1 < kMaxConnectAttempts) {
+    try {
+      if (rt_->RunAfter(ConnectDelayMs(attempt), [w = weak_from_this(), path, next = attempt + 1] {
+            if (auto s = w.lock()) s->ConnectTo(path, next);
+          })) {
+        std::lock_guard<std::mutex> lock(mu_);
+        ++stats_.connect_retries;
+        return;
+      }
+    } catch (...) {  // std::bad_alloc
+    }
+  } else {
+    Log("publisher did not accept the connection in time, giving up on it until it is announced again", url_);
+  }
+  std::lock_guard<std::mutex> lock(mu_);
+  known_paths_.erase(path);
+}
+
 void SubConn::OnEvent(uint32_t events) noexcept {
   auto self = shared_from_this();
   auto s = sub.lock();
   if (!s) return;
+  if ((events & EPOLLOUT) != 0) s->FlushOut(self);
   if ((events & EPOLLIN) != 0) {
     alignas(8) uint8_t buf[kMaxMsgSize];
     for (;;) {
@@ -193,6 +266,13 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
   if (len < sizeof(mh)) return HandleHangup(conn);
   std::memcpy(&mh, data, sizeof(mh));
   if (mh.magic != kMsgMagic) return HandleHangup(conn);
+  if (mh.type < MsgType::kHello || mh.type > MsgType::kReject) {
+    // Forward compatibility: a newer publisher's message we do not know.
+    // Ignored; fds that came with it are closed with `fds`.
+    std::lock_guard<std::mutex> lock(mu_);
+    ++stats_.unknown_messages;
+    return;
+  }
 
   if (mh.type == MsgType::kWelcome) {
     WelcomeMsg wm{};
@@ -225,7 +305,7 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
       conn->state = SubConn::State::kActive;
     }
     MsgHeader ack{kMsgMagic, MsgType::kConnAck};
-    if (!SendMessage(conn->sock.Get(), &ack, sizeof(ack), nullptr, 0)) HandleHangup(conn);
+    Send(conn, &ack, sizeof(ack));
     return;
   }
 
@@ -244,6 +324,7 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
     auto m = MapSegment(fds[0].Get(), sm.segment_size, false);
     if (!m) return HandleHangup(conn);
     bool duplicate = false;
+    bool nomem = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       // Re-sending a segment id would unmap chunks the user may hold.
@@ -255,12 +336,17 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
         seg.map = std::move(m.value());
         seg.stride = sm.chunk_stride;
         seg.count = sm.chunk_count;
-        conn->segments.emplace(sm.segment_id, std::move(seg));
+        try {
+          conn->segments.emplace(sm.segment_id, std::move(seg));
+        } catch (...) {  // std::bad_alloc: cannot follow this publisher
+          nomem = true;
+        }
       }
     }
-    if (duplicate) return HandleHangup(conn);
+    if (nomem) Log("out of memory: dropping publisher", url_);
+    if (duplicate || nomem) return HandleHangup(conn);
     SegmentAckMsg ack{{kMsgMagic, MsgType::kSegmentAck}, sm.segment_id};
-    if (!SendMessage(conn->sock.Get(), &ack, sizeof(ack), nullptr, 0)) HandleHangup(conn);
+    Send(conn, &ack, sizeof(ack));
     return;
   }
 
@@ -288,11 +374,55 @@ void SubscriberImpl::HandleHangup(const std::shared_ptr<SubConn>& conn) noexcept
   rt_->RemoveFd(conn->sock.Get());
 }
 
+bool SubscriberImpl::Send(const std::shared_ptr<SubConn>& conn, const void* msg, size_t len) noexcept {
+  const bool was_empty = conn->out.Empty();
+  switch (conn->out.Send(conn->sock.Get(), msg, len, -1)) {
+    case SendQueue::Status::kSent: return true;
+    case SendQueue::Status::kQueued: {
+      // The publisher's socket is full: not a fault. EPOLLOUT sends the
+      // rest in order (FlushOut).
+      if (was_empty) rt_->ModFd(conn->sock.Get(), conn->epoll_tag, EPOLLIN | EPOLLRDHUP | EPOLLOUT);
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.deferred_sends;
+      return true;
+    }
+    case SendQueue::Status::kOverflow: {
+      Log("publisher stopped reading control messages (send queue full), giving it up", url_);
+      std::lock_guard<std::mutex> lock(mu_);
+      ++stats_.send_queue_overflows;
+      break;
+    }
+    case SendQueue::Status::kFailed: break;
+  }
+  // Orphans the connection; it stays open while samples are held.
+  HandleHangup(conn);
+  return false;
+}
+
+void SubscriberImpl::FlushOut(const std::shared_ptr<SubConn>& conn) noexcept {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (conn->state == SubConn::State::kOrphan) return;  // the hang-up unregisters it
+  }
+  if (!conn->out.Flush(conn->sock.Get())) {
+    HandleHangup(conn);
+    return;
+  }
+  if (conn->out.Empty()) rt_->ModFd(conn->sock.Get(), conn->epoll_tag, EPOLLIN | EPOLLRDHUP);
+}
+
 void SubscriberImpl::RemoveConnLocked(const SubConn* conn) noexcept {
   auto it = std::find_if(conns_.begin(), conns_.end(), [conn](auto& c) { return c.get() == conn; });
   if (it == conns_.end()) return;
   // Keeps Poll()'s version monotonic once the connection is gone.
-  if (conn->hdr != nullptr) removed_version_ += conn->hdr->delivery_write.load(std::memory_order_relaxed);
+  if (conn->hdr != nullptr) {
+    removed_version_ += conn->hdr->delivery_write.load(std::memory_order_relaxed);
+    // We hold nothing from this publisher any more: an orderly close, also
+    // after it lost us (it may have quarantined our chunks and reads this).
+    // Release: everything the user did with the chunks happens before.
+    conn->hdr->closed.store(1, std::memory_order_release);
+  }
+  ::shutdown(conn->sock.Get(), SHUT_RDWR);
   conns_.erase(it);
 }
 
@@ -400,7 +530,12 @@ Result<const void*> SubscriberImpl::Take() noexcept {
         PushReturnLocked(c, v);
         continue;
       }
-      held_.emplace(payload, Held{conns_[ci], v, size});
+      try {
+        held_.emplace(payload, Held{conns_[ci], v, size});
+      } catch (...) {  // std::bad_alloc: hand the chunk back
+        PushReturnLocked(c, v);
+        return Error::kNoMemory;
+      }
       ++c.held;
       ++stats_.takes;
       round_robin_ = (ci + 1) % n;
@@ -426,7 +561,12 @@ void SubscriberImpl::PushReturnLocked(SubConn& conn, uint64_t handle) noexcept {
     // Cannot happen with a well-behaved publisher, which drains before every
     // delivery. Park the handle so the chunk is not lost.
     ++stats_.return_ring_full;
-    if (conn.return_backlog.size() < kMaxReturnBacklog) conn.return_backlog.push_back(handle);
+    if (conn.return_backlog.size() < kMaxReturnBacklog) {
+      try {
+        conn.return_backlog.push_back(handle);
+      } catch (...) {  // std::bad_alloc: the publisher reclaims it on disconnect
+      }
+    }
   }
   h->return_write.store(conn.return_write, std::memory_order_release);
 }

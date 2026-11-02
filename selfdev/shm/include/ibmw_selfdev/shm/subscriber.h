@@ -31,6 +31,10 @@ struct SubscriberStats {
   uint64_t releases = 0;
   uint64_t return_ring_full = 0;       // returns parked because the ring was full
   uint64_t corrupted_connections = 0;  // publishers dropped for protocol violations
+  uint64_t unknown_messages = 0;       // control messages of unknown type, ignored
+  uint64_t deferred_sends = 0;         // control messages queued: publisher socket full
+  uint64_t send_queue_overflows = 0;   // connections given up: that queue hit its bound
+  uint64_t connect_retries = 0;        // connects retried (listen backlog full)
   uint32_t connections = 0;  // publishers currently connected and ready
   uint32_t held = 0;
 };

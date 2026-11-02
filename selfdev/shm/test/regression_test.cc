@@ -10,6 +10,7 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -20,6 +21,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -30,6 +32,7 @@
 #include "ibmw_selfdev/shm/shm.h"
 #include "platform.h"
 #include "protocol.h"
+#include "runtime_impl.h"
 #include "test_util.h"
 
 namespace ibmw::selfdev::shm {
@@ -81,23 +84,41 @@ class RawPublisher {
  public:
   ~RawPublisher() {
     if (!path_.empty()) ::unlink(path_.c_str());
+    if (!tmp_.empty()) ::unlink(tmp_.c_str());
   }
 
-  bool Listen(const std::string& url) {
+  // Creates the listening socket; with `announce` it is also renamed to its
+  // public name, which is what subscribers discover.
+  bool Listen(const std::string& url, bool announce = true) {
     std::string dir = Runtime::ServiceDirectory();
     char name[96];
     std::snprintf(name, sizeof(name), "%s.%d.%08x.sock", HashPrefix(url).c_str(), static_cast<int>(::getpid()),
                   static_cast<uint32_t>(RandomU64()));
     path_ = dir + "/" + name;
-    std::string tmp = dir + "/." + name + ".tmp";
+    tmp_ = dir + "/." + name + ".tmp";
+    const std::string& tmp = tmp_;
     listen_ = UniqueFd(::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0));
     struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, tmp.c_str(), sizeof(addr.sun_path) - 1);
     if (::bind(listen_.Get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
     if (::listen(listen_.Get(), 4) != 0) return false;
-    return ::rename(tmp.c_str(), path_.c_str()) == 0;  // IN_MOVED_TO: subscribers connect
+    return !announce || Announce();
   }
+  // Accepts and closes `n` queued connections (in arrival order).
+  size_t AcceptAndDrop(size_t n) {
+    size_t done = 0;
+    for (; done < n; ++done) {
+      struct pollfd pfd {listen_.Get(), POLLIN, 0};
+      if (::poll(&pfd, 1, 3000) <= 0) break;
+      UniqueFd c(::accept4(listen_.Get(), nullptr, nullptr, SOCK_CLOEXEC));
+      if (!c.Valid()) break;
+    }
+    return done;
+  }
+  bool Announce() { return ::rename(tmp_.c_str(), path_.c_str()) == 0; }  // IN_MOVED_TO: subscribers connect
+  const std::string& PublicPath() const { return path_; }
+  const std::string& ListenPath() const { return tmp_; }
 
   // Accepts one subscriber, answers its Hello and announces segment 0.
   bool Handshake(bool seal_conn = true) {
@@ -148,6 +169,41 @@ class RawPublisher {
     if (!data) return false;
     data_ = std::move(data.value());
     return SendSegmentAdd(0) && Receive(&buf, &fds) > 0;  // SegmentAck
+  }
+
+  // Sends `msg`, waiting while the subscriber has not read earlier ones.
+  bool SendBlocking(const void* msg, size_t len, int fd = -1) {
+    for (;;) {
+      if (SendMessage(sock_.Get(), msg, len, fd >= 0 ? &fd : nullptr, fd >= 0 ? 1 : 0)) return true;
+      if (!SendWouldBlock(errno)) return false;
+      struct pollfd pfd {sock_.Get(), POLLOUT, 0};
+      if (::poll(&pfd, 1, 3000) <= 0) return false;
+    }
+  }
+
+  bool SendSegmentAddBlocking(uint32_t id) {
+    SegmentAddMsg sm{};
+    sm.h = {kMsgMagic, MsgType::kSegmentAdd};
+    sm.segment_id = id;
+    sm.chunk_count = kRawChunks;
+    sm.chunk_stride = kRawStride;
+    sm.segment_size = kRawStride * kRawChunks;
+    return SendBlocking(&sm, sizeof(sm), data_.fd.Get());
+  }
+
+  // Reads messages until `n` of `type` arrived; returns how many did.
+  int Expect(MsgType type, int n) {
+    std::vector<uint8_t> buf;
+    std::vector<UniqueFd> fds;
+    int got = 0;
+    while (got < n) {
+      ssize_t len = Receive(&buf, &fds);
+      if (len < static_cast<ssize_t>(sizeof(MsgHeader))) break;
+      MsgHeader mh{};
+      std::memcpy(&mh, buf.data(), sizeof(mh));
+      if (mh.type == type) ++got;
+    }
+    return got;
   }
 
   bool SendSegmentAdd(uint32_t id) {
@@ -206,6 +262,7 @@ class RawPublisher {
   }
 
   std::string path_;
+  std::string tmp_;
   UniqueFd listen_;
   UniqueFd sock_;
   Mapping conn_;
@@ -716,6 +773,362 @@ TEST(ShmRegressionTest, ConflictingInitIsRejected) {
   invalid.domain = "a/b";
   EXPECT_EQ(Runtime::Init(invalid).error(), Error::kInvalidArg);
   EXPECT_EQ(Runtime::ServiceDirectory(), dir);
+}
+
+// RG-20 (third review, H1/M6) A full control socket is backpressure, not a broken
+// connection. The publisher's send of a new segment would block; it is
+// queued and sent on EPOLLOUT, and a sample the subscriber holds survives.
+TEST(ShmRegressionTest, PublisherQueuesControlMessagesOnBackpressure) {
+  auto url = UniqueUrl("rg20");
+  Publisher pub(url);
+  Subscriber sub(url);
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  PublishSeq(pub, 1);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto held = sub.Take();
+  ASSERT_TRUE(held.ok());
+  fault::send_would_block.store(3);
+  auto big = pub.Loan(4096);  // new size class: a SegmentAdd that would block
+  fault::send_would_block.store(0);
+  ASSERT_TRUE(big.ok()) << ErrorName(big.error());
+  FillPattern(*big, 4096, 2);
+  ASSERT_TRUE(pub.Publish(*big));
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto second = sub.Take();
+  ASSERT_TRUE(second.ok()) << ErrorName(second.error());
+  EXPECT_EQ(CheckPattern(*second, 4096), 2u);
+  EXPECT_EQ(CheckPattern(*held, 64), 1u);
+  auto st = pub.Stats();
+  EXPECT_GT(st.deferred_sends, 0u);
+  EXPECT_EQ(st.connections, 1u);
+  EXPECT_EQ(st.reclaimed, 0u);
+  EXPECT_EQ(st.quarantined, 0u);
+  EXPECT_EQ(sub.Stats().connections, 1u);
+  sub.Release(*held);
+  sub.Release(*second);
+}
+
+// RG-21 (third review, H1/M6), subscriber side: a publisher that announces many
+// segments without reading the acks fills the subscriber's socket. The
+// acks wait in the subscriber's queue; the connection stays and every ack
+// arrives once the publisher reads.
+TEST(ShmRegressionTest, SubscriberQueuesAcksOnBackpressure) {
+  auto url = UniqueUrl("rg21");
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(url));
+  Subscriber sub(url);
+  ASSERT_TRUE(raw.Handshake());
+  constexpr uint32_t kSegments = 1500;  // far more acks than a socket buffer holds
+  for (uint32_t id = 1; id <= kSegments; ++id) ASSERT_TRUE(raw.SendSegmentAddBlocking(id)) << id;
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().deferred_sends > 0; }));
+  EXPECT_EQ(raw.Expect(MsgType::kSegmentAck, static_cast<int>(kSegments)), static_cast<int>(kSegments));
+  auto st = sub.Stats();
+  EXPECT_EQ(st.connections, 1u);
+  EXPECT_EQ(st.send_queue_overflows, 0u);
+  EXPECT_EQ(st.corrupted_connections, 0u);
+  raw.Deliver(0, 7);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto t = sub.Take();
+  ASSERT_TRUE(t.ok()) << ErrorName(t.error());
+  EXPECT_EQ(CheckPattern(*t, kRawPayload), 7u);
+  sub.Release(*t);
+}
+
+// RG-22 (third review, H1) Control messages of a type this version does not know
+// come from a newer, compatible peer; they are counted and ignored.
+TEST(ShmRegressionTest, UnknownPublisherMessageIsIgnored) {
+  auto url = UniqueUrl("rg22");
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(url));
+  Subscriber sub(url);
+  ASSERT_TRUE(raw.Handshake());
+  struct {
+    MsgHeader h;
+    uint32_t payload;
+  } future{{kMsgMagic, static_cast<MsgType>(200)}, 42};
+  ASSERT_TRUE(raw.SendBlocking(&future, sizeof(future)));
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().unknown_messages == 1; }));
+  EXPECT_EQ(sub.Stats().connections, 1u);
+  raw.Deliver(1, 3);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto t = sub.Take();
+  ASSERT_TRUE(t.ok()) << ErrorName(t.error());
+  EXPECT_EQ(CheckPattern(*t, kRawPayload), 3u);
+  sub.Release(*t);
+}
+
+// RG-23 (third review, M1) connect() fails with EAGAIN while the publisher's listen
+// backlog is full. The subscriber retries with backoff instead of giving up.
+TEST(ShmRegressionTest, ConnectRetriesWhileBacklogIsFull) {
+  auto url = UniqueUrl("rg23");
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(url, false));
+  std::vector<UniqueFd> fillers;
+  for (int i = 0; i < 64; ++i) {
+    UniqueFd fd(::socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+    struct sockaddr_un addr {};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, raw.ListenPath().c_str(), sizeof(addr.sun_path) - 1);
+    if (::connect(fd.Get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+      ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK) << std::strerror(errno);
+      break;
+    }
+    fillers.push_back(std::move(fd));
+  }
+  ASSERT_FALSE(fillers.empty());
+  ASSERT_LT(fillers.size(), 64u);  // the backlog did fill up
+  Subscriber sub(url);
+  ASSERT_TRUE(raw.Announce());
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().connect_retries > 0; }));
+  // Accept (and drop) the fillers; the subscriber's retry gets through.
+  ASSERT_EQ(raw.AcceptAndDrop(fillers.size()), fillers.size());
+  fillers.clear();
+  ASSERT_TRUE(raw.Handshake());
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
+  raw.Deliver(0, 5);
+  ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+  auto t = sub.Take();
+  ASSERT_TRUE(t.ok()) << ErrorName(t.error());
+  EXPECT_EQ(CheckPattern(*t, kRawPayload), 5u);
+  sub.Release(*t);
+}
+
+// Holds the control thread until destroyed, so tests can let inotify events
+// pile up the way they do on a busy system.
+class ControlThreadStall {
+ public:
+  ControlThreadStall() {
+    auto f = release_.get_future().share();
+    detail::RuntimeImpl::Instance()->Post([this, f] {
+      stalled_.store(true);
+      f.wait();
+    });
+    while (!stalled_.load()) std::this_thread::sleep_for(1ms);
+  }
+  ~ControlThreadStall() { release_.set_value(); }
+
+ private:
+  std::promise<void> release_;
+  std::atomic<bool> stalled_{false};
+};
+
+size_t MaxQueuedInotifyEvents() {
+  size_t n = 16384;
+  if (FILE* f = std::fopen("/proc/sys/fs/inotify/max_queued_events", "r")) {
+    unsigned long v = 0;
+    if (std::fscanf(f, "%lu", &v) == 1 && v > 0) n = v;
+    std::fclose(f);
+  }
+  return n;
+}
+
+// RG-24 (third review, M2) When the inotify queue overflows (IN_Q_OVERFLOW) the
+// events it dropped may include a new publisher; the runtime rescans the
+// whole directory instead of missing it.
+TEST(ShmRegressionTest, InotifyOverflowTriggersRescan) {
+  auto url = UniqueUrl("rg24");
+  Subscriber sub(url);
+  RawPublisher raw;
+  {
+    ControlThreadStall stall;
+    const std::string dir = Runtime::ServiceDirectory();
+    const std::string a = dir + "/rg24_a", b = dir + "/rg24_b";
+    int fd = ::open(a.c_str(), O_CREAT | O_WRONLY | O_CLOEXEC, 0600);
+    ASSERT_GE(fd, 0);
+    ::close(fd);
+    const size_t renames = MaxQueuedInotifyEvents() + 100;  // IN_MOVED_TO each
+    for (size_t i = 0; i < renames; ++i) {
+      ASSERT_EQ(::rename(i % 2 == 0 ? a.c_str() : b.c_str(), i % 2 == 0 ? b.c_str() : a.c_str()), 0);
+    }
+    ::unlink(a.c_str());
+    ::unlink(b.c_str());
+    ASSERT_TRUE(raw.Listen(url));  // its IN_MOVED_TO is lost in the overflow
+  }
+  ASSERT_TRUE(raw.Handshake());
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
+}
+
+// RG-25 (third review, M2) The watched service directory is removed (tmp cleaner,
+// administrator). The runtime re-creates it, watches it again and rescans.
+TEST(ShmRegressionTest, RemovedServiceDirectoryIsRecreated) {
+  auto url = UniqueUrl("rg25");
+  Subscriber sub(url);
+  const std::string dir = Runtime::ServiceDirectory();
+  if (DIR* d = ::opendir(dir.c_str())) {  // only stale entries of earlier tests
+    while (auto* de = ::readdir(d)) {
+      if (de->d_name[0] != '.' || (de->d_name[1] != '\0' && std::strcmp(de->d_name, "..") != 0)) {
+        ::unlink((dir + "/" + de->d_name).c_str());
+      }
+    }
+    ::closedir(d);
+  }
+  ASSERT_EQ(::rmdir(dir.c_str()), 0) << std::strerror(errno);
+  struct stat st {};
+  ASSERT_TRUE(WaitFor([&] { return ::stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }));
+  EXPECT_EQ(st.st_mode & 0777, 0700u);
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(url));
+  ASSERT_TRUE(raw.Handshake());
+  ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
+}
+
+// Runs "ibmw_selfdev_shm_peer probe" and returns its four answers.
+struct ProbeResult {
+  std::string init, dir, pub, sub;
+};
+ProbeResult Probe(const std::vector<std::string>& args, const std::vector<std::string>& env) {
+  std::vector<std::string> full{"probe"};
+  full.insert(full.end(), args.begin(), args.end());
+  auto peer = test::SpawnPeer(full, env);
+  ProbeResult r;
+  auto value = [&](const char* key) {
+    std::string line = test::ReadLine(peer);
+    std::string k = std::string(key) + " ";
+    return line.compare(0, k.size(), k) == 0 ? line.substr(k.size()) : "<" + line + ">";
+  };
+  r.init = value("init");
+  r.dir = value("dir");
+  r.pub = value("pub");
+  r.sub = value("sub");
+  test::WaitPeer(peer);
+  return r;
+}
+
+std::string Euid() { return std::to_string(::geteuid()); }
+
+// RG-26 (third review, M3/O6) Without root_dir and $IBMW_SHM_ROOT the root is a
+// fixed path: /dev/shm when usable (tmpfs, not aged by tmpfiles), else
+// /tmp. On OHOS it must be given explicitly.
+TEST(ShmRegressionTest, DefaultRootIsFixed) {
+  const std::string domain = "rg26_" + std::to_string(::getpid());
+  auto r = Probe({UniqueUrl("rg26")}, {"IBMW_SHM_ROOT=", "IBMW_SHM_DOMAIN=" + domain, "XDG_RUNTIME_DIR=/nonexistent",
+                                       "TMPDIR=/nonexistent"});
+  EXPECT_EQ(r.init, "-");
+#if defined(__OHOS__)
+  EXPECT_EQ(r.pub, "invalid_arg");
+  EXPECT_EQ(r.sub, "invalid_arg");
+#else
+  const std::string root = ::access("/dev/shm", W_OK | X_OK) == 0 ? "/dev/shm" : "/tmp";
+  const std::string dir = root + "/ibmw_shm." + Euid() + "." + domain;
+  EXPECT_EQ(r.dir, dir);
+  EXPECT_EQ(r.pub, "ok");
+  EXPECT_EQ(r.sub, "ok");
+  struct stat st {};
+  ASSERT_EQ(::stat(dir.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, 0700u);
+  EXPECT_EQ(st.st_uid, ::geteuid());
+  EXPECT_EQ(::rmdir(dir.c_str()), 0) << std::strerror(errno);
+#endif
+}
+
+// RG-27 (third review, O7) Socket paths must fit sun_path, so the service directory
+// is limited to 63 bytes. Beyond it Runtime, Publisher and Subscriber fail
+// with kInvalidArg (and a message naming the limit) instead of every
+// connection failing silently.
+TEST(ShmRegressionTest, ServiceDirectoryLengthIsChecked) {
+  const size_t fixed = std::string("/ibmw_shm.").size() + Euid().size() + 2;  // + ".d"
+  ASSERT_LT(test::TestRoot().size() + fixed + 2, 63u);
+  auto root_for = [&](size_t dir_len) {
+    std::string root = test::TestRoot() + "/";
+    root.append(dir_len - fixed - root.size(), 'r');
+    ::mkdir(root.c_str(), 0700);
+    return root;
+  };
+  const std::string ok_root = root_for(63), long_root = root_for(64);
+  auto r = Probe({UniqueUrl("rg27")}, {"IBMW_SHM_ROOT=" + ok_root, "IBMW_SHM_DOMAIN=d"});
+  EXPECT_EQ(r.dir.size(), 63u);
+  EXPECT_EQ(r.pub, "ok");
+  EXPECT_EQ(r.sub, "ok");
+  r = Probe({UniqueUrl("rg27")}, {"IBMW_SHM_ROOT=" + long_root, "IBMW_SHM_DOMAIN=d"});
+  EXPECT_EQ(r.pub, "invalid_arg");
+  EXPECT_EQ(r.sub, "invalid_arg");
+  r = Probe({UniqueUrl("rg27"), "d", long_root}, {});
+  EXPECT_EQ(r.init, "invalid_arg");
+  // A publisher with an unusable runtime must not exist half-way.
+  struct stat st {};
+  EXPECT_NE(::stat((long_root + "/ibmw_shm." + Euid() + ".d").c_str(), &st), 0);
+}
+
+// RG-28 (third review, M14) Root, domain and group follow one rule: explicit option,
+// else environment variable, else default.
+TEST(ShmRegressionTest, OptionThenEnvironmentThenDefault) {
+  const std::string root = test::TestRoot();
+  const std::string opt_root = root + "/rg28";
+  ::mkdir(opt_root.c_str(), 0700);
+  auto url = UniqueUrl("rg28");
+  auto r = Probe({url, "optdom", opt_root}, {"IBMW_SHM_DOMAIN=envdom"});
+  EXPECT_EQ(r.init, "ok");
+  EXPECT_EQ(r.dir, opt_root + "/ibmw_shm." + Euid() + ".optdom");
+  r = Probe({url, "-", opt_root}, {"IBMW_SHM_DOMAIN=envdom"});
+  EXPECT_EQ(r.dir, opt_root + "/ibmw_shm." + Euid() + ".envdom");
+  r = Probe({url}, {"IBMW_SHM_DOMAIN=envdom"});
+  EXPECT_EQ(r.dir, root + "/ibmw_shm." + Euid() + ".envdom");
+  r = Probe({url}, {"IBMW_SHM_DOMAIN="});
+  EXPECT_EQ(r.dir, root + "/ibmw_shm." + Euid() + ".default");
+  r = Probe({url}, {"IBMW_SHM_GROUP=staff"});
+  EXPECT_EQ(r.pub, "invalid_arg");
+  EXPECT_EQ(r.sub, "invalid_arg");
+}
+
+// RG-29 (third review, M15) Users only meet through a shared group. The group
+// directory is g<gid>, mode 0770 and owned by that group; directories of
+// the same domain under other owners are detected (and reported on
+// stderr, since those processes can never meet this one).
+TEST(ShmRegressionTest, GroupDirectoryAndForeignOwners) {
+  const std::string root = test::TestRoot() + "/rg29";
+  ::mkdir(root.c_str(), 0700);
+  const gid_t gid = ::getegid();
+  auto r = Probe({UniqueUrl("rg29")}, {"IBMW_SHM_ROOT=" + root, "IBMW_SHM_DOMAIN=dom",
+                                       "IBMW_SHM_GROUP=" + std::to_string(gid)});
+  const std::string gdir = root + "/ibmw_shm.g" + std::to_string(gid) + ".dom";
+  EXPECT_EQ(r.dir, gdir);
+  EXPECT_EQ(r.pub, "ok");
+  EXPECT_EQ(r.sub, "ok");
+  struct stat st {};
+  ASSERT_EQ(::stat(gdir.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, 0770u);
+  EXPECT_EQ(st.st_gid, gid);
+  for (const char* n : {"ibmw_shm.4242.dom", "ibmw_shm.4242.other", "ibmw_shm.1.x.dom", "unrelated.dom"}) {
+    ::mkdir((root + "/" + n).c_str(), 0700);
+  }
+  const std::string mine = "ibmw_shm." + Euid() + ".dom";
+  ::mkdir((root + "/" + mine).c_str(), 0700);
+  auto foreign = detail::ForeignServiceDirs(root, Euid(), "dom");
+  std::sort(foreign.begin(), foreign.end());
+  std::vector<std::string> expected{root + "/ibmw_shm.4242.dom", gdir};
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(foreign, expected);
+}
+
+// RG-30 (third review, M4) Without F_SEAL_FUTURE_WRITE subscribers could map data
+// segments writable. That is counted and visible; require_read_only turns
+// it into a hard failure instead.
+TEST(ShmRegressionTest, MissingWriteSealIsVisibleOrFatal) {
+  struct Restore {
+    ~Restore() { fault::no_future_write_seal.store(false); }
+  } restore;
+  fault::no_future_write_seal.store(true);
+  {
+    Publisher pub(UniqueUrl("rg30"));
+    auto l = pub.Loan(64);
+    ASSERT_TRUE(l.ok()) << ErrorName(l.error());
+    pub.Release(*l);
+    auto st = pub.Stats();
+    EXPECT_FALSE(st.read_only_enforced);
+    EXPECT_GE(st.unsealed_segments, 1u);
+  }
+  PublisherOptions strict;
+  strict.require_read_only = true;
+  Publisher pub(UniqueUrl("rg30"), strict);
+  auto l = pub.Loan(64);
+  ASSERT_FALSE(l.ok());
+  EXPECT_EQ(l.error(), Error::kSystem);
+  EXPECT_EQ(pub.Stats().segments, 0u);
+  fault::no_future_write_seal.store(false);
+  auto ok = pub.Loan(64);
+  ASSERT_TRUE(ok.ok()) << ErrorName(ok.error());
+  EXPECT_TRUE(pub.Stats().read_only_enforced);
+  pub.Release(*ok);
 }
 
 }  // namespace

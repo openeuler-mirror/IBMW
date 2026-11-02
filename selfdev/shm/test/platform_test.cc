@@ -4,20 +4,28 @@
 // Platform layer and wire format: memfd sealing, shared futex, fd passing,
 // handle encoding, error names.
 
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
 #include "ibmw_selfdev/shm/shm.h"
 #include "platform.h"
 #include "protocol.h"
+#include "test_util.h"
 
 namespace ibmw::selfdev::shm {
 namespace {
@@ -185,6 +193,152 @@ TEST(ShmPlatformTest, HashIsStable) {
   EXPECT_EQ(Hash64(""), 0xcbf29ce484222325ull);  // FNV-1a offset basis
   EXPECT_EQ(Hash64("a"), 0xaf63dc4c8601ec8cull);
   EXPECT_NE(Hash64("/a/b"), Hash64("/a/c"));
+}
+
+// PL-11 (third review M5) Received segments must be tmpfs (memfd) files.
+// A sealed hugetlbfs memfd passes every other check but cannot be mapped
+// safely (SIGBUS/ENOMEM when the huge page pool runs dry): rejected.
+TEST(ShmPlatformTest, MapSegmentRequiresTmpfs) {
+  auto seg = CreateSegment("pl11", 4096, true, false);
+  ASSERT_TRUE(seg.ok());
+  EXPECT_TRUE(MapSegment(seg->fd.Get(), 4096, false).ok());
+
+  constexpr size_t kHuge = 2u << 20;
+  UniqueFd huge(static_cast<int>(
+      ::syscall(SYS_memfd_create, "pl11_huge", MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB)));
+  bool have_huge = huge.Valid() && ::ftruncate(huge.Get(), kHuge) == 0 &&
+                   ::fcntl(huge.Get(), F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) == 0;
+  RecordProperty("hugetlb_memfd", have_huge ? "yes" : "no");
+  if (have_huge) {
+    auto m = MapSegment(huge.Get(), kHuge, false);
+    ASSERT_FALSE(m.ok());
+    EXPECT_EQ(m.error(), Error::kCorrupted);
+  }
+  // Whatever the kernel offers, a non-memfd file is never accepted.
+  std::string path = test::TestRoot() + "/pl11_XXXXXX";
+  UniqueFd file(::mkstemp(path.data()));
+  ASSERT_TRUE(file.Valid()) << std::strerror(errno);
+  ::unlink(path.c_str());
+  ASSERT_EQ(::ftruncate(file.Get(), 4096), 0);
+  EXPECT_FALSE(MapSegment(file.Get(), 4096, false).ok());
+}
+
+// Fills `sock` until the next send would block; returns how many fit.
+size_t FillSocket(int sock) {
+  size_t n = 0;
+  for (uint64_t v = 0;; ++v) {
+    if (!SendMessage(sock, &v, sizeof(v), nullptr, 0)) {
+      EXPECT_TRUE(SendWouldBlock(errno)) << std::strerror(errno);
+      return n;
+    }
+    ++n;
+  }
+}
+
+// PL-12 (third review H1/M6) Messages a full socket cannot take are queued
+// and sent in order on Flush(); an owned fd is closed once its message has
+// gone; the queue is bounded.
+TEST(ShmPlatformTest, SendQueueOrderOwnershipAndBound) {
+  int sv[2];
+  ASSERT_EQ(::socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sv), 0);
+  UniqueFd s0(sv[0]), s1(sv[1]);
+  const size_t filled = FillSocket(s0.Get());
+  ASSERT_GT(filled, 0u);
+
+  SendQueue q;
+  int pfd[2];
+  ASSERT_EQ(::pipe2(pfd, O_CLOEXEC), 0);
+  UniqueFd pipe_r(pfd[0]);
+  for (uint64_t v = 1000; v < 1010; ++v) {
+    UniqueFd owned = v == 1005 ? UniqueFd(pfd[1]) : UniqueFd();
+    EXPECT_EQ(q.Send(s0.Get(), &v, sizeof(v), -1, std::move(owned)), SendQueue::Status::kQueued);
+  }
+  EXPECT_FALSE(q.Empty());
+  EXPECT_TRUE(q.Flush(s0.Get()));  // still full: nothing sent, nothing lost
+  EXPECT_FALSE(q.Empty());
+
+  std::vector<uint64_t> got;
+  for (int round = 0; round < 1000 && got.size() < filled + 10; ++round) {
+    char buf[64];
+    std::vector<UniqueFd> fds;
+    ssize_t n;
+    while ((n = ReceiveMessage(s1.Get(), buf, sizeof(buf), &fds)) > 0) {
+      uint64_t v;
+      std::memcpy(&v, buf, sizeof(v));
+      got.push_back(v);
+      fds.clear();  // the received copy of the pipe end is closed here
+    }
+    ASSERT_TRUE(q.Flush(s0.Get()));
+  }
+  ASSERT_EQ(got.size(), filled + 10);
+  EXPECT_TRUE(q.Empty());
+  for (size_t i = 0; i < filled; ++i) EXPECT_EQ(got[i], i);
+  for (size_t i = 0; i < 10; ++i) EXPECT_EQ(got[filled + i], 1000 + i);
+  // Every write end is closed now: the queue released its owned copy.
+  char c;
+  EXPECT_EQ(::read(pipe_r.Get(), &c, 1), 0);
+
+  // Bound: a peer that never reads cannot grow the queue without limit.
+  ASSERT_GT(FillSocket(s0.Get()), 0u);
+  SendQueue bounded;
+  size_t queued = 0;
+  for (uint64_t v = 0; v < SendQueue::kMaxMessages; ++v) {
+    queued += bounded.Send(s0.Get(), &v, sizeof(v), -1) == SendQueue::Status::kQueued ? 1 : 0;
+  }
+  EXPECT_EQ(queued, SendQueue::kMaxMessages);
+  uint64_t one_more = 1;
+  EXPECT_EQ(bounded.Send(s0.Get(), &one_more, sizeof(one_more), -1), SendQueue::Status::kOverflow);
+
+  // A broken connection is reported as such.
+  s1.Reset();
+  SendQueue broken;
+  EXPECT_EQ(broken.Send(s0.Get(), &one_more, sizeof(one_more), -1), SendQueue::Status::kFailed);
+}
+
+// PL-13 (third review H1) Peer death detection. A zombie still exists for
+// kill(), so PidGone() only reports it once reaped; a pidfd is readable as
+// soon as the process exits. pidfd may be missing (old kernel, sandbox).
+TEST(ShmPlatformTest, PeerDeathDetection) {
+  pid_t child = ::fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    ::pause();
+    ::_exit(0);
+  }
+  struct Reap {
+    pid_t pid;
+    ~Reap() {
+      if (pid > 0) {
+        ::kill(pid, SIGKILL);
+        ::waitpid(pid, nullptr, 0);
+      }
+    }
+  } reap{child};
+  EXPECT_EQ(PidGone(child), 0);
+  UniqueFd pidfd(PidfdOpen(child));
+  RecordProperty("pidfd", pidfd.Valid() ? "yes" : "no");
+  if (!pidfd.Valid()) {
+    EXPECT_TRUE(errno == ENOSYS || errno == EPERM || errno == EACCES) << std::strerror(errno);
+  } else {
+    struct pollfd p {pidfd.Get(), POLLIN, 0};
+    EXPECT_EQ(::poll(&p, 1, 0), 0);  // alive: not readable
+  }
+  ASSERT_EQ(::kill(child, SIGKILL), 0);
+  if (pidfd.Valid()) {
+    struct pollfd p {pidfd.Get(), POLLIN, 0};
+    EXPECT_EQ(::poll(&p, 1, 5000), 1);  // exited, not yet reaped
+  } else {
+    ::usleep(50000);
+  }
+  EXPECT_EQ(PidGone(child), 0);  // a zombie still answers kill(pid, 0)
+  ASSERT_EQ(::waitpid(child, nullptr, 0), child);
+  reap.pid = -1;
+  EXPECT_EQ(PidGone(child), 1);
+
+  fault::no_pidfd.store(true);
+  EXPECT_EQ(PidfdOpen(::getpid()), -1);
+  EXPECT_EQ(errno, ENOSYS);
+  fault::no_pidfd.store(false);
 }
 
 }  // namespace
