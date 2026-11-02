@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <limits>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "cpp/util/string.h"
@@ -94,6 +95,28 @@ TEST_F(TimeManipulatorExecutorTest, SetTimeRatioValidatesAndRounds) {
     EXPECT_TRUE(executor_.SetTimeRatio(ratio)) << ratio;
     EXPECT_DOUBLE_EQ(executor_.GetTimeRatio(), applied) << ratio;
   }
+}
+
+// EXT-019: a paused timer reacts at once instead of within its next second.
+TEST_F(TimeManipulatorExecutorTest, PauseEndsAtOnceOnResumeAndShutdown) {
+  Init("{bind_executor: x, dt_us: 1000}");
+  executor_.Start();
+  ASSERT_TRUE(executor_.SetTimeRatio(0.0));
+  std::this_thread::sleep_for(100ms);  // the timer thread is paused by now
+
+  const auto paused_now = executor_.Now();
+  auto begin = std::chrono::steady_clock::now();
+  ASSERT_TRUE(executor_.SetTimeRatio(1.0));
+  while (executor_.Now() == paused_now && std::chrono::steady_clock::now() - begin < 2s) {
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, 500ms);
+
+  ASSERT_TRUE(executor_.SetTimeRatio(0.0));
+  std::this_thread::sleep_for(100ms);
+  begin = std::chrono::steady_clock::now();
+  executor_.Shutdown();
+  EXPECT_LT(std::chrono::steady_clock::now() - begin, 500ms);
 }
 
 TEST_F(TimeManipulatorExecutorTest, NowIsInTheSystemClockDomain) {

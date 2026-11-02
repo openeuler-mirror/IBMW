@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <condition_variable>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -118,6 +119,7 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   mutable std::shared_mutex ratio_mutex_;
   bool ratio_direction_ = true;
   uint32_t real_ratio_ = 1;
+  std::condition_variable_any pause_cv_;  // waits with ratio_mutex_
 
   // Set before the timer thread starts; read by DispatchAt() from any thread.
   std::atomic<uint64_t> start_time_point_ = 0;

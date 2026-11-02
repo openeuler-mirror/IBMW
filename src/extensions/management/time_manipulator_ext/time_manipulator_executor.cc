@@ -173,6 +173,12 @@ void TimeManipulatorExecutor::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
     return;
 
+  {
+    // A paused timer thread checks the state under this lock.
+    std::unique_lock<std::shared_mutex> lck(ratio_mutex_);
+  }
+  pause_cv_.notify_all();
+
   if (timer_thread_ptr_ && timer_thread_ptr_->joinable())
     timer_thread_ptr_->join();
 
@@ -275,25 +281,22 @@ bool TimeManipulatorExecutor::SetTimeRatio(double ratio) {
     return false;
   }
 
-  std::unique_lock<std::shared_mutex> lck(ratio_mutex_);
-
-  // 1 or more, fast forward
-  if (ratio >= 1.0) {
-    ratio_direction_ = true;
-    real_ratio_ = static_cast<uint32_t>(std::lround(ratio));
-    return true;
-  }
-
-  ratio_direction_ = false;
-
-  // Greater than 0 and less than 1, slow release
-  if (ratio > 1e-15 && (1.0 / ratio) < std::numeric_limits<uint32_t>::max() - 1.0) {
-    real_ratio_ = static_cast<uint32_t>(std::lround(1.0 / ratio));
-    return true;
-  }
-
   // 0, negative or too small: pause
-  real_ratio_ = std::numeric_limits<uint32_t>::max();
+  uint32_t real_ratio = std::numeric_limits<uint32_t>::max();
+  if (ratio >= 1.0) {
+    // 1 or more, fast forward
+    real_ratio = static_cast<uint32_t>(std::lround(ratio));
+  } else if (ratio > 1e-15 && (1.0 / ratio) < std::numeric_limits<uint32_t>::max() - 1.0) {
+    // Greater than 0 and less than 1, slow release
+    real_ratio = static_cast<uint32_t>(std::lround(1.0 / ratio));
+  }
+
+  {
+    std::unique_lock<std::shared_mutex> lck(ratio_mutex_);
+    ratio_direction_ = ratio >= 1.0;
+    real_ratio_ = real_ratio;
+  }
+  pause_cv_.notify_all();
   return true;
 }
 
@@ -340,12 +343,16 @@ void TimeManipulatorExecutor::TimerLoop(std::chrono::system_clock::time_point st
 
       // sleep a tick
       if (real_ratio == std::numeric_limits<uint32_t>::max()) {
-        // Paused
-        if (!options_.use_system_clock) {
-          std::this_thread::sleep_until(last_loop_std_tp += std::chrono::seconds(1));
-        } else {
-          std::this_thread::sleep_until(last_loop_sys_tp += std::chrono::seconds(1));
+        // Paused until a new ratio or shutdown; the next tick counts from then.
+        {
+          std::shared_lock<std::shared_mutex> lck(ratio_mutex_);
+          pause_cv_.wait(lck, [this] {
+            return state_.load() == State::kShutdown ||
+                   real_ratio_ != std::numeric_limits<uint32_t>::max();
+          });
         }
+        last_loop_sys_tp = std::chrono::system_clock::now();
+        last_loop_std_tp = std::chrono::steady_clock::now();
 
         continue;
       }
