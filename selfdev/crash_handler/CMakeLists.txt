@@ -47,7 +47,8 @@ if(IBMW_BUILD_TESTS AND NOT WIN32)
   # program and forward to the shared libgcc_s / libstdc++. A static libgcc or
   # libstdc++ defines them in the same link (duplicate symbols), so those tests
   # are left out then. AUTO detects -static* in the flags; ON / OFF override
-  # it (e.g. when a toolchain file links statically by default).
+  # it (e.g. when a toolchain file links statically by default). The OHOS
+  # toolchain always links the static libunwind.a, so AUTO is OFF there too.
   set(IBMW_SELFDEV_CRASH_HANDLER_TEST_INTERPOSE AUTO CACHE STRING
     "Build the crash_handler fault injection tests (AUTO, ON, OFF)")
   set_property(CACHE IBMW_SELFDEV_CRASH_HANDLER_TEST_INTERPOSE PROPERTY STRINGS AUTO ON OFF)
@@ -60,7 +61,8 @@ if(IBMW_BUILD_TESTS AND NOT WIN32)
     string(TOUPPER "${CMAKE_BUILD_TYPE}" _ibmw_ch_build_type)
     set(_ibmw_ch_link_flags
       " ${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_ibmw_ch_build_type}} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_EXE_LINKER_FLAGS_${_ibmw_ch_build_type}} ")
-    if(_ibmw_ch_link_flags MATCHES " -static(-libgcc|-libstdc\\+\\+|-pie)? ")
+    if(OHOS OR CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR "${OHOS_PLATFORM}" STREQUAL "OHOS"
+       OR _ibmw_ch_link_flags MATCHES " -static(-libgcc|-libstdc\\+\\+|-pie)? ")
       set(_ibmw_ch_interpose OFF)
     else()
       set(_ibmw_ch_interpose ON)

@@ -15,8 +15,10 @@ target_compile_features(ibmw_selfdev_concurrent INTERFACE cxx_std_17)
 # sandbox forbids the call. INTERFACE so that every user compiles the same
 # variant (see detail/asymmetric_barrier.h); at run time the environment
 # variable IBMW_SELFDEV_NO_MEMBARRIER=1 does the same without a rebuild.
-# ON by default for OHOS until membarrier(2) is confirmed on the board: a
-# seccomp policy that kills the process on it cannot be caught at run time.
+# ON by default for OHOS: a seccomp policy that kills the process on
+# membarrier(2) cannot be caught at run time, and on the one board measured
+# (HongMeng kernel 1.12, aarch64) the call works but gives no clear gain over
+# fences.
 # The option is cached: the default only applies to a fresh build directory.
 if(OHOS OR CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR "${OHOS_PLATFORM}" STREQUAL "OHOS")
   set(_ibmw_selfdev_no_membarrier_default ON)

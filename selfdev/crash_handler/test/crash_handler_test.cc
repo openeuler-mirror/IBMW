@@ -568,6 +568,22 @@ TEST(CrashHandlerTest, SigfpeInsideCallbackKeepsOriginalSignal) {
   EXPECT_EQ(WTERMSIG(r.status), SIGSEGV) << r.out;
 }
 
+// The path CMake built a test library at, or, when the tests were copied to
+// another machine (a cross build run on the board), the same file next to the
+// test executable.
+std::string TestModulePath(const char* built) {
+  if (access(built, R_OK) == 0) return built;
+  char exe[4096];
+  const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (n <= 0) return built;
+  const std::string exe_path(exe, static_cast<size_t>(n));
+  const std::string built_path(built);
+  const size_t exe_slash = exe_path.rfind('/');
+  const size_t built_slash = built_path.rfind('/');
+  if (exe_slash == std::string::npos || built_slash == std::string::npos) return built;
+  return exe_path.substr(0, exe_slash) + built_path.substr(built_slash);
+}
+
 // CH-33: one thread holds the loader lock (inside the constructor of a
 // dlopen'ed test library, which blocks forever) while another thread
 // crashes. dladdr would block; the header and the raw frames are written
@@ -598,7 +614,7 @@ TEST(CrashHandlerTest, LoaderLockHeldStillWritesRawReport) {
     if (pipe(ready) != 0) _exit(101);
     std::string fd = std::to_string(ready[1]);
     setenv("IBMW_CRASH_TEST_CTOR_FD", fd.c_str(), 1);
-    std::thread([] { (void)dlopen(IBMW_CRASH_TEST_BLOCKING_SO, RTLD_NOW); }).detach();
+    std::thread([] { (void)dlopen(TestModulePath(IBMW_CRASH_TEST_BLOCKING_SO).c_str(), RTLD_NOW); }).detach();
     char c = 0;
     if (read(ready[0], &c, 1) != 1) _exit(102);  // the constructor is running
     CrashHere();
@@ -607,6 +623,12 @@ TEST(CrashHandlerTest, LoaderLockHeldStillWritesRawReport) {
   EXPECT_NE(r.out.find("*** IBMW crash: signal 11 (SIGSEGV)"), std::string::npos) << r.out;
   EXPECT_NE(r.out.find("*** raw stacktrace (no symbol lookup):\n#00 pc 0x"), std::string::npos) << r.out;
   EXPECT_NE(r.out.find("ibmw_selfdev_crash_handler_test+0x"), std::string::npos) << r.out;
+#if defined(__OHOS__)
+  // OHOS's dladdr does not wait for the loader lock: the report completes.
+  EXPECT_NE(r.out.find("*** end of stacktrace"), std::string::npos) << r.out;
+  EXPECT_EQ(WTERMSIG(r.status), SIGSEGV) << r.out;
+  return;
+#endif
   // dladdr stayed blocked: the symbolized part never started.
   EXPECT_EQ(r.out.find("*** symbolized stacktrace:"), std::string::npos) << r.out;
   if (kAsyncSignalsDeferred) {
@@ -736,7 +758,7 @@ TEST(CrashHandlerTest, FaultInStackCaptureLeavesHeaderAndMarker) {
 // ---- caller logic and late-loaded modules (5.6 re-review round 3) --------
 
 void* LateSymbol(const char* name) {
-  void* h = dlopen(IBMW_CRASH_TEST_LATE_SO, RTLD_NOW);
+  void* h = dlopen(TestModulePath(IBMW_CRASH_TEST_LATE_SO).c_str(), RTLD_NOW);
   if (h == nullptr) _exit(103);
   void* sym = dlsym(h, name);
   if (sym == nullptr) _exit(104);
@@ -915,7 +937,7 @@ TEST(CrashHandlerTest, InterruptedContextIsRestoredAfterTheWalk) {
 void LoadLateCopy() {
   static std::string image;
   if (image.empty()) {
-    const int src = open(IBMW_CRASH_TEST_LATE_SO, O_RDONLY | O_CLOEXEC);
+    const int src = open(TestModulePath(IBMW_CRASH_TEST_LATE_SO).c_str(), O_RDONLY | O_CLOEXEC);
     if (src < 0) _exit(108);
     image = ReadAll(src);
     close(src);
@@ -1059,7 +1081,13 @@ TEST(CrashHandlerTest, SentSignalNamesSenderInsteadOfFaultAddress) {
     // Single-threaded child: the sender pid is the reporting tid.
     const std::string tid = HeaderTid(header);
     ASSERT_FALSE(tid.empty()) << header;
-    EXPECT_NE(header.find(", sent by pid " + tid + " uid " + uid + ", pc 0x"), std::string::npos)
+#if defined(__OHOS__)
+    // The HongMeng kernel delivers sigqueue() with si_pid 0.
+    const std::string sender = std::strcmp(c.name, "sigqueue") == 0 ? "0" : tid;
+#else
+    const std::string& sender = tid;
+#endif
+    EXPECT_NE(header.find(", sent by pid " + sender + " uid " + uid + ", pc 0x"), std::string::npos)
         << c.name << ": " << header;
     EXPECT_EQ(r.out.find("*** caller"), std::string::npos) << c.name << "\n" << r.out;
     EXPECT_NE(r.out.find("*** end of stacktrace"), std::string::npos) << c.name << "\n" << r.out;

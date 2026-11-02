@@ -42,6 +42,12 @@ function(ibmw_selfdev_warnings target)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow)
     if(IBMW_BUILD_WITH_WERROR)
       target_compile_options(${target} PRIVATE -Werror)
+      # The OHOS SDK toolchain passes --gcc-toolchain on every compile; clang
+      # reports it as unused when nothing is linked.
+      if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND
+         (OHOS OR CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR "${OHOS_PLATFORM}" STREQUAL "OHOS"))
+        target_compile_options(${target} PRIVATE -Wno-error=unused-command-line-argument)
+      endif()
     endif()
   endif()
 endfunction()

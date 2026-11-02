@@ -41,8 +41,11 @@ int main(int argc, char** argv) {
     // The sanitizer runtimes refuse RTLD_DEEPBIND (they abort in dlopen);
     // sanitizer lanes run the same module with RTLD_LOCAL only.
     std::printf("sanitizer build: RTLD_DEEPBIND not supported, using RTLD_LOCAL\n");
-#else
+#elif defined(RTLD_DEEPBIND)
     flags |= RTLD_DEEPBIND;
+#else
+    // musl (OHOS) does not have RTLD_DEEPBIND.
+    std::printf("RTLD_DEEPBIND not available, using RTLD_LOCAL\n");
 #endif
   }
   const int n = std::atoi(argv[3]);

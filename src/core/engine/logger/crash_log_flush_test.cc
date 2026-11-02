@@ -271,6 +271,14 @@ Clock::duration SinceCrash(const std::string& dir) {
   return Clock::now() - Clock::time_point(Clock::duration(std::stoll(text.empty() ? "0" : text)));
 }
 
+// IBMW installs no crash signal handler on OHOS (crash_signal_handling.cc),
+// so the tests that crash and wait for the report have nothing to check there.
+#if defined(__OHOS__) || defined(__OHOS)
+  #define IBMW_SKIP_WITHOUT_CRASH_HANDLER() GTEST_SKIP() << "no crash signal handler on OHOS"
+#else
+  #define IBMW_SKIP_WITHOUT_CRASH_HANDLER() static_cast<void>(0)
+#endif
+
 class CrashLogFlushDeathTest : public ::testing::Test {
  protected:
   void SetUp() override { GTEST_FLAG_SET(death_test_style, "threadsafe"); }
@@ -296,6 +304,7 @@ class CrashLogFlushDeathTest : public ::testing::Test {
 // process ends before the report reaches the file.
 // CH-48
 TEST_F(CrashLogFlushDeathTest, ReportReachesRotateFileBeforeProcessEnds) {
+  IBMW_SKIP_WITHOUT_CRASH_HANDLER();
   const std::string dir = LogDir();
   EXPECT_EXIT(
       {
@@ -314,6 +323,7 @@ TEST_F(CrashLogFlushDeathTest, ReportReachesRotateFileBeforeProcessEnds) {
 // The time also holds the report itself (about 250 ms with backward-cpp).
 // CH-48
 TEST_F(CrashLogFlushDeathTest, CrashOnLogExecutorThreadDoesNotWait) {
+  IBMW_SKIP_WITHOUT_CRASH_HANDLER();
   const std::string dir = LogDir();
   EXPECT_EXIT(
       {
@@ -329,6 +339,7 @@ TEST_F(CrashLogFlushDeathTest, CrashOnLogExecutorThreadDoesNotWait) {
 // process ends with its signal.
 // CH-48
 TEST_F(CrashLogFlushDeathTest, StuckLogExecutorDelaysCrashOnlyByFlushTimeout) {
+  IBMW_SKIP_WITHOUT_CRASH_HANDLER();
   const std::string dir = LogDir();
   const auto t0 = Clock::now();
   EXPECT_EXIT(
@@ -392,6 +403,7 @@ TEST_F(CrashLogFlushDeathTest, HookIsOwnedByThePublishingSubsystem) {
 // the busy log executor still reaches the earlier owner's log.
 // CH-56
 TEST_F(CrashLogFlushDeathTest, CrashLogOffElsewhereKeepsEarlierHook) {
+  IBMW_SKIP_WITHOUT_CRASH_HANDLER();
   const std::string dir = LogDir();
   const std::string off_dir = MakeSubDir(dir, "off");
   EXPECT_EXIT(
@@ -410,6 +422,7 @@ TEST_F(CrashLogFlushDeathTest, CrashLogOffElsewhereKeepsEarlierHook) {
 // later one's hook, which still flushes its queued report.
 // CH-56
 TEST_F(CrashLogFlushDeathTest, DestroyingEarlierOwnerKeepsLaterHook) {
+  IBMW_SKIP_WITHOUT_CRASH_HANDLER();
   const std::string dir = LogDir();
   const std::string first_dir = MakeSubDir(dir, "first");
   EXPECT_EXIT(

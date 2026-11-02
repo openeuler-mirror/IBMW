@@ -56,8 +56,9 @@ building it throws, the map is unchanged.
     before the first queue is made; it is read once, before any
     `membarrier` call;
   - at build time: CMake option `IBMW_SELFDEV_CONCURRENT_NO_MEMBARRIER=ON`
-    (the default when building for OHOS, until `membarrier` is confirmed
-    on the board), which defines `IBMW_SELFDEV_NO_MEMBARRIER` for every
+    (the default when building for OHOS: on the board measured, HongMeng
+    kernel 1.12 aarch64, `membarrier` works but the queue is not clearly
+    faster with it), which defines `IBMW_SELFDEV_NO_MEMBARRIER` for every
     user of the target. The OHOS default applies to a fresh build
     directory only: the option is cached, so a directory configured
     before keeps its value until it is set with `-D` or the cache is

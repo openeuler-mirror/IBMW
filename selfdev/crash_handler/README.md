@@ -87,9 +87,15 @@ ch::Install(opt);                // false if a handler or the alternate stack fa
   With `reraise = false` the process calls `_exit(128 + signo)`.
 - A second fault inside the handler (callback, symbolization) ends the
   process as the *original* signal, honouring `reraise`. Synchronous fault
-  signals (SEGV, BUS, FPE, ILL, TRAP) are never blocked while the handler
-  runs, so such a fault re-enters the handler instead of the kernel killing
-  the process with the second signal.
+  signals (SEGV, BUS, FPE, ILL, TRAP) and SIGABRT are never blocked while
+  the handler runs, so such a fault re-enters the handler instead of the
+  kernel killing the process with the second signal. SIGABRT is in the list
+  for `abort()` in the callback: musl's `abort()` does not unblock it, so a
+  blocked SIGABRT would end the process as SIGABRT instead of the original
+  signal. In turn, a SIGABRT sent from outside (`kill -ABRT`) while a report
+  is being written can reach the reporting thread: the report is then cut
+  short as a nested fault and the process still ends with the original
+  signal.
 - `Uninstall()` restores the previous actions only for signals whose handler
   is still this one.
 - The whole report is bounded by `report_timeout_sec` (default 10 s). If the

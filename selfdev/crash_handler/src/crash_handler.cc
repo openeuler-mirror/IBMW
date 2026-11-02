@@ -857,11 +857,13 @@ void HandleSignal(int signo, siginfo_t* info, void* raw_ctx) {
   // the synchronous signals out of sa_mask and sets SA_NODEFER, but a layer
   // in between may not (TSAN's signal emulation runs this handler with the
   // signal blocked): a blocked synchronous signal kills the process with the
-  // second signal. pthread_sigmask is async-signal-safe.
+  // second signal. SIGABRT counts as synchronous here: musl's abort() does not
+  // unblock it, it resets the handler and ends the process with SIGABRT.
+  // pthread_sigmask is async-signal-safe.
   {
     sigset_t sync_signals;
     sigemptyset(&sync_signals);
-    for (int sync_sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP}) sigaddset(&sync_signals, sync_sig);
+    for (int sync_sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTRAP}) sigaddset(&sync_signals, sync_sig);
     pthread_sigmask(SIG_UNBLOCK, &sync_signals, nullptr);
   }
   const long tid = CurrentTid();
@@ -1086,10 +1088,10 @@ bool Install(const Options& options) {
     // ones: a fault raised while it is blocked (e.g. SIGFPE inside the
     // callback) makes the kernel kill the process with that signal, losing
     // the original one. Unblocked, it re-enters HandleSignal, which ends the
-    // process as the original signal.
+    // process as the original signal. abort() in the callback is the same.
     sigfillset(&action.sa_mask);
     sigdelset(&action.sa_mask, sig);
-    for (int sync_sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGTRAP}) sigdelset(&action.sa_mask, sync_sig);
+    for (int sync_sig : {SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGTRAP}) sigdelset(&action.sa_mask, sync_sig);
     action.sa_sigaction = &HandleSignal;
 
     SavedAction saved{};
