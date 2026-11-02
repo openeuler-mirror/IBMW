@@ -6,6 +6,33 @@ details remain governed by the documentation for each release.
 
 ## [Unreleased]
 
+### Changed
+
+- MQTT RPC: servers only answer on topics starting with `ibmw_rpc_rsp/`;
+  requests carrying any other answer topic are dropped with a rate-limited
+  warning. Clients only accept an answer from the called function's answer
+  topic, and request ids start at a random value. The wire format is unchanged.
+- Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
+  (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
+  integer step (N or 1/N). Rejected RPC calls return code 2 /
+  `INVALID_TIME_RATIO`; an invalid `init_ratio` fails initialization.
+- gRPC server: the default `max_connection_num` is now 1024 (was 1000000,
+  effectively `SOMAXCONN`); `max_connection_num` and `max_concurrent_streams`
+  are configurable.
+- TCP transport: `max_send_queue_size` now bounds queued plus in-flight bytes
+  per session; previously a slow peer could hold about twice the limit.
+- C++ action API: `ActionLog` is `noexcept` and swallows exceptions from the
+  default stdout/stderr sink. The sink is per shared library.
+- HTTP RPC: CORS responses always carry `Vary: Origin` when the allow list is
+  not `*`, including requests without an `Origin` header.
+
+### Added
+
+- Recorder `storage_policy` disk limits `min_free_space_m`, `max_folder_num`
+  and `max_total_size_m`; all default to 0 (disabled).
+- CMake option `IBMW_ENABLE_HARDENING` (default `OFF`) adds stack protector,
+  `_FORTIFY_SOURCE=2`, full RELRO, noexecstack and PIE executables.
+
 ### Documentation
 
 - Reorganized public documentation into guides, reference, contributing,
