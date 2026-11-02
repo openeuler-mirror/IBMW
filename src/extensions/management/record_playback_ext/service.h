@@ -242,6 +242,8 @@ class RecordPlaybackServiceImpl : public ibmw::rpc::ServiceBase {
     try {
       handler();
     } catch (...) {
+      // Fields the handler filled before throwing are not reported.
+      rsp = Rsp{};
       if constexpr (requires { rsp.common_rsp; }) {
         ReportHandlerException(func_name, rsp.common_rsp);
       } else {

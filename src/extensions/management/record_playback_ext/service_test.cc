@@ -143,9 +143,10 @@ TEST_F(RecordServiceTest, ActionThatIsNotRunningIsReported) {
 
 TEST_F(RecordServiceTest, HandlerExceptionStillReplies) {
   AddAction("signal", false);  // StartSignalRecord requires the Start state.
-  StartRecordRsp rsp;
+  StartRecordRsp rsp{.filefolder = "partial"};  // stands in for a half-filled answer
   EXPECT_TRUE(service_.Call("StartRecord", StartRecordReq{.action_name = "act"}, rsp));
   EXPECT_EQ(rsp.common_rsp.msg, "INTERNAL_ERROR");
+  EXPECT_EQ(rsp.filefolder, "");
 }
 
 TEST_F(RecordServiceTest, OversizedMetadataIsRejected) {
