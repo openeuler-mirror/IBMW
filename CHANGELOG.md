@@ -67,6 +67,10 @@ details remain governed by the documentation for each release.
   written to a new exclusive temporary file and synced, with its directory,
   before the uncompressed file is removed. A link planted at the old fixed
   `<file>.tmp` name is no longer followed.
+- `ibmw bag record`: a topic whose Schema conflicts with the one already
+  recorded for its type and serialization (for example during a rolling
+  upgrade) is skipped and its messages are counted as dropped, with a warning
+  at the end. Previously the writer stopped and no topic was recorded any more.
 
 ### Added
 

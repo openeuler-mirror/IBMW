@@ -2385,6 +2385,10 @@ int RunRecord(int argc, const char* const* argv) {
   const auto& summary = coordinator.Summary();
   std::cout << "Recorded " << summary.message_count << " message(s) to '"
             << summary.output_path.string() << "'.\n";
+  if (const auto conflicts = coordinator.SchemaConflictMessages(); conflicts != 0) {
+    std::cerr << "Warning: dropped " << conflicts
+              << " message(s) whose Schema conflicts with the one recorded for the same type.\n";
+  }
   return 0;
 }
 
