@@ -154,6 +154,10 @@ stage_device() {
 }
 
 stage_bench() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  hdc shell "mkdir -p ${DEVICE_DIR} ${DEVICE_TMP}" >/dev/null
+  hdc file send "${CORE_BENCH}" "${DEVICE_DIR}/$(basename "${CORE_BENCH}")" >/dev/null
+  hdc shell "chmod 755 ${DEVICE_DIR}/$(basename "${CORE_BENCH}")" >/dev/null
   hdc shell "cd ${DEVICE_DIR} && TMPDIR=${DEVICE_TMP} IBMW_SHM_ROOT=${DEVICE_TMP} timeout 600 ./ibmw_shm_bench 2>&1" \
     | tr -d '\r' | tee "${LOGS}/device-bench.log"
 }

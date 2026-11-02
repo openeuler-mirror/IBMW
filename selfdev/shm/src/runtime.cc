@@ -225,6 +225,12 @@ Result<std::string> RuntimeImpl::ResolveServiceDir(const RuntimeOptions& options
       *group = static_cast<gid_t>(v);
     }
   }
+  // (gid_t)-1 means "leave the group unchanged" to chown(): the directory and
+  // sockets would silently stay in the creator's primary group.
+  if (group->has_value() && **group == static_cast<gid_t>(-1)) {
+    LogError("invalid shm group " + std::to_string(**group) + ": (gid_t)-1 is not a group");
+    return Error::kInvalidArg;
+  }
   std::string owner = group->has_value() ? "g" + std::to_string(**group) : std::to_string(::geteuid());
   std::string dir = root + "/ibmw_shm." + owner + "." + domain;
   if (dir.size() > kMaxServiceDirLength) {

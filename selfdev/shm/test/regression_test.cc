@@ -1099,7 +1099,7 @@ TEST(ShmRegressionTest, OptionThenEnvironmentThenDefault) {
   r = Probe({url}, {"IBMW_SHM_DOMAIN="});
   EXPECT_EQ(r.dir, root + "/ibmw_shm." + Euid() + ".default");
   // Only plain digits are a gid: strtoul() would accept the signed and blank forms.
-  for (const char* g : {"staff", "+5", " 5", "-1", "5 "}) {
+  for (const char* g : {"staff", "+5", " 5", "-1", "5 ", "4294967295", "4294967296"}) {
     r = Probe({url}, {std::string("IBMW_SHM_GROUP=") + g});
     EXPECT_EQ(r.pub, "invalid_arg") << "'" << g << "'";
     EXPECT_EQ(r.sub, "invalid_arg") << "'" << g << "'";

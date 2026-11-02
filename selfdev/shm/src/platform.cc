@@ -15,8 +15,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstring>
 #include <random>
+#include <vector>
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -373,6 +375,24 @@ uint64_t RandomU64() noexcept {
   return rng();
 }
 
+namespace {
+
+bool InGroup(gid_t gid) noexcept {
+  if (::getegid() == gid) return true;
+  const int n = ::getgroups(0, nullptr);
+  if (n <= 0) return false;
+  std::vector<gid_t> groups;
+  try {
+    groups.resize(static_cast<std::size_t>(n));
+  } catch (...) {
+    return false;
+  }
+  const int got = ::getgroups(n, groups.data());
+  return got > 0 && std::find(groups.begin(), groups.begin() + got, gid) != groups.begin() + got;
+}
+
+}  // namespace
+
 bool MakeDirectory(const std::string& path, std::optional<gid_t> group) noexcept {
   const mode_t mode = group ? (S_ISGID | 0770) : 0700;
   if (::mkdir(path.c_str(), mode & 0777) != 0 && errno != EEXIST) return false;
@@ -386,10 +406,10 @@ bool MakeDirectory(const std::string& path, std::optional<gid_t> group) noexcept
     // Shared group directory created by another member of the group. Its
     // creator controls the mode: anyone it lets in could plant or remove
     // sockets, so others must have no access and the group must be able
-    // to create sockets. Membership may be supplementary (access() checks
-    // with every group of the process).
+    // to create sockets. Membership may be supplementary. It is checked
+    // against the effective ids (access() would use the real ones).
     if (!group.has_value() || st.st_gid != *group || (st.st_mode & 0007) != 0 || (st.st_mode & 0070) != 0070 ||
-        ::access(path.c_str(), R_OK | W_OK | X_OK) != 0) {
+        !InGroup(*group)) {
       errno = EACCES;
       return false;
     }
