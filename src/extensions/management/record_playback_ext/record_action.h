@@ -44,6 +44,7 @@ class RecordAction {
     Mode mode = Mode::kImd;
 
     struct StoragePolicy {
+      // A new bag file starts once the current one reaches this size; 0: never.
       uint32_t max_bag_size_m = 2048;
       uint32_t max_bag_num = 0;
       uint32_t msg_write_interval = 1000;

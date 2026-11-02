@@ -321,6 +321,48 @@ TEST_F(RecordActionFreeSpaceTest, SignalRecordDoesNotStartWhileShortOfSpace) {
   action.Shutdown();
 }
 
+// EXT-026: a file that can not be opened pauses writing like a full disk: the
+// next attempt comes after a second, not after another bag worth of records.
+TEST_F(RecordActionFreeSpaceTest, FailedOpenPausesAndRetries) {
+  RecordAction action;
+  Initialize(action, "imd", "{max_bag_size_m: 1}");
+  const uint64_t now = ibmw::common::util::GetCurTimestampNs();
+  Add(action, now);
+  Add(action, now);
+  Drain();
+  ASSERT_EQ(McapFiles().size(), 1u);
+
+  // A directory in place of the next file: opening it fails for root too.
+  const uint64_t split_ns = now + 1'000'000'000;
+  const auto tm = ibmw::common::util::TimeT2TmLocal(static_cast<time_t>(split_ns / 1'000'000'000));
+  char name[64];
+  snprintf(name, sizeof(name), "ibmwbag_%04d%02d%02d_%02d%02d%02d.mcap", tm.tm_year + 1900, tm.tm_mon + 1,
+           tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+  const fs::path blocker = McapFiles()[0].parent_path() / name;
+  ASSERT_TRUE(fs::create_directory(blocker));
+  Add(action, split_ns);
+  Drain();
+  fs::remove(blocker);
+  EXPECT_EQ(McapFiles().size(), 1u);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+  Add(action, now + 5'000'000'000);
+  Drain();
+  EXPECT_EQ(McapFiles().size(), 2u);
+  action.Shutdown();
+}
+
+// EXT-026: max_bag_size_m 0 means no limit, not a new file for every record.
+TEST_F(RecordActionFreeSpaceTest, ZeroBagSizeNeverSplits) {
+  RecordAction action;
+  Initialize(action, "imd", "{max_bag_size_m: 0}");
+  const uint64_t now = ibmw::common::util::GetCurTimestampNs();
+  for (uint64_t i = 0; i < 3; ++i) Add(action, now + i * 2'000'000'000);
+  Drain();
+  EXPECT_EQ(McapFiles().size(), 1u);
+  action.Shutdown();
+}
+
 // EXT-025: a signal record ends at its stop time on a silent topic too.
 TEST_F(RecordActionFreeSpaceTest, SignalRecordEndsWithoutMessages) {
   RecordAction action;

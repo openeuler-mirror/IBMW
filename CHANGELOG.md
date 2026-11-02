@@ -54,6 +54,11 @@ details remain governed by the documentation for each release.
 - Recorder: a signal record now also ends at its stop time while its topics are
   silent, checked every `msg_write_interval_time` (default 1 s). Previously only
   the next message ended it.
+- Recorder: `storage_policy.max_bag_size_m: 0` disables bag splitting;
+  previously it started a new file for every record. When a bag file can not
+  be opened, records are dropped and the open is retried every second, like a
+  full disk; previously every record logged a failed write until the next
+  split.
 
 ### Added
 

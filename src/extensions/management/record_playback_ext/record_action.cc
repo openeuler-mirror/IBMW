@@ -260,7 +260,10 @@ void RecordAction::Initialize(YAML::Node options) {
     topic_meta_map_.emplace(key, topic_meta);
   }
   // misc
-  max_bag_size_ = static_cast<size_t>(options_.storage_policy.max_bag_size_m) * 1024 * 1024;
+  // 0 disables splitting like the other storage_policy limits.
+  max_bag_size_ = options_.storage_policy.max_bag_size_m == 0
+                      ? std::numeric_limits<size_t>::max()
+                      : static_cast<size_t>(options_.storage_policy.max_bag_size_m) * 1024 * 1024;
   max_preparation_duration_ns_ = SecondsToNsSaturated(options_.max_preparation_duration_s);
 
   metadata_.version = kVersion;
@@ -769,14 +772,17 @@ void RecordAction::AddRecordImpl(OneRecord&& record) {
   if (!writing_cached_messages_ && cur_data_size_ * estimated_overhead_ >= max_bag_size_) [[unlikely]] {
     size_t original_cur_data_size = cur_data_size_;
     cur_data_size_ = 0;
-    estimated_overhead_ = std::max(0.1, static_cast<double>(GetFileSize()) / original_cur_data_size);
+    // No file (a failed open) says nothing about the overhead: keep the estimate.
+    if (const size_t file_size = GetFileSize(); file_size != 0 && original_cur_data_size != 0) {
+      estimated_overhead_ = std::max(0.1, static_cast<double>(file_size) / original_cur_data_size);
+    }
 
     if (IsNewFolderNeeded(record.log_timestamp)) [[unlikely]] {
       OpenNewFolderToRecord();
     } else {
       OpenNewMcapToRecord(record.log_timestamp);
     }
-    // Out of space: no file is open, the record is dropped.
+    // Out of space or the open failed: no file is open, the record is dropped.
     if (write_paused_) [[unlikely]] return;
   }
 
@@ -1086,8 +1092,12 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
   if (!res.ok()) {
     MW_ERROR("Failed to open mcap file '{}': {}", cur_mcap_file_path_, res.message);
     cur_mcap_file_path_.clear();
+    // Drop records and retry in a second, like a full disk.
+    write_paused_ = true;
+    next_space_check_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     return;
   }
+  write_paused_ = false;  // HasEnoughFreeSpace() leaves it set without min_free_space_m
 
   std::unordered_map<std::string, mcap::SchemaId> schema_id_by_identity;
   for (auto& [idx, mcap_info] : mcap_info_map_) {
