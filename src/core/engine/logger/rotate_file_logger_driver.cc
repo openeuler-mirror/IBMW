@@ -2,7 +2,9 @@
 // All rights reserved.
 
 #include "engine/logger/rotate_file_logger_driver.h"
+#include <chrono>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <mutex>
 #include <regex>
@@ -82,6 +84,7 @@ void RotateFileLoggerDriver::Initialize(YAML::Node options_node) {
 
   std::filesystem::path log_path(options_.path);
   base_file_name_ = (log_path / options_.filename).string();
+  max_file_size_bytes_ = static_cast<int64_t>(options_.max_file_size_m) * 1024 * 1024;
 
   if (!(std::filesystem::exists(log_path) && std::filesystem::is_directory(log_path))) {
     std::filesystem::create_directories(log_path);
@@ -145,7 +148,7 @@ void RotateFileLoggerDriver::Log(const LogDataWrapper& log_data_wrapper) noexcep
 
     if (!options_.enable_sync) {  // disable sync and use C++ API
       auto log_work = [this, log_data_str{std::move(log_data_str)}]() {
-        if (!ofs_.is_open() || ofs_.tellp() > options_.max_file_size_m * 1024 * 1024) {
+        if (!ofs_.is_open() || ofs_.tellp() > max_file_size_bytes_) {
           if (!OpenNewFile()) return;
         }
         ofs_.write(log_data_str.data(), log_data_str.size()) << '\n';
@@ -155,7 +158,7 @@ void RotateFileLoggerDriver::Log(const LogDataWrapper& log_data_wrapper) noexcep
 
     } else {  // enable sync and use C API
       auto log_work = [this, log_data_str{std::move(log_data_str)}]() {
-        if (!file_ || ftell(file_) > options_.max_file_size_m * 1024 * 1024) {
+        if (!file_ || ftell(file_) > max_file_size_bytes_) {
           if (!OpenNewFile()) return;
         }
         (void)fwrite(log_data_str.data(), 1, log_data_str.size(), file_);
@@ -170,13 +173,37 @@ void RotateFileLoggerDriver::Log(const LogDataWrapper& log_data_wrapper) noexcep
   }
 }
 
+void RotateFileLoggerDriver::Flush() noexcept {
+  try {
+    if (!log_executor_) return;
+    if (log_executor_.IsInCurrentExecutor()) {
+      FlushOnLogExecutor();
+      return;
+    }
+    auto done = std::make_shared<std::promise<void>>();
+    auto flushed = done->get_future();
+    log_executor_.Dispatch([this, done] {
+      FlushOnLogExecutor();
+      done->set_value();
+    });
+    // A stalled log executor must not hold up the shutdown.
+    (void)flushed.wait_for(std::chrono::seconds(1));
+  } catch (...) {
+  }
+}
+
+void RotateFileLoggerDriver::FlushOnLogExecutor() noexcept {
+  if (ofs_.is_open()) ofs_.flush();
+  if (file_ != nullptr) (void)fflush(file_);
+}
+
 bool RotateFileLoggerDriver::OpenNewFile() {
   bool rename_flag = false;
 
   if (!options_.enable_sync) {  // disable sync
     // if log file exceed max size, close it
     if (ofs_.is_open()) {
-      rename_flag = (ofs_.tellp() > options_.max_file_size_m * 1024 * 1024);
+      rename_flag = (ofs_.tellp() > max_file_size_bytes_);
       ofs_.flush();
       ofs_.clear();
       ofs_.close();
@@ -198,7 +225,7 @@ bool RotateFileLoggerDriver::OpenNewFile() {
     // if log file exceed max size, close it
     if (file_ != NULL) {
       (void)fseek(file_, 0, SEEK_END);
-      rename_flag = (ftell(file_) > (options_.max_file_size_m * 1024 * 1024));
+      rename_flag = (ftell(file_) > max_file_size_bytes_);
       (void)fflush(file_);
       (void)fclose(file_);
       file_ = nullptr;

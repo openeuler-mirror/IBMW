@@ -48,9 +48,8 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
     }
   }
 
-  void Flush() noexcept override {
-    if (ofs_.is_open()) ofs_.flush();
-  }
+  // Runs on the log executor after the entries queued so far (bounded wait).
+  void Flush() noexcept override;
 
   bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept override {
     if (!run_flag_.load()) return false;
@@ -76,6 +75,7 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
 
  private:
   bool OpenNewFile();
+  void FlushOnLogExecutor() noexcept;
   void CleanLogFile();
   uint32_t GetNextIndex();
   bool CheckLog(const LogDataWrapper& log_data_wrapper);
@@ -89,6 +89,7 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
 
   std::string base_file_name_;
   std::ofstream ofs_;
+  int64_t max_file_size_bytes_ = 0;  // 64 bit: max_file_size_m may be >= 4096
 
   std::atomic_bool run_flag_ = false;
 
