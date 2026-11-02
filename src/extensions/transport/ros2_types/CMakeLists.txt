@@ -134,3 +134,8 @@ message(STATUS "ibmw_module_ros2_interface configured successfully (decoupled mo
 message(STATUS "  - No dependency on rclcpp/rmw_fastrtps_cpp")
 message(STATUS "  - Direct FastDDS/FastCDR usage")
 message(STATUS "  - ibmw callback execution")
+
+if(IBMW_BUILD_TESTS)
+  add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME}
+                   TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/util/ros2_text_serialization_test.cc)
+endif()

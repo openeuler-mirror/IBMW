@@ -35,6 +35,9 @@ details remain governed by the documentation for each release.
   data changes; reading no longer rewrites them, so concurrent readers are
   safe and one call no longer invalidates the other's result. Entries are in
   insertion order. The C ABI is unchanged.
+- ROS 2 JSON deserialization: resizable arrays of one message may claim at
+  most 256 MiB of decoded storage (`kMaxTextArrayBytes`); larger input is
+  rejected instead of allocated.
 
 ### Added
 
