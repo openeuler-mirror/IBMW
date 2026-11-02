@@ -32,6 +32,8 @@ inline constexpr auto kRuntimeSocketTimeout = std::chrono::seconds(5);
 // A control request must arrive within this time (up to twice it for a peer
 // trickling bytes): the agent serves one connection at a time.
 inline constexpr auto kRuntimeRequestTimeout = std::chrono::seconds(1);
+// Another process holds a Runtime ID lock only to check and update its files.
+inline constexpr auto kRuntimeIdLockTimeout = std::chrono::seconds(2);
 
 struct RuntimeStreamHeader {
   uint32_t magic;

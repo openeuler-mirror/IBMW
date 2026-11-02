@@ -10,6 +10,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -58,8 +59,18 @@ class RuntimeIdLock {
                   status.st_uid == ::geteuid() && (status.st_mode & 077) == 0 &&
                   status.st_nlink == 1,
               "Unsafe Runtime ID lock '{}'.", path.string());
-    MW_ASSERT(::flock(fd_.Get(), LOCK_EX) == 0,
-              "Failed to lock Runtime ID '{}'.", path.string());
+    // Bounded: a stuck or stopped lock holder must not hang Shutdown().
+    const auto deadline = std::chrono::steady_clock::now() + kRuntimeIdLockTimeout;
+    while (::flock(fd_.Get(), LOCK_EX | LOCK_NB) != 0) {
+      const int error = errno;
+      MW_ASSERT(error == EINTR || error == EWOULDBLOCK,
+                "Failed to lock Runtime ID '{}': {}.", path.string(), std::strerror(error));
+      MW_ASSERT(std::chrono::steady_clock::now() < deadline,
+                "Timed out locking Runtime ID '{}'.", path.string());
+      if (error != EINTR) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
   }
 
   RuntimeIdLock(const RuntimeIdLock&) = delete;
@@ -267,15 +278,20 @@ void RuntimeGraphAgent::Shutdown() {
     ::close(client);
   }
   if (!registration_path_.empty()) {
-    RuntimeIdLock runtime_lock(
-        options_.registry_path /
-        (options_.registration.runtime_id + ".lock"));
-    const auto existing = ReadRegistrationFile(registration_path_);
-    if (!existing || SameRegistrationOwner(*existing, options_.registration)) {
-      std::error_code error;
-      std::filesystem::remove(
-          options_.registration.control_socket, error);
-      std::filesystem::remove(registration_path_, error);
+    // Shutdown() runs from the destructor: a leftover registration is only
+    // stale (discovery drops it once this process is gone), not an error.
+    try {
+      RuntimeIdLock runtime_lock(
+          options_.registry_path /
+          (options_.registration.runtime_id + ".lock"));
+      const auto existing = ReadRegistrationFile(registration_path_);
+      if (!existing || SameRegistrationOwner(*existing, options_.registration)) {
+        std::error_code error;
+        std::filesystem::remove(
+            options_.registration.control_socket, error);
+        std::filesystem::remove(registration_path_, error);
+      }
+    } catch (...) {
     }
   }
 }

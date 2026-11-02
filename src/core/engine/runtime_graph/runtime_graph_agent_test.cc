@@ -11,7 +11,9 @@
 #include <string_view>
 #include <thread>
 
+#include <fcntl.h>
 #include <poll.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -189,6 +191,54 @@ TEST_F(RuntimeGraphAgentTest, RequestWithoutNewlineIsRejected) {
   ASSERT_TRUE(response.is_object());
   EXPECT_FALSE(response.at("ok").get<bool>());
   EXPECT_NE(response.at("error").get<std::string>().find("Runtime Agent request ended without a newline."), std::string::npos);
+}
+
+// Holds a Runtime ID lock the way another process would.
+struct HeldRuntimeIdLock {
+  explicit HeldRuntimeIdLock(const std::filesystem::path& path)
+      : fd(::open(path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600)) {
+    EXPECT_GE(fd, 0);
+    EXPECT_EQ(::flock(fd, LOCK_EX | LOCK_NB), 0);
+  }
+  ~HeldRuntimeIdLock() { ::close(fd); }
+  int fd;
+};
+
+// COMM-030: a lock holder that never lets go bounds Initialize() and leaves
+// Shutdown() (and so the destructor) without an exception.
+TEST_F(RuntimeGraphAgentTest, HeldRuntimeIdLockDoesNotHangInitializeOrShutdown) {
+  {
+    RuntimeGraphAgent agent({.registration = {.runtime_id = "locked-agent"},
+                             .registry_path = directory_});
+    agent.Initialize();
+    agent.Start();
+    const std::filesystem::path socket = agent.Registration().control_socket;
+    const auto registry = socket.parent_path();
+    HeldRuntimeIdLock held(registry / "locked-agent.lock");
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_NO_THROW(agent.Shutdown());
+    EXPECT_LT(std::chrono::steady_clock::now() - start, kRuntimeIdLockTimeout + 1s);
+    // The cleanup was skipped, not forced past the lock.
+    EXPECT_TRUE(std::filesystem::exists(registry / "locked-agent.json"));
+  }
+
+  RuntimeGraphAgent agent({.registration = {.runtime_id = "init-locked-agent"},
+                           .registry_path = directory_});
+  const auto registry = ibmw::extension::RuntimeRegistryDirectory(directory_);
+  std::filesystem::create_directories(registry);
+  std::filesystem::permissions(registry, std::filesystem::perms::owner_all,
+                               std::filesystem::perm_options::replace);
+  HeldRuntimeIdLock held(registry / "init-locked-agent.lock");
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    agent.Initialize();
+    ADD_FAILURE() << "Initialize ignored the held lock";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string_view(error.what()).find("Timed out locking Runtime ID"), std::string_view::npos)
+        << error.what();
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - start, kRuntimeIdLockTimeout + 1s);
 }
 
 TEST_F(RuntimeGraphAgentTest, ShutdownWakesIdleListenerAndRemovesRegistration) {
