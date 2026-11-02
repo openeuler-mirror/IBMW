@@ -91,7 +91,7 @@ struct SendTypeWrapper {
 #ifdef IBMW_ENABLE_COMM_TRACE
   std::vector<internal::CommTraceSendOverlayV1*> cached_send_overlays;
 #endif
-  std::atomic<uint32_t>* cached_seq_counter = nullptr;
+  std::atomic<uint64_t>* cached_seq_counter = nullptr;
   const FrameworkAsyncTransportFilterCollector* cached_filter_collector = nullptr;
   ibmw::runtime::core::observability::MetricsEntry* cached_metrics = nullptr;
   std::shared_ptr<ibmw::runtime::core::observability::CachedMetricsGate>

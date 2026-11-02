@@ -258,7 +258,7 @@ class TransportDriverDispatcher {
 
   std::unordered_map<
       std::string,
-      std::atomic<uint32_t>,
+      std::atomic<uint64_t>,
       ibmw::common::util::StringHash,
       std::equal_to<>>
       pub_topic_seq_map_;

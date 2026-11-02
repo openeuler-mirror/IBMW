@@ -654,7 +654,7 @@ bool TransportDriverDispatcher::RegisterSendType(RegisterSendTypeAccessInfoWrapp
 
   // initialize publish sequence for this topic (only in Init state)
   auto seq_emplace = pub_topic_seq_map_.try_emplace(std::string(topic_name), 0);
-  std::atomic<uint32_t>* seq_counter_ptr = &seq_emplace.first->second;
+  std::atomic<uint64_t>* seq_counter_ptr = &seq_emplace.first->second;
 
   // create filter
   auto filter_name_vec = GetFilterRules(topic_name, publish_filters_rules_);
@@ -920,7 +920,7 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
   // RegisterSendType time and is non-null for any wrapper produced by
   // RegisterSendType).
   if (auto* seq_counter = send_type_wrapper_ptr->cached_seq_counter) [[likely]] {
-    uint32_t seq = ++(*seq_counter);
+    uint64_t seq = ++(*seq_counter);
     SetMetaUint64(ctx_ref, IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ, seq);
   }
   SetMetaUint64(ctx_ref, IBMW_TRANSPORT_CONTEXT_KEY_PUB_TIMESTAMP,
@@ -1157,7 +1157,7 @@ bool TransportDriverDispatcher::RegisterSendType(SendTypeWrapper&& wrapper) {
 
   // initialize publish sequence for this topic (only in Init state)
   auto seq_emplace = pub_topic_seq_map_.try_emplace(std::string(topic_name), 0);
-  std::atomic<uint32_t>* seq_counter_ptr = &seq_emplace.first->second;
+  std::atomic<uint64_t>* seq_counter_ptr = &seq_emplace.first->second;
 
   // create filter
   auto filter_name_vec = GetFilterRules(topic_name, publish_filters_rules_);
@@ -1338,7 +1338,7 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
   // set publish sequence into context if available
   auto it = pub_topic_seq_map_.find(publish_msg_wrapper_ptr->info.topic_name);
   if (it != pub_topic_seq_map_.end()) {
-    uint32_t seq = ++(it->second);
+    uint64_t seq = ++(it->second);
     SetMetaUint64(ctx_ref, IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ, seq);
   }
 

@@ -331,5 +331,33 @@ TEST_F(PublishTapTest, RunsInRegistrationOrderAndExceptionsAreFailOpen) {
   EXPECT_EQ(driver_.send_calls, 1);
 }
 
+// COMM-021: the publish sequence is 64-bit end to end and does not wrap
+// after 2^32 messages on one topic.
+TEST_F(PublishTapTest, PublishSequenceDoesNotWrapAt32Bits) {
+  const auto* send_type = catalog_.GetSendTypeWrapperPtr(
+      info_.msg_type, info_.topic_name, info_.pkg_path, info_.module_name);
+  ASSERT_NE(send_type, nullptr);
+  ASSERT_NE(send_type->cached_seq_counter, nullptr);
+  send_type->cached_seq_counter->store(UINT32_MAX);
+
+  ibmw::transport::Context frame_context;
+  dispatcher_.Send(MessageFrame{
+      .info = info_,
+      .msg_ptr = &payload_,
+      .ctx_ref = ibmw::transport::ContextRef(frame_context)});
+  EXPECT_EQ(frame_context.GetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ), "4294967296");
+
+  ibmw::transport::Context access_context;
+  dispatcher_.Send(SendAccessInfoWrapper{
+      .pkg_path = info_.pkg_path,
+      .module_name = info_.module_name,
+      .topic_name = info_.topic_name,
+      .msg_type = ibmw_string_view_t{info_.msg_type.data(), info_.msg_type.size()},
+      .ctx_ptr = access_context.NativeHandle(),
+      .msg_ptr = &payload_});
+  EXPECT_EQ(access_context.GetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ), "4294967297");
+  EXPECT_EQ(driver_.send_calls, 2);
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::transport
