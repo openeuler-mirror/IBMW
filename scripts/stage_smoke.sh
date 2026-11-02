@@ -62,9 +62,9 @@ copy_required() {
 }
 
 # 1) ibmw + iox-roudi binary (iox-roudi only when iceoryx is built)
-cp "$BUILD/ibmw" "$STAGE/bin/" 2>/dev/null || true
-cp "$BUILD/ibmw" "$STAGE/" 2>/dev/null || true
-chmod +x "$STAGE/ibmw" "$STAGE/bin/ibmw" 2>/dev/null || true
+copy_required "$BUILD/ibmw" "$STAGE/bin/ibmw"
+copy_required "$BUILD/ibmw" "$STAGE/ibmw"
+chmod +x "$STAGE/ibmw" "$STAGE/bin/ibmw"
 if [ "$ICEORYX_BUILT" -eq 1 ]; then
   find "$BUILD" -name "iox-roudi" -executable -type f 2>/dev/null | head -1 | xargs -I{} cp {} "$STAGE/bin/" || true
   find "$BUILD" -name "iox-roudi" -executable -type f 2>/dev/null | head -1 | xargs -I{} cp {} "$STAGE/" || true
@@ -72,7 +72,7 @@ if [ "$ICEORYX_BUILT" -eq 1 ]; then
 fi
 
 # 2) all *_app executables
-find "$BUILD" -maxdepth 4 -name "*_app" -executable -type f | while read f; do
+find "$BUILD" -maxdepth 4 -name "*_app" -executable -type f -print0 | while IFS= read -r -d '' f; do
   cp "$f" "$STAGE/" 2>/dev/null || true
 done
 
@@ -88,29 +88,29 @@ find "$BUILD" -maxdepth 6 \
      -o -name "ibmw_fibonacci_action_dds_client" \
      -o -name "ibmw_fibonacci_action_dds_server" \
      -o -name "ibmw_fibonacci_action_ros2_client" \) \
-  -executable -type f | while read f; do
+  -executable -type f -print0 | while IFS= read -r -d '' f; do
   cp "$f" "$STAGE/" 2>/dev/null || true
 done
 
 # 3) all cfg yamls
-find "$REPO_ROOT/src/samples" -path "*/config/linux/bin/cfg/*.yaml" | while read f; do
+find "$REPO_ROOT/src/samples" -path "*/config/linux/bin/cfg/*.yaml" -print0 | while IFS= read -r -d '' f; do
   cp "$f" "$STAGE/cfg/" 2>/dev/null || true
 done
-find "$REPO_ROOT/src/samples/cpp/extension_smoke_test/cfg" -name "*.yaml" -type f 2>/dev/null | while read f; do
+find "$REPO_ROOT/src/samples/cpp/extension_smoke_test/cfg" -name "*.yaml" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
   cp "$f" "$STAGE/cfg/" 2>/dev/null || true
 done
 cp "$BUILD/dds_image_cfg.yaml" "$STAGE/cfg/" 2>/dev/null || true
 cp "$BUILD/dds_native_cfg.yaml" "$STAGE/cfg/" 2>/dev/null || true
 
 # 4) all .so* into stage/lib + symlink at stage root (cfg writes ./libxxx.so)
-find "$BUILD" -maxdepth 6 -name "*.so*" -type f 2>/dev/null | while read f; do
+find "$BUILD" -maxdepth 6 -name "*.so*" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
   cp -f "$f" "$STAGE/lib/" 2>/dev/null || true
 done
 # Prefer the build-root libraries over stale compatibility copies in nested
 # build/bin directories. Several apps load extensions through ./libxxx.so while
 # direct linkage may resolve against the build-root RPATH during focused runs;
 # staging must therefore make $STAGE/lib match $BUILD for the root .so files.
-find "$BUILD" -maxdepth 1 -name "*.so*" -type f 2>/dev/null | while read f; do
+find "$BUILD" -maxdepth 1 -name "*.so*" -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
   cp -f "$f" "$STAGE/lib/" 2>/dev/null || true
 done
 for so in "$STAGE/lib/"*.so*; do
