@@ -17,7 +17,7 @@ using Tcp = boost::asio::ip::tcp;
 struct ServerOptions {
   Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4(), 50050};
 
-  size_t max_connection_num = 1000000;
+  size_t max_connection_num = 1024;
 
   std::chrono::nanoseconds mgr_timer_dt = std::chrono::seconds(5);
 

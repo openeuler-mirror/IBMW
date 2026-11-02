@@ -23,6 +23,11 @@ class GrpcExtension : public ExtensionBase {
     uint16_t listen_port = 0;
     // Largest accepted request body (bytes) of the server.
     uint32_t max_request_body_size = 16U << 20;
+    // Server connection limit (also capped by the listen backlog limit).
+    uint32_t max_connection_num = 1024;
+    // Streams per server connection. Buffered request bodies per connection
+    // are bounded by max_concurrent_streams * max_request_body_size.
+    uint32_t max_concurrent_streams = 100;
   };
 
  public:

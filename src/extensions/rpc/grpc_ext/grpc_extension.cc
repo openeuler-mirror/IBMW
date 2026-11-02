@@ -27,6 +27,8 @@ struct convert<ibmw::extensions::grpc_extension::GrpcExtension::Options> {
       node["listen_ip"] = rhs.listen_ip;
       node["listen_port"] = rhs.listen_port;
       node["max_request_body_size"] = rhs.max_request_body_size;
+      node["max_connection_num"] = rhs.max_connection_num;
+      node["max_concurrent_streams"] = rhs.max_concurrent_streams;
     }
 
     return node;
@@ -46,6 +48,12 @@ struct convert<ibmw::extensions::grpc_extension::GrpcExtension::Options> {
 
     if (node["max_request_body_size"])
       rhs.max_request_body_size = node["max_request_body_size"].as<uint32_t>();
+
+    if (node["max_connection_num"])
+      rhs.max_connection_num = node["max_connection_num"].as<uint32_t>();
+
+    if (node["max_concurrent_streams"])
+      rhs.max_concurrent_streams = node["max_concurrent_streams"].as<uint32_t>();
 
     return true;
   }
@@ -85,6 +93,8 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
   // A gRPC message has a 5-byte prefix: a smaller limit rejects every request.
   MW_REQUIRE(options_.max_request_body_size >= 5, "Grpc max_request_body_size must be at least 5, got {}.",
              options_.max_request_body_size);
+  MW_REQUIRE(options_.max_connection_num >= 1, "Grpc max_connection_num must be at least 1.");
+  MW_REQUIRE(options_.max_concurrent_streams >= 1, "Grpc max_concurrent_streams must be at least 1.");
 
   asio_executor_ptr_ = std::make_shared<ibmw::common::net::AsioExecutor>(options_.thread_num);
 
@@ -123,8 +133,9 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
       http2_svr_ptr_->Initialize(server::ServerOptions{
           .ep = {boost::asio::ip::make_address_v4(options_.listen_ip),
                  options_.listen_port},
+          .max_connection_num = options_.max_connection_num,
           .http2_settings = {
-              .max_concurrent_streams = 100,
+              .max_concurrent_streams = options_.max_concurrent_streams,
               .initial_window_size = (1U << 31) - 1,
               .max_request_body_size = options_.max_request_body_size,
           }});

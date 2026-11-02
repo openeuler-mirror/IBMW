@@ -28,6 +28,7 @@
 
 #include <dirent.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 
 #include "cpp/util/string.h"
 #include "grpc_ext/grpc/status.h"
@@ -460,6 +461,50 @@ TEST(GrpcServerAcceptTest, AcceptFailureBacksOffAndRecovers) {
   asio::read(sock, asio::buffer(frame_header), ec);
   EXPECT_FALSE(ec) << ec.message();
   EXPECT_EQ(frame_header[3], 0x4) << "expected a SETTINGS frame";  // type octet
+
+  svr->Shutdown();
+}
+
+// EXT-003: the server keeps at most max_connection_num connections (default
+// 1024 instead of 1000000); a connection over the limit waits in the backlog
+// until another one goes away.
+TEST(GrpcServerAcceptTest, ConnectionLimitIsEnforced) {
+  EXPECT_EQ(server::ServerOptions{}.max_connection_num, 1024u);
+  EXPECT_EQ(GrpcExtension::Options{}.max_connection_num, 1024u);
+  EXPECT_EQ(GrpcExtension::Options{}.max_concurrent_streams, 100u);
+
+  IoThreads io(2);
+  const uint16_t port = FreeTcpPort();
+  auto svr = std::make_shared<server::AsioHttp2Server>(io.Io());
+  svr->Initialize(server::ServerOptions{.ep = {asio::ip::address_v4::loopback(), port},
+                                        .max_connection_num = 2,
+                                        .mgr_timer_dt = 100ms});
+  svr->Start();
+  std::this_thread::sleep_for(100ms);  // listening
+
+  static const char kPreface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+  asio::io_context cio;
+  // True if the server answers the preface within the timeout. Plain recv():
+  // asio's blocking read polls again after SO_RCVTIMEO expires.
+  auto served = [](asio::ip::tcp::socket& sock, int timeout_ms) {
+    timeval tv{.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
+    setsockopt(sock.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    std::array<char, 9> frame_header{};
+    return ::recv(sock.native_handle(), frame_header.data(), frame_header.size(), 0) > 0;
+  };
+  std::vector<std::unique_ptr<asio::ip::tcp::socket>> socks;
+  for (int i = 0; i < 3; ++i) {
+    socks.push_back(std::make_unique<asio::ip::tcp::socket>(cio));
+    socks.back()->connect(asio::ip::tcp::endpoint(asio::ip::address_v4::loopback(), port));
+    asio::write(*socks.back(), asio::buffer(kPreface, sizeof(kPreface) - 1));
+    std::this_thread::sleep_for(50ms);  // accept in order
+  }
+  EXPECT_TRUE(served(*socks[0], 2000));
+  EXPECT_TRUE(served(*socks[1], 2000));
+  EXPECT_FALSE(served(*socks[2], 500)) << "third connection served over the limit";
+
+  socks[0]->close();
+  EXPECT_TRUE(served(*socks[2], 5000)) << "waiting connection not served after one closed";
 
   svr->Shutdown();
 }
