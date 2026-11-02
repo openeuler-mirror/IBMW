@@ -689,6 +689,7 @@ inline bool CheckIEqual(std::string_view str1, std::string_view str2) {
 }
 
 inline std::string& StrToTitleCase(std::string& str) {
+  if (str.empty()) return str;
   std::string::iterator it = str.begin();
   *it = CharToUpper(*it);
   for (; it != str.end() - 1; ++it) {
