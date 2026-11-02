@@ -1064,11 +1064,12 @@ TEST(HttpTransportDriverTest, FanOutGivesEachTargetItsOwnHostAndBody) {
 class LogCapture {
  public:
   LogCapture() {
-    base_.get_log_level = [](void*) { return static_cast<ibmw_log_level_t>(ibmw::common::util::kLogLevelError); };
-    base_.log = [](void* ctx, ibmw_log_level_t, uint32_t, const char*, const char*, const char* data, size_t size) {
+    base_.get_log_level = [](void*) { return static_cast<ibmw_log_level_t>(ibmw::common::util::kLogLevelWarn); };
+    base_.log = [](void* ctx, ibmw_log_level_t level, uint32_t, const char*, const char*, const char* data, size_t size) {
       auto* self = static_cast<LogCapture*>(ctx);
       std::lock_guard lock(self->mutex_);
       self->text_.append(data, size).push_back('\n');
+      if (static_cast<uint32_t>(level) >= ibmw::common::util::kLogLevelError) ++self->errors_;
     };
     base_.ctx = this;
     g_logger.Set(ibmw::logger::LoggerRef(&base_));
@@ -1078,11 +1079,20 @@ class LogCapture {
     std::lock_guard lock(mutex_);
     return text_;
   }
+  size_t Errors() {
+    std::lock_guard lock(mutex_);
+    return errors_;
+  }
+  size_t Lines() {
+    const auto text = Text();
+    return std::count(text.begin(), text.end(), '\n');
+  }
 
  private:
   ibmw_logger_base_t base_{};
   std::mutex mutex_;
   std::string text_;
+  size_t errors_ = 0;
 };
 
 // Sends one message whose serialized form is `view` through a started driver,
@@ -1250,6 +1260,82 @@ TEST(NetClientPoolTest, GetClientKeepsOptionsUntilAwaited) {
       io, ibmw::common::net::AsioHttpClient::Options{.host = "127.0.0.1", .service = "80"},
       ibmw::common::net::AsioHttpClient::Options{.host = "127.0.0.2", .service = "80"});
   svr->Shutdown();
+}
+
+// TRANS-041: a client's heartbeat keeps the session alive and is no message.
+TEST(NetTcpServerTest, HeartbeatIsNotDispatched) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeTcpPort();
+  auto svr = MakeTcpServer(io, received, port);
+  svr->Start();
+  asio::io_context cli_io;
+  Tcp::socket sock(cli_io);
+  sock.connect(Tcp::endpoint(kLoopback, port));
+  asio::write(sock, asio::buffer(TcpFrame("") + TcpFrame("") + TcpFrame("x")));
+  ASSERT_TRUE(received.WaitFor(1));
+  std::lock_guard lock(received.mutex);
+  ASSERT_EQ(received.msgs.size(), 1u);
+  EXPECT_EQ(received.msgs[0].second, "x");
+  svr->Shutdown();
+}
+
+// TRANS-041: reconnecting with garbage does not flood the log; the session
+// still ends.
+TEST(NetTcpServerTest, InvalidHeadLogIsLimited) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeTcpPort();
+  LogCapture capture;
+  auto svr = std::make_shared<ibmw::common::net::AsioTcpServer>(io.Io());
+  svr->SetLogger(std::make_shared<ibmw::common::util::LoggerWrapper>(ibmw::common::util::LoggerWrapper{
+      .get_log_level_func = [logger = g_logger.Get()] { return logger.GetLogLevel(); },
+      .log_func = [logger = g_logger.Get()](uint32_t lvl, uint32_t line, const char* file, const char* func,
+                                            const char* data, size_t size) { logger.Log(lvl, line, file, func, data, size); }}));
+  svr->RegisterMsgHandle([&received](const Tcp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    received.Add(ep, buf);
+  });
+  svr->Initialize({.ep = Tcp::endpoint(kLoopback, port)});
+  svr->Start();
+
+  constexpr size_t kConnections = 30;
+  for (size_t i = 0; i < kConnections; ++i) {
+    asio::io_context cli_io;
+    Tcp::socket sock(cli_io);
+    sock.connect(Tcp::endpoint(kLoopback, port));
+    asio::write(sock, asio::buffer("garbage!", 8));
+    char byte = 0;
+    boost::system::error_code ec;
+    asio::read(sock, asio::buffer(&byte, 1), ec);
+    EXPECT_TRUE(ec) << "the server keeps a session with an invalid head";
+  }
+  svr->Shutdown();
+  EXPECT_LT(capture.Lines(), kConnections / 2) << capture.Text();
+  EXPECT_EQ(capture.Errors(), 0u) << capture.Text();
+  EXPECT_EQ(received.msgs.size(), 0u);
+}
+
+// TRANS-041: undecodable messages are dropped; each kind logs at most once per
+// interval, and good messages keep being handled.
+TEST(NetMsgCatalogTest, PeerGarbageLogIsLimited) {
+  LogCapture capture;
+  MsgHandleCatalog<Tcp::endpoint> catalog;
+  size_t handled = 0;
+  catalog.RegisterMsgHandle("/a", [&handled](const std::shared_ptr<asio::streambuf>&) { ++handled; });
+  catalog.RegisterMsgHandle("/throws", [](const std::shared_ptr<asio::streambuf>&) { throw std::runtime_error("bad"); });
+  const auto handle = catalog.GetMsgHandleFunc();
+  const auto msg = [](std::string_view uri) { return std::string(1, static_cast<char>(uri.size())) + std::string(uri) + "d"; };
+
+  constexpr size_t kRounds = 100;
+  for (size_t i = 0; i < kRounds; ++i) {
+    handle({}, MakeBuf(""));                  // shorter than a header
+    handle({}, MakeBuf(std::string("\xff", 1) + "short"));  // uri longer than the message
+    handle({}, MakeBuf(msg("/unknown")));
+    handle({}, MakeBuf(msg("/throws")));
+    handle({}, MakeBuf(msg("/a")));
+  }
+  EXPECT_EQ(handled, kRounds);
+  EXPECT_LT(capture.Lines(), kRounds) << capture.Text();
 }
 
 }  // namespace

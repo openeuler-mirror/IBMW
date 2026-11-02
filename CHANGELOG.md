@@ -88,6 +88,10 @@ details remain governed by the documentation for each release.
 - TCP/UDP client pools and the gRPC client pool identify a client by its full
   address. Previously two addresses could share a client, and messages for one
   server went to the other.
+- TCP server: a zero-length frame is taken as the client's heartbeat and no
+  longer reaches the message handler. Invalid frames and undecodable messages
+  from a peer log at most once per second for each kind of problem; an invalid
+  head or an oversized message is now a warning instead of an error.
 
 ### Added
 

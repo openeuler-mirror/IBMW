@@ -298,6 +298,7 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
   static constexpr char kHeadByte2 = 'T';
   static constexpr size_t kEagerRecvSize = 4 * 1024 * 1024;
   static constexpr size_t kRecvProbeSize = 256 * 1024;
+  static constexpr uint64_t kPeerLogIntervalMs = 1000;
 
   static bool CheckListenAddr(const Tcp::endpoint& ep) {
     try {
@@ -434,18 +435,29 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
                     read_data_size, RemoteAddr());
                 tick_has_data_ = true;
 
-                MW_REQUIRE(
-                    read_data_size == kHeadSize && head_buf[0] == kHeadByte1 && head_buf[1] == kHeadByte2,
-                    "Get an invalid head, remote addr {}, read_data_size: {}, head_buf[0]: {}, head_buf[1]: {}.",
-                    RemoteAddr(), read_data_size,
-                    static_cast<uint8_t>(head_buf[0]),
-                    static_cast<uint8_t>(head_buf[1]));
+                // What a peer sends must not flood the log: the session ends
+                // here and these are limited across all sessions.
+                if (read_data_size != kHeadSize || head_buf[0] != kHeadByte1 || head_buf[1] != kHeadByte2) [[unlikely]] {
+                  MW_WARN_INTERVAL(
+                      kPeerLogIntervalMs,
+                      "Get an invalid head, remote addr {}, read_data_size: {}, head_buf[0]: {}, head_buf[1]: {}.",
+                      RemoteAddr(), read_data_size,
+                      static_cast<uint8_t>(head_buf[0]),
+                      static_cast<uint8_t>(head_buf[1]));
+                  break;
+                }
 
                 uint32_t msg_len = ibmw::common::util::GetUint32FromBuf(&head_buf[2]);
 
-                MW_REQUIRE(
-                    msg_len <= session_options_ptr_->max_recv_size,
-                    "Msg too large, remote addr {}, size: {}.", RemoteAddr(), msg_len);
+                // A client's keep-alive: tick_has_data_ above was all it is for.
+                if (msg_len == 0) continue;
+
+                if (msg_len > session_options_ptr_->max_recv_size) [[unlikely]] {
+                  MW_WARN_INTERVAL(
+                      kPeerLogIntervalMs,
+                      "Msg too large, remote addr {}, size: {}.", RemoteAddr(), msg_len);
+                  break;
+                }
 
                 auto msg_buf = std::make_shared<Streambuf>();
 
@@ -476,7 +488,8 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
                     });
               }
             } catch (const std::exception& e) {
-              MW_WARN(
+              MW_WARN_INTERVAL(
+                  kPeerLogIntervalMs,
                   "Tcp svr session recv co get exception and exit, remote addr {}, exception info: {}",
                   RemoteAddr(), e.what());
             }
