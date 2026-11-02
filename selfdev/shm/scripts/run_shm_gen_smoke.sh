@@ -63,9 +63,30 @@ fail() {
 
 # The shm root of the running pair, removed however the script ends.
 CURRENT_ROOT=""
+# The running build step (a timeout process leading its own process group).
+STEP_PID=""
+stop_step() {
+  [[ -z "${STEP_PID}" ]] && return
+  kill -TERM "${STEP_PID}" 2>/dev/null
+  wait "${STEP_PID}" 2>/dev/null
+  STEP_PID=""
+}
 trap '[[ -z "${CURRENT_ROOT}" ]] || rm -rf "${CURRENT_ROOT}"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'stop_step; exit 130' INT
+trap 'stop_step; exit 143' TERM
+
+# limited <command...>: run one configure/build step for at most
+# BUILD_TIMEOUT seconds. timeout puts the step in its own process group, out
+# of reach of a terminal Ctrl-C, so it runs in the background and an
+# interrupt of the script stops it through stop_step.
+limited() {
+  timeout "${BUILD_TIMEOUT}" "$@" &
+  STEP_PID=$!
+  local rc=0
+  wait "${STEP_PID}" || rc=$?
+  STEP_PID=""
+  return "${rc}"
+}
 
 mkdir -p "${BUILD_ROOT}"
 BUILD_ROOT="$(cd "${BUILD_ROOT}" && pwd)"
@@ -74,7 +95,7 @@ BUILD_ROOT="$(cd "${BUILD_ROOT}" && pwd)"
 if [[ -z "${IBMW_PREFIX:-}" ]]; then
   IBMW_PREFIX="${BUILD_ROOT}/ibmw-install"
   log "configure+build+install IBMW into ${IBMW_PREFIX}"
-  timeout "${BUILD_TIMEOUT}" cmake -S "${REPO_DIR}" -B "${BUILD_ROOT}/ibmw" "${GENERATOR_ARG[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  limited cmake -S "${REPO_DIR}" -B "${BUILD_ROOT}/ibmw" "${GENERATOR_ARG[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DCMAKE_PREFIX_PATH="${ROS2_PREFIX}" \
         -DIBMW_BUILD_RUNTIME=ON -DIBMW_INSTALL=ON -DIBMW_BUILD_ROS2_TYPES=ON -DIBMW_BUILD_SHM_EXTENSION=ON \
         -DIBMW_BUILD_CLI_TOOLS=ON -DIBMW_DDS_PROVIDER=SYSTEM -DIBMW_ENABLE_DLOPEN_DEEPBIND=ON \
@@ -84,7 +105,7 @@ if [[ -z "${IBMW_PREFIX:-}" ]]; then
         -DIBMW_BUILD_WITH_WERROR=OFF "${EXTRA_ARGS[@]}" \
         >"${BUILD_ROOT}/ibmw.configure.log" 2>&1 ||
     { tail -40 "${BUILD_ROOT}/ibmw.configure.log"; fail "IBMW configure (see ${BUILD_ROOT}/ibmw.configure.log)"; }
-  timeout "${BUILD_TIMEOUT}" cmake --build "${BUILD_ROOT}/ibmw" -j "${JOBS}" >"${BUILD_ROOT}/ibmw.build.log" 2>&1 ||
+  limited cmake --build "${BUILD_ROOT}/ibmw" -j "${JOBS}" >"${BUILD_ROOT}/ibmw.build.log" 2>&1 ||
     { tail -40 "${BUILD_ROOT}/ibmw.build.log"; fail "IBMW build (see ${BUILD_ROOT}/ibmw.build.log)"; }
   rm -rf "${IBMW_PREFIX}"
   cmake --install "${BUILD_ROOT}/ibmw" --prefix "${IBMW_PREFIX}" >"${BUILD_ROOT}/ibmw.install.log" 2>&1 ||
@@ -102,10 +123,10 @@ gen_build() {
   rm -rf "${out}" "${bld}"
   python3 "${REPO_DIR}/src/tools/ibmw_gen/ibmw_gen.py" "${yaml}" -o "${out}" >"${BUILD_ROOT}/${name}.gen.log" 2>&1 ||
     { cat "${BUILD_ROOT}/${name}.gen.log"; fail "ibmw_gen ${name}"; }
-  timeout "${BUILD_TIMEOUT}" cmake -S "${out}" -B "${bld}" "${GENERATOR_ARG[@]}" -DCMAKE_PREFIX_PATH="${IBMW_PREFIX};${ROS2_PREFIX}" \
+  limited cmake -S "${out}" -B "${bld}" "${GENERATOR_ARG[@]}" -DCMAKE_PREFIX_PATH="${IBMW_PREFIX};${ROS2_PREFIX}" \
         -DCMAKE_CXX_FLAGS="${cxx}" >"${BUILD_ROOT}/${name}.configure.log" 2>&1 ||
     { tail -40 "${BUILD_ROOT}/${name}.configure.log"; fail "configure ${name} (see ${BUILD_ROOT}/${name}.configure.log)"; }
-  timeout "${BUILD_TIMEOUT}" cmake --build "${bld}" -j "${JOBS}" >"${BUILD_ROOT}/${name}.build.log" 2>&1 ||
+  limited cmake --build "${bld}" -j "${JOBS}" >"${BUILD_ROOT}/${name}.build.log" 2>&1 ||
     { tail -40 "${BUILD_ROOT}/${name}.build.log"; fail "build ${name} (see ${BUILD_ROOT}/${name}.build.log)"; }
 }
 
@@ -139,6 +160,7 @@ run_pair() {
     kill -KILL "${pub_pid}" "${sub_pid}" 2>/dev/null
     wait "${pub_pid}" || pub_rc=$?
     wait "${sub_pid}" || sub_rc=$?
+    pub_pid="" sub_pid=""
     echo "${pub} exit ${pub_rc}, ${sub} exit ${sub_rc}"
     [[ ${pub_rc} -eq 0 && ${sub_rc} -eq 0 ]]
   )
@@ -163,7 +185,14 @@ gen_build loaned "${GEN_DIR}/loaned_shm.ibmw.yaml" ""
 # shm_ext/shm_transport_driver.h by the direct modules) includes
 # observability/comm_trace.h, which is not installed. Take it from the source
 # tree until the install rules carry it.
-gen_build direct "${GEN_DIR}/direct_shm.ibmw.yaml" "-isystem ${REPO_DIR}/src/core"
+direct_cxx=""
+if [[ ! -f "${IBMW_PREFIX}/include/ibmw/observability/comm_trace.h" ]] &&
+   ! find "${IBMW_PREFIX}/include" -path '*/observability/comm_trace.h' -print -quit | grep -q .; then
+  echo "WARN: core issue C5: ${IBMW_PREFIX} does not install observability/comm_trace.h;" \
+       "the direct project is built with -isystem ${REPO_DIR}/src/core."
+  direct_cxx="-isystem ${REPO_DIR}/src/core"
+fi
+gen_build direct "${GEN_DIR}/direct_shm.ibmw.yaml" "${direct_cxx}"
 
 run_pair loaned loan_pub_app loan_sub_app "\[RECV\] point_topic"
 run_pair direct direct_pub_app direct_sub_app "Received direct shm message"
