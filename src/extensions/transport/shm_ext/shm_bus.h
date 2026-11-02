@@ -44,6 +44,11 @@ IBMW_SHM_EXPORT bool IsShmCallbackThread() noexcept;
 // `min_size`. nullopt when the result exceeds the largest selfdev class.
 IBMW_SHM_EXPORT std::optional<size_t> NextShmLoanSize(size_t current, size_t min_size) noexcept;
 
+// Parses a numeric group id (decimal digits only). nullopt when `text` is not
+// a number, is out of range, or is (gid_t)-1, which chown() reads as "no change".
+// Names are not looked up: getgrnam needs /etc/group, which OHOS may not have.
+IBMW_SHM_EXPORT std::optional<gid_t> ParseShmGroupId(std::string_view text) noexcept;
+
 // Admits hot-path operations until Close(); Close() + WaitIdle() lets shutdown
 // observe that no Send/Loan is still running.
 class IBMW_SHM_EXPORT ShmOperationGate {
@@ -74,6 +79,8 @@ class IBMW_SHM_EXPORT ShmOperationGate {
 
   Lease TryAcquire() noexcept;
   void Close() noexcept;
+  // Admits operations again after a completed shutdown (re-Initialize).
+  void Reopen() noexcept;
   bool Accepting() const noexcept { return accepting_.load(std::memory_order_seq_cst); }
   bool WaitIdle(std::chrono::steady_clock::time_point deadline) noexcept;
   size_t Active() const noexcept { return active_.load(std::memory_order_acquire); }
@@ -95,13 +102,38 @@ struct ShmDeliveryOptions {
 };
 
 struct ShmBusOptions {
-  std::string domain;      // empty: "default" (or $IBMW_SHM_DOMAIN)
-  std::string root_dir;    // empty: $IBMW_SHM_ROOT, else /tmp
+  // Each location setting resolves as option > environment > default.
+  std::string domain;    // empty: $IBMW_SHM_DOMAIN, else "default"
+  // empty: $IBMW_SHM_ROOT, else /dev/shm if usable, else /tmp. OHOS has no
+  // default: without either, Initialize() throws.
+  std::string root_dir;
+  // unset: $IBMW_SHM_GROUP (numeric), else no group (private to the user).
+  std::optional<gid_t> group;
   std::string runtime_name;
   uint64_t shm_init_size = 1024;  // first loan size of a framed Send()
   uint64_t max_bytes_per_publisher = 512ull << 20;
   bool prefault = false;
+  // Refuse to publish when the kernel cannot seal segments read-only, instead
+  // of degrading with a warning.
+  bool require_read_only = false;
   std::string listener_thread_name = "ibmw_shm_lsn";
+};
+
+// Selfdev publisher options of one bus and delivery configuration.
+IBMW_SHM_EXPORT shm::PublisherOptions MakeShmPublisherOptions(const ShmBusOptions& bus,
+                                                              const ShmDeliveryOptions& delivery);
+
+// Selfdev health counters summed over the live publishers and subscriptions of
+// a bus. Counters of closed endpoints are gone with them.
+struct ShmBusStats {
+  uint64_t quarantined = 0;         // publishers
+  uint64_t quarantined_chunks = 0;  // publishers
+  uint64_t unverifiable_peers = 0;  // publishers
+  uint64_t unsealed_segments = 0;   // publishers
+  uint64_t unknown_messages = 0;    // publishers + subscribers
+  uint64_t deferred_sends = 0;      // publishers + subscribers
+  uint64_t send_queue_overflows = 0;  // publishers + subscribers
+  uint64_t connect_retries = 0;     // subscribers
 };
 
 class ShmPublisher;
@@ -246,6 +278,8 @@ class IBMW_SHM_EXPORT ShmSubscription
   bool QuiescentLocked() const noexcept { return active_callbacks_ == 0 && outstanding_ == 0; }
   void Finalize() noexcept;
 
+  // Runs on the listener thread before any callback; set before attaching.
+  std::shared_ptr<const std::function<void()>> thread_setup_;
   std::string url_;
   ShmMessageHandler handler_;
   ShmSubscriptionOptions options_;
@@ -259,9 +293,13 @@ class IBMW_SHM_EXPORT ShmSubscription
   bool stopping_ = false;
   size_t active_callbacks_ = 0;
   size_t outstanding_ = 0;
+  // Every held slot is on lease and a sample waits behind them (only possible
+  // at max_outstanding 256, with no spare slot): the next release drops it.
+  bool starved_ = false;
 
   std::mutex attach_mu_;
   std::shared_ptr<shm::Listener> listener_;  // set while attached
+  bool attach_closed_ = false;               // finalized: never attach again
   // Declared last: destroyed first, which detaches it from the listener and
   // waits for a running callback before the members above go away.
   shm::Subscriber subscriber_;
@@ -273,6 +311,9 @@ class IBMW_SHM_EXPORT ShmListenerPool {
  public:
   explicit ShmListenerPool(std::string thread_name) : thread_name_(std::move(thread_name)) {}
   void SetThreadName(std::string thread_name);
+  // Applied once on each listener thread, before its first callback.
+  void SetThreadSetup(std::function<void()> setup);
+  // No-op (true) for a subscription already attached, stopped or finalized.
   bool Attach(const std::shared_ptr<ShmSubscription>& subscription);
   size_t Threads() const;
   void Clear() noexcept;
@@ -282,6 +323,7 @@ class IBMW_SHM_EXPORT ShmListenerPool {
 
  private:
   std::string thread_name_;
+  std::shared_ptr<const std::function<void()>> thread_setup_;
   mutable std::mutex mu_;
   std::vector<std::shared_ptr<shm::Listener>> listeners_;
 };
@@ -295,6 +337,8 @@ struct ShmSubscriptionRegistry {
       subscriptions;
   std::unordered_set<std::string, ibmw::common::util::StringHash, std::equal_to<>> reserved;
   bool shutting_down = false;
+  // Set by ShmBus::StartDelivery(); until then subscriptions are not attached.
+  bool delivery_started = false;
 
   void Remove(std::string_view url, const ShmSubscription* expected) noexcept;
 };
@@ -307,14 +351,24 @@ class IBMW_SHM_EXPORT ShmBus {
   ShmBus(const ShmBus&) = delete;
   ShmBus& operator=(const ShmBus&) = delete;
 
-  // Throws std::runtime_error when the selfdev runtime cannot start.
+  // Throws std::runtime_error when the selfdev runtime cannot start. May be
+  // called again after Shutdown() completed: the bus starts a new generation
+  // with no publishers or subscriptions. The process-wide selfdev runtime stays
+  // up, so a new generation must resolve to the same service directory, and
+  // drivers of the old generation stay refused (see Generation()).
   void Initialize(const ShmBusOptions& options);
   void SetDeliveryOptions(const ShmDeliveryOptions& options) noexcept;
   ShmDeliveryOptions DeliveryOptions() const noexcept;
   const ShmBusOptions& Options() const noexcept { return options_; }
   void SetListenerThreadName(std::string name);
+  // Thread affinity/scheduling hook, see ShmListenerPool::SetThreadSetup.
+  void SetListenerThreadSetup(std::function<void()> setup);
 
   ShmOperationGate::Lease TryAcquireOperation() noexcept { return gate_->TryAcquire(); }
+  // Bumped by a re-Initialize before it reopens the gate. A pointer cached from
+  // a publisher is valid while a lease is held and the generation is unchanged:
+  // a lease that succeeded on a reopened gate also sees the new value.
+  uint64_t Generation() const noexcept { return generation_.load(std::memory_order_acquire); }
 
   // Creates the publisher of `url` or returns the existing one. Throws on
   // failure or after shutdown started.
@@ -325,10 +379,16 @@ class IBMW_SHM_EXPORT ShmBus {
   void RollbackPublisher(std::string_view url, const ShmPublisher* expected) noexcept;
 
   // Throws when the URL is taken (or not reserved with url_reserved), the
-  // subscriber cannot be created or shutdown started.
+  // subscriber cannot be created or shutdown started. No callback runs before
+  // StartDelivery(); samples published until then wait in the subscriber queue
+  // under its usual policy.
   std::shared_ptr<ShmSubscription> RegisterSubscriber(
       std::string_view url, ShmMessageHandler handler,
       ShmSubscriptionOptions options = {});
+  // Attaches the registered subscriptions to listener threads and those
+  // registered later right away. Idempotent; a no-op once shutdown started.
+  // Throws when a listener thread cannot start; a retry attaches the rest.
+  void StartDelivery();
   bool ReserveSubscriberUrl(std::string_view url);
   void RollbackSubscriberUrl(std::string_view url) noexcept;
 
@@ -347,14 +407,18 @@ class IBMW_SHM_EXPORT ShmBus {
   size_t PublisherCount() const;
   size_t SubscriptionCount() const;
   size_t ListenerThreads() const { return listeners_.Threads(); }
+  ShmBusStats Stats() const;
 
  private:
   // Frees the URL if its previous subscription was stopped and is quiescent.
   bool ReclaimStoppedLocked(std::string_view url) noexcept;
+  // Clears the state a finished shutdown left, for a new generation.
+  void ResetForNewGenerationLocked();
 
   ShmBusOptions options_;
   // Heap-held so a failed destruction can leak it (leases point into it).
   std::unique_ptr<ShmOperationGate> gate_ = std::make_unique<ShmOperationGate>();
+  std::atomic_uint64_t generation_{0};
 
   mutable std::mutex lifecycle_mu_;
   bool initialized_ = false;

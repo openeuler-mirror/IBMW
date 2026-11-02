@@ -4,6 +4,7 @@
 #include "shm_ext/shm_bus.h"
 
 #include <algorithm>
+#include <charconv>
 #include <stdexcept>
 
 #include "shm_ext/global.h"
@@ -35,6 +36,30 @@ std::chrono::milliseconds Remaining(std::chrono::steady_clock::time_point deadli
   return std::max(left, std::chrono::milliseconds(0));
 }
 
+// Longest sleep of a shutdown wait. Releases on the fast path do not notify
+// (see ShmOperationGate::Release), so this also bounds how late a waiter sees
+// the count reach zero.
+constexpr std::chrono::milliseconds kWaitSlice{1};
+
+// Waits on a steady deadline with relative slices. wait_until(steady) is not
+// used: libc++ on musl has no pthread_cond_clockwait and turns it into a wall
+// clock wait, which a clock step moves. Here the deadline stays steady; a step
+// backward can only stretch the one slice it lands in (wait_for has the same
+// wall clock underneath on that libc++).
+template <class Predicate>
+bool WaitWithDeadline(std::condition_variable& cv, std::unique_lock<std::mutex>& lock,
+                      std::chrono::steady_clock::time_point deadline, Predicate predicate) {
+  while (!predicate()) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return false;
+    cv.wait_for(lock, std::min<std::chrono::steady_clock::duration>(deadline - now, kWaitSlice));
+  }
+  return true;
+}
+
+// Set once a listener thread applied ShmListenerPool's thread setup.
+thread_local bool t_listener_thread_ready = false;
+
 }  // namespace
 
 bool IsShmCallbackThread() noexcept { return t_current_subscription != nullptr; }
@@ -44,6 +69,16 @@ std::optional<size_t> NextShmLoanSize(size_t current, size_t min_size) noexcept 
   size_t size = std::clamp<size_t>(current, 1, kMaxLoanSize);
   while (size < min_size) size = std::min(size * 2, kMaxLoanSize);
   return size;
+}
+
+std::optional<gid_t> ParseShmGroupId(std::string_view text) noexcept {
+  uint64_t value = 0;
+  const char* const end = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+  if (text.empty() || ec != std::errc() || ptr != end) return std::nullopt;
+  const auto gid = static_cast<gid_t>(value);
+  if (static_cast<uint64_t>(gid) != value || gid == static_cast<gid_t>(-1)) return std::nullopt;
+  return gid;
 }
 
 // ============================================================ gate
@@ -56,7 +91,12 @@ void ShmOperationGate::Lease::Reset() noexcept {
 // The gate and the loan count use "publish my flag, then read the other's"
 // on both sides (Dekker); that needs seq_cst, acquire/release alone allows
 // both sides to miss each other.
+//
+// The first load only refuses early: callers that keep retrying after Close()
+// must not keep the count from ever reading zero. Admission is decided by the
+// load after the increment.
 ShmOperationGate::Lease ShmOperationGate::TryAcquire() noexcept {
+  if (!accepting_.load(std::memory_order_seq_cst)) return Lease();
   active_.fetch_add(1, std::memory_order_seq_cst);
   if (!accepting_.load(std::memory_order_seq_cst)) {
     Release();
@@ -65,10 +105,20 @@ ShmOperationGate::Lease ShmOperationGate::TryAcquire() noexcept {
   return Lease(this);
 }
 
-// Decrements under the mutex: WaitIdle checks its predicate under it too, so
-// a waiter that sees zero (and may then destroy the gate) cannot overtake a
-// releaser still touching the gate.
+// While the gate is open nobody can be waiting yet, so the mutex is skipped:
+// this gate is shared by every topic of the bus. The decrement is the last
+// access to the gate, so a waiter that sees zero and destroys it cannot overtake
+// this path. If Close() lands between the load and the decrement, the missing
+// notify costs the waiter at most one kWaitSlice.
+//
+// After Close() the slow path decrements under the mutex: WaitIdle checks its
+// predicate under it too, so a waiter that sees zero cannot overtake a releaser
+// still about to notify.
 void ShmOperationGate::Release() noexcept {
+  if (accepting_.load(std::memory_order_seq_cst)) [[likely]] {
+    active_.fetch_sub(1, std::memory_order_seq_cst);
+    return;
+  }
   std::lock_guard<std::mutex> lock(mu_);
   if (active_.fetch_sub(1, std::memory_order_seq_cst) == 1 && !accepting_.load(std::memory_order_seq_cst)) {
     cv_.notify_all();
@@ -77,23 +127,26 @@ void ShmOperationGate::Release() noexcept {
 
 void ShmOperationGate::Close() noexcept { accepting_.store(false, std::memory_order_seq_cst); }
 
+void ShmOperationGate::Reopen() noexcept { accepting_.store(true, std::memory_order_seq_cst); }
+
 bool ShmOperationGate::WaitIdle(std::chrono::steady_clock::time_point deadline) noexcept {
   std::unique_lock<std::mutex> lock(mu_);
-  return cv_.wait_until(lock, deadline, [this] { return active_.load(std::memory_order_seq_cst) == 0; });
+  return WaitWithDeadline(cv_, lock, deadline, [this] { return active_.load(std::memory_order_seq_cst) == 0; });
 }
 
 // ============================================================ publisher
 
-namespace {
-
-shm::PublisherOptions MakePublisherOptions(const ShmBusOptions& bus, const ShmDeliveryOptions& delivery) {
+shm::PublisherOptions MakeShmPublisherOptions(const ShmBusOptions& bus, const ShmDeliveryOptions& delivery) {
   shm::PublisherOptions o;
   o.too_slow = delivery.lossless ? shm::TooSlowPolicy::kWaitForConsumer : shm::TooSlowPolicy::kDiscardOldest;
   o.max_bytes = bus.max_bytes_per_publisher;
   o.prefault = bus.prefault;
   o.block_timeout = delivery.publish_block_timeout;
+  o.require_read_only = bus.require_read_only;
   return o;
 }
+
+namespace {
 
 // The iceoryx bus truncated long names (distinct topics could collide);
 // shm refuses them with a clear error instead.
@@ -111,7 +164,7 @@ ShmPublisher::ShmPublisher(std::string url, const ShmBusOptions& bus_options, co
                            size_t size_hint)
     : url_(std::move(url)),
       size_hint_(size_hint),
-      publisher_(url_, MakePublisherOptions(bus_options, delivery)) {
+      publisher_(url_, MakeShmPublisherOptions(bus_options, delivery)) {
   for (auto& slot : slots_) slot.owner = this;
 }
 
@@ -120,6 +173,7 @@ constexpr uint32_t kSlotFree = 0, kSlotBusy = 1, kSlotLoaned = 2;
 }  // namespace
 
 bool ShmPublisher::BeginLoan() noexcept {
+  if (closing_.load(std::memory_order_seq_cst)) return false;  // see TryAcquire
   outstanding_.fetch_add(1, std::memory_order_seq_cst);
   if (closing_.load(std::memory_order_seq_cst)) {
     EndLoan();
@@ -128,10 +182,14 @@ bool ShmPublisher::BeginLoan() noexcept {
   return true;
 }
 
-// Under the mutex for the same reason as ShmOperationGate::Release: handle
-// publishes hold no gate lease, so once WaitForLoans sees zero the publisher
-// may be destroyed right away.
+// Same two paths as ShmOperationGate::Release: handle publishes hold no gate
+// lease, so once WaitForLoans sees zero the publisher may be destroyed right
+// away, and nothing touches it after the decrement here.
 void ShmPublisher::EndLoan() noexcept {
+  if (!closing_.load(std::memory_order_seq_cst)) [[likely]] {
+    outstanding_.fetch_sub(1, std::memory_order_seq_cst);
+    return;
+  }
   std::lock_guard<std::mutex> lock(wait_mu_);
   if (outstanding_.fetch_sub(1, std::memory_order_seq_cst) == 1 && closing_.load(std::memory_order_seq_cst)) {
     wait_cv_.notify_all();
@@ -219,7 +277,8 @@ void ShmPublisher::BeginShutdown() noexcept {
 
 bool ShmPublisher::WaitForLoans(std::chrono::steady_clock::time_point deadline) noexcept {
   std::unique_lock<std::mutex> lock(wait_mu_);
-  return wait_cv_.wait_until(lock, deadline, [this] { return outstanding_.load(std::memory_order_seq_cst) == 0; });
+  return WaitWithDeadline(wait_cv_, lock, deadline,
+                          [this] { return outstanding_.load(std::memory_order_seq_cst) == 0; });
 }
 
 // ============================================================ subscription
@@ -282,6 +341,18 @@ void ShmSubscription::OnEvent(shm::Subscriber*, void* context) {
   // The listener detaches the subscriber before ShmSubscription's members
   // are destroyed, so `raw` is valid; lock() fails once destruction began.
   auto* raw = static_cast<ShmSubscription*>(context);
+  if (!t_listener_thread_ready) [[unlikely]] {
+    t_listener_thread_ready = true;
+    if (raw->thread_setup_) {
+      try {
+        (*raw->thread_setup_)();
+      } catch (const std::exception& e) {
+        MW_ERROR("Cannot apply the shm listener thread options: {}", e.what());
+      } catch (...) {
+        MW_ERROR("Cannot apply the shm listener thread options: unknown exception.");
+      }
+    }
+  }
   if (auto self = raw->weak_from_this().lock()) self->Drain();
 }
 
@@ -297,6 +368,16 @@ void ShmSubscription::Drain() noexcept {
     if (taken) {
       more = true;
       Deliver(taken.value());
+    } else if (options_.retained && taken.error() == shm::Error::kTooManyHeld) {
+      // The listener fires once per new sample, so nothing would come back for
+      // this one: ReleaseSample picks it up. If a release just raced past, the
+      // slot it freed is usable right now.
+      std::lock_guard<std::mutex> lock(mu_);
+      if (outstanding_ < options_.max_outstanding) {
+        more = true;
+      } else {
+        starved_ = true;
+      }
     }
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -372,6 +453,16 @@ void ShmSubscription::ReleaseSample(const void* payload, bool leased) noexcept {
   if (!leased) return;
   {
     std::lock_guard<std::mutex> lock(mu_);
+    if (starved_ || stopping_) {
+      // Arrived over the lease limit: dropped, never replayed, the same as a
+      // sample that finds the spare slot of a smaller max_outstanding.
+      const bool count = starved_ && !stopping_;
+      starved_ = false;
+      while (auto t = subscriber_.Take()) {
+        subscriber_.Release(t.value());
+        if (count) dropped_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
     --outstanding_;
   }
   cv_.notify_all();
@@ -403,6 +494,7 @@ void ShmSubscription::Finalize() noexcept {
   std::shared_ptr<shm::Listener> listener;
   {
     std::lock_guard<std::mutex> lock(attach_mu_);
+    attach_closed_ = true;
     listener = std::move(listener_);
   }
   if (listener) listener->Detach(subscriber_);
@@ -416,7 +508,7 @@ bool ShmSubscription::Close(std::chrono::milliseconds timeout) noexcept {
   if (t_current_subscription == this) return false;
   {
     std::unique_lock<std::mutex> lock(mu_);
-    if (!cv_.wait_until(lock, deadline, [this] { return QuiescentLocked(); })) return false;
+    if (!WaitWithDeadline(cv_, lock, deadline, [this] { return QuiescentLocked(); })) return false;
   }
   Finalize();
   return true;
@@ -439,11 +531,21 @@ void ShmListenerPool::SetThreadName(std::string thread_name) {
   thread_name_ = std::move(thread_name);
 }
 
+void ShmListenerPool::SetThreadSetup(std::function<void()> setup) {
+  std::lock_guard<std::mutex> lock(mu_);
+  thread_setup_ = setup ? std::make_shared<const std::function<void()>>(std::move(setup)) : nullptr;
+}
+
 bool ShmListenerPool::Attach(const std::shared_ptr<ShmSubscription>& subscription) {
   std::lock_guard<std::mutex> lock(mu_);
+  // attach_mu_ is held across the listener's Attach so Finalize() either sees
+  // the listener to detach from or stops this attach.
+  std::lock_guard<std::mutex> attach_lock(subscription->attach_mu_);
+  if (subscription->listener_ || subscription->attach_closed_ || subscription->Stopping()) return true;
+  // Written before the listener's lock publishes the subscription to its thread.
+  subscription->thread_setup_ = thread_setup_;
   auto try_attach = [&](const std::shared_ptr<shm::Listener>& l) {
     if (!l->Attach(subscription->subscriber_, &ShmSubscription::OnEvent, subscription.get())) return false;
-    std::lock_guard<std::mutex> attach_lock(subscription->attach_mu_);
     subscription->listener_ = l;
     return true;
   };
@@ -506,27 +608,53 @@ ShmBus::~ShmBus() {
 
 void ShmBus::Initialize(const ShmBusOptions& options) {
   std::lock_guard<std::mutex> lock(lifecycle_mu_);
-  if (initialized_) throw std::runtime_error("shm bus is already initialized");
+  if (initialized_ && !shut_down_) throw std::runtime_error("shm bus is already initialized");
+  const auto init_size = NextShmLoanSize(options.shm_init_size, options.shm_init_size);
+  if (!init_size) throw std::runtime_error("shm_init_size exceeds the largest shm payload");
   shm::RuntimeOptions ro;
   ro.name = options.runtime_name;
   if (!options.domain.empty()) ro.domain = options.domain;
   ro.root_dir = options.root_dir;
+  ro.group = options.group;
   if (auto r = shm::Runtime::Init(ro); !r) {
     if (r.error() == shm::Error::kAlreadyInitialized) {
       throw std::runtime_error("shm runtime already runs in '" + shm::Runtime::ServiceDirectory() +
-                               "'; a process supports one shm domain/root, requested domain '" + options.domain +
-                               "', root '" + options.root_dir + "'");
+                               "'; a process supports one shm domain/root/group, requested domain '" + options.domain +
+                               "', root '" + options.root_dir + "', group '" +
+                               (options.group ? std::to_string(*options.group) : std::string()) + "'");
+    }
+    if (r.error() == shm::Error::kInvalidArg) {
+      throw std::runtime_error(
+          "shm runtime configuration is invalid: root_dir/IBMW_SHM_ROOT is required on OHOS and must leave the "
+          "service directory within the socket path limit, domain/IBMW_SHM_DOMAIN must be at most 32 characters "
+          "without '/', IBMW_SHM_GROUP must be a numeric gid");
     }
     throw std::runtime_error(std::string("shm runtime initialisation failed: ") + shm::ErrorName(r.error()));
   }
+  // Nothing above changed the bus: a failed re-Initialize leaves it shut down.
+  if (shut_down_ || prepared_ || !gate_->Accepting()) ResetForNewGenerationLocked();
   options_ = options;
-  if (const auto size = NextShmLoanSize(options_.shm_init_size, options_.shm_init_size)) {
-    options_.shm_init_size = *size;
-  } else {
-    throw std::runtime_error("shm_init_size exceeds the largest shm payload");
-  }
+  options_.shm_init_size = *init_size;
   listeners_.SetThreadName(options_.listener_thread_name);
   initialized_ = true;
+}
+
+void ShmBus::ResetForNewGenerationLocked() {
+  prepared_ = false;
+  shut_down_ = false;
+  delivery_ = {};
+  {
+    std::unique_lock<std::shared_mutex> lock(pub_mu_);
+    pub_closed_ = false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(registry_->mu);
+    registry_->shutting_down = false;
+    registry_->delivery_started = false;
+  }
+  listeners_.SetThreadSetup(nullptr);
+  generation_.fetch_add(1, std::memory_order_release);
+  gate_->Reopen();  // last: a lease from here on sees all of the above
 }
 
 void ShmBus::SetDeliveryOptions(const ShmDeliveryOptions& options) noexcept {
@@ -540,6 +668,8 @@ ShmDeliveryOptions ShmBus::DeliveryOptions() const noexcept {
 }
 
 void ShmBus::SetListenerThreadName(std::string name) { listeners_.SetThreadName(std::move(name)); }
+
+void ShmBus::SetListenerThreadSetup(std::function<void()> setup) { listeners_.SetThreadSetup(std::move(setup)); }
 
 ShmPublisher* ShmBus::RegisterPublisher(std::string_view url, size_t size_hint, bool* created) {
   auto operation = TryAcquireOperation();
@@ -646,6 +776,7 @@ std::shared_ptr<ShmSubscription> ShmBus::RegisterSubscriber(std::string_view url
       registry_->reserved.emplace(url);
     }
   }
+  bool attach_now = false;
   std::shared_ptr<ShmSubscription> subscription;
   try {
     subscription = std::make_shared<ShmSubscription>(std::string(url), std::move(handler), options, delivery,
@@ -659,19 +790,36 @@ std::shared_ptr<ShmSubscription> ShmBus::RegisterSubscriber(std::string_view url
       if (registry_->shutting_down) throw std::runtime_error("shm bus is shutting down");
       registry_->reserved.erase(registry_->reserved.find(url));
       registry_->subscriptions.emplace(std::string(url), subscription);
+      attach_now = registry_->delivery_started;
     }
   } catch (...) {
     RollbackSubscriberUrl(url);
     throw;
   }
   // Attached last: no callback can run before the subscription is
-  // registered, so Close()/shutdown always see it.
-  if (!listeners_.Attach(subscription)) {
+  // registered, so Close()/shutdown always see it. Decided under the registry
+  // lock, so StartDelivery()'s snapshot has it whenever this skips the attach.
+  if (attach_now && !listeners_.Attach(subscription)) {
     subscription->Stop();
     subscription->TryFinalize();
     throw std::runtime_error("cannot attach shm subscriber to a listener thread");
   }
   return subscription;
+}
+
+void ShmBus::StartDelivery() {
+  auto operation = TryAcquireOperation();
+  if (!operation) return;
+  std::vector<std::shared_ptr<ShmSubscription>> subscriptions;
+  {
+    std::lock_guard<std::mutex> lock(registry_->mu);
+    if (registry_->shutting_down) return;
+    registry_->delivery_started = true;
+    for (auto& [url, s] : registry_->subscriptions) subscriptions.push_back(s);
+  }
+  for (auto& s : subscriptions) {
+    if (!listeners_.Attach(s)) throw std::runtime_error("cannot attach shm subscriber to a listener thread");
+  }
 }
 
 bool ShmBus::TryPrepareShutdown(std::chrono::milliseconds timeout) noexcept {
@@ -766,6 +914,32 @@ size_t ShmBus::PublisherCount() const {
 size_t ShmBus::SubscriptionCount() const {
   std::lock_guard<std::mutex> lock(registry_->mu);
   return registry_->subscriptions.size();
+}
+
+ShmBusStats ShmBus::Stats() const {
+  ShmBusStats total;
+  {
+    std::shared_lock<std::shared_mutex> lock(pub_mu_);
+    for (const auto& [url, p] : publishers_) {
+      const auto s = p->Stats();
+      total.quarantined += s.quarantined;
+      total.quarantined_chunks += s.quarantined_chunks;
+      total.unverifiable_peers += s.unverifiable_peers;
+      total.unsealed_segments += s.unsealed_segments;
+      total.unknown_messages += s.unknown_messages;
+      total.deferred_sends += s.deferred_sends;
+      total.send_queue_overflows += s.send_queue_overflows;
+    }
+  }
+  std::lock_guard<std::mutex> lock(registry_->mu);
+  for (const auto& [url, sub] : registry_->subscriptions) {
+    const auto s = sub->Stats();
+    total.unknown_messages += s.unknown_messages;
+    total.deferred_sends += s.deferred_sends;
+    total.send_queue_overflows += s.send_queue_overflows;
+    total.connect_retries += s.connect_retries;
+  }
+  return total;
 }
 
 }  // namespace ibmw::extensions::shm_extension

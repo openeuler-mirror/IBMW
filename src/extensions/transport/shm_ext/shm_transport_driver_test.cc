@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -19,8 +20,11 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -30,9 +34,14 @@
 
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
+#include "cpp/module_base.h"
+#include "cpp/transport/transport_handle.h"
 #include "cpp/util/buffer_array_allocator.h"
+#include "engine/transport/transport_driver_dispatcher.h"
+#include "shm_ext/global.h"
 #include "shm_ext/shm_bus.h"
 #include "shm_ext/shm_ctx_publisher.h"
+#include "shm_ext/shm_extension.h"
 #include "shm_ext/shm_pod_publisher.h"
 #include "shm_ext/shm_transport_driver.h"
 #include "yaml-cpp/yaml.h"
@@ -563,8 +572,10 @@ TEST_F(ShmDriverTest, InitializeValidatesOptions) {
 TEST_F(ShmDriverTest, DriverNameAliasIsDropIn) {
   auto& d = Init(YAML::Node(), {}, "iceoryx");
   EXPECT_EQ(d.Name(), "iceoryx");
-  EXPECT_EQ(d.Slot(), ::ibmw::DriverSlotFromString("iceoryx"));
-  EXPECT_NE(d.Slot(), ::ibmw::DriverSlotFromString(ShmTransportDriver::kStableDriverId));
+  // Routing follows the name; the slot is the C++ type and never follows it.
+  EXPECT_EQ(d.Slot(), ::ibmw::DriverSlotFromString("shm"));
+  EXPECT_EQ(d.Slot(), IBMW_DRIVER_ID(ShmTransportDriver));
+  EXPECT_NE(d.Slot(), ::ibmw::DriverSlotFromString("iceoryx"));
 
   const auto info = IntInfo(UniqueTopic());
   Received rx;
@@ -1441,6 +1452,748 @@ TEST_F(ShmDriverTest, ConflictingDomainIsRejected) {
   ShmBusOptions o;
   o.domain = "ext28_other";
   EXPECT_THROW(other.Initialize(o), std::runtime_error);
+}
+
+}  // namespace
+}  // namespace ibmw::extensions::shm_extension
+
+namespace ibmw::extensions::shm_extension {
+namespace {
+
+// ============================================================ driver slot
+
+// Type-level stand-in for iceoryx_ext's driver (not built here): its slot is
+// what a module typed for that driver compares against.
+struct IceoryxDriverStandIn {
+  static constexpr const char* kStableDriverId = "iceoryx";
+};
+
+template <class DriverT>
+class SlotModule : public ibmw::Module {
+  IBMW_USE_DRIVER(DriverT, driver_)
+
+ public:
+  ibmw::ModuleDescriptor Info() const override { return {}; }
+  bool Setup(ibmw::Runtime) override { return true; }
+  bool Run() override { return true; }
+  void Stop() override {}
+  DriverT* driver_ = nullptr;
+};
+
+// What Engine does for each driver: BroadcastDriverSlot(td->Slot(), td).
+template <class ModuleT>
+void Broadcast(ModuleT& module, runtime::core::transport::TransportDriver& td) {
+  module.SetDriverSlot(td.Slot(), &td);
+}
+
+// EXT-31 Under the alias "iceoryx" IBMW_USE_DRIVER(ShmTransportDriver) binds,
+// and a module typed for the iceoryx driver is not handed this object.
+TEST_F(ShmDriverTest, AliasKeepsTypedDriverSlot) {
+  auto& d = Init(YAML::Node(), {}, "iceoryx");
+  SlotModule<ShmTransportDriver> typed;
+  Broadcast(typed, d);
+  EXPECT_EQ(typed.driver_, &d);
+
+  SlotModule<IceoryxDriverStandIn> iceoryx_typed;
+  Broadcast(iceoryx_typed, d);
+  EXPECT_EQ(iceoryx_typed.driver_, nullptr);
+  EXPECT_NE(d.Slot(), IBMW_DRIVER_ID(IceoryxDriverStandIn));
+}
+
+// EXT-32 The public loan API routes by name: under the alias a dispatcher
+// configured for "iceoryx" loans, publishes and delivers through this driver.
+TEST_F(ShmDriverTest, AliasServesDispatcherLoanApi) {
+  auto& d = Init(YAML::Node(), {}, "iceoryx");
+  const std::string topic = UniqueTopic();
+  const ibmw_string_view_t msg_type{kIntType, sizeof(kIntType) - 1};
+
+  transport::TransportCatalog catalog;
+  transport::TransportDriverDispatcher dispatcher;
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"iceoryx"}}});
+  dispatcher.SetSubTopicsDriversRules({{".*", {"iceoryx"}}});
+  dispatcher.RegisterTransportDriver(
+      &d, transport::TransportDriverCapabilitiesV1{
+              .shutdown_v1 = static_cast<transport::TransportShutdownCapabilityV1*>(&d),
+              .loaned_pod_registration_v1 = static_cast<transport::LoanedPodRegistrationCapabilityV1*>(&d),
+              .retained_loan_v1 = static_cast<transport::RetainedLoanCapabilityV1*>(&d)});
+  dispatcher.Initialize();
+
+  ASSERT_TRUE(dispatcher.RegisterLoanedPodTopic(transport::RegisterLoanedPodAccessInfoWrapper{
+      .pkg_path = "pkg", .module_name = "module", .topic_name = topic, .msg_type = msg_type,
+      .initial_size_hint = 8, .alignment = 8}));
+  std::atomic<uint64_t> received{0};
+  ibmw::transport::LoanedMessageCallback callback(
+      [&](const ibmw_transport_context_base_t*, const void* payload, size_t size, ibmw_function_base_t*) {
+        uint64_t v = 0;
+        if (size >= sizeof(v)) std::memcpy(&v, payload, sizeof(v));
+        received.store(v);
+      });
+  ASSERT_TRUE(dispatcher.AttachLoaned(transport::MessageHandlerAccessInfoWrapper{
+      .pkg_path = "pkg", .module_name = "module", .topic_name = topic, .msg_type_support = IntTypeSupport(),
+      .callback = callback.NativeHandle()}));
+  StopGuard stop{this};
+  dispatcher.Start();
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(PodUrl(topic, kIntType)); }));
+
+  auto handle = dispatcher.Loan(transport::LoanAccessInfoWrapper{
+      .pkg_path = "pkg", .module_name = "module", .topic_name = topic, .msg_type = msg_type,
+      .requested_size = sizeof(uint64_t), .mode = transport::LoanMode::kPodOnly});
+  ASSERT_EQ(handle.source_driver, &d);
+  ASSERT_NE(handle.user_payload_ptr, nullptr);
+  const uint64_t value = 0x51;
+  std::memcpy(handle.user_payload_ptr, &value, sizeof(value));
+  dispatcher.PublishLoaned(handle);
+  EXPECT_TRUE(WaitFor([&] { return received.load() == value; }));
+}
+
+// ============================================================ listener threads
+
+struct CallbackThreadProbe {
+  std::mutex mu;
+  std::vector<std::thread::id> threads;
+  bool all_bound = true;
+  int expected_cpu = -1;
+
+  void Record() {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    const bool ok = ::sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) == 1 &&
+                    CPU_ISSET(expected_cpu, &set);
+    std::lock_guard<std::mutex> lock(mu);
+    all_bound = all_bound && ok;
+    threads.push_back(std::this_thread::get_id());
+  }
+  size_t Count() {
+    std::lock_guard<std::mutex> lock(mu);
+    return threads.size();
+  }
+};
+
+int LastAllowedCpu() {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (::sched_getaffinity(0, sizeof(set), &set) != 0) return -1;
+  for (int cpu = CPU_SETSIZE - 1; cpu >= 0; --cpu) {
+    if (CPU_ISSET(cpu, &set) && static_cast<unsigned>(cpu) < std::thread::hardware_concurrency()) return cpu;
+  }
+  return -1;
+}
+
+// EXT-33 listener_thread_bind_cpu covers every subscriber kind and every pool
+// thread, and is in effect before the first callback of each thread.
+TEST_F(ShmDriverTest, ListenerThreadOptionsCoverEveryKindAndThread) {
+  const int cpu = LastAllowedCpu();
+  ASSERT_GE(cpu, 0);
+  YAML::Node options;
+  options["listener_thread_bind_cpu"].push_back(cpu);
+  auto& d = Init(options);
+
+  CallbackThreadProbe probe;
+  probe.expected_cpu = cpu;
+  // One listener thread serves 256 subscribers; the 257th needs a second one.
+  std::vector<transport::TransportInfo> pods;
+  for (int i = 0; i < 257; ++i) {
+    pods.push_back(IntInfo(UniqueTopic("/" + std::to_string(i))));
+    ASSERT_TRUE(d.RegisterPodSubscriber(pods.back().topic_name, kIntType,
+                                        [&probe](const void*, size_t) { probe.Record(); }));
+  }
+  for (const auto& info : pods) ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+
+  const auto std_info = IntInfo(UniqueTopic("/std"));
+  Received rx;
+  ASSERT_TRUE(d.RegisterSendType(SendType(std_info)));
+  ASSERT_TRUE(d.OnMessage(Handler(std_info, &rx, [&probe] { probe.Record(); })));
+
+  const auto loaned_info = IntInfo(UniqueTopic("/loaned"));
+  ASSERT_TRUE(d.EnsurePodTopic(loaned_info.topic_name, kIntType, 8, 8));
+  transport::LoanedMessageHandlerWrapper loaned;
+  loaned.info = loaned_info;
+  loaned.callback = [&probe](const ibmw_transport_context_base_t*, const void*, size_t, std::function<void()>&&) {
+    probe.Record();
+  };
+  ASSERT_TRUE(d.AttachLoaned(loaned));
+
+  const auto retained_info = IntInfo(UniqueTopic("/retained"));
+  ASSERT_TRUE(d.EnsurePodTopic(retained_info.topic_name, kIntType, 8, 8));
+  auto retained_wrapper = loaned;
+  retained_wrapper.info = retained_info;
+  auto retained = d.AttachLoanedRetained(retained_wrapper, {.max_outstanding = 1});
+  ASSERT_NE(retained, nullptr);
+
+  StopGuard stop{this};
+  d.Start();
+  EXPECT_GE(bus_->ListenerThreads(), 2u);
+  // Which subscriptions share a thread is unspecified: publish to all of them.
+  pods.push_back(loaned_info);
+  pods.push_back(retained_info);
+  for (const auto& info : pods) {
+    ASSERT_TRUE(WaitFor([&] { return HasSubscribers(PodUrl(info.topic_name, kIntType)); }));
+    PublishPod(d, info, 1);
+  }
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(std_info.topic_name, kIntType)); }));
+  SendInt(std_info, 1);
+  ASSERT_TRUE(WaitFor([&] { return probe.Count() == pods.size() + 1; }));
+
+  std::lock_guard<std::mutex> lock(probe.mu);
+  EXPECT_TRUE(probe.all_bound);
+  std::set<std::thread::id> distinct(probe.threads.begin(), probe.threads.end());
+  EXPECT_GE(distinct.size(), 2u);
+}
+
+// ============================================================ delivery gate
+
+struct PodValues {
+  std::mutex mu;
+  std::vector<uint64_t> values;
+  std::atomic<size_t> count{0};
+  std::vector<uint64_t> Snapshot() {
+    std::lock_guard<std::mutex> lock(mu);
+    return values;
+  }
+};
+
+ShmTransportDriver::PodMessageCallback RecordPod(PodValues* out) {
+  return [out](const void* payload, size_t) {
+    uint64_t v;
+    std::memcpy(&v, payload, sizeof(v));
+    std::lock_guard<std::mutex> lock(out->mu);
+    out->values.push_back(v);
+    out->count.fetch_add(1);
+  };
+}
+
+// EXT-34 Default delivery: no callback runs before Start(); of the samples sent
+// meanwhile the newest one is delivered right after Start().
+TEST_F(ShmDriverTest, NoDeliveryBeforeStartKeepsNewestSample) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  PodValues rx;
+  ASSERT_TRUE(d.RegisterPodSubscriber(info.topic_name, kIntType, RecordPod(&rx)));
+  StopGuard stop{this};
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(PodUrl(info.topic_name, kIntType)); }));
+  for (uint64_t v = 1; v <= 3; ++v) PublishPod(d, info, v);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(rx.count.load(), 0u);
+  EXPECT_EQ(bus_->ListenerThreads(), 0u);
+
+  d.Start();
+  ASSERT_TRUE(WaitFor([&] { return rx.count.load() == 1; }));
+  EXPECT_EQ(rx.Snapshot(), std::vector<uint64_t>{3});
+  PublishPod(d, info, 4);
+  ASSERT_TRUE(WaitFor([&] { return rx.count.load() == 2; }));
+}
+
+constexpr char kLosslessOptions[] =
+    "{benchmark_profile: core_metrics_e2e_lossless_v1, publisher_too_slow_policy: WAIT_FOR_CONSUMER, "
+    "subscriber_queue_full_policy: BLOCK_PRODUCER, subscriber_queue_capacity: 256}";
+
+// EXT-35 Lossless delivery: every sample sent before Start() arrives in order.
+TEST_F(ShmDriverTest, LosslessSamplesBeforeStartAreDeliveredInOrder) {
+  auto& d = Init(YAML::Load(kLosslessOptions));
+  const auto info = IntInfo(UniqueTopic());
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  PodValues rx;
+  ASSERT_TRUE(d.RegisterPodSubscriber(info.topic_name, kIntType, RecordPod(&rx)));
+  StopGuard stop{this};
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(PodUrl(info.topic_name, kIntType)); }));
+  std::vector<uint64_t> sent;
+  for (uint64_t v = 1; v <= 20; ++v) {
+    PublishPod(d, info, v);
+    sent.push_back(v);
+  }
+  std::this_thread::sleep_for(50ms);
+  EXPECT_EQ(rx.count.load(), 0u);
+  d.Start();
+  ASSERT_TRUE(WaitFor([&] { return rx.count.load() == sent.size(); }));
+  EXPECT_EQ(rx.Snapshot(), sent);
+}
+
+// EXT-36 Handlers can be added to a URL while another driver already publishes
+// to it: delivery starts only after all of them are registered.
+TEST_F(ShmDriverTest, HandlersRegisterSafelyWhileSamplesArrive) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+
+  ShmBus other_bus;
+  other_bus.Initialize({});
+  ShmTransportDriver other(other_bus);
+  other.Initialize(YAML::Node());
+  ASSERT_TRUE(other.RegisterSendType(SendType(info)));
+  other.Start();
+
+  std::atomic_bool halt{false};
+  JoiningThread sender([&] {
+    IntMsg msg{7};
+    auto ctx = PubContext();
+    while (!halt.load()) {
+      transport::MessageFrame frame{.info = info, .msg_ptr = &msg, .ctx_ref = ctx};
+      other.Send(frame);
+      std::this_thread::sleep_for(100us);
+    }
+  });
+
+  Received first, second;
+  std::vector<std::unique_ptr<Received>> more;
+  ASSERT_TRUE(d.OnMessage(Handler(info, &first)));
+  std::this_thread::sleep_for(20ms);
+  ASSERT_TRUE(d.OnMessage(Handler(info, &second)));
+  for (int i = 0; i < 20; ++i) {
+    more.push_back(std::make_unique<Received>());
+    ASSERT_TRUE(d.OnMessage(Handler(info, more.back().get())));
+  }
+  std::this_thread::sleep_for(20ms);
+  EXPECT_EQ(first.calls.load(), 0);
+  EXPECT_EQ(second.calls.load(), 0);
+
+  StopGuard stop{this, [&] { halt = true; }};
+  d.Start();
+  EXPECT_TRUE(WaitFor([&] { return first.calls.load() > 0 && second.calls.load() > 0; }));
+  EXPECT_TRUE(WaitFor([&] { return more.back()->calls.load() > 0; }));
+  halt = true;
+}
+
+// EXT-37 A lossless producer filling the queue of a subscriber that never
+// started blocks like behind a slow consumer; shutdown without Start() frees it
+// and no callback ever runs.
+TEST_F(ShmDriverTest, ShutdownBeforeStartUnblocksProducer) {
+  auto& d = Init(YAML::Load(kLosslessOptions));
+  const auto info = IntInfo(UniqueTopic());
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  PodValues rx;
+  ASSERT_TRUE(d.RegisterPodSubscriber(info.topic_name, kIntType, RecordPod(&rx)));
+  const auto url = PodUrl(info.topic_name, kIntType);
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(url); }));
+  auto* pub = Publisher(url);
+  ASSERT_NE(pub, nullptr);
+
+  std::atomic_uint64_t published{0};
+  JoiningThread producer([&] {
+    for (uint64_t v = 1; v <= 300; ++v) {
+      transport::LoanedSampleHandle h;
+      if (!d.LoanSample(info, sizeof(v), transport::LoanMode::kPodOnly, nullptr, h)) return;
+      std::memcpy(h.user_payload_ptr, &v, sizeof(v));
+      d.PublishLoaned(h);
+      published.fetch_add(1);
+    }
+  });
+  ASSERT_TRUE(WaitFor([&] { return pub->Stats().blocked > 0; }));
+  EXPECT_EQ(published.load(), 256u);
+
+  ASSERT_TRUE(d.TryPrepareShutdown(5s));
+  d.Shutdown();
+  producer = JoiningThread();
+  EXPECT_EQ(rx.count.load(), 0u);
+  EXPECT_EQ(bus_->PublisherCount(), 0u);
+  EXPECT_EQ(bus_->SubscriptionCount(), 0u);
+}
+
+// ============================================================ retained limit
+
+// EXT-38 max_outstanding 256 leaves no spare held slot: a sample over the limit
+// must not stay queued forever. It is dropped on the next release, and the
+// subscription keeps delivering.
+TEST_F(ShmDriverTest, RetainedAtMaxLimitDoesNotStrandSamples) {
+  auto& d = Init();
+  const auto info = IntInfo(UniqueTopic());
+  ASSERT_TRUE(d.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  RetainedProbe probe;
+  ShmSubscriptionOptions options;
+  options.retained = true;
+  options.max_outstanding = shm::kMaxChunksHeldPerSubscriber;
+  auto sub = bus_->RegisterSubscriber(
+      PodUrl(info.topic_name, kIntType),
+      [&probe](const void* p, size_t, std::function<void()>&& release) {
+        uint64_t v;
+        std::memcpy(&v, p, sizeof(v));
+        std::lock_guard<std::mutex> lock(probe.mu);
+        probe.values.push_back(v);
+        probe.releases.push_back(std::move(release));
+      },
+      options);
+  StopGuard stop{this, [&] { probe.ReleaseAll(); }};
+  d.Start();
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(PodUrl(info.topic_name, kIntType)); }));
+
+  for (uint64_t v = 1; v <= shm::kMaxChunksHeldPerSubscriber; ++v) {
+    PublishPod(d, info, v);
+    ASSERT_TRUE(WaitFor([&] { return probe.Count() == v; }));
+  }
+  EXPECT_EQ(sub->Outstanding(), size_t{shm::kMaxChunksHeldPerSubscriber});
+
+  PublishPod(d, info, 1000);  // over the limit, finds every held slot taken
+  std::this_thread::sleep_for(50ms);
+  EXPECT_EQ(probe.Count(), size_t{shm::kMaxChunksHeldPerSubscriber});
+  EXPECT_EQ(sub->Stats().takes, uint64_t{shm::kMaxChunksHeldPerSubscriber});
+
+  probe.ReleaseOne();
+  EXPECT_TRUE(WaitFor([&] { return sub->Dropped() == 1; }));
+  EXPECT_EQ(sub->Stats().takes, uint64_t{shm::kMaxChunksHeldPerSubscriber} + 1);
+  EXPECT_EQ(probe.Count(), size_t{shm::kMaxChunksHeldPerSubscriber});
+
+  PublishPod(d, info, 2000);  // a released slot serves the next sample
+  ASSERT_TRUE(WaitFor([&] { return probe.Count() == size_t{shm::kMaxChunksHeldPerSubscriber} + 1; }));
+  std::lock_guard<std::mutex> lock(probe.mu);
+  EXPECT_EQ(probe.values.back(), 2000u);
+}
+
+// ============================================================ hot path lifetime
+
+// EXT-39 A releaser on the lock-free path never touches the gate after a waiter
+// saw it idle: the gate is freed immediately (ASan/TSan judge this).
+TEST(ShmGateTest, ReleaseNeverOvertakesWaiterThatFreesTheGate) {
+  for (int i = 0; i < 2000; ++i) {
+    auto gate = std::make_unique<ShmOperationGate>();
+    auto lease = gate->TryAcquire();
+    ASSERT_TRUE(lease);
+    std::atomic_bool go{false};
+    JoiningThread releaser([&go, l = std::move(lease)]() mutable {
+      while (!go.load()) {
+      }
+      l = ShmOperationGate::Lease();
+    });
+    if (i % 2 == 0) go = true;  // both orders of release and Close
+    gate->Close();
+    go = true;
+    ASSERT_TRUE(gate->WaitIdle(std::chrono::steady_clock::now() + 10s));
+    gate.reset();
+  }
+}
+
+// EXT-40 Shutdown under concurrent multi-topic Send and handle publishing: every
+// counted operation finished before anything is freed, on the fast paths too.
+TEST_F(ShmDriverTest, ShutdownRacesConcurrentSendAndLoans) {
+  for (int round = 0; round < 10; ++round) {
+    driver_.reset();
+    auto& d = Init();
+    constexpr int kTopics = 8;
+    std::vector<transport::TransportInfo> infos;
+    for (int i = 0; i < kTopics; ++i) {
+      infos.push_back(IntInfo(UniqueTopic("/" + std::to_string(i))));
+      ASSERT_TRUE(d.RegisterSendType(SendType(infos.back())));
+      ASSERT_TRUE(d.EnsurePodTopic(infos.back().topic_name, kIntType, 64, 8));
+    }
+    d.Start();
+    std::atomic_bool halt{false};
+    std::atomic_uint64_t ops{0};
+    std::vector<JoiningThread> threads;
+    for (int t = 0; t < kTopics; ++t) {
+      threads.emplace_back([&, t] {
+        IntMsg msg{t};
+        auto ctx = PubContext();
+        while (!halt.load(std::memory_order_relaxed)) {
+          transport::MessageFrame frame{.info = infos[t], .msg_ptr = &msg, .ctx_ref = ctx};
+          d.Send(frame);
+          transport::LoanedSampleHandle h;
+          if (d.LoanSample(infos[t], 8, transport::LoanMode::kPodOnly, nullptr, h)) d.PublishLoaned(h);
+          ops.fetch_add(1, std::memory_order_relaxed);
+        }
+      });
+    }
+    auto halt_threads = [&] {
+      halt = true;
+      threads.clear();
+    };
+    StopGuard stop{this, halt_threads};
+    ASSERT_TRUE(WaitFor([&] { return ops.load() > 50; }));
+    ASSERT_TRUE(d.TryPrepareShutdown(10s));
+    d.Shutdown();
+    EXPECT_EQ(bus_->PublisherCount(), 0u);
+    const uint64_t at_shutdown = ops.load();
+    ASSERT_TRUE(WaitFor([&] { return ops.load() > at_shutdown + 50; }));  // refused, not crashed
+    halt_threads();
+    EXPECT_EQ(d.SendFailures(), 0u);
+  }
+}
+
+// EXT-41 Waits are bounded by their steady deadline, also when already past it.
+TEST(ShmGateTest, WaitsRespectDeadline) {
+  ShmOperationGate gate;
+  auto lease = gate.TryAcquire();
+  gate.Close();
+  EXPECT_FALSE(gate.TryAcquire());
+  auto begin = std::chrono::steady_clock::now();
+  EXPECT_FALSE(gate.WaitIdle(begin - 1s));
+  EXPECT_FALSE(gate.WaitIdle(std::chrono::steady_clock::now() + 30ms));
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  EXPECT_GE(elapsed, 30ms);
+  EXPECT_LT(elapsed, 5s);
+  lease = ShmOperationGate::Lease();
+  EXPECT_TRUE(gate.WaitIdle(std::chrono::steady_clock::now() + 5s));
+}
+
+// ============================================================ send failures
+
+// Counts what reaches the extension's logger; undone on destruction.
+class ScopedLogCounter {
+ public:
+  ScopedLogCounter() { g_logger.Set(ibmw::logger::LoggerRef(&base_)); }
+  ~ScopedLogCounter() { g_logger.Set(ibmw::logger::LoggerRef()); }
+  uint64_t Errors() const { return errors_.load(); }
+  std::string Last() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return last_;
+  }
+
+ private:
+  ibmw_logger_base_t base_{
+      .get_log_level = [](void*) -> ibmw_log_level_t { return IBMW_LOG_LEVEL_ERROR; },
+      .log = [](void* ctx, ibmw_log_level_t, uint32_t, const char*, const char*, const char* data, size_t size) {
+        auto* self = static_cast<ScopedLogCounter*>(ctx);
+        self->errors_.fetch_add(1);
+        std::lock_guard<std::mutex> lock(self->mu_);
+        self->last_.assign(data, size);
+      },
+      .ctx = this};
+  std::atomic_uint64_t errors_{0};
+  std::mutex mu_;
+  std::string last_;
+};
+
+// EXT-42 Failing sends are counted one by one and logged at most once a second.
+TEST_F(ShmDriverTest, SendFailuresAreCountedAndRateLimited) {
+  auto& d = Init();
+  StopGuard stop{this};
+  d.Start();
+  const auto unregistered = IntInfo(UniqueTopic());
+  ScopedLogCounter logs;
+  const auto begin = std::chrono::steady_clock::now();
+  for (int i = 0; i < 1000; ++i) SendInt(unregistered, i);
+  const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - begin);
+  EXPECT_EQ(d.SendFailures(), 1000u);
+  EXPECT_GE(logs.Errors(), 1u);
+  EXPECT_LE(logs.Errors(), static_cast<uint64_t>(seconds.count()) + 2);
+  EXPECT_EQ(d.SendFailureLogsSuppressed(), 1000u - logs.Errors());
+  EXPECT_NE(logs.Last().find("not registered"), std::string::npos) << logs.Last();
+
+  // The next period logs again and says how much went unlogged.
+  std::this_thread::sleep_for(1100ms);
+  const auto before = logs.Errors();
+  SendInt(unregistered, 0);
+  EXPECT_EQ(logs.Errors(), before + 1);
+  EXPECT_NE(logs.Last().find("1001 send failures"), std::string::npos) << logs.Last();
+
+  const auto report = d.GenInitializationReport();
+  std::map<std::string, std::string> rows(report.begin(), report.end());
+  EXPECT_EQ(rows["send failures"], "1001");
+  EXPECT_EQ(rows["send failure logs suppressed"], std::to_string(d.SendFailureLogsSuppressed()));
+}
+
+// ============================================================ configuration
+
+// Sets an environment variable for one scope.
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const char* value) : name_(name) {
+    if (const char* v = std::getenv(name)) old_ = v;
+    ::setenv(name, value, 1);
+  }
+  ~ScopedEnv() {
+    if (old_) {
+      ::setenv(name_, old_->c_str(), 1);
+    } else {
+      ::unsetenv(name_);
+    }
+  }
+
+ private:
+  const char* name_;
+  std::optional<std::string> old_;
+};
+
+std::string InitializeError(ShmBus& bus, const ShmBusOptions& options) {
+  try {
+    bus.Initialize(options);
+  } catch (const std::exception& e) {
+    return e.what();
+  }
+  return {};
+}
+
+// EXT-43 Invalid location settings fail Initialize with an error that names
+// them, and the report shows the location in effect.
+TEST_F(ShmDriverTest, InvalidLocationIsReportedClearly) {
+  {
+    ScopedEnv env("IBMW_SHM_GROUP", "not-a-gid");
+    ShmBus bus;
+    const auto error = InitializeError(bus, {});
+    EXPECT_NE(error.find("IBMW_SHM_GROUP"), std::string::npos) << error;
+  }
+  {
+    ShmBus bus;
+    ShmBusOptions options;
+    options.domain = std::string(33, 'd');
+    const auto error = InitializeError(bus, options);
+    EXPECT_NE(error.find("domain"), std::string::npos) << error;
+  }
+  {
+    // A numeric group selects another service directory than the running one.
+    ShmBus bus;
+    ShmBusOptions options;
+    options.group = ::getegid();
+    const auto error = InitializeError(bus, options);
+    EXPECT_NE(error.find("group '" + std::to_string(::getegid()) + "'"), std::string::npos) << error;
+  }
+  auto& d = Init();
+  const auto report = d.GenInitializationReport();
+  std::map<std::string, std::string> rows(report.begin(), report.end());
+  const std::string dir = shm::Runtime::ServiceDirectory();
+  ASSERT_FALSE(rows["domain"].empty());
+  EXPECT_EQ(dir.substr(dir.size() - rows["domain"].size() - 1), "." + rows["domain"]);
+}
+
+// EXT-44 YAML group and require_read_only reach the bus, the runtime and the
+// publisher options; invalid values are refused with a clear error.
+TEST(ShmExtensionOptionsTest, GroupAndRequireReadOnly) {
+  auto parsed = ParseShmExtensionOptions(YAML::Load("{group: 1234, require_read_only: true, domain: d}"));
+  ASSERT_TRUE(parsed.group.has_value());
+  EXPECT_EQ(*parsed.group, 1234u);
+  EXPECT_TRUE(parsed.require_read_only);
+  const auto bus_options = MakeShmBusOptions(parsed);
+  EXPECT_EQ(bus_options.group, std::optional<gid_t>(1234));
+  EXPECT_TRUE(bus_options.require_read_only);
+  EXPECT_TRUE(MakeShmPublisherOptions(bus_options, {}).require_read_only);
+
+  auto defaults = ParseShmExtensionOptions(YAML::Load("{domain: d}"));
+  EXPECT_FALSE(defaults.group.has_value());
+  EXPECT_FALSE(defaults.require_read_only);
+  EXPECT_FALSE(MakeShmPublisherOptions(MakeShmBusOptions(defaults), {}).require_read_only);
+
+  for (const char* bad : {"{group: staff}", "{group: -1}", "{group: 4294967295}", "{group: 4294967296}",
+                          "{group: 1.5}", "{group: \"\"}", "{group: [1]}", "{group: {a: 1}}"}) {
+    try {
+      (void)ParseShmExtensionOptions(YAML::Load(bad));
+      ADD_FAILURE() << bad << " was accepted";
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find("numeric gid"), std::string::npos) << bad << ": " << e.what();
+    }
+  }
+  EXPECT_FALSE(ParseShmGroupId("+1").has_value());
+  EXPECT_FALSE(ParseShmGroupId(" 1").has_value());
+  EXPECT_EQ(ParseShmGroupId("0"), std::optional<gid_t>(0));
+  EXPECT_EQ(ParseShmGroupId("4294967294"), std::optional<gid_t>(4294967294u));
+}
+
+// EXT-45 A publisher works under require_read_only on this kernel, and the
+// selfdev health counters reach the initialization report.
+TEST_F(ShmDriverTest, ReportsSelfdevHealthCounters) {
+  ShmBusOptions bus_options;
+  bus_options.require_read_only = true;
+  auto& d = Init(YAML::Node(), bus_options);
+  const auto info = IntInfo(UniqueTopic());
+  Received rx;
+  ASSERT_TRUE(d.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(d.OnMessage(Handler(info, &rx)));
+  StopGuard stop{this};
+  d.Start();
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(info.topic_name, kIntType)); }));
+  SendInt(info, 1);
+  ASSERT_TRUE(WaitFor([&] { return rx.Ints() == 1; }));
+
+  const auto stats = bus_->Stats();
+  const auto report = d.GenInitializationReport();
+  std::map<std::string, std::string> rows(report.begin(), report.end());
+  EXPECT_EQ(rows["require read only"], "true");
+  EXPECT_EQ(rows["quarantined"], std::to_string(stats.quarantined));
+  EXPECT_EQ(rows["quarantined chunks"], std::to_string(stats.quarantined_chunks));
+  EXPECT_EQ(rows["unverifiable peers"], std::to_string(stats.unverifiable_peers));
+  EXPECT_EQ(rows["unsealed segments"], std::to_string(stats.unsealed_segments));
+  EXPECT_EQ(rows["unknown messages"], std::to_string(stats.unknown_messages));
+  EXPECT_EQ(rows["deferred sends"], std::to_string(stats.deferred_sends));
+  EXPECT_EQ(rows["send queue overflows"], std::to_string(stats.send_queue_overflows));
+  EXPECT_EQ(rows["connect retries"], std::to_string(stats.connect_retries));
+  EXPECT_EQ(stats.unsealed_segments, 0u);
+}
+
+// EXT-46 Bus counters are the sum over the live publishers and subscriptions.
+TEST_F(ShmDriverTest, BusStatsSumEveryEndpoint) {
+  auto& d = Init();
+  const auto a = IntInfo(UniqueTopic("/a"));
+  const auto b = IntInfo(UniqueTopic("/b"));
+  ASSERT_TRUE(d.EnsurePodTopic(a.topic_name, kIntType, 8, 8));
+  ASSERT_TRUE(d.EnsurePodTopic(b.topic_name, kIntType, 8, 8));
+  PodValues rx;
+  ASSERT_TRUE(d.RegisterPodSubscriber(a.topic_name, kIntType, RecordPod(&rx)));
+  StopGuard stop{this};
+  d.Start();
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(PodUrl(a.topic_name, kIntType)); }));
+  const auto stats = bus_->Stats();
+  uint64_t expected_deferred = 0;
+  for (const auto& url : {PodUrl(a.topic_name, kIntType), PodUrl(b.topic_name, kIntType)}) {
+    auto* pub = Publisher(url);
+    ASSERT_NE(pub, nullptr);
+    expected_deferred += pub->Stats().deferred_sends;
+  }
+  EXPECT_GE(stats.deferred_sends, expected_deferred);
+  EXPECT_EQ(stats.quarantined, 0u);
+}
+
+// ============================================================ re-Initialize
+
+// EXT-47 A bus that was shut down starts again with the same location: all old
+// state is gone, delivery is gated again, the old driver stays refused.
+TEST_F(ShmDriverTest, BusReinitializesAfterShutdown) {
+  auto& first = Init();
+  EXPECT_THROW(bus_->Initialize({}), std::runtime_error);  // still live
+  const auto info = IntInfo(UniqueTopic());
+  Received rx1;
+  ASSERT_TRUE(first.RegisterSendType(SendType(info)));
+  ASSERT_TRUE(first.EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  ASSERT_TRUE(first.OnMessage(Handler(info, &rx1)));
+  first.Start();
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(info.topic_name, kIntType)); }));
+  SendInt(info, 1);
+  ASSERT_TRUE(WaitFor([&] { return rx1.Ints() == 1; }));
+
+  // The engine path: the extension shuts the bus down, the driver never hears.
+  ASSERT_TRUE(bus_->TryPrepareShutdown(5s));
+  ASSERT_TRUE(bus_->Shutdown());
+  auto stale = std::move(driver_);
+
+  // A failed attempt changes nothing: the bus stays shut down and can retry.
+  ShmBusOptions conflicting;
+  conflicting.domain = "another_domain";
+  const auto error = InitializeError(*bus_, conflicting);
+  EXPECT_NE(error.find("another_domain"), std::string::npos) << error;
+  EXPECT_FALSE(bus_->TryAcquireOperation());
+
+  bus_->Initialize({});
+  EXPECT_THROW(bus_->Initialize({}), std::runtime_error);
+  EXPECT_EQ(bus_->PublisherCount(), 0u);
+  EXPECT_EQ(bus_->SubscriptionCount(), 0u);
+  EXPECT_EQ(bus_->ListenerThreads(), 0u);
+
+  driver_ = std::make_unique<ShmTransportDriver>(*bus_);
+  driver_->Initialize(YAML::Node());
+  Received rx2;
+  ASSERT_TRUE(driver_->RegisterSendType(SendType(info)));
+  ASSERT_TRUE(driver_->EnsurePodTopic(info.topic_name, kIntType, 8, 8));
+  ASSERT_TRUE(driver_->OnMessage(Handler(info, &rx2)));
+  EXPECT_EQ(bus_->ListenerThreads(), 0u);
+  StopGuard stop{this};
+  driver_->Start();
+  EXPECT_EQ(bus_->ListenerThreads(), 1u);
+  ASSERT_TRUE(WaitFor([&] { return HasSubscribers(StdUrl(info.topic_name, kIntType)); }));
+  SendInt(info, 2);
+  ASSERT_TRUE(WaitFor([&] { return rx2.Ints() == 1; }));
+  EXPECT_EQ(rx2.Int(0), 2);
+  EXPECT_EQ(rx1.Ints(), 1u);
+
+  // The old driver's cached publishers are gone: refused, not dereferenced.
+  transport::LoanedSampleHandle h;
+  EXPECT_FALSE(stale->LoanSample(info, 8, transport::LoanMode::kPodOnly, nullptr, h));
+  IntMsg msg{3};
+  auto ctx = PubContext();
+  transport::MessageFrame frame{.info = info, .msg_ptr = &msg, .ctx_ref = ctx};
+  stale->Send(frame);
+  EXPECT_EQ(stale->SendFailures(), 1u);
+  // Nor can it shut the new generation down.
+  EXPECT_TRUE(stale->TryPrepareShutdown(1s));
+  stale->Shutdown();
+  EXPECT_TRUE(bus_->TryAcquireOperation());
+  SendInt(info, 4);
+  EXPECT_TRUE(WaitFor([&] { return rx2.Ints() == 2; }));
 }
 
 }  // namespace

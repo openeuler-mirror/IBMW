@@ -5,6 +5,8 @@
 
 #include <unistd.h>
 
+#include <stdexcept>
+
 #include "shm_ext/global.h"
 #include "shm_ext/shm_transport_driver.h"
 
@@ -22,6 +24,8 @@ struct convert<ibmw::extensions::shm_extension::ShmExtension::Options> {
     node["max_bytes_per_publisher"] = rhs.max_bytes_per_publisher;
     node["prefault"] = rhs.prefault;
     node["driver_name"] = rhs.driver_name;
+    if (rhs.group) node["group"] = *rhs.group;
+    node["require_read_only"] = rhs.require_read_only;
     return node;
   }
 
@@ -35,6 +39,14 @@ struct convert<ibmw::extensions::shm_extension::ShmExtension::Options> {
       rhs.max_bytes_per_publisher = node["max_bytes_per_publisher"].as<uint64_t>();
     if (node["prefault"]) rhs.prefault = node["prefault"].as<bool>();
     if (node["driver_name"]) rhs.driver_name = node["driver_name"].as<std::string>();
+    if (const auto group = node["group"]) {
+      const std::string text = group.IsScalar() ? group.Scalar() : std::string("<not a scalar>");
+      rhs.group = ibmw::extensions::shm_extension::ParseShmGroupId(text);
+      if (!rhs.group) {
+        throw std::runtime_error("shm_extension: group must be a numeric gid below 4294967295, got '" + text + "'");
+      }
+    }
+    if (node["require_read_only"]) rhs.require_read_only = node["require_read_only"].as<bool>();
     return true;
   }
 };
@@ -42,24 +54,31 @@ struct convert<ibmw::extensions::shm_extension::ShmExtension::Options> {
 
 namespace ibmw::extensions::shm_extension {
 
+ShmExtension::Options ParseShmExtensionOptions(const YAML::Node& node) { return node.as<ShmExtension::Options>(); }
+
+ShmBusOptions MakeShmBusOptions(const ShmExtension::Options& options) {
+  ShmBusOptions bus_options;
+  bus_options.domain = options.domain;
+  bus_options.root_dir = options.root_dir;
+  bus_options.group = options.group;
+  bus_options.runtime_name = options.runtime_id.empty() ? "shm" + std::to_string(::getpid()) : options.runtime_id;
+  bus_options.shm_init_size = options.shm_init_size;
+  bus_options.max_bytes_per_publisher = options.max_bytes_per_publisher;
+  bus_options.prefault = options.prefault;
+  bus_options.require_read_only = options.require_read_only;
+  return bus_options;
+}
+
 ShmExtension::ShmExtension() { SetExtensionLogger(&g_logger); }
 
 bool ShmExtension::OnInit(runtime::core::Engine* core_ptr) {
   YAML::Node extension_options_node = core_ptr_->GetExtensionBus().GetExtensionOptionsNode(Name());
   if (extension_options_node && !extension_options_node.IsNull()) {
-    options_ = extension_options_node.as<Options>();
+    options_ = ParseShmExtensionOptions(extension_options_node);
   }
   MW_REQUIRE(!options_.driver_name.empty(), "shm_extension: driver_name must not be empty.");
 
-  ShmBusOptions bus_options;
-  bus_options.domain = options_.domain;
-  bus_options.root_dir = options_.root_dir;
-  bus_options.runtime_name =
-      options_.runtime_id.empty() ? "shm" + std::to_string(::getpid()) : options_.runtime_id;
-  bus_options.shm_init_size = options_.shm_init_size;
-  bus_options.max_bytes_per_publisher = options_.max_bytes_per_publisher;
-  bus_options.prefault = options_.prefault;
-  shm_bus_->Initialize(bus_options);
+  shm_bus_->Initialize(MakeShmBusOptions(options_));
 
   core_ptr_->RegisterHook(
       runtime::core::Before(runtime::core::Phase::kInitialize, runtime::core::Subsystem::kTransport),

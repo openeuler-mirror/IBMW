@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "engine/engine.h"
@@ -25,6 +26,9 @@ class ShmExtension : public ExtensionBase {
     uint64_t max_bytes_per_publisher = 512ull << 20;
     bool prefault = false;
     std::string driver_name = "shm";
+    // Numeric gid sharing the service directory; unset: $IBMW_SHM_GROUP.
+    std::optional<gid_t> group;
+    bool require_read_only = false;
   };
 
   ShmExtension();
@@ -42,5 +46,9 @@ class ShmExtension : public ExtensionBase {
   // Heap-held: leaked if it cannot be quiesced at destruction (see dtor).
   std::unique_ptr<ShmBus> shm_bus_ = std::make_unique<ShmBus>();
 };
+
+// The extension's YAML options; throws on an invalid value.
+IBMW_SHM_EXPORT ShmExtension::Options ParseShmExtensionOptions(const YAML::Node& node);
+IBMW_SHM_EXPORT ShmBusOptions MakeShmBusOptions(const ShmExtension::Options& options);
 
 }  // namespace ibmw::extensions::shm_extension

@@ -4,6 +4,7 @@
 #include "shm_ext/shm_transport_driver.h"
 
 #include <limits>
+#include <stdexcept>
 
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
@@ -87,12 +88,35 @@ std::string MakePodUrl(std::string_view topic, std::string_view msg_type) {
   return std::string("/transport_zc_pod/") + util::UrlEncode(topic) + "/" + util::UrlEncode(msg_type);
 }
 
-std::string MakePodKey(std::string_view topic, std::string_view msg_type) {
-  std::string k;
-  k.reserve(topic.size() + 1 + msg_type.size());
-  k.append(topic).append("|").append(msg_type);
-  return k;
+// Lookup key of the frozen publisher maps, without an allocation per message
+// once the thread's buffer has grown. Valid until the thread's next call. NUL
+// cannot occur in a registered name, unlike '|', so two topics cannot collide.
+std::string_view TopicKey(std::string_view topic, std::string_view msg_type) {
+  thread_local std::string key;
+  key.assign(topic);
+  key.push_back('\0');
+  key.append(msg_type);
+  return key;
 }
+
+// Effective domain from "<root>/ibmw_shm.<owner>.<domain>" (the owner has no
+// dot): the options may have left it to $IBMW_SHM_DOMAIN.
+std::string DomainOfServiceDirectory(std::string_view dir) {
+  constexpr std::string_view kPrefix = "ibmw_shm.";
+  const auto name = dir.substr(dir.rfind('/') + 1);
+  if (name.substr(0, kPrefix.size()) != kPrefix) return {};
+  const auto dot = name.find('.', kPrefix.size());
+  return dot == std::string_view::npos ? std::string() : std::string(name.substr(dot + 1));
+}
+
+// MW_REQUIRE logs every failure; Send() failures are logged rate-limited by
+// RecordSendFailure(), so they only throw here.
+#define SHM_SEND_REQUIRE(__expr__, __fmt__, ...)                                  \
+  do {                                                                            \
+    if (!(__expr__)) [[unlikely]] {                                               \
+      throw std::runtime_error(::ibmw_fmt::format(__fmt__, ##__VA_ARGS__));       \
+    }                                                                             \
+  } while (0)
 
 bool CheckedAddSize(size_t lhs, size_t rhs, size_t& result) noexcept {
   if (rhs > std::numeric_limits<size_t>::max() - lhs) return false;
@@ -170,6 +194,15 @@ void ShmTransportDriver::Initialize(YAML::Node options_node) {
              "core_metrics_e2e_lossless_v1 with WAIT_FOR_CONSUMER, BLOCK_PRODUCER, and queue capacity 256.");
   bus_.SetDeliveryOptions(*delivery);
   if (!options.listener_thread_name.empty()) bus_.SetListenerThreadName(options.listener_thread_name);
+  if (!options.listener_thread_name.empty() || !options.listener_thread_bind_cpu.empty() ||
+      !options.listener_thread_sched_policy.empty()) {
+    bus_.SetListenerThreadSetup([name = options.listener_thread_name, cpus = options.listener_thread_bind_cpu,
+                                 sched = options.listener_thread_sched_policy] {
+      if (!name.empty()) runtime::core::util::SetNameForCurrentThread(name);
+      if (!cpus.empty()) runtime::core::util::BindCpuForCurrentThread(cpus);
+      if (!sched.empty()) runtime::core::util::SetCpuSchedForCurrentThread(sched);
+    });
+  }
   options_ = std::move(options);
   state_.store(State::kInit);
 }
@@ -177,7 +210,9 @@ void ShmTransportDriver::Initialize(YAML::Node options_node) {
 void ShmTransportDriver::Start() {
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   MW_REQUIRE(state_.load() == State::kInit, "Method can only be called when state is 'Init'.");
+  // kStart first: a callback may Send() as soon as its subscription attaches.
   state_.store(State::kStart);
+  bus_.StartDelivery();
 }
 
 bool ShmTransportDriver::CanShutdownFromCurrentThread() const noexcept { return !IsShmCallbackThread(); }
@@ -188,6 +223,8 @@ bool ShmTransportDriver::TryPrepareShutdown(std::chrono::milliseconds timeout) n
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
     shutdown_started_ = true;
   }
+  // The bus this driver served is gone; its new generation has another driver.
+  if (bus_.Generation() != bus_generation_) return true;
   return bus_.TryPrepareShutdown(timeout);
 }
 
@@ -202,25 +239,37 @@ void ShmTransportDriver::Shutdown() {
     MW_ERROR("ShmTransportDriver::Shutdown could not prepare; resources remain intact for a retry.");
     return;
   }
-  bus_.Shutdown();
+  if (bus_.Generation() == bus_generation_) bus_.Shutdown();
   state_.store(State::kShutdown);
 }
 
 std::list<std::pair<std::string, std::string>> ShmTransportDriver::GenInitializationReport() const noexcept {
   try {
     const auto delivery = bus_.DeliveryOptions();
-    const auto& bus_options = bus_.Options();
+    const auto stats = bus_.Stats();
+    const std::string service_directory = shm::Runtime::ServiceDirectory();
     return {
         {"driver", name_},
         {"implementation", "ibmw selfdev shm (daemonless, memfd + futex)"},
-        {"domain", bus_options.domain.empty() ? std::string("default") : bus_options.domain},
-        // Effective location after IBMW_SHM_ROOT / IBMW_SHM_DOMAIN overrides.
-        {"service directory", shm::Runtime::ServiceDirectory()},
+        // Effective location after IBMW_SHM_ROOT / IBMW_SHM_DOMAIN / IBMW_SHM_GROUP.
+        {"domain", DomainOfServiceDirectory(service_directory)},
+        {"service directory", service_directory},
+        {"require read only", bus_.Options().require_read_only ? "true" : "false"},
         {"delivery", delivery.lossless ? std::string("lossless") : std::string("latest")},
         {"subscriber queue capacity", std::to_string(delivery.queue_capacity)},
         {"publishers", std::to_string(bus_.PublisherCount())},
         {"subscriptions", std::to_string(bus_.SubscriptionCount())},
         {"listener threads", std::to_string(bus_.ListenerThreads())},
+        {"send failures", std::to_string(SendFailures())},
+        {"send failure logs suppressed", std::to_string(SendFailureLogsSuppressed())},
+        {"quarantined", std::to_string(stats.quarantined)},
+        {"quarantined chunks", std::to_string(stats.quarantined_chunks)},
+        {"unverifiable peers", std::to_string(stats.unverifiable_peers)},
+        {"unsealed segments", std::to_string(stats.unsealed_segments)},
+        {"unknown messages", std::to_string(stats.unknown_messages)},
+        {"deferred sends", std::to_string(stats.deferred_sends)},
+        {"send queue overflows", std::to_string(stats.send_queue_overflows)},
+        {"connect retries", std::to_string(stats.connect_retries)},
     };
   } catch (...) {
     return {};
@@ -234,7 +283,9 @@ bool ShmTransportDriver::RegisterSendType(const transport::SendTypeWrapper& send
     MW_REQUIRE(state_.load() == State::kInit, "Method can only be called when state is 'Init'.");
     const auto& info = send_type_wrapper.info;
     std::string url = MakeStdTransportUrl(info.topic_name, info.msg_type);
-    if (bus_.RegisterPublisher(url) == nullptr) return false;
+    auto* publisher = bus_.RegisterPublisher(url);
+    if (publisher == nullptr) return false;
+    std_pub_map_.emplace(TopicKey(info.topic_name, info.msg_type), publisher);
     MW_INFO("Register publish type to shm transport, url: {}", url);
     return true;
   } catch (const std::exception& e) {
@@ -275,9 +326,8 @@ bool ShmTransportDriver::OnMessage(const transport::MessageHandlerWrapper& messa
     auto msg_handler_tool = std::make_shared<transport::MessageHandlerTool>();
     msg_handler_tool->AddMessageHandlerWrapper(&message_handler);
 
-    auto sched_info_set = std::make_shared<std::atomic_bool>(false);
-    auto handle = [sched_info_set, listener_options = options_, msg_handler_tool, driver_name = name_](
-                      const void* payload, size_t payload_size, std::function<void()>&& release) {
+    auto handle = [msg_handler_tool, driver_name = name_](const void* payload, size_t payload_size,
+                                                          std::function<void()>&& release) {
       const auto validated_pkg_size = ValidateEncodedPayloadSize(payload, payload_size);
       if (!validated_pkg_size) {
         MW_WARN("Discard malformed shm transport chunk: size {}.", payload_size);
@@ -285,18 +335,6 @@ bool ShmTransportDriver::OnMessage(const transport::MessageHandlerWrapper& messa
         return;
       }
       try {
-        // Thread options apply to whichever listener thread delivers first.
-        if (!sched_info_set->exchange(true)) [[unlikely]] {
-          if (!listener_options.listener_thread_name.empty()) {
-            runtime::core::util::SetNameForCurrentThread(listener_options.listener_thread_name);
-          }
-          if (!listener_options.listener_thread_bind_cpu.empty()) {
-            runtime::core::util::BindCpuForCurrentThread(listener_options.listener_thread_bind_cpu);
-          }
-          if (!listener_options.listener_thread_sched_policy.empty()) {
-            runtime::core::util::SetCpuSchedForCurrentThread(listener_options.listener_thread_sched_policy);
-          }
-        }
         // pkg_size | serialization_type | ctx_num | (ctx_key | ctx_val)* | msg_buffer
         auto ctx_ptr = std::make_shared<ibmw::transport::Context>(
             ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
@@ -347,27 +385,31 @@ bool ShmTransportDriver::OnMessage(const transport::MessageHandlerWrapper& messa
 // next hint, so steady-state messages need a single loan.
 void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
   try {
-    MW_REQUIRE(state_.load() == State::kStart, "Method can only be called when state is 'Start'.");
+    // Refusals by shutdown are expected and neither logged nor counted.
+    const State state = state_.load();
+    if (state == State::kShutdown) return;
+    SHM_SEND_REQUIRE(state == State::kStart, "Method can only be called when state is 'Start'.");
     auto operation = bus_.TryAcquireOperation();
     if (!operation) return;
     namespace util = ibmw::common::util;
 
     const auto& info = msg_wrapper.info;
-    std::string url = MakeStdTransportUrl(info.topic_name, info.msg_type);
-    auto* pub = bus_.GetPublisher(operation, url);
-    MW_REQUIRE(pub != nullptr, "Url: {} not registered for publishing!", url);
+    auto* pub = FindStdPublisher(operation, info.topic_name, info.msg_type);
+    SHM_SEND_REQUIRE(pub != nullptr, "Url: {} not registered for publishing!",
+                     MakeStdTransportUrl(info.topic_name, info.msg_type));
+    const std::string& url = pub->Url();
 
     std::string_view serialization_type = msg_wrapper.ctx_ref.GetSerializationType();
     if (serialization_type.empty()) serialization_type = info.msg_type_support_ref.DefaultSerializationType();
-    MW_REQUIRE(serialization_type.size() <= std::numeric_limits<uint8_t>::max(),
+    SHM_SEND_REQUIRE(serialization_type.size() <= std::numeric_limits<uint8_t>::max(),
                "Serialization type '{}' is too long.", serialization_type);
 
     auto [meta_key_vals_array, meta_key_vals_array_len] = msg_wrapper.ctx_ref.GetMetaKeyValsArray();
-    MW_REQUIRE(meta_key_vals_array_len / 2 <= 255, "Too much context meta, require less than 255, but actually {}.",
+    SHM_SEND_REQUIRE(meta_key_vals_array_len / 2 <= 255, "Too much context meta, require less than 255, but actually {}.",
                meta_key_vals_array_len / 2);
     size_t context_meta_kv_size = 1;
     for (size_t ii = 0; ii < meta_key_vals_array_len; ++ii) {
-      MW_REQUIRE(meta_key_vals_array[ii].len <= std::numeric_limits<uint16_t>::max(), "Context meta is too long.");
+      SHM_SEND_REQUIRE(meta_key_vals_array[ii].len <= std::numeric_limits<uint16_t>::max(), "Context meta is too long.");
       context_meta_kv_size += 2 + meta_key_vals_array[ii].len;
     }
     const size_t min_shm_size = 4 + 1 + serialization_type.size() + context_meta_kv_size;
@@ -389,11 +431,12 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
       const auto* buffers = view->Data();
       const size_t buffer_count = view->Size();
       size_t total_size = 0;
-      MW_REQUIRE(CheckedAddSize(min_shm_size, view->BufferSize(), total_size) &&
+      SHM_SEND_REQUIRE(CheckedAddSize(min_shm_size, view->BufferSize(), total_size) &&
                      total_size <= std::numeric_limits<uint32_t>::max(),
                  "Message on '{}' is too large for shm.", url);
       void* chunk = pub->Loan(total_size);
-      MW_REQUIRE(chunk != nullptr, "Shm loan of {} bytes on '{}' failed.", total_size, url);
+      if (chunk == nullptr && pub->IsClosing()) return;
+      SHM_SEND_REQUIRE(chunk != nullptr, "Shm loan of {} bytes on '{}' failed.", total_size, url);
       LoanGuard guard([pub, chunk] { pub->Release(chunk); });
       util::BufferOperator buf_oper(static_cast<char*>(chunk), total_size);
       buf_oper.SetUint32(static_cast<uint32_t>(total_size));
@@ -410,10 +453,11 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
     CheckMsg(msg_wrapper);
 
     auto loan_size = NextShmLoanSize(pub->SizeHint(), min_shm_size);
-    MW_REQUIRE(loan_size.has_value(), "Message header on '{}' is too large for shm.", url);
+    SHM_SEND_REQUIRE(loan_size.has_value(), "Message header on '{}' is too large for shm.", url);
     while (true) {
       void* chunk = pub->Loan(*loan_size);
-      MW_REQUIRE(chunk != nullptr, "Shm loan of {} bytes on '{}' failed.", *loan_size, url);
+      if (chunk == nullptr && pub->IsClosing()) return;
+      SHM_SEND_REQUIRE(chunk != nullptr, "Shm loan of {} bytes on '{}' failed.", *loan_size, url);
       LoanGuard guard([pub, chunk] { pub->Release(chunk); });
 
       util::BufferOperator buf_oper(static_cast<char*>(chunk), *loan_size);
@@ -428,9 +472,9 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
                                               buffer_array.AllocatorNativeHandle(),
                                               buffer_array.BufferArrayNativeHandle());
       if (!serialize_ret) [[unlikely]] {
-        MW_REQUIRE(allocator.IsOutOfMemory(), "Serialize failed.");
+        SHM_SEND_REQUIRE(allocator.IsOutOfMemory(), "Serialize failed.");
         loan_size = NextShmLoanSize(*loan_size, *loan_size + 1);
-        MW_REQUIRE(loan_size.has_value(), "Message on '{}' is too large for shm.", url);
+        SHM_SEND_REQUIRE(loan_size.has_value(), "Message on '{}' is too large for shm.", url);
         continue;
       }
 
@@ -443,10 +487,34 @@ void ShmTransportDriver::Send(transport::MessageFrame& msg_wrapper) noexcept {
       return;
     }
   } catch (const std::exception& e) {
-    MW_ERROR("{}", e.what());
+    RecordSendFailure(e.what());
   } catch (...) {
-    MW_ERROR("Shm send threw an unknown exception.");
+    RecordSendFailure("Shm send threw an unknown exception.");
   }
+}
+
+ShmPublisher* ShmTransportDriver::FindStdPublisher(const ShmOperationGate::Lease& lease, std::string_view topic,
+                                                   std::string_view msg_type) const {
+  if (!lease || bus_.Generation() != bus_generation_) return nullptr;
+  if (state_.load() == State::kStart) {
+    const auto it = std_pub_map_.find(TopicKey(topic, msg_type));
+    if (it != std_pub_map_.end()) return it->second;
+  }
+  return bus_.GetPublisher(lease, MakeStdTransportUrl(topic, msg_type));
+}
+
+void ShmTransportDriver::RecordSendFailure(const char* what) noexcept {
+  constexpr int64_t kLogIntervalNs = 1'000'000'000;
+  send_failures_.fetch_add(1, std::memory_order_relaxed);
+  const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+  int64_t last = last_send_failure_log_ns_.load(std::memory_order_relaxed);
+  if (now - last < kLogIntervalNs ||
+      !last_send_failure_log_ns_.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    send_failure_logs_suppressed_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  MW_ERROR("{} ({} send failures so far, {} of them not logged)", what, SendFailures(), SendFailureLogsSuppressed());
 }
 
 bool ShmTransportDriver::EnsurePodTopic(std::string_view topic, std::string_view msg_type, size_t initial_size_hint,
@@ -461,7 +529,7 @@ bool ShmTransportDriver::EnsurePodTopic(std::string_view topic, std::string_view
       MW_ERROR("EnsurePodTopic: invalid size/alignment ({}, {})", initial_size_hint, alignment);
       return false;
     }
-    auto key = MakePodKey(topic, msg_type);
+    const std::string key(TopicKey(topic, msg_type));
     if (const auto existing = pod_pub_map_.find(key); existing != pod_pub_map_.end()) {
       return existing->second.initial_size_hint == initial_size_hint && existing->second.alignment == alignment;
     }
@@ -471,7 +539,7 @@ bool ShmTransportDriver::EnsurePodTopic(std::string_view topic, std::string_view
       MW_ERROR("EnsurePodTopic: failed to obtain publisher for url={}", url);
       return false;
     }
-    pod_pub_map_.emplace(std::move(key), PodPublisherEndpoint{pub, initial_size_hint, alignment});
+    pod_pub_map_.emplace(key, PodPublisherEndpoint{pub, initial_size_hint, alignment});
     MW_INFO("Registered shm zero-copy POD publisher, url: {}", url);
     return true;
   } catch (const std::exception& e) {
@@ -598,7 +666,7 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
     try {
       auto operation = bus_.TryAcquireOperation();
       if (!operation) return false;
-      auto* pub = bus_.GetPublisher(operation, MakeStdTransportUrl(info.topic_name, info.msg_type));
+      auto* pub = FindStdPublisher(operation, info.topic_name, info.msg_type);
       if (pub == nullptr) {
         MW_WARN("LoanSample[ctx-meta]: standard topic not registered. Call RegisterSendType() for topic={} "
                 "msg_type={} first.",
@@ -615,8 +683,9 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
   try {
     auto operation = bus_.TryAcquireOperation();
     if (!operation) return false;
+    if (bus_.Generation() != bus_generation_) return false;
     // pod_pub_map_ is only written in Init state, before any Start-phase loan.
-    auto it = pod_pub_map_.find(MakePodKey(info.topic_name, info.msg_type));
+    auto it = pod_pub_map_.find(TopicKey(info.topic_name, info.msg_type));
     if (it == pod_pub_map_.end()) {
       MW_WARN("LoanSample: POD topic not registered. Call EnsurePodTopic first. topic={} msg_type={}",
               info.topic_name, info.msg_type);
@@ -704,7 +773,7 @@ bool ShmTransportDriver::LoanSerializedSample(const transport::TransportInfo& in
       MW_WARN("LoanSerializedSample: msg_type_support_ref is empty -- caller must populate it.");
       return false;
     }
-    auto* pub = bus_.GetPublisher(operation, MakeStdTransportUrl(info.topic_name, info.msg_type));
+    auto* pub = FindStdPublisher(operation, info.topic_name, info.msg_type);
     if (pub == nullptr) {
       MW_WARN("LoanSerializedSample: standard topic not registered. Call RegisterSendType() for topic={} "
               "msg_type={} first.",
@@ -779,5 +848,7 @@ void ShmTransportDriver::ReleaseLoaned(transport::LoanedSampleHandle& handle) no
   }
   ClearHandle(handle);
 }
+
+#undef SHM_SEND_REQUIRE
 
 }  // namespace ibmw::extensions::shm_extension

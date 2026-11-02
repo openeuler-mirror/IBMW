@@ -50,9 +50,12 @@ target_link_libraries(
           $<BUILD_INTERFACE:ibmw::selfdev::shm>
   PUBLIC  ibmw::api::cpp
           ibmw::core::engine)
+# Installed, the selfdev headers sit in <prefix>/include (ibmw_selfdev_install);
+# say so here rather than rely on another target adding that directory.
 target_include_directories(
   ${CUR_TARGET_NAME}
-  PUBLIC $<BUILD_INTERFACE:$<TARGET_PROPERTY:ibmw::selfdev::shm,INTERFACE_INCLUDE_DIRECTORIES>>)
+  PUBLIC $<BUILD_INTERFACE:$<TARGET_PROPERTY:ibmw::selfdev::shm,INTERFACE_INCLUDE_DIRECTORIES>>
+         $<INSTALL_INTERFACE:include>)
 
 include(AddWerror)
 add_werror(${CUR_TARGET_NAME})

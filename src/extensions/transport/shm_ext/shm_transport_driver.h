@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <functional>
+#include <limits>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -50,15 +51,16 @@ class IBMW_SHM_EXPORT ShmTransportDriver
   static std::optional<ShmDeliveryOptions> ResolveDeliveryOptions(const Options& options) noexcept;
 
   // `name` is "shm" by default. Running under "iceoryx" makes the driver a
-  // drop-in replacement: the bus matches drivers by Name() and user loans
-  // target Slot(), so both follow the name.
-  static constexpr const char* kStableDriverId = "shm";
+  // drop-in replacement for topic configuration: the bus routes by Name(). The
+  // slot is the driver's C++ type, not its name: IBMW_USE_DRIVER(ShmTransportDriver)
+  // must bind under every name, and a module typed for the iceoryx driver must
+  // never be handed this object.
+  IBMW_DECLARE_DRIVER_SLOT("shm")
   explicit ShmTransportDriver(ShmBus& bus, std::string name = kStableDriverId)
-      : bus_(bus), name_(std::move(name)), slot_(::ibmw::DriverSlotFromString(name_.c_str())) {}
+      : bus_(bus), name_(std::move(name)), bus_generation_(bus.Generation()) {}
   ~ShmTransportDriver() override = default;
 
   std::string_view Name() const noexcept override { return name_; }
-  ibmw_driver_slot_t Slot() const noexcept override { return slot_; }
 
   void Initialize(YAML::Node options_node) override;
   void Start() override;
@@ -109,6 +111,13 @@ class IBMW_SHM_EXPORT ShmTransportDriver
 
   ShmBus& Bus() noexcept { return bus_; }
 
+  // Send() calls that failed, and how many of those were not logged: at most
+  // one failure is logged per second. Shutdown refusals do not count.
+  uint64_t SendFailures() const noexcept { return send_failures_.load(std::memory_order_relaxed); }
+  uint64_t SendFailureLogsSuppressed() const noexcept {
+    return send_failure_logs_suppressed_.load(std::memory_order_relaxed);
+  }
+
  private:
   enum class State : uint32_t { kPreInit, kInit, kStart, kShutdown };
 
@@ -118,6 +127,13 @@ class IBMW_SHM_EXPORT ShmTransportDriver
     size_t alignment;
   };
 
+  using PublisherMap = std::unordered_map<std::string, ShmPublisher*, ibmw::common::util::StringHash, std::equal_to<>>;
+
+  // Publisher of a standard topic, nullptr when unknown. Requires a lease.
+  ShmPublisher* FindStdPublisher(const ShmOperationGate::Lease& lease, std::string_view topic,
+                                 std::string_view msg_type) const;
+  void RecordSendFailure(const char* what) noexcept;
+
   bool LoanCtxMeta(ShmPublisher* pub, const runtime::core::transport::TransportInfo& info, size_t requested_size,
                    const ibmw::transport::Context& ctx, runtime::core::transport::LoanedSampleHandle& out_handle);
   bool LoanSerialized(ShmPublisher* pub, const runtime::core::transport::TransportInfo& info,
@@ -126,7 +142,7 @@ class IBMW_SHM_EXPORT ShmTransportDriver
 
   ShmBus& bus_;
   const std::string name_;
-  const ibmw_driver_slot_t slot_;
+  const uint64_t bus_generation_;
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
   mutable std::mutex lifecycle_mutex_;
@@ -135,8 +151,17 @@ class IBMW_SHM_EXPORT ShmTransportDriver
 
   std::unordered_map<std::string, std::shared_ptr<runtime::core::transport::MessageHandlerTool>>
       message_handler_map_;
-  // Key "<topic>|<msg_type>"; frozen after Init, read lock-free afterwards.
-  std::unordered_map<std::string, PodPublisherEndpoint> pod_pub_map_;
+  // Key: see TopicKey(). Both maps are written in Init state under
+  // lifecycle_mutex_ only, then frozen: the seq_cst store of kStart in Start()
+  // publishes them to every thread that reads kStart. The publishers they point
+  // at live until ShmBus::Shutdown(), which requires the gate to be idle, so a
+  // lease of the bus generation this driver was built for keeps them valid.
+  std::unordered_map<std::string, PodPublisherEndpoint, ibmw::common::util::StringHash, std::equal_to<>> pod_pub_map_;
+  PublisherMap std_pub_map_;
+
+  std::atomic_uint64_t send_failures_{0};
+  std::atomic_uint64_t send_failure_logs_suppressed_{0};
+  std::atomic_int64_t last_send_failure_log_ns_{std::numeric_limits<int64_t>::min() / 2};
 };
 
 }  // namespace ibmw::extensions::shm_extension
