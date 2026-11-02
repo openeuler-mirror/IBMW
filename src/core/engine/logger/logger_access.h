@@ -52,7 +52,10 @@ class LoggerAccess {
     // Note: MW_LOG macro already checks lvl >= GetLogLevel() before calling
     // this method, so this check is redundant on the macro path. We keep it
     // as a safety net for direct C-ABI callers (cost: one relaxed atomic load).
-    if (lvl >= lvl_.load(std::memory_order_relaxed)) {
+    // Levels from OFF up are not message levels; the drivers index per-level
+    // tables with lvl, so they are dropped here (CORE-038).
+    if (lvl >= lvl_.load(std::memory_order_relaxed) &&
+        static_cast<uint32_t>(lvl) < IBMW_LOG_LEVEL_OFF) {
 #if defined(_WIN32)
       thread_local size_t tid(std::hash<std::thread::id>{}(std::this_thread::get_id()));
 #elif defined(__GLIBC__)
