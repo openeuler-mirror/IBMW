@@ -25,7 +25,7 @@
 #   0  — 全绿（或 --report 模式）
 #   1  — strict 模式下检测到违规
 #   2  — baseline 模式下新增违规
-#   64 — 参数错误 / 环境错误
+#   64 — 参数错误 / 环境错误（含扫描步骤本身失败，任何模式）
 #
 # 用例：
 #   bash ibmw/scripts/check_red_lines.sh                 # strict
@@ -39,7 +39,14 @@
 #   - R11 和 R12 已转为 strict 检查
 
 set -u
-# 注意：不 set -e，否则 grep 未匹配（exit 1）会终止脚本
+# 注意：不 set -e，否则 grep 未匹配（exit 1）会终止脚本。
+# 扫描步骤本身的失败（find/awk 出错、grep 返回 >1）由 scan_failed 计数，
+# 最后以 exit 64 结束，避免违规数为 0 的"误绿"。
+SCAN_ERRORS=0
+scan_failed() {
+  SCAN_ERRORS=$((SCAN_ERRORS + 1))
+  echo "ERROR: scan step failed: $*" >&2
+}
 
 #─────────────────────────────────────────────
 # 0. 参数解析
@@ -120,16 +127,20 @@ trap cleanup EXIT
 find "$SAMPLES_DIR" -type d -name 'managed' -print0 \
   | xargs -0 -I{} find {} -type f \( -name '*.h' -o -name '*.cc' -o -name '*.hpp' -o -name '*.cpp' \) \
   >> "$USER_FACING_LIST"
+st=("${PIPESTATUS[@]}"); [[ ${st[0]} -eq 0 && ${st[1]} -eq 0 ]] || scan_failed "managed file list (${st[*]})"
 
 # *_gen/src 下的 *_module.{h,cc}
 find "$SAMPLES_DIR" -type d -name '*_gen' -print0 \
   | xargs -0 -I{} find {}/src -type f \( -name '*_module.h' -o -name '*_module.cc' \) 2>/dev/null \
   >> "$USER_FACING_LIST"
+# 不是每个 *_gen 都有 src/，内层 find 的失败是预期的，只检查外层。
+[[ ${PIPESTATUS[0]} -eq 0 ]] || scan_failed "*_gen directory list"
 
 # standalone main.cc
 find "$SAMPLES_DIR" -type d -name 'standalone' -print0 \
   | xargs -0 -I{} find {} -type f -name 'main.cc' \
   >> "$USER_FACING_LIST"
+st=("${PIPESTATUS[@]}"); [[ ${st[0]} -eq 0 && ${st[1]} -eq 0 ]] || scan_failed "standalone file list (${st[*]})"
 
 # ibmw-template/ user-facing tree (non-overridden, production scan only).
 # The starter project is a peer of src/ for refactor + red-line purposes
@@ -145,7 +156,7 @@ if [[ -z "$SCAN_PATH_OVERRIDE" ]]; then
       find "$tmpl_root" -type f \
           \( -name '*.h' -o -name '*.cc' -o -name '*.hpp' -o -name '*.cpp' \) \
           -not -path '*/build/*' -not -path '*/snapshots/*' \
-          >> "$USER_FACING_LIST"
+          >> "$USER_FACING_LIST" || scan_failed "template file list: $tmpl_root"
     fi
   done
 fi
@@ -156,7 +167,7 @@ fi
 # always populate via the three structural finds above.
 if [[ -n "$SCAN_PATH_OVERRIDE" && ! -s "$USER_FACING_LIST" ]]; then
   find "$SAMPLES_DIR" -type f \( -name '*.h' -o -name '*.cc' -o -name '*.hpp' -o -name '*.cpp' \) \
-    >> "$USER_FACING_LIST"
+    >> "$USER_FACING_LIST" || scan_failed "scan-path file list"
 fi
 
 USER_FACING_COUNT=$(wc -l < "$USER_FACING_LIST")
@@ -225,6 +236,8 @@ grep_user_facing() {
       | grep -nE --no-messages "$pattern" 2>/dev/null \
       | sed "s|^|$rule: $f:|" \
       >> "$VIOLATIONS_RAW"
+    local st=("${PIPESTATUS[@]}")
+    [[ ${st[0]} -eq 0 && ${st[1]} -le 1 ]] || scan_failed "$rule: $f (${st[*]})"
   done < "$USER_FACING_LIST"
 }
 
@@ -235,15 +248,17 @@ grep_single_file() {
   grep -nHE --no-messages "$pattern" "$file" 2>/dev/null \
     | sed "s|^|$rule: |" \
     >> "$VIOLATIONS_RAW"
+  [[ ${PIPESTATUS[0]} -le 1 ]] || scan_failed "$rule: $file"
 }
 
 # 在 yaml 集合 grep
 grep_yaml() {
   local rule="$1"; local pattern="$2"
-  find "$SAMPLES_DIR" -type f \( -name '*.ibmw.yaml' -o -name '*.ibmw.yml' \) -print0 \
-    | xargs -0 grep -nHE --no-messages "$pattern" 2>/dev/null \
+  # grep -r 保留 0/1/2 退出码（xargs 会把"未匹配"和"出错"都折叠成 123）。
+  grep -rnHE --no-messages --include='*.ibmw.yaml' --include='*.ibmw.yml' "$pattern" "$SAMPLES_DIR" 2>/dev/null \
     | sed "s|^|$rule: |" \
     >> "$VIOLATIONS_RAW"
+  [[ ${PIPESTATUS[0]} -le 1 ]] || scan_failed "$rule: yaml under $SAMPLES_DIR"
 }
 
 #─────────────────────────────────────────────
@@ -313,6 +328,8 @@ grep_pkg_with_exempt() {
     | grep -E --no-messages "$pattern" 2>/dev/null \
     | sed "s|^|$rule: $file:|" \
     >> "$VIOLATIONS_RAW"
+  local st=("${PIPESTATUS[@]}")
+  [[ ${st[0]} -eq 0 && ${st[1]} -le 1 ]] || scan_failed "$rule: $file (${st[*]})"
 }
 for f in "$API_DIR/pkg/"*.h "$API_DIR/pkg/"*.cc "$API_DIR/c/"*.h; do
   [[ "$f" == "$PKG_MAIN" ]] && continue
@@ -338,10 +355,7 @@ emit_rule "R11" "HIGH" "yaml 不得按 transport 分裂 module_type（strict）"
 # 允许：publisher / subscriber / loaned_publisher / loaned_subscriber / direct_<transport>_*
 R11_PAT='^[[:space:]]*module_type[[:space:]]*:[[:space:]]*(dds|iceoryx|shm|ros2|json)_(publisher|subscriber|loaned_publisher|loaned_subscriber)[[:space:]]*$'
 # R11 strict：命中直接计入 $VIOLATIONS_RAW，与 R1-R9 共用 strict / baseline 判定
-find "$SAMPLES_DIR" -type f \( -name '*.ibmw.yaml' -o -name '*.ibmw.yml' \) -print0 \
-  | xargs -0 grep -nHE --no-messages "$R11_PAT" 2>/dev/null \
-  | sed 's|^|R11: |' \
-  >> "$VIOLATIONS_RAW"
+grep_yaml "R11" "$R11_PAT"
 
 #─────────────────────────────────────────────
 # 11.5. R8 — LoanedSample<...> + SenderAccess<...>::Send( 必须在 IBMW_HAS_* 守卫内
@@ -383,7 +397,7 @@ if [[ "$USER_FACING_COUNT" -gt 0 ]]; then
     done
     [[ $excluded -eq 1 ]] && continue
 
-    stripped="$(strip_ibmw_has_guards "$f")"
+    stripped="$(strip_ibmw_has_guards "$f")" || { scan_failed "R8: $f"; continue; }
     has_loaned=$(echo "$stripped" | grep -cE 'LoanedSample[[:space:]]*<' 2>/dev/null || true)
     has_send=$(echo "$stripped"   | grep -cE 'SenderAccess[[:space:]]*<[^>]*>[[:space:]]*::[[:space:]]*Send[[:space:]]*\(' 2>/dev/null || true)
     if [[ "$has_loaned" -gt 0 && "$has_send" -gt 0 ]]; then
@@ -426,6 +440,7 @@ if [[ "$USER_FACING_COUNT" -gt 0 ]]; then
       | grep -vE 'defined[[:space:]]*\([[:space:]]*IBMW_HAS_' \
       | sed 's|^|R12: |' \
       >> "$VIOLATIONS_RAW"
+    [[ ${PIPESTATUS[0]} -le 1 ]] || scan_failed "R12: $f"
   done < "$USER_FACING_LIST"
 fi
 
@@ -453,6 +468,12 @@ echo "════════════════════════�
 echo " Summary"
 echo "   R1-R12 violations   : $VIOLATION_COUNT"
 echo "═══════════════════════════════════════════════════════════"
+
+if [[ "$SCAN_ERRORS" -gt 0 ]]; then
+  echo "[$MODE] ERROR: $SCAN_ERRORS scan step(s) failed; the result above is incomplete." >&2
+  rm -f "$VIOLATION_LINES_FILE"
+  exit 64
+fi
 
 # 模式判定
 case "$MODE" in
