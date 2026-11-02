@@ -249,7 +249,8 @@ bool MqttRpcDriver::RegisterServiceFunc(
         // Answers only go to client answer topics, never to a topic of the
         // peer's choice (e.g. a data or request topic).
         if (!mqtt_pub_topic.starts_with(kRspTopicPrefix)) [[unlikely]] {
-          MW_DEBUG("Drop rpc request for '{}': invalid answer topic.", info.func_name);
+          MW_WARN_INTERVAL(5000, "Drop rpc request for '{}': answer topic must start with '{}'.",
+                           info.func_name, kRspTopicPrefix);
           return;
         }
 
