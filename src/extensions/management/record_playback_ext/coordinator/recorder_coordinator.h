@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
@@ -42,7 +43,9 @@ class RecorderCoordinator {
   // False when the channel's Schema conflicts with the one already recorded
   // for its type and serialization; the channel is not registered.
   bool RegisterChannel(StorageChannelDescriptor channel);
-  void TriggerSnapshot();
+  // Waits up to timeout for the snapshot to be written. False on timeout: the
+  // snapshot is still written once the storage catches up.
+  bool TriggerSnapshot(std::chrono::milliseconds timeout);
   void AddDroppedMessages(uint64_t count = 1) {
     external_dropped_.fetch_add(count);
   }

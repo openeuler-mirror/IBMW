@@ -71,6 +71,11 @@ details remain governed by the documentation for each release.
   recorded for its type and serialization (for example during a rolling
   upgrade) is skipped and its messages are counted as dropped, with a warning
   at the end. Previously the writer stopped and no topic was recorded any more.
+- `ibmw bag record --snapshot`: SIGUSR1 waits at most 5 s for the snapshot and
+  then reports "Snapshot is still being written."; the snapshot is still
+  completed later. Previously a stuck storage kept the command from stopping.
+  C++ `RecorderCoordinator::TriggerSnapshot` takes a timeout and returns false
+  when it expires.
 
 ### Added
 

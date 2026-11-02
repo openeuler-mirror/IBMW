@@ -2316,8 +2316,12 @@ int RunRecord(int argc, const char* const* argv) {
     }
     if (g_snapshot_requested.exchange(false)) {
       if (options.snapshot_mode) {
-        coordinator.TriggerSnapshot();
-        std::cout << "Snapshot completed.\n";
+        // Bounded, so a stuck storage does not keep the loop from stopping.
+        if (coordinator.TriggerSnapshot(std::chrono::seconds(5))) {
+          std::cout << "Snapshot completed.\n";
+        } else {
+          std::cout << "Snapshot is still being written.\n";
+        }
       } else {
         std::cout << "Ignoring SIGUSR1 because snapshot mode is disabled.\n";
       }

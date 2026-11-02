@@ -3,6 +3,8 @@
 
 #include "record_playback_ext/coordinator/recorder_coordinator.h"
 
+#include <chrono>
+#include <future>
 #include <map>
 #include <memory>
 #include <string>
@@ -19,6 +21,8 @@ class FakeStorage : public Storage {
     std::map<std::string, uint64_t> topic_messages;
     uint64_t schemas = 0;
     uint64_t dropped = 0;
+    // When valid, every write waits for it: a stuck disk.
+    std::shared_future<void> write_gate;
   };
 
   explicit FakeStorage(Record* record) : record_(record) {}
@@ -32,6 +36,7 @@ class FakeStorage : public Storage {
     return next_channel_;
   }
   void Write(StorageChannelId channel_id, const ibmw::transport::SerializedMessage&) override {
+    if (record_->write_gate.valid()) record_->write_gate.wait();
     ++record_->topic_messages[channels_.at(channel_id)];
   }
   void Flush() override {}
@@ -100,6 +105,30 @@ TEST(RecorderCoordinatorTest, ConflictingSchemaOnlyDropsThatTopic) {
   EXPECT_EQ(record.schemas, 2u);
   EXPECT_EQ(record.dropped, 3u);
   EXPECT_EQ(coordinator.SchemaConflictMessages(), 3u);
+}
+
+// EXT-041: a snapshot behind a stuck storage write gives up waiting after the
+// timeout, so the caller (the bag command loop) still handles stop requests.
+TEST(RecorderCoordinatorTest, SnapshotWaitIsBounded) {
+  FakeStorage::Record record;
+  std::promise<void> disk;
+  record.write_gate = disk.get_future().share();
+  RecorderCoordinator::Options options;
+  options.snapshot_mode = true;
+  RecorderCoordinator coordinator(options, std::make_unique<FakeStorage>(&record));
+  coordinator.Initialize();
+  coordinator.Start();
+
+  const auto topic = MakeTopic("/snap", "pkg/msg/Pose", "float64 x");
+  ASSERT_EQ(coordinator.Accept(MakeMessage(topic)), RecordQueue::PushResult::kPushed);
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_FALSE(coordinator.TriggerSnapshot(std::chrono::milliseconds(100)));
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(5));
+
+  disk.set_value();
+  EXPECT_TRUE(coordinator.TriggerSnapshot(std::chrono::seconds(5)));
+  EXPECT_NO_THROW(coordinator.Close());
+  EXPECT_EQ(record.topic_messages["/snap"], 1u);
 }
 
 }  // namespace

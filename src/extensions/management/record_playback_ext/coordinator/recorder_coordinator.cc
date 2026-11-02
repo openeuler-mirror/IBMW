@@ -98,7 +98,7 @@ bool RecorderCoordinator::RegisterChannel(
   return true;
 }
 
-void RecorderCoordinator::TriggerSnapshot() {
+bool RecorderCoordinator::TriggerSnapshot(std::chrono::milliseconds timeout) {
   MW_ASSERT(options_.snapshot_mode, "Recorder is not in snapshot mode.");
   uint64_t request_id = 0;
   {
@@ -115,12 +115,14 @@ void RecorderCoordinator::TriggerSnapshot() {
   queue_.WakeConsumer();
 
   std::unique_lock snapshot_lock(snapshot_mutex_);
-  snapshot_cv_.wait(snapshot_lock, [this, request_id] {
-    return completed_snapshot_id_ >= request_id ||
-           snapshot_writer_finished_;
-  });
+  if (!snapshot_cv_.wait_for(snapshot_lock, timeout, [this, request_id] {
+        return completed_snapshot_id_ >= request_id ||
+               snapshot_writer_finished_;
+      })) {
+    return false;
+  }
   if (completed_snapshot_id_ >= request_id) {
-    return;
+    return true;
   }
   snapshot_lock.unlock();
   std::exception_ptr error;
