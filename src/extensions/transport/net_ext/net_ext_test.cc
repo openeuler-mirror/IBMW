@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,6 +32,7 @@
 #include "engine/service/service_catalog.h"
 #include "net_base/asio_tcp_cli.h"
 #include "net_base/asio_tcp_svr.h"
+#include "net_base/asio_udp_cli.h"
 #include "net_base/asio_udp_svr.h"
 #include "net_ext/http/http_rpc_driver.h"
 #include "net_ext/meta_filter.h"
@@ -346,6 +348,59 @@ TEST(NetUdpServerTest, FullSessionTableDropsOnlyNewEndpoints) {
   EXPECT_FALSE(received.WaitFor(3, 200ms));
   std::lock_guard lock(received.mutex);
   EXPECT_EQ(received.msgs[1].second, "a2");
+  svr->Shutdown();
+}
+
+// TRANS-033: a datagram longer than max_package_size used to be delivered
+// silently truncated; it is now dropped. The sender drops oversized messages.
+TEST(NetUdpServerTest, OversizedDatagramIsDroppedNotTruncated) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeUdpPort();
+  auto svr = std::make_shared<ibmw::common::net::AsioUdpServer>(io.Io());
+  svr->RegisterMsgHandle([&received](const Udp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    received.Add(ep, buf);
+  });
+  svr->Initialize({.ep = Udp::endpoint(kLoopback, port), .max_package_size = 8});
+  svr->Start();
+
+  asio::io_context cli_io;
+  Udp::socket sock(cli_io, Udp::endpoint(kLoopback, 0));
+  sock.send_to(asio::buffer(std::string("123456789")), Udp::endpoint(kLoopback, port));
+  sock.send_to(asio::buffer(std::string("12345678")), Udp::endpoint(kLoopback, port));
+  ASSERT_TRUE(received.WaitFor(1));
+  EXPECT_FALSE(received.WaitFor(2, 200ms));
+  std::lock_guard lock(received.mutex);
+  EXPECT_EQ(received.msgs[0].second, "12345678");
+  svr->Shutdown();
+}
+
+TEST(NetUdpClientTest, OversizedMessageIsNotSent) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeUdpPort();
+  auto svr = std::make_shared<ibmw::common::net::AsioUdpServer>(io.Io());
+  svr->RegisterMsgHandle([&received](const Udp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
+    received.Add(ep, buf);
+  });
+  svr->Initialize({.ep = Udp::endpoint(kLoopback, port)});
+  svr->Start();
+
+  auto cli = std::make_shared<ibmw::common::net::AsioUdpClient>(io.Io());
+  cli->Initialize({.svr_ep = Udp::endpoint(kLoopback, port), .max_package_size = 4});
+  cli->Start();
+  auto make = [](const std::string& text) {
+    auto buf = std::make_shared<asio::streambuf>();
+    std::ostream(buf.get()) << text;
+    return buf;
+  };
+  cli->SendMsg(make("too-long"));
+  cli->SendMsg(make("ok"));
+  ASSERT_TRUE(received.WaitFor(1));
+  EXPECT_FALSE(received.WaitFor(2, 200ms));
+  std::lock_guard lock(received.mutex);
+  EXPECT_EQ(received.msgs[0].second, "ok");
+  cli->Shutdown();
   svr->Shutdown();
 }
 

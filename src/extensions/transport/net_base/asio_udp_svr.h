@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -137,11 +138,17 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
             try {
               auto msg_buf = std::make_shared<boost::asio::streambuf>();
               boost::asio::ip::udp::endpoint remote_ep;
+              // One spare byte: a datagram that fills it was longer than the
+              // limit and has been truncated by the kernel, so drop it.
               size_t read_data_size = co_await sock_.async_receive_from(
-                  msg_buf->prepare(options_.max_package_size), remote_ep,
+                  msg_buf->prepare(options_.max_package_size + 1), remote_ep,
                   boost::asio::use_awaitable);
               MW_TRACE("udp svr session async read {} bytes from {}",
                           read_data_size, ibmw::common::util::SSToString(remote_ep));
+              if (read_data_size > options_.max_package_size) [[unlikely]] {
+                OnTruncatedDatagram(remote_ep);
+                continue;
+              }
               msg_buf->commit(read_data_size);
 
               std::shared_ptr<Session> session_ptr;
@@ -405,6 +412,14 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
     kShutdown,
   };
 
+  [[gnu::cold, gnu::noinline]] void OnTruncatedDatagram(const Udp::endpoint& remote_ep) {
+    // Log the 1st, 2nd, 4th, 8th, ... drop so a flood cannot flood the log.
+    const uint64_t count = ++truncated_count_;
+    if ((count & (count - 1)) != 0) return;
+    MW_WARN("udp svr dropped a datagram longer than max_package_size {} from {} ({} dropped so far).",
+            options_.max_package_size, ibmw::common::util::SSToString(remote_ep), count);
+  }
+
   [[gnu::cold, gnu::noinline]] void OnSessionTableFull(const Udp::endpoint& remote_ep) {
     if (table_full_) return;
     table_full_ = true;
@@ -435,6 +450,7 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
   std::unordered_map<Udp::endpoint, std::shared_ptr<Session>, AsioEndpointHash>
       session_ptr_map_;
   bool table_full_ = false;  // warned for the current full episode (mgr strand)
+  uint64_t truncated_count_ = 0;  // datagrams dropped as truncated (receive loop on mgr strand)
 };
 
 }  // namespace ibmw::common::net

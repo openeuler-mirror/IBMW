@@ -103,9 +103,11 @@ class AsioUdpClient : public std::enable_shared_from_this<AsioUdpClient> {
         return;
       }
 
-      MW_CHECK_ERROR(msg_buf_ptr->size() <= options_.max_package_size,
-                        "Msg too large for udp package, size {}, limit {}.",
-                        msg_buf_ptr->size(), options_.max_package_size);
+      if (msg_buf_ptr->size() > options_.max_package_size) [[unlikely]] {
+        MW_ERROR("Msg too large for udp package, dropped, size {}, limit {}.",
+                 msg_buf_ptr->size(), options_.max_package_size);
+        return;
+      }
 
       if (!session_ptr_ || !session_ptr_->IsRunning()) {
         session_ptr_ = std::make_shared<Session>(io_ptr_, logger_ptr_);
