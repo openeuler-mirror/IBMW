@@ -38,6 +38,9 @@ details remain governed by the documentation for each release.
 - ROS 2 JSON deserialization: resizable arrays of one message may claim at
   most 256 MiB of decoded storage (`kMaxTextArrayBytes`); larger input is
   rejected instead of allocated.
+- C++ `ibmw::Runtime`: an incompatible or malformed core now throws
+  `std::invalid_argument` instead of aborting the process. `ibmw::Module` reports
+  it as a failed setup; code constructing `Runtime` directly must handle it.
 
 ### Added
 

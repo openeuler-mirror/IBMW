@@ -7,12 +7,14 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 
 #include <sys/mman.h>
 
 #include "cpp/core.h"
+#include "cpp/module_base.h"
 #include "cpp/transport/loaned_subscriber.h"
 
 namespace ibmw::transport {
@@ -32,6 +34,39 @@ static_assert(std::is_move_constructible_v<ReceivedLoan>);
 static_assert(!std::is_copy_constructible_v<LoanedSubscription>);
 static_assert(std::is_move_constructible_v<LoanedSubscription>);
 
+void ExpectRuntimeRejected(const ibmw_core_base_t* base, std::string_view message) {
+  try {
+    Runtime runtime(base);
+    FAIL() << "Runtime accepted the core";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string_view(e.what()).find(message), std::string_view::npos) << e.what();
+  }
+}
+
+class SetupCountingModule : public Module {
+ public:
+  ModuleDescriptor Info() const override { return {}; }
+  bool Setup(Runtime) override {
+    ++setup_calls;
+    return true;
+  }
+  bool Run() override { return true; }
+  void Stop() override {}
+
+  int setup_calls = 0;
+};
+
+// API-048: a module rejecting the core fails its setup; the host process lives.
+TEST(RuntimeV2Abi, ModuleSetupFailsOnIncompatibleCoreWithoutAborting) {
+  ibmw_core_base_t base{};
+  base.abi_version = 1;
+
+  SetupCountingModule module;
+  const auto* handle = module.NativeHandle();
+  EXPECT_FALSE(handle->setup(handle->ctx, &base));
+  EXPECT_EQ(module.setup_calls, 0);
+}
+
 TEST(RuntimeV2Abi, RejectsV1BeforeCallingTransportAccessor) {
   auto* transport_access_calls = static_cast<int*>(mmap(
       nullptr, sizeof(int), PROT_READ | PROT_WRITE,
@@ -47,7 +82,7 @@ TEST(RuntimeV2Abi, RejectsV1BeforeCallingTransportAccessor) {
     return nullptr;
   };
 
-  EXPECT_DEATH({ Runtime runtime(&base); }, "ABI version mismatch");
+  ExpectRuntimeRejected(&base, "ABI version mismatch");
   EXPECT_EQ(*transport_access_calls, 0);
   EXPECT_EQ(munmap(transport_access_calls, sizeof(int)), 0);
 }
@@ -90,7 +125,7 @@ TEST(RuntimeV2Abi, RejectsMalformedCurrentVersionBeforeAnyAccessorCall) {
   base.parameter_handle = nullptr;
   base.ctx = accessor_calls;
 
-  EXPECT_DEATH({ Runtime runtime(&base); }, "Malformed current-version core ABI");
+  ExpectRuntimeRejected(&base, "Malformed current-version core ABI");
   for (size_t i = 0; i < kAccessorCount; ++i) EXPECT_EQ(accessor_calls[i], 0);
   EXPECT_EQ(munmap(accessor_calls, sizeof(int) * kAccessorCount), 0);
 }
@@ -127,7 +162,7 @@ TEST(RuntimeV2Abi, RejectsNullReturnedSubHandleAfterValidFunctionTable) {
   };
   base.ctx = calls;
 
-  EXPECT_DEATH({ Runtime runtime(&base); }, "required accessor returned null");
+  ExpectRuntimeRejected(&base, "required accessor returned null");
   EXPECT_EQ(calls[kRuntimeAccessorCount], static_cast<int>(kRuntimeAccessorCount));
   for (size_t i = 0; i < kRuntimeAccessorCount; ++i) EXPECT_EQ(calls[i], i + 1);
   EXPECT_EQ(munmap(calls, sizeof(int) * (kRuntimeAccessorCount + 1)), 0);

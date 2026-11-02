@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include <cstdio>
-#include <cstdlib>
+#include <stdexcept>
+#include <string>
 
 #include "c/core_base.h"
 #include "cpp/memory/allocator.h"
@@ -39,12 +39,13 @@ class Runtime {
   explicit Runtime(const ibmw_core_base_t* base_ptr)
       : base_ptr_(base_ptr) {
     if (base_ptr_) {
+      // A rejected core throws instead of aborting the host process: the
+      // module setup bridge reports it as a failed setup (API-048).
       if (base_ptr_->abi_version != IBMW_CORE_ABI_VERSION) {
-        std::fprintf(stderr,
-                     "[IBMW FATAL] ABI version mismatch: runtime=%u, expected=%u. "
-                     "Recompile all plugins against the current SDK.\n",
-                     base_ptr_->abi_version, (unsigned)IBMW_CORE_ABI_VERSION);
-        std::abort();
+        throw std::invalid_argument(
+            "ABI version mismatch: runtime=" + std::to_string(base_ptr_->abi_version) +
+            ", expected=" + std::to_string(IBMW_CORE_ABI_VERSION) +
+            ". Recompile all plugins against the current SDK.");
       }
       // A matching version is not sufficient if the provider supplied a
       // truncated or otherwise malformed current-version function table.
@@ -56,10 +57,7 @@ class Runtime {
           base_ptr_->service_handle == nullptr ||
           base_ptr_->transport_handle == nullptr ||
           base_ptr_->parameter_handle == nullptr) {
-        std::fprintf(stderr,
-                     "[IBMW FATAL] Malformed current-version core ABI: "
-                     "required accessor is null.\n");
-        std::abort();
+        throw std::invalid_argument("Malformed current-version core ABI: required accessor is null.");
       }
       // Eagerly cache sub-handle pointers. These are stable after engine
       // initialization and never change for the lifetime of the module.
@@ -76,10 +74,7 @@ class Runtime {
           cached_logger_ == nullptr || cached_memory_ == nullptr ||
           cached_service_ == nullptr || cached_transport_ == nullptr ||
           cached_parameter_ == nullptr) {
-        std::fprintf(stderr,
-                     "[IBMW FATAL] Malformed current-version core ABI: "
-                     "required accessor returned null.\n");
-        std::abort();
+        throw std::invalid_argument("Malformed current-version core ABI: required accessor returned null.");
       }
     }
   }
