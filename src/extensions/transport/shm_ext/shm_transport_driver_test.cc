@@ -2754,7 +2754,7 @@ TEST_F(ShmDriverTest, IoxCompatCtxMetaTypedPublisher) {
 
 // EXT-58 A sample or buffer borrowed from one driver and handed to a
 // publisher of another driver is not published there; its own driver takes
-// the loan back (typed, raw and ctx-meta publish()).
+// the loan back (typed, raw, native raw and ctx-meta publish()).
 TEST_F(ShmDriverTest, IoxCompatForeignSampleGoesBackToItsDriver) {
   auto& a = Init();
   ShmTransportDriver b(*bus_, "shm_b");
@@ -2768,6 +2768,9 @@ TEST_F(ShmDriverTest, IoxCompatForeignSampleGoesBackToItsDriver) {
   auto typed_b = CreatePodPublisher<CompatPod>(&b, info_b.topic_name, kType);
   auto raw_a = CreateRawPodPublisher(&a, info_a.topic_name, kRawType, 64);
   auto raw_b = CreateRawPodPublisher(&b, info_b.topic_name, kRawType, 64);
+  auto native_a = CreateShmRawPodPublisher(&a, info_a.topic_name, kRawType, 64);
+  auto native_b = CreateShmRawPodPublisher(&b, info_b.topic_name, kRawType, 64);
+  ASSERT_TRUE(native_a && native_b);
   ASSERT_TRUE(a.RegisterSendType(SendType(info_a)));
   ASSERT_TRUE(b.RegisterSendType(SendType(info_b)));
   auto meta_a = CreateCtxMetaPublisher(&a, info_a.topic_name, kBlobType);
@@ -2790,6 +2793,13 @@ TEST_F(ShmDriverTest, IoxCompatForeignSampleGoesBackToItsDriver) {
   ASSERT_TRUE(bytes.is_valid());
   EXPECT_EQ(raw_pub->Outstanding(), 1u);
   EXPECT_FALSE(raw_b->publish(std::move(bytes)));
+  EXPECT_EQ(raw_pub->Outstanding(), 0u);
+
+  // The native raw publisher behaves the same.
+  auto native_bytes = native_a->Borrow(16);
+  ASSERT_TRUE(native_bytes.valid());
+  EXPECT_EQ(raw_pub->Outstanding(), 1u);
+  EXPECT_FALSE(native_b->Publish(std::move(native_bytes)));
   EXPECT_EQ(raw_pub->Outstanding(), 0u);
 
   auto buf = meta_a->borrow_loaned_buffer(*PubContext(), 16);

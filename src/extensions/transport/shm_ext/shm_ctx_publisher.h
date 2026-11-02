@@ -45,7 +45,11 @@ class ShmCtxMetaPublisher {
   }
 
   // Loan, serialize `msg` into the chunk and publish. False if the loan or
-  // the serialization failed; the driver then holds no chunk.
+  // the serialization failed; the driver then holds no chunk. True does not
+  // prove delivery: TransportDriver::PublishLoaned() returns nothing, so a
+  // publish the library refuses (the chunk is still released) reads as true.
+  // Callers needing that result loan and call
+  // ShmTransportDriver::TryPublishLoaned() themselves.
   bool Publish(const ibmw::transport::Context& ctx, const void* msg) noexcept {
     if (driver_ == nullptr || msg == nullptr) return false;
     runtime::core::transport::LoanedSampleHandle handle;

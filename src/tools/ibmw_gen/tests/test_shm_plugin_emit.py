@@ -756,6 +756,29 @@ class TestShmSchemaAndImportWiring(unittest.TestCase):
         self.assertEqual(config_gen._get_messaging_driver(["ipub", "dsub"], module_map), "iceoryx")
         self.assertEqual(config_gen._get_messaging_driver(["ssub", "dsub"], module_map), "shm")
 
+    def test_schema_rejects_iceoryx_and_shm_in_one_app(self):
+        import contextlib
+        import io
+
+        import schema
+
+        data = {
+            "modules": [
+                {"name": "ipub", "transport": "iceoryx"},
+                {"name": "ssub", "transport": "shm"},
+                {"name": "dsub", "transport": "dds"},
+            ],
+            "apps": [{"name": "ok_app", "modules": ["ssub", "dsub"]},
+                     {"name": "mixed_app", "modules": ["ipub", "ssub"]}],
+        }
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as ctx:
+            schema._validate_apps(data)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("App 'mixed_app' cannot mix iceoryx and shm modules (iceoryx: ipub; shm: ssub)", err.getvalue())
+        data["apps"] = data["apps"][:1]
+        schema._validate_apps(data)  # shm with other transports is fine
+
     def test_ros2_import_shm_target_metadata(self):
         from ros2_interface_import import emit_reference_existing_interface_report
 

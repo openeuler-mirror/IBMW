@@ -58,6 +58,8 @@ class ShmLoanedBytes {
   }
 
   bool valid() const noexcept { return driver_ != nullptr && handle_.user_payload_ptr != nullptr; }
+  // The driver that lent the chunk.
+  ShmTransportDriver* Owner() const noexcept { return driver_; }
   void* data() noexcept { return handle_.user_payload_ptr; }
   size_t size() const noexcept { return handle_.user_payload_size; }
 
@@ -96,11 +98,15 @@ class ShmRawPodPublisher {
   }
 
   // False if the sample is invalid or its chunk was not published (e.g. a
-  // stale or duplicate loan).
+  // stale or duplicate loan). A sample of another driver is not published
+  // here; the driver that lent it takes the chunk back.
   bool Publish(ShmLoanedBytes&& sample) noexcept {
     if (!sample.valid()) return false;
+    ShmTransportDriver* owner = sample.Owner();
     auto handle = sample.Extract();
-    return driver_->TryPublishLoaned(handle);
+    if (driver_->TryPublishLoaned(handle)) return true;
+    if (handle.driver_token != nullptr) owner->ReleaseLoaned(handle);
+    return false;
   }
 
   const runtime::core::transport::TransportInfo& info() const noexcept { return info_; }

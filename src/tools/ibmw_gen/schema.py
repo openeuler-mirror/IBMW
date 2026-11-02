@@ -1197,6 +1197,14 @@ def _validate_apps(data: dict):
             if mod_name not in module_names:
                 _error(f"App '{app['name']}' references unknown module '{mod_name}'")
 
+        # shm replaces iceoryx on the same topics: one app cannot load both.
+        transports = {m["name"]: m.get("transport") for m in data.get("modules", [])}
+        mixed = {t: sorted(n for n in app["modules"] if transports.get(n) == t) for t in ("iceoryx", "shm")}
+        if mixed["iceoryx"] and mixed["shm"]:
+            _error(f"App '{app['name']}' cannot mix iceoryx and shm modules (iceoryx: "
+                   f"{', '.join(mixed['iceoryx'])}; shm: {', '.join(mixed['shm'])}); "
+                   "put them in separate apps or move them to one transport")
+
         # Default app type
         if "type" not in app:
             app["type"] = "pubsub"

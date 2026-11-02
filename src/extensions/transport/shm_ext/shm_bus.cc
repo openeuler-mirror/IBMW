@@ -899,7 +899,9 @@ bool ShmBus::Shutdown() noexcept {
   // Phase one left no loan, so a handle call still inside the gate holds a
   // stale token and returns at once; it must not look at a freed publisher.
   loan_return_gate_->Close();
-  loan_return_gate_->WaitIdle(std::chrono::steady_clock::time_point::max());
+  while (!loan_return_gate_->WaitIdle(std::chrono::steady_clock::now() + std::chrono::seconds(1))) {
+    MW_ERROR("ShmBus::Shutdown is still waiting for loan publish/release calls to return.");
+  }
   std::unordered_map<std::string, std::shared_ptr<ShmSubscription>, ibmw::common::util::StringHash, std::equal_to<>>
       subscriptions;
   {
