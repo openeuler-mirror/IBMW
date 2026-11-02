@@ -472,18 +472,50 @@ class CoAccessBase : public AccessBase {
     const void* req_ptr;
     void* rsp_ptr;
 
-    struct State {
-      ibmw::rpc::Status status;
+    ibmw::rpc::Status status;
+
+    // Owned by the completion callback. Resumes the caller exactly once: with
+    // the provider's code, or with CLI_DRIVER_INTERNAL_ERROR when every copy
+    // of the callback is destroyed without being called (a lost answer would
+    // otherwise leak the suspended coroutine frame).
+    struct Resumer {
+      Resumer(CallAwaitable* awaitable_in, std::coroutine_handle<> handle_in,
+              ibmw::executor::ExecutorHandle resume_exe_in)
+          : awaitable(awaitable_in), handle(handle_in), resume_exe(std::move(resume_exe_in)) {}
+
+      CallAwaitable* awaitable;
       std::coroutine_handle<> handle;
-      std::mutex mutex;
-      bool suspended = false;
-      bool completed = false;
-      bool resumed = false;
+      ibmw::executor::ExecutorHandle resume_exe;
+      std::atomic<bool> completed{false};
+
+      void Complete(uint32_t code) {
+        if (completed.exchange(true, std::memory_order_acq_rel)) return;
+        // The coroutine is suspended until the dispatched task resumes it.
+        awaitable->status = ibmw::rpc::Status(code);
+        resume_exe.Dispatch([handle{handle}, exe{resume_exe}]() {
+          // Resume with g_thread_ctx.exe set to the calling executor, as
+          // co::IbmwExecutor's resumers do, so code after co_await (for
+          // example the next RPC call, which takes its resume executor from
+          // there) sees it; the worker's own context is restored afterwards.
+          ibmw::co::details::ThreadCtxScope scope(exe);
+          handle.resume();
+        });
+      }
+
+      ~Resumer() {
+        try {
+          Complete(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+        } catch (...) {
+        }
+      }
     };
 
-    std::shared_ptr<State> state = std::make_shared<State>();
-
-    bool await_ready() const noexcept { return false; }
+    // Off an executor thread there is nowhere to resume: fail without suspending.
+    bool await_ready() noexcept {
+      if (resume_exe) [[likely]] return false;
+      status = ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_INVALID_CONTEXT);
+      return true;
+    }
 
     // Once Call() has the callback, the coroutine may be resumed and its
     // frame (which holds *this) destroyed on another thread. So everything
@@ -492,58 +524,19 @@ class CoAccessBase : public AccessBase {
     // await_suspend in the coroutine frame, where their destructors would
     // run on freed memory.
     IBMW_RPC_AWAIT_SUSPEND_NOINLINE void await_suspend(std::coroutine_handle<> h) {
-      auto state_copy = state;
       auto service_ref_copy = service_ref;
       auto full_func_name_copy = full_func_name;
       auto ctx_ref_copy = ctx_ref;
-      auto resume_exe_copy = resume_exe;
       auto req_ptr_copy = req_ptr;
       auto rsp_ptr_copy = rsp_ptr;
 
-      MW_ASSERT(resume_exe_copy, "Coroutine RPC resume executor is not set.");
-
-      {
-        std::lock_guard lock(state_copy->mutex);
-        state_copy->handle = h;
-        state_copy->suspended = true;
-      }
-
+      auto resumer = std::make_shared<Resumer>(this, h, resume_exe);
       service_ref_copy.Call(
           *full_func_name_copy, ctx_ref_copy, req_ptr_copy, rsp_ptr_copy,
-          [state{std::move(state_copy)}, resume_exe_copy](uint32_t code) mutable {
-            {
-              std::lock_guard lock(state->mutex);
-              if (state->completed) {
-                return;
-              }
-              state->status = ibmw::rpc::Status(code);
-              state->completed = true;
-            }
-
-            resume_exe_copy.Dispatch([state, resume_exe_copy]() mutable {
-              std::coroutine_handle<> handle;
-              {
-                std::lock_guard lock(state->mutex);
-                if (state->resumed) {
-                  return;
-                }
-                state->resumed = true;
-                handle = std::exchange(state->handle, std::coroutine_handle<>{});
-              }
-              if (handle) {
-                // Resume with g_thread_ctx.exe set to the calling executor, as
-                // co::IbmwExecutor's resumers do, so code after co_await (for
-                // example the next RPC call, which takes its resume executor
-                // from there) sees it; the worker's own context is restored
-                // afterwards (see ThreadCtxScope).
-                ibmw::co::details::ThreadCtxScope scope(resume_exe_copy);
-                handle.resume();
-              }
-            });
-          });
+          [resumer{std::move(resumer)}](uint32_t code) { resumer->Complete(code); });
     }
 
-    auto await_resume() noexcept { return state->status; }
+    auto await_resume() noexcept { return status; }
   };
   // Regression guard for the GCC 11/12 double destruction above: removing the
   // constructor (making it an aggregate again) must not compile.
