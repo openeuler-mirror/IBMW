@@ -235,6 +235,8 @@ class BoundedBlockingQueue {
   // every push and pop take WakeSlow() while it sleeps, slowing the thread
   // waited for: with 8 producers that fed on itself.
   static constexpr int kFrontYields = 64;
+  // Re-check period of a front sleeper whose HeavyBarrier() failed.
+  static constexpr Clock::duration kUnpairedPoll = std::chrono::milliseconds(1);
   // abort_ never reaches this value; for waits that ignore Abort().
   static constexpr uint64_t kIgnoreAbort = std::numeric_limits<uint64_t>::max();
   // Units of sleepers_, one 21-bit count per kind, so that a waker reads
@@ -432,22 +434,41 @@ class BoundedBlockingQueue {
     if ((epoch & 1) != 0) return false;
     Hold hold{epoch, deadline};
     while (true) {
-      Woken woken;
-      switch (TryPopImpl(out, &hold)) {
+      Woken woken = Woken::kRetry;
+      Front front;
+      try {
+        front = TryPopImpl(out, &hold);
+      } catch (...) {
+        GiveUp();  // a throwing move left the item queued
+        throw;
+      }
+      switch (front) {
         case Front::kItem:
           return true;
         case Front::kEmpty:
           woken = Wait(kPopSleeper, [this] { return EmptyNow(); }, epoch, deadline);
           break;
         case Front::kNotReady: {
-          if (hold.woken != Woken::kRetry) return false;
+          if (hold.woken != Woken::kRetry) return GiveUp();
           woken = WaitFront(head_.popped.load(std::memory_order_seq_cst), epoch, deadline);
           break;
         }
       }
-      if (woken != Woken::kRetry) return false;
-      if (abort_.load(std::memory_order_seq_cst) != epoch) return false;
+      if (woken != Woken::kRetry) return GiveUp();
+      if (abort_.load(std::memory_order_seq_cst) != epoch) return GiveUp();
     }
+  }
+
+  // A push signals one pop sleeper (see Publish()). If that was this call
+  // and it gives up (deadline, Abort() or an exception) without an item,
+  // e.g. because the oldest item is still being written, the other pop
+  // sleepers would sleep with items queued: pass the signal on. Like a
+  // push, read sleepers_ after seeing the queue non-empty; tail_ and
+  // head_.popped are seq_cst too, so a pop sleeper counted after that read
+  // finds items (or a consumer took them) and does not sleep.
+  bool GiveUp() {
+    if (!EmptyNow()) Wake(kPopSleeper, 1);
+    return false;
   }
 
   // Hands the oldest item to take(item) and removes it, stepping over
@@ -724,6 +745,11 @@ class BoundedBlockingQueue {
   Woken Wait(uint64_t kind, Blocked blocked, uint64_t epoch, Clock::time_point deadline) {
     std::condition_variable& cv = kind == kPopSleeper ? not_empty_ : kind == kPushSleeper ? not_full_ : progress_;
     const auto aborted = [&] { return epoch != kIgnoreAbort && abort_.load(std::memory_order_seq_cst) != epoch; };
+    if (deadline != kNoDeadline && Clock::now() >= deadline) {
+      // Nothing left to wait for (PopFor(0), or a retry after the deadline).
+      if (!blocked()) return Woken::kRetry;
+      return aborted() ? Woken::kAborted : Woken::kTimeout;
+    }
     // Short waits (an item about to be written, a slot about to be freed)
     // end here, without a futex sleep on this side or a wake on the other.
     const int yields = kind == kFrontSleeper ? kFrontYields : kWaitYields;
@@ -746,7 +772,9 @@ class BoundedBlockingQueue {
       uint64_t kind;
       ~Uncount() { sleepers.fetch_sub(kind, std::memory_order_relaxed); }
     } uncount{sleepers_, kind};
-    if (kind == kFrontSleeper) detail::HeavyBarrier();  // see Wake()
+    if (kind == kFrontSleeper && !detail::HeavyBarrier()) {  // see Wake()
+      return PollFront(cv, blocked, aborted, deadline);
+    }
     std::unique_lock<std::mutex> lock(wait_mu_);
     Woken woken = Woken::kRetry;
     while (blocked()) {
@@ -760,6 +788,25 @@ class BoundedBlockingQueue {
       }
     }
     return woken;
+  }
+
+  // The rest of Wait() for a front sleeper whose HeavyBarrier() failed: a
+  // waker's change may then go unseen when it is signalled, so re-check
+  // every kUnpairedPoll. Kept out of line: inlining it into Wait() (where
+  // it never runs) made 1P8C in the queue benchmark about 40% slower (GCC 11).
+  template <class Blocked, class Aborted>
+  [[gnu::noinline]] Woken PollFront(std::condition_variable& cv, Blocked& blocked, Aborted& aborted,
+                                    Clock::time_point deadline) {
+    std::unique_lock<std::mutex> lock(wait_mu_);
+    while (blocked()) {
+      if (aborted()) return Woken::kAborted;
+      const Clock::time_point until = std::min(deadline, Clock::now() + kUnpairedPoll);
+      if (!SleepUntil(cv, lock, until) && until == deadline) {
+        if (blocked()) return aborted() ? Woken::kAborted : Woken::kTimeout;
+        break;
+      }
+    }
+    return Woken::kRetry;
   }
 
   // False once the deadline has passed.
@@ -791,7 +838,8 @@ class BoundedBlockingQueue {
   // accessed. Front sleepers also wait on a lane's turn or head_turn, or a
   // cell, written with release stores on every push and pop: there the
   // waker puts LightBarrier() between its stores and the read of sleepers_,
-  // and the sleeper HeavyBarrier() after counting itself.
+  // and the sleeper HeavyBarrier() after counting itself (if that fails,
+  // the sleeper does not rely on the signal and re-checks periodically).
   //
   // Wakes front sleepers and `n` sleepers of `kind`. A counted sleeper
   // checks blocked() under wait_mu_: before the waker takes wait_mu_ (the

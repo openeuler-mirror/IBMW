@@ -86,24 +86,58 @@ inline void LightBarrier() noexcept {
   }
 }
 
-inline void HeavyBarrier() noexcept {
+// Tries per heavy barrier. membarrier(2) can fail for a moment: ENOMEM when
+// the kernel cannot allocate its CPU mask (CONFIG_CPUMASK_OFFSTACK).
+inline constexpr int kMembarrierTries = 4;
+
+// True once membarrier(2) failed after registration with an error that will
+// not go away (EPERM from a seccomp filter installed later, ENOSYS, ...):
+// later heavy barriers then fail without trying. Transient errors (EINTR,
+// EAGAIN, ENOMEM) do not set it, not even when every try failed.
+inline std::atomic<bool> membarrier_blocked{false};
+
+#if IBMW_SELFDEV_HAS_MEMBARRIER
+// HeavyBarrier() after its first membarrier(2) failed with errno: retries
+// transient errors, and reports a failure once. Cold and out of line, so
+// that it stays off the push and pop paths.
+[[gnu::cold, gnu::noinline]] inline bool RetryMembarrier() noexcept {
+  int err = errno;
+  for (int n = 1; n < kMembarrierTries && (err == EINTR || err == EAGAIN || err == ENOMEM); ++n) {
+    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) == 0) return true;
+    err = errno;
+  }
+  if (err != EINTR && err != EAGAIN && err != ENOMEM) membarrier_blocked.store(true, std::memory_order_relaxed);
+  static std::atomic<bool> reported{false};
+  if (!reported.exchange(true, std::memory_order_relaxed)) {
+    std::fprintf(stderr,
+                 "ibmw_selfdev: membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED) failed after registration: %s; "
+                 "threads waiting at a queue lane now re-check every millisecond; "
+                 "set IBMW_SELFDEV_NO_MEMBARRIER=1 in the environment to use fences instead\n",
+                 std::strerror(err));
+  }
+  return false;
+}
+#endif
+
+// Returns whether the barrier was made; false only if membarrier(2) fails
+// after registration (see membarrier_blocked; or memory pressure on every
+// try). Light sides already skip their fence then, so nothing pairs with
+// them: the caller must not rely on being signalled, and should re-check
+// what it waits for periodically instead (every store becomes visible in
+// finite time). Not mprotect(2) on a resident page as a substitute (folly,
+// .NET): that runs a barrier on the other CPUs only where the kernel shoots
+// their TLB entries down by IPI, and AArch64 (the OHOS target) invalidates
+// remote TLBs by broadcast instructions instead. Out of line: it costs a
+// system call anyway, and its callers sit on the push and pop paths.
+[[nodiscard, gnu::noinline]] inline bool HeavyBarrier() noexcept {
 #if IBMW_SELFDEV_HAS_MEMBARRIER
   if (RegisterMembarrier()) {
-    // Fails only if something blocked membarrier(2) after registration (a
-    // seccomp filter installed later). Light sides already skip their fence,
-    // so a fence here would not pair with them and wakeups could be lost:
-    // stop instead of hanging later.
-    if (syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) != 0) {
-      std::fprintf(stderr,
-                   "ibmw_selfdev: membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED) failed after registration: %s; "
-                   "set IBMW_SELFDEV_NO_MEMBARRIER=1 in the environment to use fences instead\n",
-                   std::strerror(errno));
-      std::abort();
-    }
-    return;
+    if (membarrier_blocked.load(std::memory_order_relaxed)) return false;
+    return syscall(SYS_membarrier, MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0) == 0 || RetryMembarrier();
   }
 #endif
   std::atomic_thread_fence(std::memory_order_seq_cst);
+  return true;
 }
 
 }  // namespace IBMW_SELFDEV_BARRIER_NS

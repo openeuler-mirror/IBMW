@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -49,28 +50,51 @@ class ConcurrentHashMap {
   }
 
   /// Returns true when inserted, false when an existing value was replaced.
+  /// The replaced value is destroyed after the shard lock is released. The
+  /// new value is constructed from `value` before the lock is taken, then
+  /// moved in or swapped with the old one: Value must be constructible from
+  /// V, move constructible and swappable. If constructing it throws, the
+  /// map is unchanged.
   template <class V>
   bool InsertOrAssign(const Key& key, V&& value) {
+    static_assert(std::is_constructible_v<Value, V&&>, "InsertOrAssign: Value must be constructible from the argument");
+    static_assert(std::is_move_constructible_v<Value> && std::is_swappable_v<Value>,
+                  "InsertOrAssign: Value must be move constructible and swappable (the old value is swapped out "
+                  "under the shard lock and destroyed after it)");
+    Value fresh(std::forward<V>(value));
     Shard& s = ShardFor(key);
-    std::lock_guard<detail::AdaptiveMutex> lock(s.mu);
-    return s.map.insert_or_assign(key, std::forward<V>(value)).second;
+    std::unique_lock<detail::AdaptiveMutex> lock(s.mu);
+    // try_emplace leaves `fresh` alone when the key is present.
+    auto [it, inserted] = s.map.try_emplace(key, std::move(fresh));
+    if (!inserted) {
+      using std::swap;
+      swap(it->second, fresh);
+    }
+    lock.unlock();
+    return inserted;
   }
 
-  /// Atomically finds, removes and returns the value.
+  /// Atomically finds, removes and returns the value. The moved-from value
+  /// is destroyed after the shard lock is released; if moving it out
+  /// throws, the key stays in the map.
   std::optional<Value> Take(const Key& key) {
     Shard& s = ShardFor(key);
-    std::lock_guard<detail::AdaptiveMutex> lock(s.mu);
+    std::unique_lock<detail::AdaptiveMutex> lock(s.mu);
     auto it = s.map.find(key);
     if (it == s.map.end()) return std::nullopt;
     std::optional<Value> out(std::move(it->second));
-    s.map.erase(it);
+    auto node = s.map.extract(it);
+    lock.unlock();
     return out;
   }
 
+  /// The value is destroyed after the shard lock is released.
   bool Erase(const Key& key) {
     Shard& s = ShardFor(key);
-    std::lock_guard<detail::AdaptiveMutex> lock(s.mu);
-    return s.map.erase(key) != 0;
+    std::unique_lock<detail::AdaptiveMutex> lock(s.mu);
+    auto node = s.map.extract(key);
+    lock.unlock();
+    return !node.empty();
   }
 
   bool Contains(const Key& key) const {

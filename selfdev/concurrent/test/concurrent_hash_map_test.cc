@@ -4,12 +4,15 @@
 #include "ibmw_selfdev/concurrent/concurrent_hash_map.h"
 
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -214,6 +217,101 @@ TEST(ConcurrentHashMapTest, ShardCountClamped) {
   using Map = ConcurrentHashMap<int, int>;
   EXPECT_EQ(Map(Map::kMaxShards + 1).ShardCount(), Map::kMaxShards);
   EXPECT_EQ(Map(~size_t{0}).ShardCount(), Map::kMaxShards);
+}
+
+// HM-15: a value's destructor may use the same map (here it erases another
+// key, as an entry that unregisters something would): Erase and
+// InsertOrAssign destroy the old value, and Take the moved-from one, after
+// releasing the shard lock. One shard, so all keys share it. Run on its
+// own thread, so a deadlock fails the test instead of hanging it.
+struct ErasesOnDestroy {
+  using Map = ConcurrentHashMap<int, ErasesOnDestroy>;
+  Map* map = nullptr;
+  int other = 0;
+  ErasesOnDestroy() = default;
+  ErasesOnDestroy(Map* m, int k) : map(m), other(k) {}
+  ErasesOnDestroy(ErasesOnDestroy&& o) noexcept : map(std::exchange(o.map, nullptr)), other(o.other) {}
+  ErasesOnDestroy& operator=(ErasesOnDestroy&& o) noexcept {
+    map = std::exchange(o.map, nullptr);
+    other = o.other;
+    return *this;
+  }
+  ~ErasesOnDestroy() {
+    if (map != nullptr) {
+      EXPECT_TRUE(map->Erase(other));
+    }
+  }
+};
+
+// Uses the map in its destructor even when moved from (as Take() leaves
+// the stored one).
+struct LooksUpOnDestroy {
+  using Map = ConcurrentHashMap<int, LooksUpOnDestroy>;
+  Map* map = nullptr;
+  LooksUpOnDestroy() = default;
+  explicit LooksUpOnDestroy(Map* m) : map(m) {}
+  LooksUpOnDestroy(LooksUpOnDestroy&& o) noexcept : map(o.map) {}
+  LooksUpOnDestroy& operator=(LooksUpOnDestroy&& o) noexcept {
+    map = o.map;
+    return *this;
+  }
+  ~LooksUpOnDestroy() {
+    if (map != nullptr) map->Contains(0);
+  }
+};
+
+// Runs `body` on its own thread; false if it did not finish within 10 s
+// (then `body` and what it uses are leaked, as a shard lock is still held).
+bool FinishesInTime(std::function<void()> body) {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  std::thread t([body = std::move(body), done] {
+    struct Done {  // also when a fatal assertion returns early
+      std::atomic<bool>& d;
+      ~Done() { d = true; }
+    } mark{*done};
+    body();
+  });
+  const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!*done && std::chrono::steady_clock::now() < give_up) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  if (!*done) {
+    t.detach();
+    return false;
+  }
+  t.join();
+  return true;
+}
+
+TEST(ConcurrentHashMapTest, ValueDestructorMayUseMap) {
+  using Map = ErasesOnDestroy::Map;
+  auto* m = new Map(1);
+  const bool finished = FinishesInTime([m] {
+    EXPECT_TRUE(m->Emplace(1, m, 2));
+    EXPECT_TRUE(m->Emplace(2));
+    EXPECT_TRUE(m->Erase(1));
+    EXPECT_FALSE(m->Contains(2));
+
+    EXPECT_TRUE(m->InsertOrAssign(3, ErasesOnDestroy(m, 4)));
+    EXPECT_TRUE(m->Emplace(4));
+    EXPECT_FALSE(m->InsertOrAssign(3, ErasesOnDestroy()));
+    EXPECT_FALSE(m->Contains(4));
+    EXPECT_TRUE(m->Contains(3));
+    EXPECT_EQ(m->Size(), 1u);
+  });
+  EXPECT_TRUE(finished) << "deadlock: a value was destroyed under its shard lock (Erase or InsertOrAssign)";
+  if (finished) delete m;
+
+  using TakeMap = LooksUpOnDestroy::Map;
+  auto* tm = new TakeMap(1);
+  const bool took = FinishesInTime([tm] {
+    EXPECT_TRUE(tm->Emplace(5, tm));
+    const auto v = tm->Take(5);
+    EXPECT_TRUE(v.has_value());
+    EXPECT_FALSE(tm->Contains(5));
+  });
+  EXPECT_TRUE(took) << "deadlock: Take destroyed the moved-from value under its shard lock";
+  if (took) delete tm;
 }
 
 }  // namespace concurrent_hash_map_test

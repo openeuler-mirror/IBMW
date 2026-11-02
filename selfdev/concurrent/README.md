@@ -17,7 +17,12 @@ if (q.Pop(t)) t();              // false once aborted
 ```
 
 Callbacks given to `Visit` / `ForEach` run under a shard lock and must not
-call back into the same map.
+call back into the same map. Values are destroyed outside it (`Erase`,
+the old value of `InsertOrAssign`, the moved-from value of `Take`), so a
+destructor may use the map. `InsertOrAssign(key, v)` builds the new value
+before taking the lock and swaps it in, so `V` must be constructible from
+`v`, move constructible and swappable (checked by `static_assert`); if
+building it throws, the map is unchanged.
 
 `BoundedBlockingQueue` notes:
 
@@ -50,13 +55,25 @@ call back into the same map.
   - at run time: set `IBMW_SELFDEV_NO_MEMBARRIER=1` in the environment
     before the first queue is made; it is read once, before any
     `membarrier` call;
-  - at build time: CMake option `IBMW_SELFDEV_CONCURRENT_NO_MEMBARRIER=ON`,
-    which defines `IBMW_SELFDEV_NO_MEMBARRIER` for every user of the
-    target. Defining the macro by hand must be done for all translation
-    units (globally): units that disagree can lose wakeups. The queue
-    lives in an inline namespace named after the variant, which makes
-    some mixes fail to link, but not all (a queue held as a member of a
-    type shared across units still links).
+  - at build time: CMake option `IBMW_SELFDEV_CONCURRENT_NO_MEMBARRIER=ON`
+    (the default when building for OHOS, until `membarrier` is confirmed
+    on the board), which defines `IBMW_SELFDEV_NO_MEMBARRIER` for every
+    user of the target. The OHOS default applies to a fresh build
+    directory only: the option is cached, so a directory configured
+    before keeps its value until it is set with `-D` or the cache is
+    recreated. Defining the macro by hand must be done for all
+    translation units (globally): units that disagree can lose wakeups.
+    The queue lives in an inline namespace named after the variant,
+    which makes some mixes fail to link, but not all (a queue held as a
+    member of a type shared across units still links).
 - If `membarrier` fails after registration (a filter installed later
-  returns an error), the queue aborts with a message naming the
-  variable, rather than losing wakeups.
+  returns an error, or `ENOMEM` on every one of a few tries), the queue
+  keeps working: a thread about to sleep at a lane then re-checks every
+  millisecond instead of relying on a wakeup, and a message naming the
+  variable is printed once to stderr. An error that will not go away
+  (`EPERM`, `ENOSYS`, ...) is remembered and later sleeps skip the call;
+  after transient ones (`ENOMEM`, `EINTR`, `EAGAIN`) the next sleep tries
+  again.
+- `PopFor` that times out, a call ended by `Abort()`, or a `Pop` whose
+  move assignment throws, with items still queued, passes on the wakeup
+  it may have taken, so other blocked `Pop` calls are not left asleep.

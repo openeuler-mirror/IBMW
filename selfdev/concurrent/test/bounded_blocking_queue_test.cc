@@ -3,6 +3,7 @@
 
 #include "ibmw_selfdev/concurrent/bounded_blocking_queue.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -953,12 +954,13 @@ TEST(BoundedBlockingQueueTest, StalledProducerKeepsDeadlinesAndDoesNotBurnCpu) {
 template <class Duration>
 void PopForHugeTimeout(Duration timeout) {
   BoundedBlockingQueue<int> q;
+  // Start the clock before the pusher's: the push comes >= kSettle later.
+  const auto start = std::chrono::steady_clock::now();
   std::thread pusher([&] {
     std::this_thread::sleep_for(kSettle);
     EXPECT_TRUE(q.Push(1));
   });
   int v = 0;
-  const auto start = std::chrono::steady_clock::now();
   EXPECT_TRUE(q.PopFor(v, timeout));
   EXPECT_GE(ElapsedMs(start), 40);
   EXPECT_EQ(v, 1);
@@ -998,7 +1000,10 @@ TEST(BoundedBlockingQueueTest, PopForMostNegativeTimeoutReturnsAtOnce) {
 // TryPop and PopFor with short deadlines. The lock-free consumers own a lane
 // in two ways (TryPop takes the ticket first and then waits for the lane;
 // Pop and PopFor take the lane first and may let go of it at a deadline),
-// which must never lose, duplicate or reorder an item.
+// which must never lose, duplicate or reorder an item. Half the consumers
+// only Pop; the others stop once the producers are done, so the last items
+// are left to blocking Pop calls and a lost wakeup there is not retried
+// away by a TryPop or PopFor loop.
 template <bool kNothrowMove>
 struct Slow {
   int64_t v = -1;
@@ -1022,6 +1027,7 @@ void SlowProducersMixedConsumers(size_t capacity) {
   std::vector<std::atomic<int>> seen(size_t{kProducers} * kPerProducer);
   std::atomic<int> got{0};
   std::atomic<int> order_errors{0};
+  std::atomic<bool> produced{false};
   std::vector<std::thread> threads;
   for (int c = 0; c < kConsumers; ++c) {
     threads.emplace_back([&, c] {
@@ -1035,9 +1041,10 @@ void SlowProducersMixedConsumers(size_t capacity) {
         seen[static_cast<size_t>(out.v)].fetch_add(1);
         ++got;
       };
-      while (!q.Aborted()) {
+      const bool pop_only = c % 2 == 0;
+      while (pop_only ? !q.Aborted() : !produced) {
         bool ok = false;
-        switch (rng() % 3) {
+        switch (pop_only ? 0 : rng() % 3) {
           case 0:
             ok = q.Pop(out);
             break;
@@ -1050,7 +1057,6 @@ void SlowProducersMixedConsumers(size_t capacity) {
         }
         if (ok) record();
       }
-      while (q.TryPop(out)) record();
     });
   }
   std::vector<std::thread> producers;
@@ -1060,6 +1066,7 @@ void SlowProducersMixedConsumers(size_t capacity) {
     });
   }
   for (auto& t : producers) t.join();
+  produced = true;
   EXPECT_TRUE(Eventually([&] { return got.load() == kProducers * kPerProducer; }, 60s)) << got.load();
   q.Abort();
   for (auto& t : threads) t.join();
@@ -1074,6 +1081,146 @@ TEST(BoundedBlockingQueueTest, SlowProducersMixedConsumers) {
     SlowProducersMixedConsumers<true>(capacity);
     SlowProducersMixedConsumers<false>(capacity);
   }
+}
+
+// BQ-38: a push signals one sleeping Pop. If that was a PopFor which then
+// cannot take an item before its deadline (the oldest one is still being
+// written), it must pass the signal on: two Pop calls asleep at the same
+// time still get both items. The PopFor falls asleep first, so it is the
+// one signalled (futex wakeups go in order). Getting all three asleep can
+// take longer than the PopFor timeout on a slow machine (TSAN, loaded CI);
+// then the run proves nothing and is repeated with twice the timeout.
+bool StayAsleep(const std::vector<std::atomic<long>*>& tids) {
+  int polls = 0;
+  const auto give_up = std::chrono::steady_clock::now() + 10s;
+  while (polls < 5 && std::chrono::steady_clock::now() < give_up) {
+    bool all = true;
+    for (auto* tid : tids) all = all && tid->load() != 0 && ThreadSleeping(tid->load());
+    polls = all ? polls + 1 : 0;
+    std::this_thread::sleep_for(10ms);
+  }
+  return polls == 5;
+}
+
+// False if the PopFor timed out before item 1 came (inconclusive).
+template <bool kNothrowMove>
+bool PopForPassesWakeupOnce(std::chrono::seconds timeout) {
+  using T = Stalling<kNothrowMove>;
+  BoundedBlockingQueue<T> q;
+  std::atomic<long> popfor_tid{0};
+  std::atomic<int> popfor_result{-1};  // -1: still waiting
+  std::chrono::steady_clock::duration popfor_took{};
+  std::thread popfor([&] {
+    popfor_tid = syscall(SYS_gettid);
+    T o;
+    const auto start = std::chrono::steady_clock::now();
+    const bool got = q.PopFor(o, timeout);
+    popfor_took = std::chrono::steady_clock::now() - start;
+    popfor_result = got ? 1 : 0;
+  });
+  // EXPECT rather than ASSERT from here on: the threads must be joined.
+  EXPECT_TRUE(StayAsleep({&popfor_tid}));
+  std::vector<std::atomic<long>> pop_tids(2);
+  std::vector<std::atomic<int>> popped(2);  // -1: still waiting; -2: false
+  std::vector<std::thread> pops;
+  for (size_t i = 0; i < 2; ++i) {
+    popped[i] = -1;
+    pops.emplace_back([&, i] {
+      pop_tids[i] = syscall(SYS_gettid);
+      T o;
+      popped[i] = q.Pop(o) ? o.v : -2;
+    });
+  }
+  EXPECT_TRUE(StayAsleep({&popfor_tid, &pop_tids[0], &pop_tids[1]}));
+
+  // Item 0 stays in its constructor; item 1 is published and signals.
+  Gate gate;
+  std::thread stalled([&] { EXPECT_TRUE(q.Emplace(0, &gate)); });
+  EXPECT_TRUE(Eventually([&] { return q.Size() == 1; }));
+  EXPECT_TRUE(q.Emplace(1, nullptr));
+  if (popfor_result.load() != -1) {  // timed out before item 1 came
+    gate.Open();
+    stalled.join();
+    q.Abort();
+    popfor.join();
+    for (auto& t : pops) t.join();
+    EXPECT_EQ(popfor_result.load(), 0);
+    EXPECT_GE(popfor_took, timeout) << "PopFor returned false before its deadline";
+    return false;
+  }
+  EXPECT_TRUE(Eventually([&] { return popfor_result.load() != -1; }, timeout + 5s));
+  EXPECT_EQ(popfor_result.load(), 0);
+  gate.Open();
+  stalled.join();
+  EXPECT_TRUE(Eventually([&] { return popped[0].load() != -1 && popped[1].load() != -1; }, 5s))
+      << "a Pop slept with an item queued";
+  q.Abort();  // releases a Pop that missed its wakeup, so the test fails instead of hanging
+  popfor.join();
+  for (auto& t : pops) t.join();
+  EXPECT_EQ(popped[0].load() + popped[1].load(), 1);
+  EXPECT_EQ(std::min(popped[0].load(), popped[1].load()), 0);
+  EXPECT_TRUE(q.Empty());
+  return true;
+}
+
+template <bool kNothrowMove>
+void PopForPassesWakeupOn() {
+  for (auto timeout = 1s; timeout <= 16s; timeout *= 2) {
+    if (PopForPassesWakeupOnce<kNothrowMove>(timeout)) return;
+  }
+  ADD_FAILURE() << "PopFor timed out before item 1 came even with a 16 s timeout";
+}
+
+TEST(BoundedBlockingQueueTest, PopForTimeoutPassesWakeupOn) {
+  PopForPassesWakeupOn<true>();
+  PopForPassesWakeupOn<false>();
+}
+
+// BQ-40: the same for a Pop whose move assignment throws (locked consumer
+// path): the item stays queued, the exception leaves Pop(), and the other
+// sleeping Pop must still get the item.
+struct ThrowsOnAssign {
+  static inline std::atomic<bool> throw_next{false};
+  int v = -1;
+  ThrowsOnAssign() = default;
+  explicit ThrowsOnAssign(int x) : v(x) {}
+  ThrowsOnAssign(ThrowsOnAssign&& o) noexcept(false) : v(o.v) {}
+  ThrowsOnAssign& operator=(ThrowsOnAssign&& o) noexcept(false) {
+    if (throw_next.exchange(false)) throw std::runtime_error("assign");
+    v = o.v;
+    return *this;
+  }
+};
+
+TEST(BoundedBlockingQueueTest, ThrowingPopPassesWakeupOn) {
+  BoundedBlockingQueue<ThrowsOnAssign> q;
+  std::vector<std::atomic<long>> tids(2);
+  std::vector<std::atomic<int>> popped(2);  // -1: still waiting; -2: false; -3: threw
+  std::vector<std::thread> pops;
+  for (size_t i = 0; i < 2; ++i) {
+    popped[i] = -1;
+    pops.emplace_back([&, i] {
+      tids[i] = syscall(SYS_gettid);
+      ThrowsOnAssign o;
+      try {
+        popped[i] = q.Pop(o) ? o.v : -2;
+      } catch (const std::runtime_error&) {
+        popped[i] = -3;
+      }
+    });
+  }
+  // EXPECT rather than ASSERT: the threads must be joined.
+  EXPECT_TRUE(StayAsleep({&tids[0], &tids[1]}));
+  ThrowsOnAssign::throw_next = true;
+  EXPECT_TRUE(q.Emplace(7));
+  EXPECT_TRUE(Eventually([&] { return popped[0].load() != -1 && popped[1].load() != -1; }, 5s))
+      << "a Pop slept with an item queued";
+  q.Abort();  // releases a Pop that missed its wakeup
+  for (auto& t : pops) t.join();
+  EXPECT_FALSE(ThrowsOnAssign::throw_next.load());
+  EXPECT_EQ(std::min(popped[0].load(), popped[1].load()), -3);
+  EXPECT_EQ(std::max(popped[0].load(), popped[1].load()), 7);
+  EXPECT_TRUE(q.Empty());
 }
 
 }  // namespace bounded_blocking_queue_test
