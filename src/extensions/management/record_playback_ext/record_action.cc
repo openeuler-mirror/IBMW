@@ -11,6 +11,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "dynamiclatch.h"
@@ -57,6 +58,7 @@ struct convert<ibmw::extensions::record_playback_extension::RecordAction::Option
     }
 
     node["max_preparation_duration_s"] = rhs.max_preparation_duration_s;
+    node["max_preparation_cache_m"] = rhs.max_preparation_cache_m;
     node["executor"] = rhs.executor;
 
     node["topic_meta_list"] = YAML::Node();
@@ -147,6 +149,8 @@ struct convert<ibmw::extensions::record_playback_extension::RecordAction::Option
     }
     if (node["max_preparation_duration_s"])
       rhs.max_preparation_duration_s = node["max_preparation_duration_s"].as<uint64_t>();
+    if (node["max_preparation_cache_m"])
+      rhs.max_preparation_cache_m = node["max_preparation_cache_m"].as<uint32_t>();
 
     rhs.executor = node["executor"].as<std::string>();
 
@@ -288,6 +292,7 @@ void RecordAction::Initialize(YAML::Node options) {
                       ? std::numeric_limits<size_t>::max()
                       : static_cast<size_t>(options_.storage_policy.max_bag_size_m) * 1024 * 1024;
   max_preparation_duration_ns_ = SecondsToNsSaturated(options_.max_preparation_duration_s);
+  max_preparation_cache_bytes_ = static_cast<size_t>(options_.max_preparation_cache_m) * 1024 * 1024;
 
   metadata_.version = kVersion;
   if (options_.extra_attributes && !options_.extra_attributes.IsNull()) {
@@ -513,6 +518,7 @@ void RecordAction::AddRecord(OneRecord&& record) {
         action->AddRecordImpl(std::move(record));
       } else {
         action->cur_cache_.emplace_back(std::move(record));
+        if (action->max_preparation_cache_bytes_ != 0) [[unlikely]] action->BoundPreparationCache();
 
         auto cur_cache_begin_timestamp = action->cur_cache_.begin()->log_timestamp;
 
@@ -521,6 +527,7 @@ void RecordAction::AddRecord(OneRecord&& record) {
                 action->max_preparation_duration_ns_) {
           action->cur_cache_.swap(action->last_cache_);
           action->cur_cache_.clear();
+          action->last_cache_bytes_ = std::exchange(action->cur_cache_bytes_, 0);
         }
       }
     });
@@ -620,6 +627,11 @@ bool RecordAction::StartSignalRecord(uint64_t preparation_duration_s, uint64_t r
         // Clear the cache
       action->last_cache_.clear();
       action->cur_cache_.clear();
+      action->last_cache_bytes_ = action->cur_cache_bytes_ = 0;
+      if (action->dropped_cache_records_ != 0) {
+        MW_WARN("{} records before the start were dropped by max_preparation_cache_m.",
+                std::exchange(action->dropped_cache_records_, 0));
+      }
     } catch (...) {
       *error = std::current_exception();
     }
@@ -968,6 +980,24 @@ void RecordAction::SetMcapOptions() {
   };
   mcap_options.compression_mode = compression_mode_map[options_.storage_policy.compression_mode];
   mcap_options.compression_level = compression_level_map[options_.storage_policy.compression_level];
+}
+
+void RecordAction::BoundPreparationCache() {
+  const auto bytes = [](const OneRecord& record) -> size_t {
+    return record.buffer_view_ptr ? record.buffer_view_ptr->BufferSize() : 0;
+  };
+  cur_cache_bytes_ += bytes(cur_cache_.back());
+  while (last_cache_bytes_ + cur_cache_bytes_ > max_preparation_cache_bytes_ &&
+         last_cache_.size() + cur_cache_.size() > 1) {
+    const bool from_last = !last_cache_.empty();
+    auto& cache = from_last ? last_cache_ : cur_cache_;
+    (from_last ? last_cache_bytes_ : cur_cache_bytes_) -= bytes(cache.front());
+    cache.pop_front();
+    if (dropped_cache_records_++ == 0) {
+      MW_WARN("Records before the start exceed max_preparation_cache_m {} MB, dropping the oldest.",
+              options_.max_preparation_cache_m);
+    }
+  }
 }
 
 bool RecordAction::HasEnoughFreeSpace() {

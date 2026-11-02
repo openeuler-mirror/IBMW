@@ -73,6 +73,10 @@ class RecordAction {
     YAML::Node extra_attributes;
 
     uint64_t max_preparation_duration_s = 0;
+    // Signal mode: the records cached before a start may take at most this
+    // much memory, the oldest are dropped first (the newest one is always
+    // kept); 0: only max_preparation_duration_s bounds the cache.
+    uint32_t max_preparation_cache_m = 0;
     std::string executor;
 
     bool record_enabled = true;
@@ -224,6 +228,7 @@ class RecordAction {
   size_t GetFileSize() const;
   bool IsNewFolderNeeded(uint64_t timestamp) const;
   bool HasEnoughFreeSpace();
+  void BoundPreparationCache();
 
   size_t GetDbFileSize() const;
 
@@ -304,6 +309,11 @@ class RecordAction {
 
   std::deque<OneRecord> last_cache_;
   std::deque<OneRecord> cur_cache_;
+  // Payload bytes of the caches, only counted with max_preparation_cache_m.
+  size_t max_preparation_cache_bytes_ = 0;
+  size_t last_cache_bytes_ = 0;
+  size_t cur_cache_bytes_ = 0;
+  uint64_t dropped_cache_records_ = 0;
 
   // Indicates whether currently in the process of writing cached messages,
   // used to avoid triggering splitting and causing recursion during cache flush.

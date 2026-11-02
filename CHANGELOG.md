@@ -64,6 +64,9 @@ details remain governed by the documentation for each release.
 
 - Recorder `storage_policy` disk limits `min_free_space_m`, `max_folder_num`
   and `max_total_size_m`; all default to 0 (disabled).
+- Recorder option `max_preparation_cache_m` (default 0, disabled) bounds the
+  memory of records cached before a signal record starts; the oldest are
+  dropped first.
 - CMake option `IBMW_ENABLE_HARDENING` (default `OFF`) adds stack protector,
   `_FORTIFY_SOURCE=2`, full RELRO, noexecstack and PIE executables.
 

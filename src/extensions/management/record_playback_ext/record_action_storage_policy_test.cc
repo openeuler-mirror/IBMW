@@ -27,6 +27,7 @@
 #include "base/time_util.h"
 #include "engine/executor/executor_access.h"
 #include "engine/executor/thread_pool_executor.h"
+#include "mcap/reader.hpp"
 #include "record_playback_ext/record_action.h"
 
 namespace ibmw::extensions::record_playback_extension {
@@ -228,18 +229,29 @@ class RecordActionFreeSpaceTest : public RecordActionStoragePolicyTest {
 
   ibmw::executor::ExecutorHandle Handle() const { return ibmw::executor::ExecutorHandle(access_->NativeHandle()); }
 
-  void Initialize(RecordAction& action, const std::string& mode, const std::string& storage_policy) {
+  void Initialize(RecordAction& action, const std::string& mode, const std::string& storage_policy,
+                  const std::string& extra_options = "{}") {
     action.RegisterGetExecutorFunc([this](std::string_view) { return Handle(); });
-    action.RegisterGetTypeSupportFunc([](std::string_view) { return ibmw::util::TypeSupportRef(); });
+    // A type with no serialization of its own: topics are recorded through the schema below.
+    static const ibmw_type_support_base_t kType{
+        .serialization_types_supported_num = [](void*) -> size_t { return 0; },
+        .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return nullptr; }};
+    action.RegisterGetTypeSupportFunc([](std::string_view) { return ibmw::util::TypeSupportRef(&kType); });
     action.RegisterGetSchemaSupportFunc(
-        [](std::string_view, std::string_view) -> std::optional<ibmw::util::SchemaDescriptor> {
-          return std::nullopt;
+        [](std::string_view type, std::string_view serialization) -> std::optional<ibmw::util::SchemaDescriptor> {
+          return ibmw::util::SchemaDescriptor{.type_name = std::string(type),
+                                              .serialization_type = std::string(serialization),
+                                              .schema_name = std::string(type),
+                                              .schema_encoding = "jsonschema",
+                                              .schema_data = "{}",
+                                              .schema_hash = ibmw::util::ComputeSchemaHash("{}")};
         });
     action.SetFreeSpaceQuery([this](const fs::path&) { return free_space_.load(); });
     YAML::Node options = YAML::Load("{executor: storage-policy-test, topic_meta_list: []}");
     options["mode"] = mode;
     options["bag_path"] = (root_ / "bags").string();
     options["storage_policy"] = YAML::Load(storage_policy);
+    for (const auto& kv : YAML::Load(extra_options)) options[kv.first.as<std::string>()] = kv.second;
     action.Initialize(options);
     action.InitExecutor(Handle());
     action.Start();
@@ -253,11 +265,11 @@ class RecordActionFreeSpaceTest : public RecordActionStoragePolicyTest {
     ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
   }
 
-  void Add(RecordAction& action, uint64_t log_timestamp) {
-    action.AddRecord({.topic_index = 1,
+  void Add(RecordAction& action, uint64_t log_timestamp, uint64_t topic_index = 1, uint32_t sequence = 0) {
+    action.AddRecord({.topic_index = topic_index,
                       .log_timestamp = log_timestamp,
                       .pub_timestamp = log_timestamp,
-                      .pub_sequence = 0,
+                      .pub_sequence = sequence,
                       .buffer_view_ptr = std::make_shared<ibmw::util::BufferArrayView>(payload_.data(), payload_.size())});
   }
 
@@ -319,6 +331,38 @@ TEST_F(RecordActionFreeSpaceTest, SignalRecordDoesNotStartWhileShortOfSpace) {
   ASSERT_TRUE(action.StartSignalRecord(0, 60, folder));
   EXPECT_EQ(List(root_ / "bags").size(), 2u);
   action.Shutdown();
+}
+
+// EXT-029: max_preparation_cache_m bounds the signal pre-record cache by
+// size; the oldest records go first. 0 keeps only the time window.
+TEST_F(RecordActionFreeSpaceTest, PreparationCacheIsBoundedBySize) {
+  for (const uint32_t limit_m : {0u, 1u}) {
+    RecordAction action;
+    Initialize(action, "signal", "{}",
+               "{max_preparation_duration_s: 100, max_preparation_cache_m: " + std::to_string(limit_m) +
+                   ", topic_meta_list: [{topic: /t, msg_type: t, serialization_type: json}]}");
+    const uint64_t now = ibmw::common::util::GetCurTimestampNs();
+    for (uint32_t i = 0; i < 5; ++i) Add(action, now - (5 - i) * 1'000'000'000ull, 0, i);  // 600 KiB each
+    Drain();
+    std::string folder;
+    ASSERT_TRUE(action.StartSignalRecord(100, 60, folder));
+    ASSERT_TRUE(action.StopSignalRecord());
+    action.Shutdown();
+
+    std::vector<uint32_t> sequences;
+    for (const auto& file : McapFiles()) {
+      mcap::McapReader reader;
+      ASSERT_TRUE(reader.open(file.string()).ok());
+      for (const auto& view : reader.readMessages()) sequences.push_back(view.message.sequence);
+      reader.close();
+    }
+    if (limit_m == 0) {
+      EXPECT_EQ(sequences, (std::vector<uint32_t>{0, 1, 2, 3, 4}));
+    } else {
+      EXPECT_EQ(sequences, (std::vector<uint32_t>{4}));
+    }
+    fs::remove_all(root_ / "bags");
+  }
 }
 
 // EXT-026: a file that can not be opened pauses writing like a full disk: the
