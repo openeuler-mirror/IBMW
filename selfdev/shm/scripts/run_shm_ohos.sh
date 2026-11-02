@@ -13,6 +13,10 @@
 #   device   push to the hdc device; run the kernel probe and both test binaries
 #   bench    run ibmw_shm_bench on the device (prints a report, no pass/fail)
 #   clean    remove DEVICE_DIR and DEVICE_TMP from the device
+#   bench-ext  build ibmw_shm_ext_bench from this tree and, with BENCH_BASE_SRC, a
+#            baseline tree; run them interleaved on the device, print a summary and
+#            remove BENCH_DEVICE_DIR and BENCH_DEVICE_ROOT again (no pass/fail on
+#            the numbers). Needs neither `build` nor `device` first.
 #
 # Environment:
 #   OUT                 outputs (default: <repo>/build-ohos-shm)
@@ -24,6 +28,13 @@
 #   REPEAT              repeat count (default: 5)
 #   JOBS                build parallelism (default: nproc)
 #   TEST_TIMEOUT        seconds per test run (default: 1800)
+#   BENCH_BASE_SRC      baseline tree for bench-ext, e.g. a worktree of 89b5a1a (default: none)
+#   BENCH_ROUNDS        bench-ext rounds per binary (default: 25; short rounds, see BENCH_ARGS,
+#                       pair better on a device whose speed changes during a run)
+#   BENCH_ARGS          extra bench arguments (default: --reps 3 --ms 50)
+#   BENCH_CPUS          worker CPUs on the device (default: 12-19, one core type)
+#   BENCH_DEVICE_DIR    bench-ext binaries (default: /data/local/tmp/ibmw_shm_bench_ext)
+#   BENCH_DEVICE_ROOT   bench-ext IBMW_SHM_ROOT; keep it short (default: /data/local/tmp/ibx)
 #
 # The binaries are fully static because the SDK libc.so is a link stub. Static
 # binaries do not exercise the device's dynamic linker namespaces.
@@ -38,6 +49,12 @@ DEVICE_TMP="${DEVICE_TMP:-/data/local/tmp/s}"
 REPEAT="${REPEAT:-5}"
 JOBS="${JOBS:-$(nproc)}"
 TEST_TIMEOUT="${TEST_TIMEOUT:-1800}"
+BENCH_BASE_SRC="${BENCH_BASE_SRC:-}"
+BENCH_ROUNDS="${BENCH_ROUNDS:-25}"
+BENCH_ARGS="${BENCH_ARGS:---reps 3 --ms 50}"
+BENCH_CPUS="${BENCH_CPUS:-12,13,14,15,16,17,18,19}"
+BENCH_DEVICE_DIR="${BENCH_DEVICE_DIR:-/data/local/tmp/ibmw_shm_bench_ext}"
+BENCH_DEVICE_ROOT="${BENCH_DEVICE_ROOT:-/data/local/tmp/ibx}"
 SRC="${OUT}/src"
 LOGS="${OUT}/logs"
 CORE_TEST="${OUT}/core/shm/ibmw_selfdev_shm_test"
@@ -54,6 +71,29 @@ fail() {
   rc=1
 }
 
+# common: toolchain and static linking for a copied tree <src>.
+common_cmake_args() {
+  common=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$1/cmake/toolchains/ohos-arm64-v8a.cmake"
+    -DOHOS_SDK_NATIVE_ROOT="${SDK}" -DOHOS_STL=c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=ON)
+}
+
+# ext_args: minimal IBMW, runtime + shm_ext only.
+ext_cmake_args() {
+  local off=(ICEORYX DDS ECHO GRPC MQTT NET ZENOH PROXY PARAMETER LOG_CONTROL OPENTELEMETRY RECORD_PLAYBACK
+    SERVICE_INTROSPECTION TIME_MANIPULATOR TOPIC_LOGGER)
+  ext_args=(-DIBMW_BUILD_SHM_EXTENSION=ON -DIBMW_BUILD_OHOS_CAPTURE_AGENT=OFF -DIBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE=OFF
+    -DIBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE=OFF -DIBMW_BUILD_CLI_TOOLS=OFF -DIBMW_BUILD_EXAMPLES=OFF
+    -DIBMW_BUILD_PROTOCOLS=OFF -DIBMW_BUILD_ROS2_TYPES=OFF)
+  local e d
+  for e in "${off[@]}"; do ext_args+=("-DIBMW_BUILD_${e}_EXTENSION=OFF"); done
+  for d in ASIO BACKWARD CPPTOML FMT GFLAGS GOOGLETEST ICEORYX JSONCPP LIBUNIFEX NLOHMANN_JSON TBB YAML-CPP; do
+    local lower
+    lower="$(echo "${d}" | tr '[:upper:]' '[:lower:]')"
+    ext_args+=("-DFETCHCONTENT_SOURCE_DIR_${d}=${DEPS_DIR}/${lower}-src")
+  done
+  ext_args+=(-DCMAKE_CXX_COMPILER_LAUNCHER="${HERE}/ohos/ibmw-core-launcher.sh")
+}
+
 stage_build() {
   mkdir -p "${SRC}"
   rsync -a --delete --exclude .git --exclude '.omc' --exclude '/build*/' "${REPO}/" "${SRC}/" || return 1
@@ -62,29 +102,16 @@ stage_build() {
   "${SDK}/llvm/bin/clang" --target=aarch64-linux-ohos --sysroot="${SDK}/sysroot" -static -O1 -w \
     "${HERE}/ohos/shm_probe.c" -o "${PROBE}" || return 1
 
-  local common=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="${SRC}/cmake/toolchains/ohos-arm64-v8a.cmake"
-    -DOHOS_SDK_NATIVE_ROOT="${SDK}" -DOHOS_STL=c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=ON)
+  common_cmake_args "${SRC}"
   # Core library: -Wall -Wextra -Wshadow -Werror from ibmw_selfdev_warnings.
   cmake -S "${SRC}/selfdev" -B "${OUT}/core" "${common[@]}" -DCMAKE_BUILD_TYPE=Release \
     -DIBMW_SELFDEV_SHM=ON -DIBMW_SELFDEV_SHM_BENCH=ON -Dgoogletest_LOCAL_SOURCE="${DEPS_DIR}/googletest-src" \
     >"${LOGS}/core.configure.log" 2>&1 || { tail -20 "${LOGS}/core.configure.log"; return 1; }
   cmake --build "${OUT}/core" -j "${JOBS}" >"${LOGS}/core.build.log" 2>&1 || { tail -40 "${LOGS}/core.build.log"; return 1; }
 
-  # Minimal IBMW: runtime + shm_ext only.
-  local off=(ICEORYX DDS ECHO GRPC MQTT NET ZENOH PROXY PARAMETER LOG_CONTROL OPENTELEMETRY RECORD_PLAYBACK
-    SERVICE_INTROSPECTION TIME_MANIPULATOR TOPIC_LOGGER)
-  local args=(-DIBMW_BUILD_SHM_EXTENSION=ON -DIBMW_BUILD_OHOS_CAPTURE_AGENT=OFF -DIBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE=OFF
-    -DIBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE=OFF -DIBMW_BUILD_CLI_TOOLS=OFF -DIBMW_BUILD_EXAMPLES=OFF
-    -DIBMW_BUILD_PROTOCOLS=OFF -DIBMW_BUILD_ROS2_TYPES=OFF)
-  local e d
-  for e in "${off[@]}"; do args+=("-DIBMW_BUILD_${e}_EXTENSION=OFF"); done
-  for d in ASIO BACKWARD CPPTOML FMT GFLAGS GOOGLETEST ICEORYX JSONCPP LIBUNIFEX NLOHMANN_JSON TBB YAML-CPP; do
-    local lower
-    lower="$(echo "${d}" | tr '[:upper:]' '[:lower:]')"
-    args+=("-DFETCHCONTENT_SOURCE_DIR_${d}=${DEPS_DIR}/${lower}-src")
-  done
+  ext_cmake_args
   cmake -S "${SRC}" -B "${OUT}/ext" "${common[@]}" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DIBMW_BUILD_WITH_WERROR=ON \
-    -DCMAKE_CXX_COMPILER_LAUNCHER="${HERE}/ohos/ibmw-core-launcher.sh" "${args[@]}" \
+    "${ext_args[@]}" \
     >"${LOGS}/ext.configure.log" 2>&1 || { tail -20 "${LOGS}/ext.configure.log"; return 1; }
   cmake --build "${OUT}/ext" -j "${JOBS}" --target ibmw_extensions_shm_ext_test ibmw_shm_ext_peer \
     >"${LOGS}/ext.build.log" 2>&1 || { tail -40 "${LOGS}/ext.build.log"; return 1; }
@@ -162,6 +189,54 @@ stage_bench() {
     | tr -d '\r' | tee "${LOGS}/device-bench.log"
 }
 
+# bench_ext_build <label> <source tree>: static ibmw_shm_ext_bench in OUT/bench-ext/<label>.
+bench_ext_build() {
+  local label=$1 from=$2 src="${OUT}/bench-ext/$1/src" dir="${OUT}/bench-ext/$1/build"
+  mkdir -p "${src}"
+  rsync -a --delete --exclude .git --exclude .omc --exclude '/build*/' "${from}/" "${src}/" || return 1
+  "${HERE}/shm_ext_bench_overlay.sh" "${REPO}" "${src}" || return 1
+  (cd "${src}" && patch -p1 --quiet <"${HERE}/ohos/ibmw-core-workaround.diff") || return 1
+  common_cmake_args "${src}"
+  ext_cmake_args
+  # IBMW_BUILD_TESTS would add --coverage, whose counters would be measured.
+  cmake -S "${src}" -B "${dir}" "${common[@]}" -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo -DIBMW_BUILD_WITH_WERROR=ON "${ext_args[@]}" \
+    >"${LOGS}/bench-ext-${label}.configure.log" 2>&1 || { tail -20 "${LOGS}/bench-ext-${label}.configure.log"; return 1; }
+  cmake --build "${dir}" -j "${JOBS}" --target ibmw_shm_ext_bench \
+    >"${LOGS}/bench-ext-${label}.build.log" 2>&1 || { tail -40 "${LOGS}/bench-ext-${label}.build.log"; return 1; }
+  find "${dir}" -name ibmw_shm_ext_bench -type f -executable | head -1 | xargs -I{} cp {} "${OUT}/bench-ext/${label}/ibmw_shm_ext_bench"
+}
+
+stage_bench-ext() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  local labels=(new) label round log run_rc
+  bench_ext_build new "${REPO}" || return 1
+  if [[ -n "${BENCH_BASE_SRC}" ]]; then
+    bench_ext_build base "${BENCH_BASE_SRC}" || return 1
+    labels=(base new)
+  fi
+  hdc shell "mkdir -p ${BENCH_DEVICE_DIR} ${BENCH_DEVICE_ROOT}" >/dev/null
+  for label in "${labels[@]}"; do
+    hdc file send "${OUT}/bench-ext/${label}/ibmw_shm_ext_bench" "${BENCH_DEVICE_DIR}/bench_${label}" >/dev/null
+    hdc shell "chmod 755 ${BENCH_DEVICE_DIR}/bench_${label}" >/dev/null
+  done
+  local runs="${LOGS}/bench-ext-runs"
+  rm -rf "${runs}" && mkdir -p "${runs}"
+  for ((round = 1; round <= BENCH_ROUNDS; ++round)); do
+    for label in "${labels[@]}"; do
+      log="${runs}/${label}.${round}.log"
+      echo "round ${round} ${label} load: $(hdc shell 'cat /proc/loadavg' | tr -d '\r' | cut -d' ' -f1)"
+      # hdc does not reliably return the remote exit code: report it in-band.
+      hdc shell "cd ${BENCH_DEVICE_DIR} && IBMW_SHM_ROOT=${BENCH_DEVICE_ROOT} timeout 300 ./bench_${label} --cpus ${BENCH_CPUS} ${BENCH_ARGS} 2>&1; echo DEVICE_RC=\$?; rm -rf ${BENCH_DEVICE_ROOT}/*" \
+        | tr -d '\r' >"${log}"
+      run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
+      [[ "${run_rc:-255}" -eq 0 ]] || fail "bench-ext ${label} round ${round} (${log})"
+    done
+  done
+  hdc shell "rm -rf ${BENCH_DEVICE_DIR} ${BENCH_DEVICE_ROOT}" >/dev/null
+  python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" | tee "${LOGS}/bench-ext-summary.txt"
+}
+
 stage_clean() {
   hdc shell "rm -rf ${DEVICE_DIR} ${DEVICE_TMP}"
 }
@@ -170,7 +245,7 @@ stage_clean() {
 for s in "$@"; do
   echo "==== [shm-ohos] ${s} ===="
   case "${s}" in
-    build | qemu | device | bench | clean) "stage_${s}" || fail "stage ${s}" ;;
+    build | qemu | device | bench | bench-ext | clean) "stage_${s}" || fail "stage ${s}" ;;
     *) echo "unknown stage ${s}" >&2; exit 64 ;;
   esac
 done

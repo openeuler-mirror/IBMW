@@ -87,3 +87,18 @@ if(IBMW_BUILD_TESTS AND test_files)
 endif()
 
 set_target_properties(${CUR_TARGET_NAME} PROPERTIES OUTPUT_NAME "ibmw_shm_transport")
+
+# BEGIN shm_ext bench block (run_shm_ext_bench.sh / run_shm_ohos.sh copy it into a baseline tree)
+# Loan/publish microbenchmark, never installed. Off with IBMW_BUILD_TESTS because
+# that switch adds --coverage to everything, whose counters would be measured.
+# The plugin sources are compiled in, as add_gtest_target does, so the binary can
+# be fully static on OHOS.
+option(IBMW_BUILD_SHM_EXT_BENCH "Build the shm_ext loan/publish microbenchmark" OFF)
+if(IBMW_BUILD_SHM_EXT_BENCH)
+  add_executable(ibmw_shm_ext_bench test_peer/shm_ext_bench.cc ${src})
+  target_include_directories(ibmw_shm_ext_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  target_link_libraries(ibmw_shm_ext_bench PRIVATE ibmw::core::extension_api ibmw::selfdev::shm ibmw::api::cpp
+                                                   ibmw::core::engine)
+  add_werror(ibmw_shm_ext_bench)
+endif()
+# END shm_ext bench block
