@@ -205,7 +205,8 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
                         while (!data_list_.empty()) {
                           std::list<std::shared_ptr<Streambuf>> tmp_data_list;
                           tmp_data_list.swap(data_list_);
-                          queued_size_ = 0;
+                          // Stays counted until written (TRANS-028: bounds queued + in flight).
+                          const size_t batch_size = queued_size_;
 
                           std::vector<char> head_buf(tmp_data_list.size() * kHeadSize);
 
@@ -227,6 +228,7 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
 
                           size_t write_data_size = co_await boost::asio::async_write(
                               sock_, data_buf_vec, boost::asio::use_awaitable);
+                          queued_size_ -= batch_size;
                           MW_TRACE(
                               "Tcp cli session async write {} bytes to {}.",
                               write_data_size, RemoteAddr());
@@ -450,7 +452,7 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
     // misc
     std::string remote_addr_;
     std::list<std::shared_ptr<Streambuf>> data_list_;
-    size_t queued_size_ = 0;  // bytes in data_list_
+    size_t queued_size_ = 0;  // bytes in data_list_ and being written
     bool queue_full_ = false;
   };
 

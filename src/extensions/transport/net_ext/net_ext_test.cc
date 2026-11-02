@@ -240,8 +240,38 @@ size_t DrainSocket(Tcp::socket& sock) {
   return bytes;
 }
 
+// Bytes the loopback socket buffers absorb towards a peer that does not read
+// (receive buffer 4096 as in the tests below), measured like the sessions
+// write: until the kernel stops taking data.
+size_t KernelBufferedBytes() {
+  asio::io_context io;
+  Tcp::acceptor acceptor(io, Tcp::endpoint(kLoopback, 0));
+  acceptor.set_option(asio::socket_base::receive_buffer_size(4096));
+  Tcp::socket sender(io);
+  sender.connect(acceptor.local_endpoint());
+  Tcp::socket receiver = acceptor.accept();
+  sender.non_blocking(true);
+  const std::string chunk(64 * 1024, 'k');
+  size_t bytes = 0;
+  for (auto idle_since = std::chrono::steady_clock::now(); std::chrono::steady_clock::now() - idle_since < 300ms;) {
+    boost::system::error_code ec;
+    const size_t n = sender.write_some(asio::buffer(chunk), ec);
+    if (n > 0) {
+      bytes += n;
+      idle_since = std::chrono::steady_clock::now();
+    } else {
+      std::this_thread::sleep_for(5ms);
+    }
+  }
+  return bytes;
+}
+
+constexpr size_t kSendQueueLimit = 4 * 1024 * 1024;
+
 // TRANS-028: sending to a peer that does not read is bounded: messages
 // beyond max_send_queue_size are dropped instead of queued without limit.
+// The limit covers the batch being written as well: at most the limit (and
+// one message accepted into an empty queue) is held besides the kernel buffers.
 TEST(NetTcpServerTest, SendQueueToSlowPeerIsBounded) {
   IoThreads io;
   Received received;
@@ -250,7 +280,7 @@ TEST(NetTcpServerTest, SendQueueToSlowPeerIsBounded) {
   svr->RegisterMsgHandle([&received](const Tcp::endpoint& ep, const std::shared_ptr<asio::streambuf>& buf) {
     received.Add(ep, buf);
   });
-  svr->Initialize({.ep = Tcp::endpoint(kLoopback, port), .max_send_queue_size = 1024 * 1024});
+  svr->Initialize({.ep = Tcp::endpoint(kLoopback, port), .max_send_queue_size = kSendQueueLimit});
   svr->Start();
 
   asio::io_context cli_io;
@@ -273,8 +303,9 @@ TEST(NetTcpServerTest, SendQueueToSlowPeerIsBounded) {
   std::this_thread::sleep_for(300ms);
 
   const size_t delivered = DrainSocket(sock) / (6 + kMsgSize);
-  EXPECT_GE(delivered, 16u);  // at least the queue limit got through
-  EXPECT_LT(delivered, kMsgNum / 2) << "send queue grew without limit";
+  EXPECT_GE(delivered, kSendQueueLimit / kMsgSize);  // at least the queue limit got through
+  EXPECT_LE(delivered, KernelBufferedBytes() / kMsgSize + kSendQueueLimit / kMsgSize + 8)
+      << "more than the send queue limit was held";
   svr->Shutdown();
 }
 
@@ -290,7 +321,7 @@ TEST(NetTcpClientTest, SendQueueToSlowPeerIsBounded) {
   acceptor.listen();
 
   auto cli = std::make_shared<ibmw::common::net::AsioTcpClient>(io.Io());
-  cli->Initialize({.svr_ep = Tcp::endpoint(kLoopback, port), .max_send_queue_size = 1024 * 1024});
+  cli->Initialize({.svr_ep = Tcp::endpoint(kLoopback, port), .max_send_queue_size = kSendQueueLimit});
   cli->Start();
 
   constexpr size_t kMsgSize = 64 * 1024;
@@ -304,8 +335,9 @@ TEST(NetTcpClientTest, SendQueueToSlowPeerIsBounded) {
   std::this_thread::sleep_for(300ms);
 
   const size_t delivered = DrainSocket(sock) / (6 + kMsgSize);
-  EXPECT_GE(delivered, 16u);
-  EXPECT_LT(delivered, kMsgNum / 2) << "send queue grew without limit";
+  EXPECT_GE(delivered, kSendQueueLimit / kMsgSize);
+  EXPECT_LE(delivered, KernelBufferedBytes() / kMsgSize + kSendQueueLimit / kMsgSize + 8)
+      << "more than the send queue limit was held";
   cli->Shutdown();
 }
 
