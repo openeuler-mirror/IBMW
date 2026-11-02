@@ -188,10 +188,9 @@ class WorkspaceGenerator(GeneratorBase):
             for depend_module in depends_std_modules:
                 self.module_depends_.append(depend_module["name"].replace("-", "_"))
         self.deploy_modes_ = deploy_modes
-        if "project_name" not in self.base_info_.keys() and self.base_info_["project_name"] is None:
+        if not self.base_info_.get("project_name"):
             raise Exception("You need to designate your project name in your yaml file!")
-        else:
-            self.project_name_ = self.base_info_["project_name"].replace("-", "_")
+        self.project_name_ = str(self.base_info_["project_name"]).replace("-", "_")
         self.build_mode_tags_ = self.base_info_["build_mode_tags"]
         self.ibmw_import_options_ = self.base_info_["ibmw_import_options"]
         self.test_marco_ = self.project_name_.upper() + "_BUILD_TESTS"
