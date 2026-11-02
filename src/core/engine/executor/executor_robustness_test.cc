@@ -288,6 +288,35 @@ TEST(ExecutorRobustness, ThreadPoolShutdownWithoutTimersIsImmediate) {
   EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::milliseconds(500));
 }
 
+// CORE-035: GetExecutor() is handed to the logger and extensions and may run
+// on their threads while the bus shuts down (verified by TSan); afterwards it
+// finds nothing.
+TEST(ExecutorRobustness, ExecutorBusLookupRacingShutdownIsSafe) {
+  executor::ExecutorBus bus;
+  bus.SetLogger(MakeLogger());
+  bus.Initialize(YAML::Load(R"(
+executors:
+  - name: pool
+    type: thread_pool
+    options: {thread_num: 1}
+)"));
+  bus.Start();
+  EXPECT_TRUE(bus.GetExecutor("pool"));
+
+  std::atomic_bool started{false}, stop{false};
+  std::thread reader([&] {
+    while (!stop.load()) {
+      (void)bus.GetExecutor("pool");
+      started = true;
+    }
+  });
+  while (!started.load()) std::this_thread::yield();
+  bus.Shutdown();
+  stop = true;
+  reader.join();
+  EXPECT_FALSE(bus.GetExecutor("pool"));
+}
+
 // CORE-029: a strand bound to a thread pool must be shut down and destroyed
 // before that pool's io_context (verified by ASan); queued strand work drains.
 TEST(ExecutorRobustness, ExecutorBusTearsDownStrandBeforeItsThreadPool) {

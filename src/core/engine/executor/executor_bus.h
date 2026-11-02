@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -83,6 +84,9 @@ class ExecutorBus : public ISubsystem {
 
   std::vector<std::unique_ptr<ExecutorBase>> executor_vec_;
 
+  // GetExecutor() runs on logger and extension threads, concurrently with
+  // Shutdown() clearing the map.
+  mutable std::shared_mutex executor_access_mutex_;
   std::unordered_map<
       std::string,
       std::unique_ptr<ExecutorAccess>,
