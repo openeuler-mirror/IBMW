@@ -5,12 +5,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include <lz4frame.h>
 #include <zstd.h>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "base/exception.h"
 
@@ -40,12 +47,50 @@ std::string ReadFile(const std::filesystem::path& path) {
   return data;
 }
 
-void WriteFile(const std::filesystem::path& path, std::string_view data) {
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
-  MW_ASSERT(output.is_open(), "Cannot create compressed file '{}'.", path.string());
-  output.write(data.data(), static_cast<std::streamsize>(data.size()));
-  output.close();
-  MW_ASSERT(output.good(), "Cannot write compressed file '{}'.", path.string());
+// Closes a file descriptor and removes the temporary file unless released.
+struct TemporaryFile {
+  int fd = -1;
+  std::string path;
+  ~TemporaryFile() {
+    if (fd >= 0) ::close(fd);
+    if (!path.empty()) ::unlink(path.c_str());
+  }
+};
+
+// A new file next to path: O_EXCL neither follows nor reuses a planted link.
+TemporaryFile CreateTemporaryFile(const std::filesystem::path& path) {
+  static std::atomic<uint64_t> counter{0};
+  TemporaryFile file;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    std::string candidate = path.string() + ".tmp." + std::to_string(::getpid()) + "." +
+                            std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+    file.fd = ::open(candidate.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
+    if (file.fd >= 0) {
+      file.path = std::move(candidate);
+      return file;
+    }
+    MW_ASSERT(errno == EEXIST, "Cannot create '{}': {}.", candidate, std::strerror(errno));
+  }
+  MW_ASSERT(false, "Cannot create a temporary file for '{}'.", path.string());
+  return file;
+}
+
+void WriteAll(const TemporaryFile& file, std::string_view data) {
+  while (!data.empty()) {
+    const ssize_t written = ::write(file.fd, data.data(), data.size());
+    if (written < 0 && errno == EINTR) continue;
+    MW_ASSERT(written > 0, "Cannot write compressed file '{}': {}.", file.path, std::strerror(errno));
+    data.remove_prefix(static_cast<size_t>(written));
+  }
+}
+
+void SyncDirectory(const std::filesystem::path& directory) {
+  const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  MW_ASSERT(fd >= 0, "Cannot open directory '{}': {}.", directory.string(), std::strerror(errno));
+  const int result = ::fsync(fd);
+  const int error = errno;
+  ::close(fd);
+  MW_ASSERT(result == 0, "Cannot sync directory '{}': {}.", directory.string(), std::strerror(error));
 }
 
 std::string CompressZstd(std::string_view input, int compression_level) {
@@ -211,11 +256,18 @@ std::filesystem::path CompressFile(
     std::string_view format,
     int compression_level) {
   const auto output_path = CompressedFilePath(input_path, format);
-  const auto temporary_path = output_path.string() + ".tmp";
-  WriteFile(
-      temporary_path,
-      CompressBuffer(ReadFile(input_path), format, compression_level));
-  std::filesystem::rename(temporary_path, output_path);
+  const std::string compressed = CompressBuffer(ReadFile(input_path), format, compression_level);
+  // The input is only removed once the output and its name are on disk: a
+  // power loss leaves one of them complete. This runs on the compression
+  // pool, the fsync does not block recording.
+  TemporaryFile temporary = CreateTemporaryFile(output_path);
+  WriteAll(temporary, compressed);
+  MW_ASSERT(::fsync(temporary.fd) == 0, "Cannot sync '{}': {}.", temporary.path, std::strerror(errno));
+  MW_ASSERT(::close(std::exchange(temporary.fd, -1)) == 0, "Cannot close '{}': {}.", temporary.path,
+            std::strerror(errno));
+  std::filesystem::rename(temporary.path, output_path);
+  temporary.path.clear();
+  SyncDirectory(output_path.parent_path().empty() ? "." : output_path.parent_path());
   std::filesystem::remove(input_path);
   return output_path;
 }

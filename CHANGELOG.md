@@ -63,6 +63,10 @@ details remain governed by the documentation for each release.
   after its end (previously every later start reported "Playback is already
   running"). A stop now also drops the records already queued for publishing;
   previously up to two batches (about 1 s) were still published.
+- Bag file compression (`compression_mode: file`): the compressed file is
+  written to a new exclusive temporary file and synced, with its directory,
+  before the uncompressed file is removed. A link planted at the old fixed
+  `<file>.tmp` name is no longer followed.
 
 ### Added
 

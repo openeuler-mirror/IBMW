@@ -3,7 +3,12 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+
+#include <unistd.h>
 
 #include <lz4frame.h>
 #include <zstd.h>
@@ -91,6 +96,37 @@ TEST(CompressionCodecTest, CorruptedFramesAreRejected) {
         << format;
     EXPECT_ANY_THROW(DecompressBuffer(std::string_view(), format)) << format;
   }
+}
+
+std::string ReadAll(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(input), {});
+}
+
+// EXT-038: the temporary file is created exclusively: a symbolic link planted
+// at the old predictable name is neither followed nor kept.
+TEST(CompressionCodecTest, CompressFileDoesNotFollowPlantedLink) {
+  namespace fs = std::filesystem;
+  const auto root = fs::temp_directory_path() / ("ibmw-compress-file-" + std::to_string(::getpid()));
+  fs::remove_all(root);
+  fs::create_directories(root);
+  const auto input = root / "bag_0.mcap";
+  const std::string plain(64 * 1024, 'm');
+  std::ofstream(input, std::ios::binary) << plain;
+  const auto victim = root / "victim";
+  std::ofstream(victim) << "keep";
+  fs::create_symlink(victim, root / "bag_0.mcap.zstd.tmp");
+
+  const auto output = CompressFile(input, "zstd", 0);
+  EXPECT_EQ(output, root / "bag_0.mcap.zstd");
+  EXPECT_EQ(ReadAll(victim), "keep");
+  EXPECT_TRUE(fs::is_regular_file(fs::symlink_status(output)));
+  EXPECT_EQ(DecompressBuffer(ReadAll(output), "zstd"), plain);
+  EXPECT_FALSE(fs::exists(input));
+  size_t entries = 0;
+  for ([[maybe_unused]] const auto& entry : fs::directory_iterator(root)) ++entries;
+  EXPECT_EQ(entries, 3u);  // output, victim and the planted link only
+  fs::remove_all(root);
 }
 
 }  // namespace
