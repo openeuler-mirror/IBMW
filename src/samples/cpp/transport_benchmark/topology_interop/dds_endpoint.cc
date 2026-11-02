@@ -198,7 +198,9 @@ class Sink final : public ibmw::Module {
     try {
       if (auto x = getenv("MW_PERF_PRODUCER_PID")) pid = std::stoull(x);
       if (auto x = getenv("MW_PERF_PRODUCER_START_TIME_TICKS")) ticks = std::stoull(x);
-    } catch (...) {
+    } catch (const std::exception& x) {
+      // pid/ticks stay 0, so WriteArtifact fails and the run is reported invalid.
+      std::cerr << "invalid MW_PERF_PRODUCER_* value: " << x.what() << "\n";
     }
     auto run = getenv("MW_PERF_RUN_ID");
     bool valid = unique_ == o.count && received_ == o.count && !dup_ && !out_of_order_ && !bad_ &&

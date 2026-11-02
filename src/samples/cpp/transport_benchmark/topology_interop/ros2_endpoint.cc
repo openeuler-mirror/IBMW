@@ -68,7 +68,9 @@ int Sink(const ibmw::topology::Options& o, std::shared_ptr<rclcpp::Node> n,
   try {
     if (ep) pid = std::stoull(ep);
     if (et) ticks = std::stoull(et);
-  } catch (...) {
+  } catch (const std::exception& x) {
+    // pid/ticks stay 0, so WriteArtifact fails and the run is reported invalid.
+    std::cerr << "invalid MW_PERF_PRODUCER_* value: " << x.what() << "\n";
   }
   bool valid = unique == o.count && received == o.count && !dup && !order && !bad;
   std::ofstream jf;
