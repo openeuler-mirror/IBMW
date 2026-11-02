@@ -60,6 +60,12 @@ class IoThreads {
   }
   ~IoThreads() {
     guard_.reset();
+    // Lets the pending handlers finish: stopping with work queued keeps their
+    // frames, which hold sessions and through them the io_context, alive.
+    for (const auto deadline = std::chrono::steady_clock::now() + 10s;
+         !io_->stopped() && std::chrono::steady_clock::now() < deadline;) {
+      std::this_thread::sleep_for(10ms);
+    }
     io_->stop();
     for (auto& t : threads_) t.join();
   }
@@ -300,6 +306,10 @@ TEST_F(GrpcRpcDriverTest, MissingAnswerTimesOutAndLateAnswerIsHarmless) {
   code = Call(2, &rsp, 300ms);
   ASSERT_TRUE(code) << "server no longer answers";
   EXPECT_NE(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+
+  // An unanswered frame keeps itself alive through its callback.
+  std::lock_guard lock(pending_mutex_);
+  for (const auto& frame : pending_) Answer(frame, IBMW_RPC_STATUS_OK);
 }
 
 // A gRPC body is a 5 byte prefix plus the payload: "7" fits in 8 bytes,

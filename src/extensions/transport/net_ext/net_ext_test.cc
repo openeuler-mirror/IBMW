@@ -76,6 +76,12 @@ class IoThreads {
   }
   ~IoThreads() {
     guard_.reset();
+    // Lets the pending handlers finish: stopping with work queued keeps their
+    // frames, which hold sessions and through them the io_context, alive.
+    for (const auto deadline = std::chrono::steady_clock::now() + 10s;
+         !io_->stopped() && std::chrono::steady_clock::now() < deadline;) {
+      std::this_thread::sleep_for(10ms);
+    }
     io_->stop();
     for (auto& t : threads_) t.join();
   }
@@ -779,6 +785,10 @@ TEST_F(HttpRpcDriverTest, MissingAnswerTimesOutAndLateAnswerIsIgnored) {
   // timeout again, since the service never answers in time).
   auto next = Post("1", {{"Timeout", "1"}});
   EXPECT_EQ(next.result(), http::status::internal_server_error);
+
+  // An unanswered frame keeps itself alive through its callback.
+  std::lock_guard lock(mutex);
+  if (pending) Answer(pending, IBMW_RPC_STATUS_OK);
 }
 
 // Answers given inline, before the handler waits, must never be lost.
