@@ -2,7 +2,9 @@
 // All rights reserved.
 
 // Module package used by package_loader_test. The default build reports
-// three modules, the last of which answers with another name.
+// three modules, the last of which answers with another name. With
+// IBMW_PKG_FIXTURE_TOO_MANY it reports one module more than the loader
+// accepts.
 
 #include <cstddef>
 #include <string>
@@ -12,7 +14,11 @@
 
 namespace {
 
+#ifdef IBMW_PKG_FIXTURE_TOO_MANY
+constexpr size_t kModuleNum = 4097;
+#else
 constexpr size_t kModuleNum = 3;
+#endif
 
 int g_live_modules = 0;
 

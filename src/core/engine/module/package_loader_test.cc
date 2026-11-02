@@ -42,5 +42,12 @@ TEST(PackageLoaderTest, ModulesOutsideTheFailureStayLoaded) {
   loader.UnLoadPkg();  // the fixture's module count is process wide
 }
 
+// CORE-021: the module count of a package is bounded before its name list is read.
+TEST(PackageLoaderTest, ModuleCountIsBounded) {
+  PackageLoader loader;
+  EXPECT_NE(LoadError(loader, PKG_TOO_MANY_FIXTURE_PATH).find("modules"), std::string::npos);
+  EXPECT_EQ(LiveModules(loader), 0);
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::module

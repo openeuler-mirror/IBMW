@@ -234,10 +234,13 @@ if(IBMW_BUILD_TESTS AND test_files)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
   endforeach()
-  add_library(pkg_fixture MODULE ${PKG_FIXTURE_SRC})
-  target_link_libraries(pkg_fixture PRIVATE ibmw::api::cpp)
-  set_target_properties(pkg_fixture PROPERTIES CXX_VISIBILITY_PRESET hidden
-                                               VISIBILITY_INLINES_HIDDEN ON)
+  foreach(fixture IN ITEMS pkg_fixture pkg_too_many_fixture)
+    add_library(${fixture} MODULE ${PKG_FIXTURE_SRC})
+    target_link_libraries(${fixture} PRIVATE ibmw::api::cpp)
+    set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
+                                                VISIBILITY_INLINES_HIDDEN ON)
+  endforeach()
+  target_compile_definitions(pkg_too_many_fixture PRIVATE IBMW_PKG_FIXTURE_TOO_MANY)
   target_compile_definitions(extension_legacy_fixture
                              PRIVATE IBMW_EXT_FIXTURE_LEGACY)
   target_compile_definitions(extension_v2_bad_version_fixture
@@ -270,7 +273,8 @@ if(IBMW_BUILD_TESTS AND test_files)
                    type_support_bad_package_size_v1_fixture
                    type_support_null_type_v1_fixture
                    type_support_duplicate_type_v1_fixture
-                   pkg_fixture)
+                   pkg_fixture
+                   pkg_too_many_fixture)
   target_compile_definitions(
     ${CUR_TARGET_NAME}_test
     PRIVATE
@@ -287,7 +291,8 @@ if(IBMW_BUILD_TESTS AND test_files)
       "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\""
       "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\""
       "TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_duplicate_type_v1_fixture>\""
-      "PKG_FIXTURE_PATH=\"$<TARGET_FILE:pkg_fixture>\"")
+      "PKG_FIXTURE_PATH=\"$<TARGET_FILE:pkg_fixture>\""
+      "PKG_TOO_MANY_FIXTURE_PATH=\"$<TARGET_FILE:pkg_too_many_fixture>\"")
 
   set(COMM_TRACE_COMPILE_OUT_TEST_TARGET
       ${CUR_TARGET_NAME}_comm_trace_compile_out_test)

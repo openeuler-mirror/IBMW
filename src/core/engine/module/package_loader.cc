@@ -11,6 +11,10 @@ using PkgEntryFunc = ibmw_pkg_entry_t (*)();
 
 static constexpr const char* kPkgEntryFuncName = "IbmwPkgEntry";
 
+// The name list length is only known from get_module_num(); bounding it keeps
+// a broken package from making the loader read far past its array.
+static constexpr size_t kMaxModulesPerPkg = 4096;
+
 void PackageLoader::LoadPkg(std::string_view pkg_path,
                            const std::vector<std::string>& disable_modules,
                            const std::vector<std::string>& enable_modules) {
@@ -41,6 +45,8 @@ void PackageLoader::LoadPkg(std::string_view pkg_path,
 
   size_t module_num = get_module_num_fn();
   MW_REQUIRE(module_num > 0, "No module in lib {}.", pkg_path_);
+  MW_REQUIRE(module_num <= kMaxModulesPerPkg, "Lib {} reports {} modules, at most {} are supported.",
+             pkg_path_, module_num, kMaxModulesPerPkg);
 
   const ibmw_string_view_t* module_name_array = get_module_name_list_fn();
   MW_REQUIRE(module_name_array != nullptr,
