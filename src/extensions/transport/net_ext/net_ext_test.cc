@@ -35,6 +35,7 @@
 #include "net_base/asio_tcp_svr.h"
 #include "net_base/asio_udp_cli.h"
 #include "net_base/asio_udp_svr.h"
+#include "net_base/http_media_type.h"
 #include "net_ext/http/http_rpc_driver.h"
 #include "net_ext/meta_filter.h"
 #include "net_ext/net_extension.h"
@@ -629,6 +630,31 @@ TEST_F(HttpRpcDriverTest, AnswersAndFiltersReservedHeaders) {
   EXPECT_EQ(request_id_meta, "123");  // correlation stamp passes through
   // TRANS-017: no CORS unless configured.
   EXPECT_EQ(rsp.find(http::field::access_control_allow_origin), rsp.end());
+}
+
+TEST(HttpMediaTypeTest, IgnoresParametersAndCase) {
+  using ibmw::common::net::HttpMediaTypeIs;
+  EXPECT_TRUE(HttpMediaTypeIs("application/json", "application/json"));
+  EXPECT_TRUE(HttpMediaTypeIs("application/json; charset=utf-8", "application/json"));
+  EXPECT_TRUE(HttpMediaTypeIs("application/json;charset=UTF-8", "application/json"));
+  EXPECT_TRUE(HttpMediaTypeIs("Application/JSON", "application/json"));
+  EXPECT_TRUE(HttpMediaTypeIs(" application/cdr ", "application/cdr"));
+  EXPECT_TRUE(HttpMediaTypeIs("application/json charset=utf-8", "application/json"));  // legacy form
+  EXPECT_FALSE(HttpMediaTypeIs("application/jsonx", "application/json"));
+  EXPECT_FALSE(HttpMediaTypeIs("text/json", "application/json"));
+  EXPECT_FALSE(HttpMediaTypeIs("", "application/json"));
+}
+
+TEST_F(HttpRpcDriverTest, AcceptsStandardJsonContentTypeWithCharset) {
+  SetUpDriver([](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    *static_cast<int*>(frame->rsp_ptr) = *static_cast<const int*>(frame->req_ptr) + 1;
+    Answer(frame, IBMW_RPC_STATUS_OK);
+  });
+  for (const char* ct : {"application/json; charset=utf-8", "Application/JSON"}) {
+    auto rsp = Post("1", {{"Content-Type", ct}});
+    EXPECT_EQ(rsp.result(), http::status::ok) << ct;
+    EXPECT_EQ(rsp.body(), "2") << ct;
+  }
 }
 
 TEST_F(HttpRpcDriverTest, CorsOnlyForAllowedOrigins) {

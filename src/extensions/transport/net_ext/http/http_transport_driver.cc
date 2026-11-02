@@ -6,6 +6,7 @@
 #include "cpp/util/type_support.h"
 #include "net_ext/global.h"
 #include "base/url_encode.h"
+#include "net_base/http_media_type.h"
 #include "net_ext/meta_filter.h"
 
 namespace YAML {
@@ -186,14 +187,13 @@ bool HttpTransportDriver::OnMessage(
 
       auto req_content_type_boost_sw = req_content_type_itr->value();
       std::string_view req_content_type(req_content_type_boost_sw.data(), req_content_type_boost_sw.size());
-      if (req_content_type == "application/json" ||
-          req_content_type == "application/json charset=utf-8") {
+      if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/json")) {
         serialization_type = "json";
         rsp.set(http::field::content_type, "application/json");
-      } else if (req_content_type == "application/cdr") {
+      } else if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/cdr")) {
         serialization_type = "cdr";
         rsp.set(http::field::content_type, "application/cdr");
-      } else if (req_content_type == "application/ros2") {
+      } else if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/ros2")) {
         serialization_type = "ros2";
         rsp.set(http::field::content_type, "application/ros2");
       } else {
