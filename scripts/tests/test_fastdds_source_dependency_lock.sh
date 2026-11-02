@@ -56,7 +56,8 @@ assert_contains "$SOURCE_FOONATHAN" 'tags/v0.7-3.tar.gz'
 assert_contains "$SOURCE_FOONATHAN" 'SHA256=4203d15db22a94a3978eeb1afb59a37d35c57c0f148733f0f1a53a6281cb74dd'
 assert_contains "$SOURCE_TINYXML2" 'SHA256=3bdf15128ba16686e69bce256cc468e76c7b94ff2c7f391cc5ec09e40bff3839'
 assert_contains "$SOURCE_ASIO" 'SHA256=755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8'
-assert_contains "$SOURCE_HELPER" 'list(APPEND _download_args URL_HASH "${_IBMW_DEP_URL_HASH}")'
+assert_contains "$SOURCE_HELPER" 'requires URL_HASH when downloading from URL.'
+assert_contains "$SOURCE_HELPER" 'set(_download_args URL "${_IBMW_DEP_URL}" URL_HASH "${_IBMW_DEP_URL_HASH}"'
 
 # Fast DDS transitive source dependencies are immutable and auditable.
 assert_contains "$GET_CPPTOML" 'URL_HASH SHA256=11b1c07132d23e85071cef3d0fe9bc605de731fcd1b1c3f3d43ed09a6fd7a850'
