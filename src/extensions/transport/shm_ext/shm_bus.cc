@@ -627,7 +627,8 @@ void ShmBus::Initialize(const ShmBusOptions& options) {
       throw std::runtime_error(
           "shm runtime configuration is invalid: root_dir/IBMW_SHM_ROOT is required on OHOS and must leave the "
           "service directory within the socket path limit, domain/IBMW_SHM_DOMAIN must be at most 32 characters "
-          "without '/', IBMW_SHM_GROUP must be a numeric gid");
+          "without '/', IBMW_SHM_GROUP must be a numeric gid (requested domain '" + options.domain + "', root '" +
+          options.root_dir + "', group '" + (options.group ? std::to_string(*options.group) : std::string()) + "')");
     }
     throw std::runtime_error(std::string("shm runtime initialisation failed: ") + shm::ErrorName(r.error()));
   }

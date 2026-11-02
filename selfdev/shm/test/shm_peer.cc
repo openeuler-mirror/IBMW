@@ -25,9 +25,11 @@
 
 #include <dirent.h>
 #include <grp.h>
+#include <linux/capability.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -272,8 +274,19 @@ bool BecomeUser(const char* uid_arg, const char* gid_arg, const char* groups_arg
   }
   const auto uid = static_cast<uid_t>(std::strtoul(uid_arg, nullptr, 10));
   const auto gid = static_cast<gid_t>(std::strtoul(gid_arg, nullptr, 10));
-  return ::setgroups(groups.size(), groups.data()) == 0 && ::setresgid(gid, gid, gid) == 0 &&
-         ::setresuid(uid, uid, uid) == 0 && ::geteuid() == uid && ::getegid() == gid;
+  if (::setgroups(groups.size(), groups.data()) != 0 || ::setresgid(gid, gid, gid) != 0 ||
+      ::setresuid(uid, uid, uid) != 0 || ::geteuid() != uid || ::getegid() != gid) {
+    return false;
+  }
+  // Linux clears the capabilities when root changes to a non-zero uid, but the
+  // HongMeng kernel (OHOS) keeps them, and CAP_DAC_OVERRIDE would let the peer
+  // into any directory. Drop them explicitly and check they are gone.
+  __user_cap_header_struct header{_LINUX_CAPABILITY_VERSION_3, 0};
+  __user_cap_data_struct data[2]{};
+  if (::syscall(SYS_capset, &header, data) != 0) return false;
+  __user_cap_data_struct now[2]{};
+  if (::syscall(SYS_capget, &header, now) != 0) return false;
+  return (now[0].effective | now[1].effective | now[0].permitted | now[1].permitted) == 0;
 }
 
 int RunSubWrite(const std::string& url) {

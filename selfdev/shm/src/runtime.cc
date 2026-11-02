@@ -214,9 +214,11 @@ Result<std::string> RuntimeImpl::ResolveServiceDir(const RuntimeOptions& options
   if (!group->has_value()) {
     std::string g = env("IBMW_SHM_GROUP");
     if (!g.empty()) {
+      // strtoul() alone accepts leading blanks, '+' and '-'; only digits are a gid.
+      const bool digits = g.size() <= 10 && g.find_first_not_of("0123456789") == std::string::npos;
       char* end = nullptr;
-      unsigned long v = std::strtoul(g.c_str(), &end, 10);
-      if (end == g.c_str() || *end != '\0' || v > 0xfffffffful) {
+      unsigned long v = digits ? std::strtoul(g.c_str(), &end, 10) : 0;
+      if (!digits || end == g.c_str() || *end != '\0' || v > 0xfffffffful) {
         LogError("invalid IBMW_SHM_GROUP '" + g + "': expected a numeric gid");
         return Error::kInvalidArg;
       }

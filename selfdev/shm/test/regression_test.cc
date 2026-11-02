@@ -1098,9 +1098,12 @@ TEST(ShmRegressionTest, OptionThenEnvironmentThenDefault) {
   EXPECT_EQ(r.dir, root + "/ibmw_shm." + Euid() + ".envdom");
   r = Probe({url}, {"IBMW_SHM_DOMAIN="});
   EXPECT_EQ(r.dir, root + "/ibmw_shm." + Euid() + ".default");
-  r = Probe({url}, {"IBMW_SHM_GROUP=staff"});
-  EXPECT_EQ(r.pub, "invalid_arg");
-  EXPECT_EQ(r.sub, "invalid_arg");
+  // Only plain digits are a gid: strtoul() would accept the signed and blank forms.
+  for (const char* g : {"staff", "+5", " 5", "-1", "5 "}) {
+    r = Probe({url}, {std::string("IBMW_SHM_GROUP=") + g});
+    EXPECT_EQ(r.pub, "invalid_arg") << "'" << g << "'";
+    EXPECT_EQ(r.sub, "invalid_arg") << "'" << g << "'";
+  }
 }
 
 // RG-29 (third review, M15) Users only meet through a shared group. The group
