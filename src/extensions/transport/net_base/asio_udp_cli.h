@@ -216,9 +216,6 @@ class AsioUdpClient : public std::enable_shared_from_this<AsioUdpClient> {
               case 3:
                 sock_.close();
                 ++stop_step;
-              case 4:
-                sock_.release();
-                ++stop_step;
               default:
                 stop_step = 0;
                 break;

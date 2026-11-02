@@ -369,9 +369,6 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
               case 4:
                 sock_.close();
                 ++stop_step;
-              case 5:
-                sock_.release();
-                ++stop_step;
               default:
                 stop_step = 0;
                 break;

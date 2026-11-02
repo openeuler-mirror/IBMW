@@ -233,9 +233,6 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
               sock_.close();
               ++stop_step;
             case 4:
-              sock_.release();
-              ++stop_step;
-            case 5:
               mgr_timer_.cancel();
               ++stop_step;
             default:

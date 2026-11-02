@@ -246,9 +246,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
             case 4:
               acceptor_.close();
               ++stop_step;
-            case 5:
-              // acceptor_.release(); // When loading using a dynamic library, it will crash here, and needs to be investigated
-              ++stop_step;
             default:
               stop_step = 0;
               break;
@@ -545,15 +542,12 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 stream_.socket().close();
                 ++stop_step;
               case 4:
-                stream_.socket().release();
-                ++stop_step;
-              case 5:
                 stream_.cancel();
                 ++stop_step;
-              case 6:
+              case 5:
                 stream_.close();
                 ++stop_step;
-              case 7:
+              case 6:
                 stream_.release_socket();
                 ++stop_step;
               default:
