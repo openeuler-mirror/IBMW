@@ -3,7 +3,11 @@
 
 #include "topology_common.h"
 #include "uint8_multi_array_serializer.h"
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -23,7 +27,8 @@ constexpr char raw[] = "/mw_perf/topology/raw";
 constexpr char derived[] = "/mw_perf/topology/derived";
 constexpr char type[] = "std_msgs/msg/UInt8MultiArray";
 ibmw::topology::Options o;
-ibmw::runtime::core::Engine* engine = nullptr;
+using ibmw::runtime::core::Engine;
+Engine* engine = nullptr;
 bool Touch(const char* path) {
   if (!path || !*path) return true;
   std::ofstream f(path);
@@ -229,17 +234,69 @@ class Sink final : public ibmw::Module {
   std::vector<ibmw::topology::Record> records_;
   ibmw::common::util::LatencyStats stats_;
 };
-void Sig(int) {
-  if (engine) engine->Shutdown();
+// SIGINT/SIGTERM only write the signal number to a pipe (async-signal-safe);
+// a watcher thread calls Engine::Shutdown(), which logs and locks.
+std::mutex g_core_mutex;
+int g_signal_pipe[2] = {-1, -1};
+
+// Makes `core` the target of SIGINT/SIGTERM while in scope.
+class ScopedSignalCore {
+ public:
+  explicit ScopedSignalCore(Engine* core) { Set(core); }
+  ~ScopedSignalCore() { Set(nullptr); }
+  ScopedSignalCore(const ScopedSignalCore&) = delete;
+  ScopedSignalCore& operator=(const ScopedSignalCore&) = delete;
+
+ private:
+  static void Set(Engine* core) {
+    std::lock_guard<std::mutex> lck(g_core_mutex);
+    engine = core;
+  }
+};
+
+void SignalHandler(int sig) {
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(sig);
+  [[maybe_unused]] auto ret = write(g_signal_pipe[1], &byte, 1);
+  errno = saved_errno;
+}
+
+bool InstallSignalHandlers() {
+  if (pipe2(g_signal_pipe, O_CLOEXEC) != 0 ||
+      fcntl(g_signal_pipe[1], F_SETFL, O_NONBLOCK) != 0) {
+    return false;
+  }
+  std::thread([] {
+    unsigned char sig = 0;
+    while (true) {
+      const ssize_t n = read(g_signal_pipe[0], &sig, 1);
+      if (n != 1) {
+        if (n < 0 && errno == EINTR) continue;
+        return;
+      }
+      std::lock_guard<std::mutex> lck(g_core_mutex);
+      if (engine == nullptr) {
+        // No engine (anymore): die from the signal.
+        std::signal(sig, SIG_DFL);
+        raise(sig);
+        continue;
+      }
+      engine->Shutdown();
+    }
+  }).detach();
+  return std::signal(SIGINT, SignalHandler) != SIG_ERR &&
+         std::signal(SIGTERM, SignalHandler) != SIG_ERR;
 }
 }  // namespace
 int main(int ac, char** av) {
   if (!ibmw::topology::Parse(ac, av, o, true)) return 2;
-  signal(SIGINT, Sig);
-  signal(SIGTERM, Sig);
+  if (!InstallSignalHandlers()) {
+    std::cerr << "Failed to set up SIGINT/SIGTERM handling." << std::endl;
+    return 1;
+  }
   try {
     ibmw::runtime::core::Engine e;
-    engine = &e;
+    ScopedSignalCore signal_core(&e);
     Source s;
     Relay r;
     Sink k;
@@ -254,7 +311,6 @@ int main(int ac, char** av) {
     e.Initialize(x);
     e.Start();
     e.Shutdown();
-    engine = nullptr;
     return o.role == "source" && !s.ok();
   } catch (const std::exception& x) {
     std::cerr << x.what() << "\n";
