@@ -276,7 +276,7 @@ void UdpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
       MW_REQUIRE(meta_key_vals_array.len / 2 <= 255,
                               "Too much context meta, require less than 255, but actually {}.", meta_key_vals_array.len / 2);
       meta_key_vals.reserve(meta_key_vals_array.len / 2);
-      for (size_t ii = 0; ii < meta_key_vals_array.len; ii += 2) {
+      for (size_t ii = 0; ii + 1 < meta_key_vals_array.len; ii += 2) {
         meta_key_vals.emplace_back(
             std::string(ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii])),
             std::string(ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii + 1])));

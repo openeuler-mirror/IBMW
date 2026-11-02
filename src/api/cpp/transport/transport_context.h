@@ -317,7 +317,7 @@ class ContextRef {
     auto [str_array, len] = base_ptr_->ops->get_meta_key_vals(base_ptr_->ctx);
 
     std::unordered_map<std::string_view, std::string_view> result;
-    for (size_t ii = 0; ii < len; ii += 2) {
+    for (size_t ii = 0; ii + 1 < len; ii += 2) {
       auto key = ibmw::util::ToStdStringView(str_array[ii]);
       auto val = ibmw::util::ToStdStringView(str_array[ii + 1]);
       result.emplace(key, val);
@@ -350,7 +350,7 @@ class ContextRef {
     ss << "meta: {";
 
     auto [str_array, len] = base_ptr_->ops->get_meta_key_vals(base_ptr_->ctx);
-    for (size_t ii = 0; ii < len; ii += 2) {
+    for (size_t ii = 0; ii + 1 < len; ii += 2) {
       if (ii != 0) ss << ",";
 
       auto key = ibmw::util::ToStdStringView(str_array[ii]);

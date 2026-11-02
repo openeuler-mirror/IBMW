@@ -325,7 +325,7 @@ void HttpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
     // Set other context meta fields to http header
     if (msg_wrapper.ctx_ref) {
       auto meta_key_vals_array = msg_wrapper.ctx_ref.GetMetaKeyValsArray();
-      for (size_t ii = 0; ii < meta_key_vals_array.len; ii += 2) {
+      for (size_t ii = 0; ii + 1 < meta_key_vals_array.len; ii += 2) {
         auto key = ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii]);
         auto val = ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii + 1]);
         req_ptr->set(

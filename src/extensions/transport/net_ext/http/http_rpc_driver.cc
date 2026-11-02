@@ -568,7 +568,7 @@ void HttpRpcDriver::Call(
 
             // Set other context meta fields to http header
             auto [meta_key_vals_array, meta_key_vals_array_len] = client_call_wrapper_ptr->ctx_ref.GetMetaKeyValsArray();
-            for (size_t ii = 0; ii < meta_key_vals_array_len; ii += 2) {
+            for (size_t ii = 0; ii + 1 < meta_key_vals_array_len; ii += 2) {
               auto key = ibmw::util::ToStdStringView(meta_key_vals_array[ii]);
               auto val = ibmw::util::ToStdStringView(meta_key_vals_array[ii + 1]);
               req.set(
