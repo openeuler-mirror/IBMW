@@ -41,6 +41,9 @@ details remain governed by the documentation for each release.
 - C++ `ibmw::Runtime`: an incompatible or malformed core now throws
   `std::invalid_argument` instead of aborting the process. `ibmw::Module` reports
   it as a failed setup; code constructing `Runtime` directly must handle it.
+- Discovery: a plugin found through `IBMW_DISCOVERY_PLUGIN_DIR` is only loaded
+  when its directory and library belong to the current user or root and are
+  not world writable; setuid processes ignore the variable.
 
 ### Added
 
