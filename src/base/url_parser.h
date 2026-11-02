@@ -4,7 +4,6 @@
 #pragma once
 
 #include <optional>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -32,39 +31,46 @@ struct Url {
  */
 template <class StringType = std::string_view>
 std::optional<Url<StringType>> ParseUrl(std::string_view url_str) {
-  std::regex url_regex(
-      R"(^(([^:\/?#]+)://)?(([^\/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?)",
-      std::regex::ECMAScript);
-  std::match_results<std::string_view::const_iterator> url_match_result;
-
-  if (!std::regex_match(url_str.begin(), url_str.end(), url_match_result, url_regex))
-    return std::nullopt;
-
+  // Same split as the regex
+  //   ^(([^:/?#]+)://)?([^/?#]*)([^?#]*)(\?([^#]*))?(#(.*))?$
+  // without building a std::regex per call or recursing per character.
   Url<StringType> url;
-  if (url_match_result[2].matched)
-    url.protocol = StringType(url_match_result[2].first, url_match_result[2].second);
+  std::string_view rest = url_str;
 
-  if (url_match_result[4].matched) {
-    StringType auth(url_match_result[4].first, url_match_result[4].second);
-    size_t pos = auth.find_first_of(':');
-    if (pos != StringType::npos) {
-      url.host = auth.substr(0, pos);
-      url.service = auth.substr(pos + 1);
-    } else {
-      url.host = auth;
-    }
+  if (const size_t scheme_end = rest.find("://");
+      scheme_end != std::string_view::npos && scheme_end > 0 &&
+      rest.substr(0, scheme_end).find_first_of(":/?#") == std::string_view::npos) {
+    url.protocol = StringType(rest.substr(0, scheme_end));
+    rest.remove_prefix(scheme_end + 3);
   }
 
-  if (url_match_result[5].matched)
-    url.path = StringType(url_match_result[5].first, url_match_result[5].second);
+  const std::string_view auth = rest.substr(0, rest.find_first_of("/?#"));
+  rest.remove_prefix(auth.size());
+  if (const size_t pos = auth.find(':'); pos != std::string_view::npos) {
+    url.host = StringType(auth.substr(0, pos));
+    url.service = StringType(auth.substr(pos + 1));
+  } else {
+    url.host = StringType(auth);
+  }
 
-  if (url_match_result[7].matched)
-    url.query = StringType(url_match_result[7].first, url_match_result[7].second);
+  const std::string_view path = rest.substr(0, rest.find_first_of("?#"));
+  url.path = StringType(path);
+  rest.remove_prefix(path.size());
 
-  if (url_match_result[9].matched)
-    url.fragment = StringType(url_match_result[9].first, url_match_result[9].second);
+  if (!rest.empty() && rest.front() == '?') {
+    const std::string_view query = rest.substr(1, rest.find('#') - 1);
+    url.query = StringType(query);
+    rest.remove_prefix(query.size() + 1);
+  }
 
-  return std::optional<Url<StringType>>{url};
+  if (!rest.empty()) {  // starts with '#'
+    const std::string_view fragment = rest.substr(1);
+    // ECMAScript '.' does not match line terminators, so the regex rejected them.
+    if (fragment.find_first_of("\r\n") != std::string_view::npos) return std::nullopt;
+    url.fragment = StringType(fragment);
+  }
+
+  return std::optional<Url<StringType>>{std::move(url)};
 }
 
 /**
