@@ -84,7 +84,7 @@ case "${ACTION_CASE}" in
     exit 1
     ;;
 esac
-SERVER_READY_MARKER="${SERVER_READY_MARKER:-[PASS] DDS-only action server started for ${ACTION_NAME}}"
+SERVER_READY_MARKER="${SERVER_READY_MARKER:-DDS-only action server started for ${ACTION_NAME}}"
 
 fail() {
   echo "[FAIL] $*" >&2

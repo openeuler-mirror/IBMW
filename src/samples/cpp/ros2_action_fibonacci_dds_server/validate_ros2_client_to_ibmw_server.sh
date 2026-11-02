@@ -55,7 +55,7 @@ LDD_LOG="$LOG_DIR/${SERVER_TARGET_NAME}.ldd.log"
 if [ -z "${SERVER_READY_MARKER:-}" ]; then
   case "$SERVER_TARGET_NAME" in
     ibmw_action_dds_generic_fibonacci_server|ibmw_action_dds_countdown_fibonacci_wire_server|ibmw_action_dds_generic_gripper_command_server)
-      SERVER_READY_MARKER="[PASS] DDS-only action server started for $ACTION_NAME"
+      SERVER_READY_MARKER="DDS-only action server started for $ACTION_NAME"
       ;;
     *)
       SERVER_READY_MARKER="[PASS] DDS-only Fibonacci action server started for /fibonacci"
