@@ -25,19 +25,19 @@ namespace {
 
 using namespace std::chrono_literals;
 
-// Allocates the message the way Paho does, so MQTTAsync_freeMessage and
+// Allocates with Paho's allocator, so MQTTAsync_freeMessage and
 // MQTTAsync_free can release it.
 MQTTAsync_message* NewMessage() {
-  auto* msg = static_cast<MQTTAsync_message*>(std::malloc(sizeof(MQTTAsync_message)));
+  auto* msg = static_cast<MQTTAsync_message*>(MQTTAsync_malloc(sizeof(MQTTAsync_message)));
   const MQTTAsync_message init = MQTTAsync_message_initializer;
   std::memcpy(msg, &init, sizeof(init));
-  msg->payload = std::malloc(4);
+  msg->payload = MQTTAsync_malloc(4);
   msg->payloadlen = 4;
   return msg;
 }
 
 char* NewTopic(const char* topic) {
-  char* t = static_cast<char*>(std::malloc(std::strlen(topic) + 1));
+  char* t = static_cast<char*>(MQTTAsync_malloc(std::strlen(topic) + 1));
   std::strcpy(t, topic);
   return t;
 }

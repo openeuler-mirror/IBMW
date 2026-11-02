@@ -174,10 +174,10 @@ MQTTAsync_message* NewRequest(const std::string& answer_topic, const std::string
   payload.append(4, '\0');  // req id
   payload += '\0';          // meta count
   payload += body;
-  auto* msg = static_cast<MQTTAsync_message*>(std::malloc(sizeof(MQTTAsync_message)));
+  auto* msg = static_cast<MQTTAsync_message*>(MQTTAsync_malloc(sizeof(MQTTAsync_message)));
   const MQTTAsync_message init = MQTTAsync_message_initializer;
   std::memcpy(msg, &init, sizeof(init));
-  msg->payload = std::malloc(payload.size());
+  msg->payload = MQTTAsync_malloc(payload.size());
   std::memcpy(msg->payload, payload.data(), payload.size());
   msg->payloadlen = static_cast<int>(payload.size());
   return msg;
@@ -194,13 +194,16 @@ TEST_F(MqttRpcDriverTest, RequestWithForeignAnswerTopicIsDropped) {
   service.info = info_;
   service.service_func = [&served](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
     served.push_back(*static_cast<const int*>(frame->req_ptr));
+    // Takes the answer callback like the service dispatcher does; it holds
+    // the frame, so leaving it in the frame would keep both alive.
+    auto callback = std::move(frame->callback);
   };
   ASSERT_TRUE(driver.RegisterServiceFunc(service));
   driver.Start();
 
   auto deliver = [&](const std::string& answer_topic, const std::string& body) {
     const std::string topic = "ibmw_rpc_req/%2Ftest%2Fsvc";
-    char* raw = static_cast<char*>(std::malloc(topic.size() + 1));
+    char* raw = static_cast<char*>(MQTTAsync_malloc(topic.size() + 1));
     std::memcpy(raw, topic.c_str(), topic.size() + 1);
     catalog->HandleServerMsg(raw, raw, NewRequest(answer_topic, body));
   };
