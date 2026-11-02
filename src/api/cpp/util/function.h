@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <functional>
 #include <new>
@@ -29,7 +30,8 @@ struct InvokerTraitsHelper<R (*)(void*, Args...)> {
 template <typename T>
 concept DecayedType = std::is_same_v<std::decay_t<T>, T>;
 
-// TODO: Parameter types must be in plain C-style form (no references, STL containers, etc.)
+// Note: invoker parameter types are expected to be plain C-style types (no references, STL
+// containers, etc.) because NativeHandle() is passed across the C ABI; this is not enforced yet.
 template <typename T>
 concept FunctionCStyleOps =
     std::is_same_v<void (*)(void*, void*), decltype(T::relocator)> &&
@@ -130,9 +132,13 @@ class Function<Ops> {
     return *this;
   }
 
-  // TODO: All Args types must be constrained to plain C-style forms (no references, STL containers, etc.)
+  // Preconditions (not checked in release builds, this is the per-callback hot path):
+  // - *this is non-empty (check with operator bool when it may be empty);
+  // - the stored callable does not throw: the invoker crosses the C ABI and is noexcept,
+  //   so an escaping exception calls std::terminate.
   template <typename... Args>
   R operator()(Args... args) const noexcept {
+    assert(base_.ops != nullptr && "calling an empty ibmw::util::Function");
     return static_cast<const OpsType*>(base_.ops)->invoker(&(base_.object_buf), args...);
   }
 

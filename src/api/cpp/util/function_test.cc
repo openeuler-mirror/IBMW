@@ -54,6 +54,22 @@ TEST(UtilFunction, AssignmentThatThrowsLeavesFunctionEmpty) {
   EXPECT_EQ(c.alive, 0);
 }
 
+TEST(UtilFunction, EmptyStatesAreObservableBeforeCalling) {
+  Task empty;
+  EXPECT_FALSE(static_cast<bool>(empty));
+  Task from_null(nullptr);
+  EXPECT_FALSE(static_cast<bool>(from_null));
+  Task from_null_base(static_cast<ibmw_function_base_t*>(nullptr));
+  EXPECT_FALSE(static_cast<bool>(from_null_base));
+}
+
+#ifndef NDEBUG
+TEST(UtilFunctionDeathTest, CallingEmptyFunctionAssertsInDebugBuilds) {
+  Task empty;
+  EXPECT_DEATH(empty(), "empty ibmw::util::Function");
+}
+#endif
+
 // Small enough for the inline buffer, but more strictly aligned than it.
 struct alignas(32) OverAligned {
   bool* ok;
