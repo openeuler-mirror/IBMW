@@ -195,6 +195,16 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# gcov instrumentation slows the binaries down and writes .gcda files at run
+# time, so it is only on by default for Debug test builds.
+if(IBMW_BUILD_TESTS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_ibmw_coverage_default ON)
+else()
+  set(_ibmw_coverage_default OFF)
+endif()
+option(IBMW_ENABLE_COVERAGE "IBMW build with gcov coverage instrumentation." ${_ibmw_coverage_default})
+unset(_ibmw_coverage_default)
+
 file(READ "${PROJECT_SOURCE_DIR}/VERSION" IBMW_RUNTIME_VERSION)
 string(STRIP "${IBMW_RUNTIME_VERSION}" IBMW_RUNTIME_VERSION)
 message("IBMW Version : ${IBMW_RUNTIME_VERSION}")
@@ -278,7 +288,7 @@ if(IBMW_MASTER_PROJECT)
   set(CMAKE_CXX_VISIBILITY_INLINES_HIDDEN ON)
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(IBMW_BUILD_TESTS AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
+    if(IBMW_ENABLE_COVERAGE AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
     endif()
@@ -350,8 +360,8 @@ if(IBMW_BUILD_TESTS)
                 ${PROJECT_SOURCE_DIR}/scripts/tests/test_installed_typesupport_package.sh)
       set(IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
           "IBMW_INSTALLED_TYPESUPPORT_IBMW_BUILD=${CMAKE_BINARY_DIR}")
-      if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT ADDRESS_SANITIZER
-                                                     AND NOT THREAD_SANITIZER)
+      if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND IBMW_ENABLE_COVERAGE
+         AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
         list(APPEND IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
              "IBMW_INSTALLED_TYPESUPPORT_LOADER_LINK_COVERAGE=1")
       endif()
@@ -704,6 +714,7 @@ list(
   ibmw_vars
   IBMW_RUNTIME_VERSION
   IBMW_BUILD_TESTS
+  IBMW_ENABLE_COVERAGE
   IBMW_BUILD_RUNTIME
   IBMW_BUILD_PROTOCOLS
   IBMW_DDS_PROVIDER
