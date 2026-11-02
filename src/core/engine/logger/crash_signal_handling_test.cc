@@ -3,6 +3,8 @@
 
 // CORE-005: the crash handler puts back what it replaced and detaches its
 // logger when destroyed.
+// CORE-007: executor threads get their own alternate signal stack, so a stack
+// overflow there is still reported.
 
 #include "engine/logger/crash_signal_handling.h"
 
@@ -14,8 +16,14 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
+#include <thread>
+
+#include "engine/executor/thread_pool_executor.h"
+#include "engine/thread_tools.h"
+#include "yaml-cpp/yaml.h"
 
 namespace ibmw::runtime::core::logger {
 namespace {
@@ -91,6 +99,65 @@ TEST(CrashSignalHandlingTest, CrashAfterDestructionUsesPreviousHandler) {
   ASSERT_TRUE(WIFSIGNALED(status));
   EXPECT_EQ(WTERMSIG(status), SIGSEGV);
   EXPECT_EQ(output.find("IBMW crash signal"), std::string::npos) << output;
+}
+
+bool CurrentThreadHasAltStack() {
+  stack_t current{};
+  return sigaltstack(nullptr, &current) == 0 && (current.ss_flags & SS_DISABLE) == 0;
+}
+
+TEST(CrashSignalHandlingTest, ExecutorThreadsGetAltStackOnlyWhileInstalled) {
+  const auto worker_has_alt_stack = [] {
+    executor::ThreadPoolExecutor executor;
+    executor.Initialize("alt-stack-test", YAML::Load("{thread_num: 1}"));
+    executor.Start();
+    std::promise<bool> result;
+    executor.Dispatch([&result] { result.set_value(CurrentThreadHasAltStack()); });
+    const bool has = result.get_future().get();
+    executor.Shutdown();
+    return has;
+  };
+  EXPECT_FALSE(worker_has_alt_stack());
+  {
+    CrashSignalHandling handling;
+    EXPECT_TRUE(worker_has_alt_stack());
+  }
+  EXPECT_FALSE(worker_has_alt_stack());
+}
+
+[[gnu::noinline]] int Recurse(int depth) {
+  volatile char frame[1024];
+  frame[0] = static_cast<char>(depth);
+  return Recurse(depth + 1) + frame[0];
+}
+
+TEST(CrashSignalHandlingTest, StackOverflowOnWorkerThreadIsReported) {
+  int fds[2];
+  ASSERT_EQ(pipe(fds), 0);
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const rlimit no_core{0, 0};
+    (void)setrlimit(RLIMIT_CORE, &no_core);
+    dup2(fds[1], STDERR_FILENO);
+    close(fds[0]);
+    CrashSignalHandling handling;
+    std::thread([] {
+      util::EnsureAltSignalStackForCurrentThread();
+      Recurse(0);
+    }).join();
+    _exit(0);
+  }
+  close(fds[1]);
+  std::string output;
+  char buffer[4096];
+  for (ssize_t n; (n = read(fds[0], buffer, sizeof(buffer))) > 0;) output.append(buffer, n);
+  close(fds[0]);
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGSEGV);
+  EXPECT_NE(output.find("IBMW crash signal: 11"), std::string::npos) << output.substr(0, 512);
 }
 
 }  // namespace

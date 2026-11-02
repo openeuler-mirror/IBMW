@@ -71,6 +71,7 @@ void ParallelExecutor::Initialize(std::string_view name, YAML::Node options_node
         threadname = threadname + "." + std::to_string(ii);
 
       try {
+        util::EnsureAltSignalStackForCurrentThread();
         util::SetNameForCurrentThread(threadname);
         util::BindCpuForCurrentThread(options_.thread_bind_cpu);
         util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);

@@ -3,6 +3,7 @@
 
 #include "engine/thread_tools.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <thread>
 
@@ -11,6 +12,11 @@
 
 #include <pthread.h>
 #include <sched.h>
+
+#if !defined(_WIN32)
+  #include <signal.h>
+  #include <sys/mman.h>
+#endif
 
 #if defined(_WIN32)
   #include <windows.h>
@@ -166,6 +172,52 @@ void SetCpuSchedForCurrentThread(std::string_view sched) {
     }
   }
 
+#endif
+}
+
+namespace {
+std::atomic<bool> alt_signal_stacks_enabled{false};
+
+#if !defined(_WIN32)
+struct ThreadAltSignalStack {
+  void* base = nullptr;
+
+  ~ThreadAltSignalStack() {
+    if (base == nullptr) return;
+    stack_t current{};
+    if (sigaltstack(nullptr, &current) == 0 && current.ss_sp == base) {
+      stack_t disable{};
+      disable.ss_flags = SS_DISABLE;
+      if (sigaltstack(&disable, nullptr) != 0) return;  // still in use: keep it
+    }
+    munmap(base, kCrashAltStackSize);
+  }
+};
+
+thread_local ThreadAltSignalStack tl_alt_signal_stack;
+#endif
+}  // namespace
+
+void EnableAltSignalStacks(bool enable) {
+  alt_signal_stacks_enabled.store(enable, std::memory_order_relaxed);
+}
+
+void EnsureAltSignalStackForCurrentThread() {
+#if !defined(_WIN32)
+  if (!alt_signal_stacks_enabled.load(std::memory_order_relaxed)) return;
+  stack_t current{};
+  if (sigaltstack(nullptr, &current) != 0 || (current.ss_flags & SS_DISABLE) == 0) return;
+  void* base = mmap(nullptr, kCrashAltStackSize, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (base == MAP_FAILED) return;
+  stack_t stack{};
+  stack.ss_sp = base;
+  stack.ss_size = kCrashAltStackSize;
+  if (sigaltstack(&stack, nullptr) != 0) {
+    munmap(base, kCrashAltStackSize);
+    return;
+  }
+  tl_alt_signal_stack.base = base;
 #endif
 }
 

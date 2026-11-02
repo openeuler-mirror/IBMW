@@ -63,6 +63,7 @@ void WatchdogExecutor::Initialize(YAML::Node options_node) {
     thread_id_.store(std::this_thread::get_id(), std::memory_order_relaxed);
 
     try {
+      util::EnsureAltSignalStackForCurrentThread();
       util::SetNameForCurrentThread(name_);
       util::BindCpuForCurrentThread(options_.thread_bind_cpu);
       util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);

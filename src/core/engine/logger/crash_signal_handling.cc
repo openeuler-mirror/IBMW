@@ -4,6 +4,7 @@
 #include "engine/logger/crash_signal_handling.h"
 
 #include "base/log_util.h"
+#include "engine/thread_tools.h"
 
 // Handlers are not installed on OHOS until the unwinder is validated on
 // target boards (same gate for backward-cpp and the selfdev handler).
@@ -189,9 +190,13 @@ std::vector<int> DefaultSignals() {
 
 void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept { std::free(p); }
 
-CrashSignalHandling::CrashSignalHandling() { InstallHandlers(DefaultSignals()); }
+CrashSignalHandling::CrashSignalHandling() {
+  InstallHandlers(DefaultSignals());
+  util::EnableAltSignalStacks(true);  // executor threads started from now on
+}
 
 CrashSignalHandling::~CrashSignalHandling() {
+  util::EnableAltSignalStacks(false);
   for (auto it = previous_actions_.rbegin(); it != previous_actions_.rend(); ++it) {
     struct sigaction current;
     // SA_RESETHAND or a later installer may have replaced ours: keep that.
@@ -314,7 +319,7 @@ CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
 }
 
 void CrashSignalHandling::EnsureAltStack() {
-  const size_t stack_size = 1024 * 1024 * 8;
+  const size_t stack_size = util::kCrashAltStackSize;
   alt_stack_.reset(static_cast<char*>(std::malloc(stack_size)));
   if (!alt_stack_) {
     loaded_ = false;

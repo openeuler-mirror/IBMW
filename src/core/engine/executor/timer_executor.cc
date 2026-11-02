@@ -268,6 +268,7 @@ void TimerExecutor::TimerLoop() {
   std::string threadname = name_;
 
   try {
+    ibmw::runtime::core::util::EnsureAltSignalStackForCurrentThread();
     ibmw::runtime::core::util::SetNameForCurrentThread(threadname);
     ibmw::runtime::core::util::BindCpuForCurrentThread(options_.thread_bind_cpu);
     ibmw::runtime::core::util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);
