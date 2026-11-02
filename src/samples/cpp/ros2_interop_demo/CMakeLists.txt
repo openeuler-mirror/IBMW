@@ -125,6 +125,7 @@ install(TARGETS ros2_interop_app ros2_pub_only_app ros2_sub_only_app
 install(DIRECTORY config/
   DESTINATION share/ros2_interop_demo
   USE_SOURCE_PERMISSIONS
+  PATTERN ".*" EXCLUDE
 )
 
 message(STATUS "ros2_interop_demo configured successfully")

@@ -15,6 +15,10 @@
 #include "engine/core_types.h"
 #include "engine/yaml_tools.h"
 #include "base/sys_tools.h"
+#include "base/ibmw_config.h"
+#if defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+#include "ibmw_selfdev/coro/task.h"
+#endif
 
 namespace ibmw::runtime::core {
 #ifdef IBMW_ENABLE_CORE_METRICS
@@ -27,6 +31,15 @@ using observability::CoreMetricsController;
 
 Engine::Engine()
     : logger_ptr_(std::make_shared<ibmw::common::util::LoggerWrapper>()) {
+#if defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+  // A real reference into libibmw_selfdev_coro, so every executable that
+  // embeds the engine (bin/ibmw, ibmw_add_app apps) records it as DT_NEEDED
+  // even when linked with --as-needed (the engine itself awaits no Task).
+  // The library is then loaded at start-up, before any package: packages
+  // that need it resolve to this copy without a RUNPATH of their own, and
+  // its initial-exec TLS slot lives in the static TLS block.
+  (void)ibmw::selfdev::coro::detail::CurrentStartRecord();
+#endif
   BuildSubsystemTable();
   ResolveInitOrder();
 }
@@ -395,6 +408,14 @@ void Engine::StartImpl() {
 #endif
 
   MW_INFO("Gen initialization report:\n{}", GenInitializationReport());
+
+  // Initialize() dlopen'ed more libraries after ModuleBus refreshed the
+  // crash handler's module table (TypeSupport packages loaded by
+  // RuntimeGraph, plugins loaded by extensions): record them before any
+  // Start() runs their code. Libraries loaded later on demand (for example a
+  // discovery plugin created by a topic subscription) show as bare pcs in the
+  // raw part of a crash report; the symbolized part still names them.
+  logger::CrashSignalHandling::RefreshModules();
 
   RunHooks(BeforePhase(Phase::kStart));
 

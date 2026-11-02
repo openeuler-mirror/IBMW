@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include "cpp/executor/executor.h"
 #include "cpp/executor/timer.h"
+#include "engine/logger/crash_flush.h"
 #include "engine/logger/formatter.h"
 #include "engine/logger/logger_driver_base.h"
 #include "engine/logger/os.h"
@@ -51,6 +52,19 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
     if (ofs_.is_open()) ofs_.flush();
   }
 
+  bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept override {
+    if (!run_flag_.load()) return false;
+    // Runs after the queued writes, on the thread that owns ofs_ / file_.
+    auto flush = [this]() {
+      if (options_.enable_sync) {
+        if (file_ != nullptr) (void)fflush(file_);
+      } else if (ofs_.is_open()) {
+        ofs_.flush();
+      }
+    };
+    return FlushOnLogExecutor(log_executor_, std::move(flush), deadline);
+  }
+
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func) {
     get_executor_func_ = get_executor_func;
@@ -70,8 +84,8 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
  private:
   Options options_;
   std::function<ibmw::executor::ExecutorHandle(std::string_view)> get_executor_func_;
-  executor::ExecutorHandle log_executor_;
-  executor::ExecutorHandle timer_executor_;
+  ibmw::executor::ExecutorHandle log_executor_;
+  ibmw::executor::ExecutorHandle timer_executor_;
 
   std::string base_file_name_;
   std::ofstream ofs_;

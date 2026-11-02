@@ -39,6 +39,8 @@ target_link_libraries(
 # Executor
 if(IBMW_EXECUTOR_USE_STDEXEC)
   target_link_libraries(${CUR_TARGET_NAME} INTERFACE STDEXEC::stdexec)
+elseif(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+  target_link_libraries(${CUR_TARGET_NAME} INTERFACE ibmw::selfdev::coro)
 else()
   target_link_libraries(${CUR_TARGET_NAME} INTERFACE unifex::unifex)
 endif()

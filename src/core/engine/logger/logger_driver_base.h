@@ -55,6 +55,21 @@ class LoggerDriverBase {
    */
   virtual void Flush() noexcept {}
 
+  /**
+   * @brief Write out the entries logged so far, for the crash report.
+   * @note  Called by the crash signal handler after it logged the report and
+   *        before the process ends, possibly on any thread (including the
+   *        driver's own log executor). Must return by `deadline` and must not
+   *        block on a log executor that cannot make progress. Returns true
+   *        when everything logged before the call has been written.
+   *        Default: Flush() (suitable for sync drivers).
+   */
+  virtual bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept {
+    (void)deadline;
+    Flush();
+    return true;
+  }
+
   virtual std::list<std::pair<std::string, std::string>> GenInitializationReport() const noexcept { return {}; }
 
   virtual bool AllowDuplicates() const noexcept = 0;  // It should always return the same value

@@ -20,6 +20,15 @@
 /// Use stdexec as the executor implementation (experimental)
 #cmakedefine IBMW_EXECUTOR_USE_STDEXEC
 
+/// Use the self-developed crash handler (selfdev/crash_handler) instead of backward-cpp
+#cmakedefine IBMW_SELFDEV_CRASH_HANDLER
+
+/// Use the self-developed concurrent containers (selfdev/concurrent) instead of oneTBB
+#cmakedefine IBMW_SELFDEV_CONCURRENT
+
+/// Use the self-developed coroutines (selfdev/coro) as the executor implementation instead of libunifex
+#cmakedefine IBMW_EXECUTOR_USE_SELFDEV_CORO
+
 /// Define a global GetLogger() free function in context.h
 #cmakedefine IBMW_CONTEXT_DEFINE_GLOBAL_LOGGER_HANDLE
 

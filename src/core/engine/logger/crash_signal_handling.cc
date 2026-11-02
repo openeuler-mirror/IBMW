@@ -5,10 +5,21 @@
 
 #include "base/log_util.h"
 
+// Handlers are not installed on OHOS until the unwinder is validated on
+// target boards (same gate for backward-cpp and the selfdev handler).
 #if !defined(__OHOS__) && !defined(__OHOS)
-  #define IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD 1
+  #define IBMW_CRASH_SIGNAL_HANDLING_ENABLED 1
 #else
+  #define IBMW_CRASH_SIGNAL_HANDLING_ENABLED 0
+#endif
+
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
   #define IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD 0
+  #include <string_view>
+
+  #include "ibmw_selfdev/crash_handler/crash_handler.h"
+#else
+  #define IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD IBMW_CRASH_SIGNAL_HANDLING_ENABLED
 #endif
 
 #if IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
@@ -30,7 +41,41 @@
 
 namespace ibmw::runtime::core::logger {
 
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(IBMW_SELFDEV_CRASH_HANDLER)
+
+// Addresses only: symbolize offline from the module map. Not verified on
+// Windows yet (see st/selfdev_process/crash_handler/功能设计.md).
+void CrashSignalHandling::PrintStacktrace(CONTEXT* ctx, int skip_frames) {
+  (void)ctx;
+  void* frames[ibmw::selfdev::crash::kMaxFrames];
+  size_t count = ibmw::selfdev::crash::CaptureStack(frames, 64, static_cast<size_t>(skip_frames) + 1);
+  std::string out(count * 32 + 1, '\0');
+  out.resize(ibmw::selfdev::crash::FormatStack(out.data(), out.size(), frames, count, false, false));
+  MW_ERROR("CRASH SIGNAL HANDLING STACKTRACE:\n{}", out);
+}
+
+LONG WINAPI CrashSignalHandling::UnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
+  if (info && info->ExceptionRecord) {
+    MW_ERROR("CRASH SIGNAL HANDLING EXCEPTION CODE: 0x{:08X}", static_cast<uint32_t>(info->ExceptionRecord->ExceptionCode));
+  } else {
+    MW_ERROR("CRASH SIGNAL HANDLING: unhandled exception (no exception record)");
+  }
+  PrintStacktrace(info ? info->ContextRecord : nullptr, 0);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void CrashSignalHandling::AbortHandler(int) {
+  MW_ERROR("CRASH SIGNAL HANDLING: SIGABRT");
+  PrintStacktrace(nullptr, 0);
+  std::abort();
+}
+
+CrashSignalHandling::CrashSignalHandling() {
+  ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
+  std::signal(SIGABRT, &AbortHandler);
+}
+
+#elif defined(_WIN32)
 
 void CrashSignalHandling::PrintStacktrace(CONTEXT* ctx, int skip_frames) {
   backward::Printer printer;
@@ -82,6 +127,28 @@ void CrashSignalHandling::AbortHandler(int) {
 CrashSignalHandling::CrashSignalHandling() {
   ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
   std::signal(SIGABRT, &AbortHandler);
+}
+
+#elif defined(IBMW_SELFDEV_CRASH_HANDLER)
+
+void CrashSignalHandling::ReportToLog(const char* report, size_t len, void*) {
+  MW_ERROR("Crash signal handling stacktrace: \n{}", std::string_view(report, len));
+  // The handler ends the process as soon as this returns.
+  RunCrashFlush();
+}
+
+CrashSignalHandling::CrashSignalHandling() {
+  #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  ibmw::selfdev::crash::Options options;
+  options.alt_stack_size = 1024 * 1024 * 8;  // same as the backward-cpp path
+  options.report_callback = &ReportToLog;
+  // The raw report also goes to stderr (async-signal-safe) in case logging
+  // itself is what crashed.
+  options.output_fd = STDERR_FILENO;
+  loaded_ = ibmw::selfdev::crash::Install(options);
+  #else
+  loaded_ = false;
+  #endif
 }
 
 #elif IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
@@ -145,6 +212,8 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   std::stringstream ss;
   printer.print(st, ss);
   MW_ERROR("Crash signal handling signal: {}, stacktrace: \n{}", info->si_signo, ss.str());
+  // SigHandler re-raises the signal right after this returns.
+  RunCrashFlush();
 
   #if _XOPEN_SOURCE >= 700 || _POSIX_C_SOURCE >= 200809L
   psiginfo(info, nullptr);
@@ -221,5 +290,11 @@ void CrashSignalHandling::EnsureAltStack() { loaded_ = false; }
 void CrashSignalHandling::InstallHandlers(const std::vector<int>&) { loaded_ = false; }
 
 #endif
+
+void CrashSignalHandling::RefreshModules() {
+#if defined(IBMW_SELFDEV_CRASH_HANDLER) && !defined(_WIN32) && IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  ibmw::selfdev::crash::RefreshModules();
+#endif
+}
 
 }  // namespace ibmw::runtime::core::logger

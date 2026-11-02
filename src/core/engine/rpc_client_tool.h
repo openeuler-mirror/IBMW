@@ -8,9 +8,14 @@
 #include <memory>
 #include <optional>
 
+#include "base/ibmw_config.h"
 #include "cpp/executor/executor.h"
 
-#include "tbb/concurrent_hash_map.h"
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  #include "ibmw_selfdev/concurrent/concurrent_hash_map.h"
+#else
+  #include "tbb/concurrent_hash_map.h"
+#endif
 
 namespace ibmw::runtime::core::util {
 
@@ -35,7 +40,11 @@ class RpcClientTool {
   }
 
   bool Record(uint32_t req_id, std::chrono::nanoseconds timeout, MsgRecorder&& msg_recorder) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    bool ret = client_msg_recorder_map_.Emplace(req_id, std::move(msg_recorder));
+#else
     bool ret = client_msg_recorder_map_.emplace(req_id, std::move(msg_recorder));
+#endif
 
     if (!ret) [[unlikely]]
       return false;
@@ -58,6 +67,11 @@ class RpcClientTool {
   }
 
   std::optional<MsgRecorder> GetRecord(uint32_t req_id) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    // Find and erase under one shard lock: a timeout racing the response for
+    // the same req_id gets the record exactly once.
+    return client_msg_recorder_map_.Take(req_id);
+#else
     typename ClientMsgRecorderMap::accessor ac;
     bool find_ret = client_msg_recorder_map_.find(ac, req_id);
 
@@ -69,6 +83,7 @@ class RpcClientTool {
     client_msg_recorder_map_.erase(ac);
 
     return result;
+#endif
   }
 
  private:
@@ -77,7 +92,11 @@ class RpcClientTool {
   ibmw::executor::ExecutorHandle timeout_executor_;
   TimeoutHandle timeout_handle_;
 
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  using ClientMsgRecorderMap = ibmw::selfdev::concurrent::ConcurrentHashMap<uint32_t, MsgRecorder>;
+#else
   using ClientMsgRecorderMap = tbb::concurrent_hash_map<uint32_t, MsgRecorder>;
+#endif
   ClientMsgRecorderMap client_msg_recorder_map_;
 };
 

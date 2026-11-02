@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -36,7 +37,7 @@ class LoggingSubsystem : public ISubsystem {
 
  public:
   LoggingSubsystem() = default;
-  ~LoggingSubsystem() override = default;
+  ~LoggingSubsystem() override;
 
   LoggingSubsystem(const LoggingSubsystem&) = delete;
   LoggingSubsystem& operator=(const LoggingSubsystem&) = delete;
@@ -50,6 +51,20 @@ class LoggingSubsystem : public ISubsystem {
    * @note  Should be called before resetting the core logger to drain queued entries.
    */
   void Flush();
+
+  /**
+   * @brief Bounded flush for the crash report (see LoggerDriverBase::FlushForCrash).
+   * @note  Waits at most `timeout` in total for all drivers. Called by the
+   *        crash signal handler after it logged the report.
+   * @return true when every driver wrote out what was logged before the call.
+   */
+  bool FlushForCrash(std::chrono::milliseconds timeout) noexcept;
+
+  // Upper bound of the wait in FlushForCrash() when called by the crash
+  // handler. Must stay well below the selfdev crash handler's report watchdog
+  // (Options::report_timeout_sec, 10 s), so a log executor that is stuck
+  // still lets the report finish and the process end with its signal.
+  static constexpr std::chrono::milliseconds kCrashFlushTimeout{500};
 
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);

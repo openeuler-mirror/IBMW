@@ -5,7 +5,7 @@
 
 #include "base/ibmw_config.h"
 
-#ifdef IBMW_EXECUTOR_USE_STDEXEC
+#if defined(IBMW_EXECUTOR_USE_STDEXEC)
 
   #include <exec/timed_scheduler.hpp>
   #include <stdexec/execution.hpp>
@@ -200,6 +200,161 @@ class IbmwContext {
       : executor_bus_ref_(executor_bus_ref) {}
 
   IbmwExecutor GetExecutor(std::string_view executor_name) {
+    return IbmwExecutor(executor_bus_ref_.GetExecutor(executor_name));
+  }
+
+  explicit operator bool() const { return static_cast<bool>(executor_bus_ref_); }
+
+ private:
+  executor::ExecutorBusRef executor_bus_ref_;
+};
+
+}  // namespace ibmw::co
+
+#elif defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+
+  #include <chrono>
+  #include <coroutine>
+  #include <string_view>
+  #include <type_traits>
+
+  #include "ibmw_selfdev/coro/concepts.h"
+  #include "ibmw_selfdev/coro/export.h"
+
+  #include "cpp/context/details/thread_context.h"
+  #include "cpp/executor/executor_bus.h"
+  #include "cpp/util/function.h"
+
+namespace ibmw::co {
+
+namespace details {
+
+// Resumes h on the executor's thread with g_thread_ctx.exe set. Only exe is
+// set: ctx_ptr and active_rpc_context stay what the worker thread has, so
+// code after co_await that needs the module context (GetCurrentContext())
+// calls Context::LetMe() first. Coroutine bodies catch their own exceptions,
+// so resume() does not throw.
+inline auto MakeResumer(executor::ExecutorHandle executor_ref, std::coroutine_handle<> h) {
+  return [executor_ref, h]() {
+    // Restored even if resume() throws (a foreign coroutine type whose
+    // unhandled_exception rethrows), so the worker keeps its own context.
+    struct ThreadCtxRestore {
+      decltype(ibmw::context::details::g_thread_ctx) previous = ibmw::context::details::g_thread_ctx;
+      ~ThreadCtxRestore() { ibmw::context::details::g_thread_ctx = std::move(previous); }
+    } restore;
+    ibmw::context::details::g_thread_ctx.exe = executor_ref;
+    h.resume();
+  };
+}
+
+}  // namespace details
+
+// Executor. A selfdev coro TimedScheduler: each schedule*() returns an
+// awaiter that resumes the coroutine on the executor with g_thread_ctx.exe
+// set, as the unifex branch's receivers do.
+//
+// Awaiter rule (see selfdev coro 接口设计.md): once Dispatch*() has handed the
+// coroutine handle to the executor, the coroutine may run and be destroyed
+// on another thread, so await_suspend touches neither the awaiter nor any
+// other frame state afterwards, and is never inlined (Clang < 19 may place
+// the locals of an inlined await_suspend, e.g. the temporary task wrapper
+// destroyed after Dispatch() returns, in the coroutine frame).
+class IbmwExecutor {
+ public:
+  // Awaiter
+  class ScheduleAwaiter {
+   public:
+    explicit ScheduleAwaiter(executor::ExecutorHandle executor_ref) noexcept
+        : executor_ref_(executor_ref) {}
+
+    bool await_ready() const noexcept { return false; }
+    IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) {
+      executor_ref_.Dispatch(details::MakeResumer(executor_ref_, h));
+    }
+    void await_resume() const noexcept {}
+
+   private:
+    executor::ExecutorHandle executor_ref_;
+  };
+
+  // Awaiter
+  class ScheduleAfterAwaiter {
+   public:
+    ScheduleAfterAwaiter(executor::ExecutorHandle executor_ref, const std::chrono::nanoseconds& dt) noexcept
+        : executor_ref_(executor_ref), dt_(dt) {}
+
+    bool await_ready() const noexcept { return false; }
+    IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) {
+      executor_ref_.DispatchAfter(dt_, details::MakeResumer(executor_ref_, h));
+    }
+    void await_resume() const noexcept {}
+
+   private:
+    executor::ExecutorHandle executor_ref_;
+    std::chrono::nanoseconds dt_;
+  };
+
+  // Awaiter
+  class ScheduleAtAwaiter {
+   public:
+    ScheduleAtAwaiter(executor::ExecutorHandle executor_ref,
+                      const std::chrono::system_clock::time_point& tp) noexcept
+        : executor_ref_(executor_ref), tp_(tp) {}
+
+    bool await_ready() const noexcept { return false; }
+    IBMW_SELFDEV_CORO_NOINLINE void await_suspend(std::coroutine_handle<> h) {
+      executor_ref_.DispatchAt(tp_, details::MakeResumer(executor_ref_, h));
+    }
+    void await_resume() const noexcept {}
+
+   private:
+    executor::ExecutorHandle executor_ref_;
+    std::chrono::system_clock::time_point tp_;
+  };
+
+  explicit IbmwExecutor(executor::ExecutorHandle executor_ref = {}) noexcept
+      : executor_ref_(executor_ref) {}
+
+  ScheduleAwaiter schedule() const noexcept { return ScheduleAwaiter(executor_ref_); }
+
+  ScheduleAfterAwaiter schedule_after(const std::chrono::nanoseconds& dt) const noexcept {
+    return ScheduleAfterAwaiter(executor_ref_, dt);
+  }
+
+  ScheduleAtAwaiter schedule_at(const std::chrono::system_clock::time_point& tp) const noexcept {
+    return ScheduleAtAwaiter(executor_ref_, tp);
+  }
+
+  friend bool operator==(IbmwExecutor a, IbmwExecutor b) noexcept {
+    return a.executor_ref_.NativeHandle() == b.executor_ref_.NativeHandle();
+  }
+
+  friend bool operator!=(IbmwExecutor a, IbmwExecutor b) noexcept {
+    return a.executor_ref_.NativeHandle() != b.executor_ref_.NativeHandle();
+  }
+
+  explicit operator bool() const { return static_cast<bool>(executor_ref_); }
+
+ private:
+  executor::ExecutorHandle executor_ref_;
+};
+
+// Awaiters that are co_await operands must not be aggregates (GCC 11/12
+// destroy an aggregate-initialized co_await operand twice; see selfdev coro
+// 接口设计.md, "awaiter rules").
+static_assert(!std::is_aggregate_v<IbmwExecutor::ScheduleAwaiter>);
+static_assert(!std::is_aggregate_v<IbmwExecutor::ScheduleAfterAwaiter>);
+static_assert(!std::is_aggregate_v<IbmwExecutor::ScheduleAtAwaiter>);
+
+static_assert(ibmw::selfdev::coro::TimedScheduler<IbmwExecutor>);
+
+// Context
+class IbmwContext {
+ public:
+  explicit IbmwContext(executor::ExecutorBusRef executor_bus_ref = {}) noexcept
+      : executor_bus_ref_(executor_bus_ref) {}
+
+  IbmwExecutor GetExecutor(std::string_view executor_name) const {
     return IbmwExecutor(executor_bus_ref_.GetExecutor(executor_name));
   }
 

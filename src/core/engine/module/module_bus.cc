@@ -8,6 +8,7 @@
 
 #include "cpp/module_base.h"
 #include "cpp/util/string.h"
+#include "engine/logger/crash_signal_handling.h"
 #include "engine/logger/log_level_tool.h"
 
 namespace YAML {
@@ -127,6 +128,11 @@ void ModuleBus::Initialize(YAML::Node options_node) {
 
     package_loader_map_.emplace(pkg_options.path, std::move(module_loader_ptr));
   }
+
+  // The crash handler was installed by the logger subsystem before the
+  // packages were loaded; record them so a crash in package code (from the
+  // module Initialize() calls below on) names the package module.
+  logger::CrashSignalHandling::RefreshModules();
 
   // Initialize the module directly registered
   for (const auto& item : registered_module_vec_) {

@@ -51,6 +51,8 @@ set(TYPE_SUPPORT_V1_FIXTURE_SRC
 list(REMOVE_ITEM src ${EXTENSION_V2_FIXTURE_SRC}
                      ${TYPE_SUPPORT_V1_FIXTURE_SRC})
 list(REMOVE_ITEM src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_query.cc)
+set(SELFDEV_E2E_BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/executor/selfdev_e2e_bench.cc)
+list(REMOVE_ITEM src ${SELFDEV_E2E_BENCH_SRC})
 if(NOT IBMW_ENABLE_CORE_METRICS)
   list(REMOVE_ITEM test_files ${CMAKE_CURRENT_SOURCE_DIR}/core_metrics_test.cc)
 endif()
@@ -110,14 +112,28 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
          $<INSTALL_INTERFACE:include/ibmw>)
 
+# Selfdev replacements (selfdev/) or the original third-party libraries.
+# Chosen with if() rather than generator expressions so that install(EXPORT)
+# maps the target names (a name inside $<IF:...> is exported verbatim).
+if(IBMW_SELFDEV_CONCURRENT)
+  set(_ibmw_engine_concurrent_lib ibmw::selfdev::concurrent)
+else()
+  set(_ibmw_engine_concurrent_lib TBB::tbb)
+endif()
+if(IBMW_SELFDEV_CRASH_HANDLER)
+  set(_ibmw_engine_crash_lib ibmw::selfdev::crash_handler)
+else()
+  set(_ibmw_engine_crash_lib backward_iface)
+endif()
+
 # Set link libraries of target
 target_link_libraries(
   ${CUR_TARGET_NAME}
   PUBLIC ${CMAKE_DL_LIBS}
          asio::asio
          yaml-cpp::yaml-cpp
-         TBB::tbb
-         backward_iface
+         ${_ibmw_engine_concurrent_lib}
+         ${_ibmw_engine_crash_lib}
          ibmw::api::cpp
          ibmw::core::extension_api
          ibmw::core::extension_support
@@ -283,4 +299,16 @@ if(IBMW_BUILD_TESTS AND test_files)
     add_test(NAME ${COMM_TRACE_TEST_TARGET}
              COMMAND $<TARGET_FILE:${COMM_TRACE_TEST_TARGET}>)
   endif()
+endif()
+
+# Executor end-to-end benchmark; run by hand, not registered with ctest.
+if(IBMW_BUILD_SELFDEV_E2E_BENCH)
+  add_executable(ibmw_selfdev_e2e_bench ${SELFDEV_E2E_BENCH_SRC})
+  target_link_libraries(ibmw_selfdev_e2e_bench PRIVATE ${CUR_TARGET_NAME})
+  # Test builds add --coverage globally; keep this TU uninstrumented (the
+  # engine archive still is, so prefer a build with IBMW_BUILD_TESTS=OFF).
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(ibmw_selfdev_e2e_bench PRIVATE -fno-profile-arcs -fno-test-coverage)
+  endif()
+  add_werror(ibmw_selfdev_e2e_bench)
 endif()

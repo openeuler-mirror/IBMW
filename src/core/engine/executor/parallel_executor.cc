@@ -81,6 +81,30 @@ void ParallelExecutor::Initialize(std::string_view name, YAML::Node options_node
 
       ibmw::executor::Task task;
       while (true) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+        try {
+          while (qu_.TryPop(task)) {
+            task();
+            --queue_task_num_;
+          }
+        } catch (const std::exception& e) {
+          MW_FATAL("Tbb pool executor '{}' run loop get exception, {}",
+                      Name(), e.what());
+        }
+
+        if (state_.load() == State::kShutdown) break;
+
+        try {
+          // Pop() returns false once Shutdown() aborted the queue.
+          if (qu_.Pop(task)) {
+            task();
+            --queue_task_num_;
+          }
+        } catch (const std::exception& e) {
+          MW_FATAL("Tbb pool executor '{}' run loop get exception, {}",
+                      Name(), e.what());
+        }
+#else
         try {
           while (qu_.try_pop(task)) {
             task();
@@ -102,6 +126,7 @@ void ParallelExecutor::Initialize(std::string_view name, YAML::Node options_node
           MW_FATAL("Tbb pool executor '{}' run loop get exception, {}",
                       Name(), e.what());
         }
+#endif
       }
 
       tl_current_executor_ = nullptr;
@@ -124,7 +149,11 @@ void ParallelExecutor::Shutdown() {
     return;
 
   while (work_thread_num_.load()) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    qu_.Abort();  // sticky: one call is enough, repeating is harmless
+#else
     qu_.abort();
+#endif
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 
@@ -164,10 +193,23 @@ void ParallelExecutor::Dispatch(ibmw::executor::Task&& task) noexcept {
                         name_, cur_queue_task_num, queue_threshold_);
   }
 
+  // Count before inserting: a worker may pop and decrement the task before
+  // this thread runs another instruction, which would otherwise wrap the
+  // unsigned counter and make the threshold check reject tasks.
+  ++queue_task_num_;
   try {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    if (!qu_.Emplace(std::move(task))) [[unlikely]] {
+      --queue_task_num_;
+      MW_ERROR("Tbb pool executor '{}' can only execute task when state is 'Init' or 'Start'.",
+                  name_);
+      return;
+    }
+#else
     qu_.emplace(std::move(task));
-    ++queue_task_num_;
+#endif
   } catch (const std::exception& e) {
+    --queue_task_num_;
     MW_ERROR("Tbb pool executor '{}' execute task get exception, {}", name_, e.what());
   }
 }

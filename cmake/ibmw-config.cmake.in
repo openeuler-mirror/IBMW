@@ -9,13 +9,14 @@
 # Exported targets:
 #   ibmw::base              - Base utilities (header-only, depends on fmt)
 #   ibmw::api::c            - C ABI API (header-only)
-#   ibmw::api::cpp          - C++ API (header-only, depends on unifex/stdexec)
+#   ibmw::api::cpp          - C++ API (header-only, depends on unifex/stdexec/selfdev coro;
+#                             selfdev coro ships the shared library libibmw_selfdev_coro)
 #   ibmw::api::pkg          - Pkg-mode entry point (header-only)
 #   ibmw::api::type_support - Type support plugin API (header-only)
 #   ibmw::api::dds_type_support  - DDS TypeSupport package adapter
 #   ibmw::api::ros2_type_support - ROS2 TypeSupport package adapter
 #   ibmw::core::extension_api - Extension development API (header-only)
-#   ibmw::core::engine      - Engine static library (App-mode, links asio/yaml-cpp/TBB/backward)
+#   ibmw::core::engine      - Engine static library (App-mode, links asio/yaml-cpp/concurrent containers/crash handler)
 #   ibmw::core::main        - The ibmw executable (Pkg-mode runner)
 #
 # Conditionally exported (when built with DDS/ROS2):
@@ -66,6 +67,13 @@ find_dependency(fmt)
 # Executor implementation — required by ibmw::api::cpp
 if(@IBMW_EXECUTOR_USE_STDEXEC@)
   find_dependency(stdexec)
+elseif(@IBMW_EXECUTOR_USE_SELFDEV_CORO@)
+  # ibmw::selfdev::coro is exported with ibmw itself: headers plus the shared
+  # library libibmw_selfdev_coro (installed to lib/; it holds the one
+  # per-thread slot of Task's synchronous-completion handoff, so it is never
+  # static). It links Threads::Threads, which API-only installs do not look
+  # up below.
+  find_dependency(Threads)
 else()
   # unifex requires std::coroutines target (from FindCoroutines.cmake, not
   # installed by unifex). Create it if missing — on C++20/GCC11+ coroutine
@@ -88,11 +96,16 @@ if(@IBMW_BUILD_RUNTIME@)
   # yaml-cpp
   find_dependency(yaml-cpp)
 
-  # TBB
-  find_dependency(TBB)
+  # TBB — not needed with the selfdev concurrent containers
+  if(NOT @IBMW_SELFDEV_CONCURRENT@)
+    find_dependency(TBB)
+  endif()
 
-  # Backward::Backward — custom INTERFACE library installed alongside ibmw
-  find_dependency(backward)
+  # Backward::Backward — custom INTERFACE library installed alongside ibmw.
+  # Not needed with the selfdev crash handler (exported in ibmw-targets).
+  if(NOT @IBMW_SELFDEV_CRASH_HANDLER@)
+    find_dependency(backward)
+  endif()
 endif()
 
 # --------------------------------------------------------------------------

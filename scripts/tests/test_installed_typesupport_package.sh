@@ -50,13 +50,23 @@ else
 fi
 cmake --install "$IBMW_BUILD" --prefix "$IBMW_PREFIX" >/dev/null
 
+# The installed ibmw config resolves its dependencies with find_dependency;
+# forward the directories IBMW itself was configured with, so the test does
+# not depend on CMAKE_PREFIX_PATH in the caller's environment (same as
+# test_installed_coro_package.sh).
+DEP_HINTS=()
+for dep in fastcdr fastrtps fastdds foonathan_memory; do
+  dir="$(sed -n "s/^${dep}_DIR:[A-Z]*=//p" "$IBMW_BUILD/CMakeCache.txt" | head -n1)"
+  if [[ -n "$dir" && "$dir" != *-NOTFOUND ]]; then DEP_HINTS+=("-D${dep}_DIR=$dir"); fi
+done
+
 note "generating and installing sidecar"
 python3 "$REPO_ROOT/src/tools/ibmw_gen/ibmw_gen.py" \
   "$FIXTURE/installed_typesupport.ibmw.yaml" -o "$GENERATED" >/dev/null
 cmake -S "$GENERATED" -B "$GENERATED_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$IBMW_PREFIX" \
-  -DCMAKE_INSTALL_PREFIX="$GENERATED_PREFIX" >/dev/null
+  -DCMAKE_INSTALL_PREFIX="$GENERATED_PREFIX" "${DEP_HINTS[@]}" >/dev/null
 cmake --build "$GENERATED_BUILD" --parallel "${IBMW_TEST_JOBS:-2}" >/dev/null
 cmake --install "$GENERATED_BUILD" >/dev/null
 
@@ -75,7 +85,7 @@ fi
 cmake -S "$FIXTURE" -B "$LOADER_BUILD" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH="$IBMW_PREFIX" \
-  "${LOADER_CMAKE_ARGS[@]}" >/dev/null
+  "${DEP_HINTS[@]}" "${LOADER_CMAKE_ARGS[@]}" >/dev/null
 cmake --build "$LOADER_BUILD" --parallel "${IBMW_TEST_JOBS:-2}" >/dev/null
 LD_LIBRARY_PATH="$GENERATED_PREFIX/lib:$IBMW_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
   "$LOADER_BUILD/installed_typesupport_loader" "$SIDECAR"

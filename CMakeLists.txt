@@ -154,6 +154,29 @@ option(IBMW_ZENOH_USE_PACKAGE "IBMW use an existing/prebuilt zenohc CMake packag
 
 option(IBMW_EXECUTOR_USE_STDEXEC "IBMW use stdexec as executor impl. (Experimental)" OFF)
 
+# Self-developed replacements for third-party components (see selfdev/).
+option(IBMW_SELFDEV_CRASH_HANDLER
+  "IBMW use the selfdev crash handler instead of backward-cpp (drops libdw/libelf/libbfd)." ON)
+option(IBMW_SELFDEV_CONCURRENT
+  "IBMW use selfdev concurrent containers instead of oneTBB." ON)
+# Default ON, except when stdexec was selected (the two are exclusive).
+if(IBMW_EXECUTOR_USE_STDEXEC)
+  set(_ibmw_selfdev_coro_default OFF)
+else()
+  set(_ibmw_selfdev_coro_default ON)
+endif()
+option(IBMW_EXECUTOR_USE_SELFDEV_CORO
+  "IBMW use selfdev coroutines (selfdev/coro) as executor impl instead of libunifex." ${_ibmw_selfdev_coro_default})
+# Executor end-to-end benchmark (selfdev vs third-party backends); not a ctest.
+option(IBMW_BUILD_SELFDEV_E2E_BENCH
+  "IBMW build ibmw_selfdev_e2e_bench (executor / coroutine / RpcClientTool throughput)." OFF)
+if(IBMW_EXECUTOR_USE_STDEXEC AND IBMW_EXECUTOR_USE_SELFDEV_CORO)
+  # The coro default is cached on the first configure, so switching an
+  # existing build dir to stdexec needs the explicit OFF.
+  message(FATAL_ERROR "IBMW_EXECUTOR_USE_STDEXEC and IBMW_EXECUTOR_USE_SELFDEV_CORO are mutually exclusive. "
+                      "To use stdexec, also pass -DIBMW_EXECUTOR_USE_SELFDEV_CORO=OFF.")
+endif()
+
 # ============================================================================
 # Compiler settings
 # ============================================================================
@@ -258,6 +281,18 @@ if(IBMW_MASTER_PROJECT)
   set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
+# Installed executables and extension modules (bin/) load the shared
+# libraries installed to lib/ (libibmw_selfdev_coro, see selfdev/coro).
+# Relative, so the install tree stays relocatable and carries no build path.
+# Set for sub-project builds too (add_subdirectory): the variable is scoped to
+# this directory, so it only applies to IBMW's own targets.
+if(APPLE)
+  list(APPEND CMAKE_INSTALL_RPATH "@loader_path/../lib")
+elseif(UNIX)
+  list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
+endif()
+list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
@@ -322,12 +357,29 @@ if(IBMW_BUILD_TESTS)
         WARNING
           "Skipping installed TypeSupport package test: bash, ldd, and python3 are required.")
     endif()
+    # bin/ibmw must load libibmw_selfdev_coro at startup so user packages
+    # (with or without a RUNPATH) resolve it from the installed tree.
+    find_program(IBMW_TEST_READELF_EXECUTABLE NAMES readelf)
+    if(IBMW_EXECUTOR_USE_SELFDEV_CORO AND IBMW_TEST_BASH_EXECUTABLE AND
+       IBMW_TEST_READELF_EXECUTABLE)
+      add_test(
+        NAME ibmw_installed_coro_package_test
+        COMMAND ${IBMW_TEST_BASH_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/scripts/tests/test_installed_coro_package.sh)
+      set_tests_properties(
+        ibmw_installed_coro_package_test
+        PROPERTIES ENVIRONMENT "IBMW_INSTALLED_CORO_IBMW_BUILD=${CMAKE_BINARY_DIR}"
+                   LABELS "integration;install;coro"
+                   PROCESSORS 2
+                   RUN_SERIAL TRUE
+                   TIMEOUT 900)
+    endif()
   endif()
 endif()
 
 if(IBMW_EXECUTOR_USE_STDEXEC)
   include(GetStdexec)
-else()
+elseif(NOT IBMW_EXECUTOR_USE_SELFDEV_CORO)
   include(GetLibUnifex)
 endif()
 
@@ -394,8 +446,12 @@ if(IBMW_BUILD_RUNTIME)
   include(GetAsio)
   include(GetGFlags)
   include(GetYamlCpp)
-  include(GetTBB)
-  include(GetBackward)
+  if(NOT IBMW_SELFDEV_CONCURRENT)
+    include(GetTBB)
+  endif()
+  if(NOT IBMW_SELFDEV_CRASH_HANDLER)
+    include(GetBackward)
+  endif()
 endif()
 
 # FastDDS/FastCDR is required by both:
@@ -491,6 +547,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # ============================================================================
 # Add subdirectory
 # ============================================================================
+if(IBMW_BUILD_RUNTIME OR IBMW_EXECUTOR_USE_SELFDEV_CORO)
+  add_subdirectory(selfdev)
+endif()
 add_subdirectory(src)
 add_subdirectory(tools)
 
@@ -508,7 +567,9 @@ if(IBMW_INSTALL)
     PATTERN "*.cmake"
     PATTERN "*.py"
     PATTERN "*.stg"
-    PATTERN "ibmw-config.cmake.in" EXCLUDE)
+    PATTERN "ibmw-config.cmake.in" EXCLUDE
+    # Tool state such as cmake/.omc/ is not part of the install.
+    PATTERN ".*" EXCLUDE)
 
   # Install the generated targets file (note: renamed from ibmw-config to
   # ibmw-targets so the hand-written config wrapper can call find_dependency()
@@ -652,6 +713,9 @@ list(
   IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
   IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE
   IBMW_EXECUTOR_USE_STDEXEC
+  IBMW_SELFDEV_CRASH_HANDLER
+  IBMW_SELFDEV_CONCURRENT
+  IBMW_EXECUTOR_USE_SELFDEV_CORO
   IBMW_ENABLE_DLOPEN_DEEPBIND
   IBMW_ENABLE_CORE_METRICS
   IBMW_ENABLE_COMM_TRACE

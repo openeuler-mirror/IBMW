@@ -144,7 +144,8 @@ endfunction()
 # )
 #
 # Creates a SHARED library (.so) for pkg-mode, linked to ibmw::api::pkg
-# and the specified module targets.
+# and the specified module targets. With an installed IBMW, its install
+# RUNPATH defaults to the external link directories (see below).
 #
 # Example:
 #   ibmw_add_pkg(pubsub_pkg
@@ -162,6 +163,20 @@ function(ibmw_add_pkg TARGET_NAME)
 
   target_link_libraries(${TARGET_NAME}
     PRIVATE ibmw::api::pkg ${ARG_MODULES} ${ARG_DEPS})
+
+  # Built against an installed IBMW (find_package(ibmw)): by default the
+  # installed package gets a RUNPATH to the directories of the libraries it
+  # links from outside the project, among them <ibmw prefix>/lib for
+  # libibmw_selfdev_coro. bin/ibmw loads that library at start-up, so the
+  # package also loads without it; the RUNPATH covers other hosts. A
+  # project-wide CMAKE_INSTALL_RPATH_USE_LINK_PATH, the target property or
+  # CMAKE_SKIP_RPATH / CMAKE_SKIP_INSTALL_RPATH override it.
+  if(TARGET ibmw::selfdev::coro AND NOT DEFINED CMAKE_INSTALL_RPATH_USE_LINK_PATH)
+    get_target_property(_ibmw_coro_imported ibmw::selfdev::coro IMPORTED)
+    if(_ibmw_coro_imported)
+      set_target_properties(${TARGET_NAME} PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
+    endif()
+  endif()
 
   if(ARG_OUTPUT_NAME)
     set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME ${ARG_OUTPUT_NAME})

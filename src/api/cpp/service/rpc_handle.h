@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "c/service/rpc_handle_base.h"
@@ -15,6 +16,12 @@
 #include "cpp/service/rpc_co_filter.h"
 #include "cpp/util/function.h"
 #include "cpp/util/string.h"
+
+#if defined(_MSC_VER) && !defined(__clang__)
+  #define IBMW_RPC_AWAIT_SUSPEND_NOINLINE __declspec(noinline)
+#else
+  #define IBMW_RPC_AWAIT_SUSPEND_NOINLINE __attribute__((noinline))
+#endif
 
 namespace ibmw::rpc {
 
@@ -422,7 +429,28 @@ class CoAccessBase : public AccessBase {
   auto& GetFilterBus() { return filter_mgr_; }
 
  protected:
+  // Deliberately not an aggregate. GCC 11/12 destroy the members of an
+  // aggregate-initialized temporary twice when it is the operand of co_await
+  // (`co_await CallAwaitable{.x = ...}`): the shared_ptr members were released
+  // twice, a heap use-after-free on every coroutine RPC call. A user-declared
+  // constructor makes `co_await CallAwaitable(...)` / `{...}` safe on every
+  // compiler (see selfdev coro/接口设计.md, "awaiter rules").
   struct CallAwaitable {
+    CallAwaitable(ibmw::rpc::ServiceRef service_ref_in,
+                  std::shared_ptr<const std::string> full_func_name_in,
+                  ibmw::rpc::ContextRef ctx_ref_in,
+                  std::shared_ptr<Context> ctx_owner_in,
+                  ibmw::executor::ExecutorHandle resume_exe_in,
+                  const void* req_ptr_in,
+                  void* rsp_ptr_in)
+        : service_ref(std::move(service_ref_in)),
+          full_func_name(std::move(full_func_name_in)),
+          ctx_ref(ctx_ref_in),
+          ctx_owner(std::move(ctx_owner_in)),
+          resume_exe(std::move(resume_exe_in)),
+          req_ptr(req_ptr_in),
+          rsp_ptr(rsp_ptr_in) {}
+
     ibmw::rpc::ServiceRef service_ref;
     std::shared_ptr<const std::string> full_func_name;
     ibmw::rpc::ContextRef ctx_ref;
@@ -444,7 +472,13 @@ class CoAccessBase : public AccessBase {
 
     bool await_ready() const noexcept { return false; }
 
-    void await_suspend(std::coroutine_handle<> h) {
+    // Once Call() has the callback, the coroutine may be resumed and its
+    // frame (which holds *this) destroyed on another thread. So everything
+    // used from there on is a local copy, and the function is kept out of
+    // line: Clang (before 19) may otherwise place the locals of an inlined
+    // await_suspend in the coroutine frame, where their destructors would
+    // run on freed memory.
+    IBMW_RPC_AWAIT_SUSPEND_NOINLINE void await_suspend(std::coroutine_handle<> h) {
       auto state_copy = state;
       auto service_ref_copy = service_ref;
       auto full_func_name_copy = full_func_name;
@@ -473,7 +507,7 @@ class CoAccessBase : public AccessBase {
               state->completed = true;
             }
 
-            resume_exe_copy.Dispatch([state]() mutable {
+            resume_exe_copy.Dispatch([state, resume_exe_copy]() mutable {
               std::coroutine_handle<> handle;
               {
                 std::lock_guard lock(state->mutex);
@@ -484,6 +518,19 @@ class CoAccessBase : public AccessBase {
                 handle = std::exchange(state->handle, std::coroutine_handle<>{});
               }
               if (handle) {
+                // Resume with g_thread_ctx.exe set to the calling executor, as
+                // co::IbmwExecutor's resumers do, so code after co_await (for
+                // example the next RPC call, which takes its resume executor
+                // from there) sees it. Only exe is set: ctx_ptr and
+                // active_rpc_context stay what the worker thread has (code
+                // after co_await that needs the module context calls
+                // Context::LetMe() first). The worker's own context is
+                // restored afterwards, also if resume() throws.
+                struct ThreadCtxRestore {
+                  decltype(ibmw::context::details::g_thread_ctx) previous = ibmw::context::details::g_thread_ctx;
+                  ~ThreadCtxRestore() { ibmw::context::details::g_thread_ctx = std::move(previous); }
+                } restore;
+                ibmw::context::details::g_thread_ctx.exe = resume_exe_copy;
                 handle.resume();
               }
             });
@@ -492,6 +539,10 @@ class CoAccessBase : public AccessBase {
 
     auto await_resume() noexcept { return state->status; }
   };
+  // Regression guard for the GCC 11/12 double destruction above: removing the
+  // constructor (making it an aggregate again) must not compile.
+  static_assert(!std::is_aggregate_v<CallAwaitable>,
+                "CallAwaitable must not be an aggregate (GCC co_await double-destroy)");
 
   struct CallHandle {
     ibmw::rpc::ServiceRef service_ref;
@@ -505,14 +556,8 @@ class CoAccessBase : public AccessBase {
       auto ctx_owner_keep = ctx_owner;
       auto resume_exe_keep = resume_exe;
 
-      co_return co_await CallAwaitable{
-          .service_ref = service_ref_keep,
-          .full_func_name = full_func_name_keep,
-          .ctx_ref = ctx_ref,
-          .ctx_owner = ctx_owner_keep,
-          .resume_exe = resume_exe_keep,
-          .req_ptr = req_ptr,
-          .rsp_ptr = rsp_ptr};
+      co_return co_await CallAwaitable(
+          service_ref_keep, full_func_name_keep, ctx_ref, ctx_owner_keep, resume_exe_keep, req_ptr, rsp_ptr);
     }
   };
 

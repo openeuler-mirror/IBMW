@@ -5,7 +5,7 @@
 
 #include "base/ibmw_config.h"
 
-#ifdef IBMW_EXECUTOR_USE_STDEXEC
+#if defined(IBMW_EXECUTOR_USE_STDEXEC)
 
   #include <exec/async_scope.hpp>
 
@@ -14,6 +14,16 @@ namespace ibmw::co {
 using AsyncScope = exec::async_scope;
 
   #define complete on_empty
+
+}  // namespace ibmw::co
+
+#elif defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+
+  #include "ibmw_selfdev/coro/async_scope.h"
+
+namespace ibmw::co {
+
+using AsyncScope = ibmw::selfdev::coro::AsyncScope;
 
 }  // namespace ibmw::co
 
