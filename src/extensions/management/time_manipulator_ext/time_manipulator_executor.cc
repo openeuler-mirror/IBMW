@@ -250,7 +250,8 @@ void TimeManipulatorExecutor::DispatchAt(
     for (size_t ii = 1; ii < timing_wheel_vec_.size(); ++ii) {
       auto& level = timing_wheel_vec_[ii];
       if (target_tick < level.limit) {
-        // TODO: Sorting tasks based on time and inserting them into it
+        // Unsorted on purpose: each level 0 slot holds one tick, so tasks still
+        // run at their tick; the order within one tick is not guaranteed.
         level.wheel[(target_tick / level.unit) % level.wheel.size()].emplace_back(
             TaskWithTimestamp{target_tick, std::move(task)});
         return;
