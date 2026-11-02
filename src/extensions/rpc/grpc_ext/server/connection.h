@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -51,7 +52,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
         socket_strand_(asio::make_strand(*io_ptr)),
         socket_(socket_strand_),
         mgr_strand_(asio::make_strand(*io_ptr)),
-        timer_(socket_strand_),
+        timer_(mgr_strand_),
         logger_ptr_(logger_ptr),
         dispatcher_ptr_(dispatcher_ptr) {}
 
@@ -294,7 +295,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   std::string remote_addr_;
   std::atomic<bool> tick_has_data_ = false;
-  bool close_connect_flag_ = false;
+  std::atomic<bool> close_connect_flag_ = false;
 
   http2::ServerSession nghttp2_session_;
 };

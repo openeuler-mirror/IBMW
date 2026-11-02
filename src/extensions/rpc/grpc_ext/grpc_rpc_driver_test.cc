@@ -21,6 +21,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -40,6 +41,7 @@
 #include "grpc_ext/http2/header.h"
 #include "grpc_ext/http2/request.h"
 #include "grpc_ext/http2/server_session.h"
+#include "grpc_ext/server/connection.h"
 
 namespace ibmw::extensions::grpc_extension {
 namespace {
@@ -126,6 +128,44 @@ TEST(GrpcServerSessionTest, FullRequestsKeepCompletionOrder) {
   for (const auto& request : session.GetFullRequestList()) ids.push_back(request->GetStreamId());
   EXPECT_EQ(ids, (std::vector<int32_t>{1, 3, 5}));
   EXPECT_TRUE(session.GetFullRequestList().empty());
+}
+
+// EXT-009: the no-data timer closes a connection whose read loop keeps running
+// on another thread. A client sending only PINGs never completes a request.
+TEST(GrpcServerConnectionTest, IdleTimerClosesConnectionWithChattyClient) {
+  auto io = std::make_shared<asio::io_context>();
+  Tcp::acceptor acceptor(*io, Tcp::endpoint(asio::ip::address_v4::loopback(), 0));
+  auto connection = std::make_shared<server::Connection>(
+      io, std::make_shared<ibmw::common::util::LoggerWrapper>(),
+      std::make_shared<server::Dispatcher>());
+  server::ServerOptions options;
+  options.max_no_data_duration = 200ms;
+  connection->Initialize(std::make_shared<server::ConnectionOptions>(options));
+
+  Tcp::socket client(*io);
+  client.connect(acceptor.local_endpoint());
+  acceptor.accept(connection->Socket());
+  connection->Start();
+  std::vector<std::thread> workers;
+  for (int i = 0; i < 2; ++i) workers.emplace_back([&io] { io->run(); });
+
+  using namespace std::string_view_literals;
+  boost::system::error_code ec;
+  asio::write(client, asio::buffer("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"sv), ec);
+  asio::write(client, asio::buffer("\0\0\0\x04\0\0\0\0\0"sv), ec);
+  const auto ping = "\0\0\x08\x06\0\0\0\0\0\0\0\0\0\0\0\0\0"sv;
+  std::array<char, 4096> drain;
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (connection->IsRunning() && std::chrono::steady_clock::now() < deadline) {
+    asio::write(client, asio::buffer(ping), ec);
+    if (!ec && client.available(ec) > 0) client.read_some(asio::buffer(drain), ec);
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_FALSE(connection->IsRunning());
+
+  client.close(ec);
+  connection->Shutdown();
+  for (auto& worker : workers) worker.join();
 }
 
 TEST(GrpcTimeoutTest, ParsesUpToEightDigits) {
