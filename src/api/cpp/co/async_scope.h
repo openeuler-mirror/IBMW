@@ -11,9 +11,13 @@
 
 namespace ibmw::co {
 
-using AsyncScope = exec::async_scope;
-
-  #define complete on_empty
+// unifex::async_scope spells "wait until all work is done" complete(); this
+// keeps that spelling without a macro that rewrites every `complete` token in
+// the including translation units (API-046).
+class AsyncScope : public exec::async_scope {
+ public:
+  [[nodiscard]] auto complete() noexcept { return on_empty(); }
+};
 
 }  // namespace ibmw::co
 
