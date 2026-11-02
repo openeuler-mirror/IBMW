@@ -231,135 +231,144 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
     // Iterate through each pkg
     for (const auto& subscribe_pkg_path_itr : subscribe_index_map_find_topic_itr->second) {
       std::string_view cur_sub_pkg_path = subscribe_pkg_path_itr.first;
+      // One package failing (e.g. its serialization throws) must not drop the
+      // delivery to the packages after it.
+      try {
+        const auto* module_msg_handler_map_ptr = transport_catalog_ptr_->GetModuleMessageHandlerWrapperMapPtr(
+            pub_info.msg_type, pub_info.topic_name, cur_sub_pkg_path);
 
-      const auto* module_msg_handler_map_ptr = transport_catalog_ptr_->GetModuleMessageHandlerWrapperMapPtr(
-          pub_info.msg_type, pub_info.topic_name, cur_sub_pkg_path);
-
-      if (module_msg_handler_map_ptr == nullptr ||
-          module_msg_handler_map_ptr->empty()) [[unlikely]] {
-        MW_ERROR(
-            "Can not find catalog info, pkg_path: {}, topic_name: {}, msg_type: {}",
-            cur_sub_pkg_path, pub_info.topic_name, pub_info.msg_type);
-        continue;
-      }
-
-      // The creation/destruction methods of the same type should be unified for each module under the same pkg.
-      // Select any module's creation/destruction method for this type as the global selection of pkg
-      const auto* tpl_msg_handler_ptr = module_msg_handler_map_ptr->begin()->second;
-
-      auto tpl_sub_info = tpl_msg_handler_ptr->info;
-
-      // Create context under this pkg.
-      // NOTE: The context is shared across all module subscribers within the
-      // same package. This is safe for sequential (inline) execution, but when
-      // subscribe_executor_ref_ is set, concurrent callbacks may race on
-      // Context mutation if a subscriber filter (e.g. otp_trace) calls
-      // SetMetaValue. This is a pre-existing design trade-off; adding per-
-      // subscriber Context clones would eliminate the race at the cost of
-      // additional heap allocations.
-      auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
-
-      const auto& meta_keys = msg_wrapper.ctx_ref.GetMetaKeys();
-      for (const auto& item : meta_keys) {
-        ctx_ptr->SetMetaValue(item, msg_wrapper.ctx_ref.GetMetaValue(item));
-      }
-
-      ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
-
-      // Determine whether to use copy or serialization for message delivery.
-      // Use copy when: (a) pub and sub are in the same package, OR
-      // (b) the type support does not support serialization. Case (b) is
-      // only sound when both packages share the copy implementation;
-      // otherwise the message is dropped rather than copied with a possibly
-      // different layout.
-      const bool same_pkg = (cur_sub_pkg_path == pub_info.pkg_path);
-      bool use_copy = same_pkg || !type_supports_serialization;
-      if (!same_pkg && use_copy &&
-          !SameCopyImplementation(pub_info.msg_type_support_ref, tpl_sub_info.msg_type_support_ref)) [[unlikely]] {
-        ReportIncompatibleCopy(pub_info, cur_sub_pkg_path);
-        continue;
-      }
-
-      if (use_copy) {
-        // Copy-based delivery: create a new message and copy data directly.
-        // Only ONE copy per subscribing package — all modules within the same
-        // package share the same message via shared_ptr.
-
-        // Create sub msg under this pkg (single allocation for all subscribers)
-        std::shared_ptr<void> msg_ptr = tpl_sub_info.msg_type_support_ref.CreateSharedPtr();
-
-        CheckMsg(msg_wrapper);
-
-        tpl_sub_info.msg_type_support_ref.Copy(msg_wrapper.msg_ptr, msg_ptr.get());
-
-        // Call the registered subscribe method.
-        // Note: serialization_cache is intentionally omitted — on the copy
-        // path the subscriber already has a direct msg_ptr and msg_cache_ptr,
-        // so the cache is never consulted by CheckMsg() or downstream code.
-        for (const auto& msg_handler_itr : *module_msg_handler_map_ptr) {
-          const auto* msg_handler_ptr = msg_handler_itr.second;
-
-          // Create MessageFrame under this pkg-module
-          MessageFrame sub_msg_wrapper{
-              .info = msg_handler_ptr->info,
-              .msg_ptr = msg_ptr.get(),
-              .ctx_ref = ctx_ptr,
-              .msg_cache_ptr = msg_ptr};
-
-          if (subscribe_executor_ref_) {
-            subscribe_executor_ref_.Dispatch(
-                [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
-                 token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
-                  msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
-                });
-          } else {
-            msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
-          }
+        if (module_msg_handler_map_ptr == nullptr ||
+            module_msg_handler_map_ptr->empty()) [[unlikely]] {
+          MW_ERROR(
+              "Can not find catalog info, pkg_path: {}, topic_name: {}, msg_type: {}",
+              cur_sub_pkg_path, pub_info.topic_name, pub_info.msg_type);
+          continue;
         }
 
-      } else {
-        // Serialization-based delivery: when pub and sub are in different
-        // packages and the type support provides serialization methods.
+        // The creation/destruction methods of the same type should be unified for each module under the same pkg.
+        // Select any module's creation/destruction method for this type as the global selection of pkg
+        const auto* tpl_msg_handler_ptr = module_msg_handler_map_ptr->begin()->second;
 
-        ctx_ptr->SetSerializationType(serialization_type);
+        auto tpl_sub_info = tpl_msg_handler_ptr->info;
 
-        // Serialize message on publisher side
-        SerializeMsgWithCache(msg_wrapper, serialization_type);
+        // Create context under this pkg.
+        // NOTE: The context is shared across all module subscribers within the
+        // same package. This is safe for sequential (inline) execution, but when
+        // subscribe_executor_ref_ is set, concurrent callbacks may race on
+        // Context mutation if a subscriber filter (e.g. otp_trace) calls
+        // SetMetaValue. This is a pre-existing design trade-off; adding per-
+        // subscriber Context clones would eliminate the race at the cost of
+        // additional heap allocations.
+        auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
 
-        --serialization_pkg_remaining;
-        const bool is_last_serialization_pkg = (serialization_pkg_remaining == 0);
+        const auto& meta_keys = msg_wrapper.ctx_ref.GetMetaKeys();
+        for (const auto& item : meta_keys) {
+          ctx_ptr->SetMetaValue(item, msg_wrapper.ctx_ref.GetMetaValue(item));
+        }
 
-        // Call the registered subscribe method.
-        // Optimization: move the serialization_cache to the last subscriber of
-        // the last serialization-package instead of copying for all — saves
-        // (total_subscribers - 1) unordered_map copy operations.
-        const size_t handler_count = module_msg_handler_map_ptr->size();
-        size_t handler_idx = 0;
+        ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
 
-        for (const auto& msg_handler_itr : *module_msg_handler_map_ptr) {
-          const auto* msg_handler_ptr = msg_handler_itr.second;
-          ++handler_idx;
-          const bool is_last = is_last_serialization_pkg && (handler_idx == handler_count);
+        // Determine whether to use copy or serialization for message delivery.
+        // Use copy when: (a) pub and sub are in the same package, OR
+        // (b) the type support does not support serialization. Case (b) is
+        // only sound when both packages share the copy implementation;
+        // otherwise the message is dropped rather than copied with a possibly
+        // different layout.
+        const bool same_pkg = (cur_sub_pkg_path == pub_info.pkg_path);
+        bool use_copy = same_pkg || !type_supports_serialization;
+        if (!same_pkg && use_copy &&
+            !SameCopyImplementation(pub_info.msg_type_support_ref, tpl_sub_info.msg_type_support_ref)) [[unlikely]] {
+          ReportIncompatibleCopy(pub_info, cur_sub_pkg_path);
+          continue;
+        }
 
-          // Create MessageFrame under this pkg-module
-          MessageFrame sub_msg_wrapper{
-              .info = msg_handler_ptr->info,
-              .msg_ptr = nullptr,
-              .ctx_ref = ctx_ptr,
-              .serialization_cache = is_last
-                  ? std::move(msg_wrapper.serialization_cache)
-                  : msg_wrapper.serialization_cache};
+        if (use_copy) {
+          // Copy-based delivery: create a new message and copy data directly.
+          // Only ONE copy per subscribing package — all modules within the same
+          // package share the same message via shared_ptr.
 
-          if (subscribe_executor_ref_) {
-            subscribe_executor_ref_.Dispatch(
-                [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
-                 token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
-                  msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
-                });
-          } else {
-            msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+          // Create sub msg under this pkg (single allocation for all subscribers)
+          std::shared_ptr<void> msg_ptr = tpl_sub_info.msg_type_support_ref.CreateSharedPtr();
+
+          CheckMsg(msg_wrapper);
+
+          tpl_sub_info.msg_type_support_ref.Copy(msg_wrapper.msg_ptr, msg_ptr.get());
+
+          // Call the registered subscribe method.
+          // Note: serialization_cache is intentionally omitted — on the copy
+          // path the subscriber already has a direct msg_ptr and msg_cache_ptr,
+          // so the cache is never consulted by CheckMsg() or downstream code.
+          for (const auto& msg_handler_itr : *module_msg_handler_map_ptr) {
+            const auto* msg_handler_ptr = msg_handler_itr.second;
+
+            // Create MessageFrame under this pkg-module
+            MessageFrame sub_msg_wrapper{
+                .info = msg_handler_ptr->info,
+                .msg_ptr = msg_ptr.get(),
+                .ctx_ref = ctx_ptr,
+                .msg_cache_ptr = msg_ptr};
+
+            if (subscribe_executor_ref_) {
+              subscribe_executor_ref_.Dispatch(
+                  [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
+                   token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
+                    msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+                  });
+            } else {
+              msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+            }
+          }
+
+        } else {
+          // Serialization-based delivery: when pub and sub are in different
+          // packages and the type support provides serialization methods.
+
+          ctx_ptr->SetSerializationType(serialization_type);
+
+          // Serialize message on publisher side
+          SerializeMsgWithCache(msg_wrapper, serialization_type);
+
+          --serialization_pkg_remaining;
+          const bool is_last_serialization_pkg = (serialization_pkg_remaining == 0);
+
+          // Call the registered subscribe method.
+          // Optimization: move the serialization_cache to the last subscriber of
+          // the last serialization-package instead of copying for all — saves
+          // (total_subscribers - 1) unordered_map copy operations.
+          const size_t handler_count = module_msg_handler_map_ptr->size();
+          size_t handler_idx = 0;
+
+          for (const auto& msg_handler_itr : *module_msg_handler_map_ptr) {
+            const auto* msg_handler_ptr = msg_handler_itr.second;
+            ++handler_idx;
+            const bool is_last = is_last_serialization_pkg && (handler_idx == handler_count);
+
+            // Create MessageFrame under this pkg-module
+            MessageFrame sub_msg_wrapper{
+                .info = msg_handler_ptr->info,
+                .msg_ptr = nullptr,
+                .ctx_ref = ctx_ptr,
+                .serialization_cache = is_last
+                    ? std::move(msg_wrapper.serialization_cache)
+                    : msg_wrapper.serialization_cache};
+
+            if (subscribe_executor_ref_) {
+              subscribe_executor_ref_.Dispatch(
+                  [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
+                   token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
+                    msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+                  });
+            } else {
+              msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+              // Inline delivery is over: hand the cache back so the drivers
+              // after this one do not serialize again.
+              if (is_last) msg_wrapper.serialization_cache = std::move(sub_msg_wrapper.serialization_cache);
+            }
           }
         }
+      } catch (const std::exception& e) {
+        MW_ERROR("Deliver msg to pkg '{}' failed, topic_name: {}, msg_type: {}, error: {}",
+                 cur_sub_pkg_path, pub_info.topic_name, pub_info.msg_type, e.what());
       }
     }
   } catch (const std::exception& e) {

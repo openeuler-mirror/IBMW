@@ -6,6 +6,8 @@
 //           that owns the handlers is released.
 // COMM-007: cross-package delivery by direct copy requires a shared type
 //           support implementation.
+// COMM-037: one package failing does not drop the others, and inline
+//           delivery leaves the serialization cache to the next driver.
 
 #include <gtest/gtest.h>
 
@@ -20,6 +22,7 @@
 
 #include "cpp/executor/executor.h"
 #include "cpp/util/string.h"
+#include "engine/transport/transport_driver_tools.h"
 #include "engine/transport/inprocess_transport.h"
 #include "engine/transport/transport_catalog.h"
 #include "yaml-cpp/yaml.h"
@@ -151,7 +154,7 @@ struct Fixture {
     handler->info = std::move(info);
     handler->callback = [this](MessageFrame& frame, std::function<void()>&&,
                                const internal::CallbackInvocationEnvelopeV1*) {
-      last_value = *static_cast<const int*>(frame.msg_ptr);
+      if (frame.msg_ptr != nullptr) last_value = *static_cast<const int*>(frame.msg_ptr);
       ++calls;
     };
     ASSERT_TRUE(transport.OnMessage(*handler));
@@ -252,6 +255,68 @@ TEST(InProcessTransportTest, CrossPackageCopyWithSameTypeSupportIsDelivered) {
   f.Publish(Info("pub_pkg", "pub", IntTypeSupport<100>()), 7);
   EXPECT_EQ(f.calls.load(), 1);
   EXPECT_EQ(f.last_value.load(), 107);
+  f.transport.Shutdown();
+}
+
+// Serializable int; serialize fails while `fail_next_serialize` is set.
+std::atomic<int> serialize_calls{0};
+std::atomic<bool> fail_next_serialize{false};
+const ibmw_type_support_base_t* SerializableIntTypeSupport() {
+  static const ibmw_string_view_t kTypes[] = {ibmw::util::ToIbmwStringView("test")};
+  static const ibmw_type_support_base_t ts{
+      .type_name = [](void*) { return ibmw::util::ToIbmwStringView("test:Int"); },
+      .create = [](void*) -> void* { return new int(0); },
+      .destroy = [](void*, void* msg) { delete static_cast<int*>(msg); },
+      .copy = [](void*, const void* from, void* to) { *static_cast<int*>(to) = *static_cast<const int*>(from); },
+      .move = [](void*, void* from, void* to) { *static_cast<int*>(to) = *static_cast<int*>(from); },
+      .serialize = [](void*, ibmw_string_view_t, const void*, const ibmw_buffer_array_allocator_t*,
+                      ibmw_buffer_array_t*) {
+        ++serialize_calls;
+        return !fail_next_serialize.exchange(false);
+      },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) { return true; },
+      .serialization_types_supported_num = [](void*) -> size_t { return 1; },
+      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return kTypes; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .ctx = nullptr};
+  return &ts;
+}
+
+TEST(InProcessTransportTest, FailingPackageDoesNotDropTheOthers) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  f.Subscribe(Info("pub_pkg", "same", SerializableIntTypeSupport()));
+  f.Subscribe(Info("other_a", "sub", SerializableIntTypeSupport()));
+  f.Subscribe(Info("other_b", "sub", SerializableIntTypeSupport()));
+  f.transport.Start();
+
+  // Whichever cross-package subscriber comes first fails to serialize; the
+  // retry for the second one succeeds.
+  fail_next_serialize = true;
+  f.Publish(Info("pub_pkg", "pub", SerializableIntTypeSupport()), 7);
+  EXPECT_EQ(f.calls.load(), 2);
+  f.transport.Shutdown();
+}
+
+TEST(InProcessTransportTest, InlineDeliveryKeepsSerializationCacheForNextDriver) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  f.Subscribe(Info("other_a", "sub", SerializableIntTypeSupport()));
+  f.Subscribe(Info("other_b", "sub", SerializableIntTypeSupport()));
+  f.transport.Start();
+
+  serialize_calls = 0;
+  const auto pub_info = Info("pub_pkg", "pub", SerializableIntTypeSupport());
+  int value = 7;
+  ibmw::transport::Context context;
+  MessageFrame frame{.info = pub_info, .msg_ptr = &value, .ctx_ref = ibmw::transport::ContextRef(context)};
+  f.transport.Send(frame);
+  EXPECT_EQ(f.calls.load(), 2);
+  // A driver after this one finds the bytes in the cache.
+  EXPECT_NE(SerializeMsgWithCache(frame, "test"), nullptr);
+  EXPECT_EQ(serialize_calls.load(), 1);
   f.transport.Shutdown();
 }
 
