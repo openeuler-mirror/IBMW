@@ -137,5 +137,13 @@ message(STATUS "  - ibmw callback execution")
 
 if(IBMW_BUILD_TESTS)
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME}
-                   TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/util/ros2_text_serialization_test.cc)
+                   TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/util/ros2_text_serialization_test.cc
+                            ${CMAKE_CURRENT_SOURCE_DIR}/util/ros2_type_support_test.cc)
+  # The CDR size test needs the generated FastRTPS callbacks.
+  foreach(_ibmw_ros2_types_test_pkg IN ITEMS std_msgs geometry_msgs sensor_msgs)
+    if(TARGET ${_ibmw_ros2_types_test_pkg}::${_ibmw_ros2_types_test_pkg}__rosidl_typesupport_fastrtps_cpp)
+      target_link_libraries(${CUR_TARGET_NAME}_test PRIVATE
+        ${_ibmw_ros2_types_test_pkg}::${_ibmw_ros2_types_test_pkg}__rosidl_typesupport_fastrtps_cpp)
+    endif()
+  endforeach()
 endif()
