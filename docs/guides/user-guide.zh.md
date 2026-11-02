@@ -1322,7 +1322,7 @@ Extension 选项：
 |-----|------|------|------|
 | `broker_addr` | string | -- | Broker 地址（必需） |
 | `client_id` | string | -- | Client ID（必需） |
-| `max_pkg_size_k` | uint32 | `0` | 最大包大小 KB |
+| `max_pkg_size_k` | uint32 | `1024` | 最大包大小 KB，至多 2097151（2 GiB - 1） |
 | `reconnect_interval_ms` | uint32 | `5000` | 重连间隔 |
 | `truststore` | string | `""` | CA 证书路径（TLS） |
 | `client_cert` | string | `""` | Client 证书（TLS） |

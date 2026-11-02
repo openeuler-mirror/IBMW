@@ -355,7 +355,7 @@ bool MqttRpcDriver::RegisterServiceFunc(
 
               MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
               pubmsg.payload = msg_buf_vec.data();
-              pubmsg.payloadlen = msg_buf_vec.size();
+              pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());  // <= max_pkg_size_ <= INT_MAX
               pubmsg.qos = qos;
               pubmsg.retained = 0;
 
@@ -712,7 +712,7 @@ void MqttRpcDriver::Call(
     // send
     MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
     pubmsg.payload = msg_buf_vec.data();
-    pubmsg.payloadlen = msg_buf_vec.size();
+    pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());  // <= max_pkg_size_ <= INT_MAX
     pubmsg.qos = qos;
     pubmsg.retained = 0;
 
@@ -793,8 +793,11 @@ void MqttRpcDriver::SubscribeMqttTopic() {
 
 void MqttRpcDriver::UnSubscribeMqttTopic() {
   // todo:Replace with MQTTClient_unsubscribeMany
-  for (auto sub_info : sub_info_vec_) {
-    MQTTAsync_unsubscribe(client_, sub_info.topic.data(), NULL);
+  for (const auto& sub_info : sub_info_vec_) {
+    int rc = MQTTAsync_unsubscribe(client_, sub_info.topic.data(), NULL);
+    if (rc != MQTTASYNC_SUCCESS) {
+      MW_WARN("Failed to unsubscribe mqtt, topic: {} return code: {}", sub_info.topic, rc);
+    }
   }
 }
 
@@ -815,7 +818,7 @@ void MqttRpcDriver::ReturnRspWithStatusCode(
 
   MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
   pubmsg.payload = msg_buf_vec.data();
-  pubmsg.payloadlen = msg_buf_vec.size();
+  pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());
   pubmsg.qos = qos;
   pubmsg.retained = 0;
 

@@ -98,6 +98,10 @@ details remain governed by the documentation for each release.
 - DDS RPC client: a reply is matched to its call by the full 64-bit request id;
   a reply whose high word is not 0 is ignored. Previously only the low 32 bits
   were compared.
+- MQTT transport: a message without a context is published (previously the
+  send failed with "Reference is null"). `max_pkg_size_k` above 2097151
+  (2 GiB - 1) fails initialization instead of wrapping the limit; its
+  documented default is corrected to 1024. Failed unsubscribes are logged.
 
 ### Added
 

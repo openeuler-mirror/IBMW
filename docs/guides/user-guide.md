@@ -1396,7 +1396,7 @@ Extension options:
 |-----|------|---------|-------------|
 | `broker_addr` | string | -- | Broker address (required) |
 | `client_id` | string | -- | Client ID (required) |
-| `max_pkg_size_k` | uint32 | `0` | Max package size KB |
+| `max_pkg_size_k` | uint32 | `1024` | Max package size KB, at most 2097151 (2 GiB - 1) |
 | `reconnect_interval_ms` | uint32 | `5000` | Reconnect interval |
 | `truststore` | string | `""` | CA cert path (TLS) |
 | `client_cert` | string | `""` | Client cert (TLS) |

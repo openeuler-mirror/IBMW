@@ -259,7 +259,11 @@ void MqttTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
     // Determine the data serialization type, first look for ctx. If it is not configured in ctx, use the first supported serialization type.
     auto publish_type_support_ref = info.msg_type_support_ref;
 
-    std::string_view serialization_type = msg_wrapper.ctx_ref.GetSerializationType();
+    // The context is optional: without one, no meta data is sent.
+    std::string_view serialization_type;
+    if (msg_wrapper.ctx_ref) {
+      serialization_type = msg_wrapper.ctx_ref.GetSerializationType();
+    }
     if (serialization_type.empty()) {
       serialization_type = publish_type_support_ref.DefaultSerializationType();
     }
@@ -277,7 +281,12 @@ void MqttTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
     size_t msg_size = buffer_array_view_ptr->BufferSize();
 
     // context
-    auto [meta_key_vals_array, meta_key_vals_array_len] = msg_wrapper.ctx_ref.GetMetaKeyValsArray();
+    ibmw_string_view_array_t meta_key_vals{};
+    if (msg_wrapper.ctx_ref) {
+      meta_key_vals = msg_wrapper.ctx_ref.GetMetaKeyValsArray();
+    }
+    const auto* meta_key_vals_array = meta_key_vals.str_array;
+    const size_t meta_key_vals_array_len = meta_key_vals.len;
     MW_REQUIRE(meta_key_vals_array_len / 2 <= 255,
                             "Too much context meta, require less than 255, but actually {}.", meta_key_vals_array_len / 2);
 
@@ -312,7 +321,7 @@ void MqttTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
 
     MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
     pubmsg.payload = msg_buf_vec.data();
-    pubmsg.payloadlen = msg_buf_vec.size();
+    pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());  // <= max_pkg_size_ <= INT_MAX
     pubmsg.qos = qos;
     pubmsg.retained = 0;
 
@@ -344,8 +353,11 @@ void MqttTransportDriver::SubscribeMqttTopic() {
 
 void MqttTransportDriver::UnSubscribeMqttTopic() {
   // todo:Replace with MQTTClient_unsubscribeMany
-  for (auto sub_info : sub_info_vec_) {
-    MQTTAsync_unsubscribe(client_, sub_info.topic.data(), NULL);
+  for (const auto& sub_info : sub_info_vec_) {
+    int rc = MQTTAsync_unsubscribe(client_, sub_info.topic.data(), NULL);
+    if (rc != MQTTASYNC_SUCCESS) {
+      MW_WARN("Failed to unsubscribe mqtt, topic: {} return code: {}", sub_info.topic, rc);
+    }
   }
 }
 }  // namespace ibmw::extensions::mqtt_extension

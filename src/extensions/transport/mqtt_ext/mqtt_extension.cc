@@ -44,6 +44,9 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
 
     if (node["max_pkg_size_k"])
       rhs.max_pkg_size_k = node["max_pkg_size_k"].as<uint32_t>();
+    MW_REQUIRE(rhs.max_pkg_size_k <= ibmw::extensions::mqtt_extension::MqttExtension::kMaxPkgSizeK,
+               "mqtt_extension option max_pkg_size_k must be at most {}, got {}.",
+               ibmw::extensions::mqtt_extension::MqttExtension::kMaxPkgSizeK, rhs.max_pkg_size_k);
 
     if (node["truststore"])
       rhs.truststore = node["truststore"].as<std::string>();
@@ -90,11 +93,15 @@ MqttExtension::MqttExtension() {
   SetExtensionLogger(&g_logger);
 }
 
+MqttExtension::Options MqttExtension::ParseOptions(const YAML::Node &node) {
+  return node.as<Options>();
+}
+
 bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
   YAML::Node extension_options_node = core_ptr_->GetExtensionBus().GetExtensionOptionsNode(Name());
 
   if (extension_options_node && !extension_options_node.IsNull()) {
-    options_ = extension_options_node.as<Options>();
+    options_ = ParseOptions(extension_options_node);
   }
 
   // Validate the connection options (URL, TLS files) up front so that a

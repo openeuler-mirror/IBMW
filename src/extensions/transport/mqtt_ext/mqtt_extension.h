@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "MQTTAsync.h"
+#include "yaml-cpp/yaml.h"
 
 #include "engine/extension/extension_base.h"
 #include "mqtt_ext/msg_handle_catalog.h"
@@ -42,6 +44,11 @@ class MqttExtension : public ExtensionBase {
     // served once it ends.
     uint32_t start_connect_wait_ms = 3000;
   };
+
+  // Paho takes the payload length as int: larger packages can not be sent.
+  static constexpr uint32_t kMaxPkgSizeK = INT_MAX / 1024;
+
+  static Options ParseOptions(const YAML::Node &node);
 
  public:
   MqttExtension();
