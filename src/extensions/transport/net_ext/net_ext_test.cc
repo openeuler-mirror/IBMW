@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -836,6 +837,94 @@ TEST_F(HttpRpcDriverTest, ZeroTimeoutHeaderDoesNotFailAsyncAnswers) {
   auto rsp = Post("1", {{"Timeout", "0"}});
   EXPECT_EQ(rsp.result(), http::status::ok);
   EXPECT_EQ(rsp.body(), "7");
+}
+
+// TRANS-039: a failed call tells the client why it failed.
+TEST(HttpRpcStatusTest, HeaderWinsThenHttpStatusIsMapped) {
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(500, "1008"), IBMW_RPC_STATUS_SVR_HANDLE_FAILED);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(500, "2"), IBMW_RPC_STATUS_TIMEOUT);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(500, "77"), 77u);  // user-defined code
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(404, ""), IBMW_RPC_STATUS_SVR_NOT_FOUND);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(504, ""), IBMW_RPC_STATUS_TIMEOUT);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(408, ""), IBMW_RPC_STATUS_TIMEOUT);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(500, ""), IBMW_RPC_STATUS_SVR_HANDLE_FAILED);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(501, ""), IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(503, ""), IBMW_RPC_STATUS_SVR_NOT_READY);
+  EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(400, ""), IBMW_RPC_STATUS_SVR_UNKNOWN);
+  // A malformed or zero header falls back to the HTTP status.
+  for (std::string_view bad : {"0", "x", "12x", "-1", "99999999999"}) {
+    EXPECT_EQ(HttpRpcDriver::RpcStatusFromHttp(500, bad), IBMW_RPC_STATUS_SVR_HANDLE_FAILED) << bad;
+  }
+}
+
+TEST_F(HttpRpcDriverTest, FailedCallsCarryRpcStatusHeader) {
+  SetUpDriver([](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    Answer(frame, *static_cast<const int*>(frame->req_ptr) == 1 ? 77 : IBMW_RPC_STATUS_SVR_HANDLE_FAILED);
+  });
+  auto status_of = [](const http::response<http::string_body>& rsp) {
+    auto itr = rsp.find(HttpRpcDriver::kRpcStatusHeader);
+    return itr == rsp.end() ? std::string() : std::string(itr->value());
+  };
+
+  auto user_code = Post("1");
+  EXPECT_EQ(user_code.result(), http::status::internal_server_error);
+  EXPECT_EQ(status_of(user_code), "77");
+
+  auto handle_failed = Post("2");
+  EXPECT_EQ(handle_failed.result(), http::status::internal_server_error);
+  EXPECT_EQ(status_of(handle_failed), std::to_string(IBMW_RPC_STATUS_SVR_HANDLE_FAILED));
+
+  auto bad_body = Post("not a number");
+  EXPECT_EQ(bad_body.result(), http::status::internal_server_error);
+  EXPECT_EQ(status_of(bad_body), std::to_string(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED));
+
+  auto bad_type = Post("1", {{"Content-Type", "text/plain"}});
+  EXPECT_EQ(bad_type.result(), http::status::internal_server_error);
+  EXPECT_EQ(status_of(bad_type), std::to_string(IBMW_RPC_STATUS_SVR_INVALID_DESERIALIZATION_TYPE));
+}
+
+// The client reports the server's status instead of SVR_NOT_FOUND.
+TEST_F(HttpRpcDriverTest, ClientCallReportsServerStatus) {
+  SetUpDriver([](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    Answer(frame, 77);
+  });
+  cli_->Initialize({});
+  cli_->Start();
+
+  auto ctx = std::make_shared<ibmw::rpc::Context>(ibmw_rpc_context_type_t::IBMW_RPC_CLIENT_CONTEXT);
+  ctx->SetMetaValue(IBMW_RPC_CONTEXT_KEY_TO_ADDR, "http://127.0.0.1:" + std::to_string(port_));
+  ctx->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, "json");
+  ctx->SetTimeout(std::chrono::seconds(5));
+  int req = 1;
+  int rsp = 0;
+  std::promise<uint32_t> done;
+  auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+      runtime::core::service::ServiceMessageFrame{
+          .info = wrapper_.info,
+          .req_ptr = &req,
+          .rsp_ptr = &rsp,
+          .ctx_ref = ctx,
+          .callback = [&done](ibmw::rpc::Status status) { done.set_value(status.Code()); }});
+  driver_->Call(frame);
+  auto result = done.get_future();
+  ASSERT_EQ(result.wait_for(10s), std::future_status::ready);
+  EXPECT_EQ(result.get(), 77u);
+}
+
+TEST_F(HttpRpcDriverTest, ServerTimeoutCarriesTimeoutStatus) {
+  std::shared_ptr<runtime::core::service::ServiceMessageFrame> pending;
+  std::mutex mutex;
+  SetUpDriver([&](const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    std::lock_guard lock(mutex);
+    pending = frame;
+  });
+  auto rsp = Post("1", {{"Timeout", "1"}});
+  EXPECT_EQ(rsp.result(), http::status::internal_server_error);
+  auto itr = rsp.find(HttpRpcDriver::kRpcStatusHeader);
+  ASSERT_NE(itr, rsp.end());
+  EXPECT_EQ(std::string(itr->value()), std::to_string(IBMW_RPC_STATUS_TIMEOUT));
+  std::lock_guard lock(mutex);
+  if (pending) Answer(pending, IBMW_RPC_STATUS_OK);
 }
 
 // One publish fans out to several servers: each server must see its own Host

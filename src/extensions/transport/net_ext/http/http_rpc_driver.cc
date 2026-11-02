@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <mutex>
 #include <optional>
 #include <regex>
@@ -211,9 +212,22 @@ bool HttpRpcDriver::RegisterServiceFunc(
         co_return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
       }
 
+      // Keeps the CORS headers already set on rsp.
+      auto reply_error = [&req, &rsp](uint32_t code, std::string_view msg) {
+        rsp.result(http::status::internal_server_error);
+        rsp.set(kRpcStatusHeader, std::to_string(code));
+        rsp.set(http::field::content_type, "text/html");
+        boost::beast::ostream(rsp.body()) << "An error occurred: '" << msg << "'";
+        rsp.keep_alive(req.keep_alive());
+        rsp.prepare_payload();
+        return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
+      };
+
       auto req_content_type_itr = req.find(http::field::content_type);
-      MW_REQUIRE(req_content_type_itr != req.end(),
-                              "Http req has no content type.");
+      if (req_content_type_itr == req.end()) [[unlikely]] {
+        MW_WARN_INTERVAL(5000, "Http req has no content type, func: {}.", info.func_name);
+        co_return reply_error(IBMW_RPC_STATUS_SVR_INVALID_DESERIALIZATION_TYPE, "Http req has no content type.");
+      }
 
       auto req_content_type_boost_sw = req_content_type_itr->value();
       std::string_view req_content_type(req_content_type_boost_sw.data(), req_content_type_boost_sw.size());
@@ -227,7 +241,8 @@ bool HttpRpcDriver::RegisterServiceFunc(
         serialization_type = "ros2";
         rsp.set(http::field::content_type, "application/ros2");
       } else {
-        MW_THROW("Http req has invalid content type {}.", req_content_type);
+        MW_WARN_INTERVAL(5000, "Http req has invalid content type {}, func: {}.", req_content_type, info.func_name);
+        co_return reply_error(IBMW_RPC_STATUS_SVR_INVALID_DESERIALIZATION_TYPE, "Http req has invalid content type.");
       }
 
       // Read other fields from http header into context; framework fields are
@@ -268,7 +283,10 @@ bool HttpRpcDriver::RegisterServiceFunc(
       bool deserialize_ret = info.req_type_support_ref.Deserialize(
           serialization_type, buffer_array_view, service_req_ptr.get());
 
-      MW_REQUIRE(deserialize_ret, "Http req deserialize failed.");
+      if (!deserialize_ret) [[unlikely]] {
+        MW_WARN_INTERVAL(5000, "Http req deserialize failed, func: {}.", info.func_name);
+        co_return reply_error(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED, "Http req deserialize failed.");
+      }
 
       // Create service rsp
       std::shared_ptr<void> service_rsp_ptr = info.rsp_type_support_ref.CreateSharedPtr();
@@ -389,7 +407,8 @@ bool HttpRpcDriver::RegisterServiceFunc(
         rsp_buf = std::move(call_state->rsp_buf);
       }
 
-      MW_REQUIRE(ret_code == 0, "Handle rpc failed, code: {}.", ret_code);
+      if (ret_code != 0) [[unlikely]]
+        co_return reply_error(ret_code, "Handle rpc failed, code: " + std::to_string(ret_code) + ".");
 
       // Fill http rsp package and copy it directly
       size_t rsp_size = rsp_buf->BufferSize();
@@ -478,6 +497,29 @@ bool HttpRpcDriver::RegisterClientFunc(
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
     return false;
+  }
+}
+
+uint32_t HttpRpcDriver::RpcStatusFromHttp(unsigned http_status, std::string_view rpc_status_header) noexcept {
+  uint32_t code = 0;
+  const char* end = rpc_status_header.data() + rpc_status_header.size();
+  const auto [ptr, ec] = std::from_chars(rpc_status_header.data(), end, code);
+  if (ec == std::errc() && ptr == end && code != IBMW_RPC_STATUS_OK) return code;
+
+  switch (http_status) {
+    case 404:
+      return IBMW_RPC_STATUS_SVR_NOT_FOUND;
+    case 408:
+    case 504:
+      return IBMW_RPC_STATUS_TIMEOUT;
+    case 500:
+      return IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
+    case 501:
+      return IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED;
+    case 503:
+      return IBMW_RPC_STATUS_SVR_NOT_READY;
+    default:
+      return IBMW_RPC_STATUS_SVR_UNKNOWN;
   }
 }
 
@@ -624,7 +666,13 @@ void HttpRpcDriver::Call(
             auto rsp = co_await client_ptr->HttpSendRecvCo<http::dynamic_body, http::dynamic_body>(req, timeout);
 
             if (rsp.result() != http::status::ok) [[unlikely]] {
-              CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_NOT_FOUND));
+              const auto status_itr = rsp.find(kRpcStatusHeader);
+              CallResultCallback(
+                  *client_call_wrapper_ptr,
+                  ibmw::rpc::Status(RpcStatusFromHttp(
+                      rsp.result_int(),
+                      status_itr == rsp.end() ? std::string_view{}
+                                              : ibmw::common::net::ToStdStringView(status_itr->value()))));
               co_return;
             }
 

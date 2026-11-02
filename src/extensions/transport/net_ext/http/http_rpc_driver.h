@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <cstdint>
+#include <string_view>
+
 #include "engine/service/service_driver.h"
 #include "engine/discovery/service_discovery_protocol.h"
 #include "net_base/asio_http_cli.h"
@@ -39,6 +42,14 @@ class HttpRpcDriver : public runtime::core::service::ServiceDriver {
         http_svr_ptr_(http_svr_ptr) {}
 
   ~HttpRpcDriver() override = default;
+
+  // A failed call is answered with HTTP 500 and its RPC status in this header;
+  // clients that do not know the header still see the 500.
+  static constexpr std::string_view kRpcStatusHeader = "ibmw-rpc_status";
+
+  // RPC status for a non-200 answer: the status header if present, else
+  // derived from the HTTP status code.
+  static uint32_t RpcStatusFromHttp(unsigned http_status, std::string_view rpc_status_header) noexcept;
 
   std::string_view Name() const noexcept override { return "http"; }
 

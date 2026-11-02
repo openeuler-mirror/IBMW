@@ -25,6 +25,11 @@ details remain governed by the documentation for each release.
   default stdout/stderr sink. The sink is per shared library.
 - HTTP RPC: CORS responses always carry `Vary: Origin` when the allow list is
   not `*`, including requests without an `Origin` header.
+- HTTP RPC: failed calls are still answered with HTTP 500 and now carry the
+  RPC status in an `ibmw-rpc_status` header. Clients report that status (for
+  example the service's own code or `TIMEOUT`) instead of always
+  `SVR_NOT_FOUND`; without the header the HTTP status is mapped (404 not found,
+  408/504 timeout, 500 handle failed, 501 not implemented, 503 not ready).
 
 ### Added
 
