@@ -9,6 +9,7 @@
 //   sub      <url> <count> <lossless> <size>  receive and verify, in order if lossless
 //   sub_hold <url> <n>                        take n chunks, keep them, wait to be killed
 //   pub_hold <url>                            publish one chunk, wait to be killed
+//   sub_write <url>                           write into a received chunk (must die by SIGSEGV)
 
 #include <unistd.h>
 
@@ -143,6 +144,21 @@ int RunPubHold(const std::string& url) {
   Park();
 }
 
+int RunSubWrite(const std::string& url) {
+  Subscriber sub(url);
+  if (!sub.Valid()) return 4;
+  const void* payload = nullptr;
+  if (!Wait([&] {
+        auto t = sub.Take();
+        if (t) payload = *t;
+        return t.ok();
+      }, 10000)) {
+    return 3;
+  }
+  const_cast<volatile uint8_t*>(static_cast<const uint8_t*>(payload))[0] = 1;
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -154,5 +170,6 @@ int main(int argc, char** argv) {
   if (mode == "sub") return RunSub(url, arg(3, 100), arg(4, 0) != 0, static_cast<uint32_t>(arg(5, 64)));
   if (mode == "sub_hold") return RunSubHold(url, static_cast<uint32_t>(arg(3, 1)));
   if (mode == "pub_hold") return RunPubHold(url);
+  if (mode == "sub_write") return RunSubWrite(url);
   return 64;
 }

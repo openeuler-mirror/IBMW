@@ -308,30 +308,16 @@ TEST(ShmRobustnessTest, CorruptReturnIndexDropsSubscriber) {
 
 // RB-06 Subscribers cannot write into received payloads (read-only mapping).
 TEST(ShmRobustnessDeathTest, SubscriberPayloadIsReadOnly) {
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  // The threadsafe style re-executes the binary: let the kernel's SIGSEGV
-  // kill the child instead of a sanitizer's handler turning it into a report.
-  for (const char* var : {"ASAN_OPTIONS", "TSAN_OPTIONS", "UBSAN_OPTIONS"}) {
-    const char* old = std::getenv(var);
-    std::string v = std::string(old != nullptr ? old : "") + ":handle_segv=0";
-    ::setenv(var, v.c_str(), 1);
-  }
-  EXPECT_EXIT(
-      {
-        auto url = UniqueUrl("rb06");
-        Publisher pub(url);
-        Subscriber sub(url);
-        if (!WaitFor([&] { return pub.HasSubscribers(); })) std::_Exit(1);
-        auto l = pub.Loan(64);
-        if (!l) std::_Exit(2);
-        pub.Publish(*l);
-        if (!WaitFor([&] { return sub.HasData(); })) std::_Exit(3);
-        auto t = sub.Take();
-        if (!t) std::_Exit(4);
-        const_cast<volatile uint8_t*>(static_cast<const uint8_t*>(*t))[0] = 1;
-        std::_Exit(0);
-      },
-      ::testing::KilledBySignal(SIGSEGV), "");
+  auto url = UniqueUrl("rb06");
+  Publisher pub(url);
+  // The kernel's SIGSEGV must kill the peer, not a sanitizer's handler.
+  auto peer = test::SpawnPeer({"sub_write", url},
+                              {"ASAN_OPTIONS=handle_segv=0", "TSAN_OPTIONS=handle_segv=0", "UBSAN_OPTIONS=handle_segv=0"});
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers(); }));
+  auto l = pub.Loan(64);
+  ASSERT_TRUE(l.ok());
+  pub.Publish(*l);
+  EXPECT_EQ(test::WaitPeer(peer), 128 + SIGSEGV);
 }
 
 // RB-07 A socket file left by a dead publisher (ECONNREFUSED) is removed by

@@ -339,12 +339,15 @@ struct Peer {
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
-    std::vector<std::string> all{IBMW_SHM_EXT_PEER_PATH};
+    // Cross-testing: the build-time path does not exist on the target device.
+    const char* override_path = std::getenv("IBMW_SHM_EXT_PEER_PATH");
+    const std::string path = override_path != nullptr ? override_path : IBMW_SHM_EXT_PEER_PATH;
+    std::vector<std::string> all{path};
     all.insert(all.end(), args.begin(), args.end());
     std::vector<char*> argv;
     for (auto& a : all) argv.push_back(a.data());
     argv.push_back(nullptr);
-    const int rc = ::posix_spawn(&pid, IBMW_SHM_EXT_PEER_PATH, &actions, nullptr, argv.data(), environ);
+    const int rc = ::posix_spawn(&pid, path.c_str(), &actions, nullptr, argv.data(), environ);
     posix_spawn_file_actions_destroy(&actions);
     ::close(fds[1]);
     out = fds[0];

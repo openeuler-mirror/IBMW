@@ -123,7 +123,9 @@ Peer SpawnPeer(const std::vector<std::string>& args, const std::vector<std::stri
     ::dup2(fds[1], STDOUT_FILENO);
     for (const auto& e : env) ::putenv(const_cast<char*>(e.c_str()));
     std::vector<char*> argv;
-    std::string path = IBMW_SHM_PEER_PATH;
+    // Cross-testing: the build-time path does not exist on the target device.
+    const char* override_path = std::getenv("IBMW_SHM_PEER_PATH");
+    std::string path = override_path != nullptr ? override_path : IBMW_SHM_PEER_PATH;
     argv.push_back(path.data());
     std::vector<std::string> copy = args;
     for (auto& a : copy) argv.push_back(a.data());

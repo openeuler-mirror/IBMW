@@ -1,0 +1,33 @@
+diff --git a/src/core/engine/topic_io/registry_subscription.cc b/src/core/engine/topic_io/registry_subscription.cc
+index 7ff52b5..ee6a2d5 100644
+--- a/src/core/engine/topic_io/registry_subscription.cc
++++ b/src/core/engine/topic_io/registry_subscription.cc
+@@ -97,7 +97,7 @@ std::vector<RegistrySubscription> SelectRegistrySubscriptions(
+     const auto& capability = first.capture_capabilities.at(driver);
+     if (capability.mode == "cached_serialized" && publishers.size() != 1) continue;
+     const auto connection = ConnectionKey(capability);
+-    if (!std::all_of(publishers.begin(), publishers.end(), [&](const auto& publisher) {
++    if (!std::all_of(publishers.begin(), publishers.end(), [&, &driver = driver](const auto& publisher) {
+           return std::find(publisher.topic.available_drivers.begin(), publisher.topic.available_drivers.end(), driver) !=
+                      publisher.topic.available_drivers.end() && Direct(publisher, driver) &&
+                  ConnectionKey(publisher.capture_capabilities.at(driver)) == connection;
+diff --git a/src/extensions/CMakeLists.txt b/src/extensions/CMakeLists.txt
+index bd01098..16cae34 100644
+--- a/src/extensions/CMakeLists.txt
++++ b/src/extensions/CMakeLists.txt
+@@ -97,8 +97,11 @@ if(IBMW_BUILD_PROXY_EXTENSION)
+   add_subdirectory(utility/proxy_ext)
+ endif()
+ 
+-# CLI providers are built after their runtime dependencies.
+-add_subdirectory(cli/topic)
+-if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
+-  add_subdirectory(cli/bag)
++# CLI providers are built after their runtime dependencies. They need
++# ibmw::cli::command from src/core/main, which is not built for OHOS.
++if(TARGET ibmw::cli::command)
++  add_subdirectory(cli/topic)
++  if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
++    add_subdirectory(cli/bag)
++  endif()
+ endif()
