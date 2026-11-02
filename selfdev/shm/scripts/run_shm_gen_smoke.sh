@@ -63,7 +63,9 @@ fail() {
 
 # The shm root of the running pair, removed however the script ends.
 CURRENT_ROOT=""
-# The running build step (a timeout process leading its own process group).
+# The running step in the background: a timeout process leading its own
+# process group (build) or the subshell running an app pair (run). The script
+# waits on it with `wait`, which a trapped signal interrupts at once.
 STEP_PID=""
 stop_step() {
   [[ -z "${STEP_PID}" ]] && return
@@ -137,11 +139,11 @@ run_pair() {
   log "run ${name}: ${sub} + ${pub} for ${RUN_SECONDS}s"
   root="$(mktemp -d "${TMPDIR:-/tmp}/ibmw_shm_gen.XXXXXX")"
   CURRENT_ROOT="${root}"
+  # Runs in the background (SIGINT ignored there), stopped by stop_step's TERM.
   (
-    pub_pid="" sub_pid=""
+    pub_pid="" sub_pid="" sleep_pid=""
     # shellcheck disable=SC2086  # the ids are unquoted so that empty ones vanish
-    trap 'kill -KILL ${pub_pid} ${sub_pid} 2>/dev/null' EXIT
-    trap 'exit 130' INT
+    trap 'kill -KILL ${pub_pid} ${sub_pid} ${sleep_pid} 2>/dev/null' EXIT
     trap 'exit 143' TERM
     cd "${bld}" || exit 1
     export IBMW_SHM_ROOT="${root}" LD_LIBRARY_PATH="${IBMW_PREFIX}/bin:${IBMW_PREFIX}/lib:${ROS2_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
@@ -150,7 +152,10 @@ run_pair() {
     sub_pid=$!
     "./${pub}" "cfg/${pub}.yaml" >"${BUILD_ROOT}/${name}.pub.log" 2>&1 &
     pub_pid=$!
-    sleep "${RUN_SECONDS}"
+    sleep "${RUN_SECONDS}" &
+    sleep_pid=$!
+    wait "${sleep_pid}"
+    sleep_pid=""
     kill -INT "${pub_pid}" "${sub_pid}" 2>/dev/null
     local pub_rc=0 sub_rc=0
     for _ in $(seq 100); do
@@ -163,8 +168,11 @@ run_pair() {
     pub_pid="" sub_pid=""
     echo "${pub} exit ${pub_rc}, ${sub} exit ${sub_rc}"
     [[ ${pub_rc} -eq 0 && ${sub_rc} -eq 0 ]]
-  )
-  local rc=$?
+  ) &
+  STEP_PID=$!
+  local rc=0
+  wait "${STEP_PID}" || rc=$?
+  STEP_PID=""
   rm -rf "${root}"
   CURRENT_ROOT=""
   local received
