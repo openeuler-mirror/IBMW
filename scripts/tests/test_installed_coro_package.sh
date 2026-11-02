@@ -6,7 +6,8 @@
 #   1. bin/ibmw records DT_NEEDED libibmw_selfdev_coro.so.<SOVERSION> and
 #      RUNPATH $ORIGIN/../lib, so the library is loaded at startup.
 #   2. A user package built with find_package(ibmw) + ibmw_add_pkg gets a
-#      RUNPATH containing <prefix>/lib by default.
+#      RUNPATH relative to $ORIGIN by default, without any absolute path. It
+#      finds <prefix>/lib, also after both trees moved together.
 #   3. The same package built with CMAKE_SKIP_RPATH=ON (no RUNPATH at all)
 #      still loads and runs coroutines through bin/ibmw, because ibmw already
 #      loaded the library and the dynamic loader matches it by SONAME.
@@ -29,7 +30,7 @@ FIXTURE="$SCRIPT_DIR/fixtures/installed_coro_package"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 note() { printf '[installed-coro] %s\n' "$*"; }
 
-for command in cmake readelf; do
+for command in cmake readelf ldd; do
   command -v "$command" >/dev/null || fail "$command is required"
 done
 
@@ -103,14 +104,15 @@ ibmw:
 YAML
 }
 
-run_fixture() {  # <name>
+run_fixture() {  # <name> [<root holding ibmw-prefix and <name>-prefix>]
   local name="$1"
-  local pkg="$SCRATCH/$name-prefix/lib/libcoro_fixture_pkg.so"
-  local cfg="$SCRATCH/$name.yaml"
-  local log="$SCRATCH/$name.log"
+  local root="${2:-$SCRATCH}"
+  local pkg="$root/$name-prefix/lib/libcoro_fixture_pkg.so"
+  local cfg="$root/$name.yaml"
+  local log="$root/$name.log"
   write_config "$cfg" "$pkg" false
   local rc=0
-  env -u LD_LIBRARY_PATH -u LD_PRELOAD "$IBMW_BIN" run "$cfg" --duration 2 --no-signal >"$log" 2>&1 || rc=$?
+  env -u LD_LIBRARY_PATH -u LD_PRELOAD "$root/ibmw-prefix/bin/ibmw" run "$cfg" --duration 2 --no-signal >"$log" 2>&1 || rc=$?
   if [[ $rc -ne 0 ]] || ! grep -q 'coro fixture result=500500' "$log" || ! grep -q 'IBMW stopped' "$log"; then
     cat "$log" >&2
     fail "$name: package did not run through bin/ibmw (rc=$rc)"
@@ -122,10 +124,23 @@ note "building fixture package with default install RPATH"
 build_fixture default
 PKG_DYN="$(readelf -d "$SCRATCH/default-prefix/lib/libcoro_fixture_pkg.so")"
 grep -q "(NEEDED).*\[$SONAME\]" <<<"$PKG_DYN" || { printf '%s\n' "$PKG_DYN" >&2; fail "default: package has no DT_NEEDED $SONAME"; }
-grep -q "(RUNPATH\|RPATH).*$PREFIX/lib" <<<"$PKG_DYN" ||
-  { printf '%s\n' "$PKG_DYN" >&2; fail "default: package run path does not contain $PREFIX/lib"; }
-note "default: package NEEDED $SONAME, run path contains $PREFIX/lib"
+PKG_RUNPATH="$(sed -n 's/.*(\(RUNPATH\|RPATH\)).*\[\(.*\)\]/\2/p' <<<"$PKG_DYN")"
+[[ "$PKG_RUNPATH" == '$ORIGIN:$ORIGIN/../../ibmw-prefix/lib' ]] ||
+  { printf '%s\n' "$PKG_DYN" >&2; fail "default: unexpected package run path '$PKG_RUNPATH'"; }
+note "default: package NEEDED $SONAME, run path $PKG_RUNPATH"
 run_fixture default
+
+# Both trees moved together: the package finds the library by its own RUNPATH
+# (ldd, without bin/ibmw), and it still runs through the moved bin/ibmw.
+MOVED="$SCRATCH/moved"
+mkdir -p "$MOVED/ibmw-prefix" "$MOVED/default-prefix"
+cp -a "$PREFIX/." "$MOVED/ibmw-prefix/"
+cp -a "$SCRATCH/default-prefix/." "$MOVED/default-prefix/"
+MOVED_LDD="$(env -u LD_LIBRARY_PATH -u LD_PRELOAD ldd "$MOVED/default-prefix/lib/libcoro_fixture_pkg.so")"
+grep -qF "$SONAME => $MOVED/default-prefix/lib/../../ibmw-prefix/lib/$SONAME" <<<"$MOVED_LDD" ||
+  { printf '%s\n' "$MOVED_LDD" >&2; fail "moved: package does not find $SONAME through its run path"; }
+note "moved: package finds $SONAME through its run path"
+run_fixture default "$MOVED"
 
 note "building fixture package with CMAKE_SKIP_RPATH=ON"
 build_fixture norpath -DCMAKE_SKIP_RPATH=ON
