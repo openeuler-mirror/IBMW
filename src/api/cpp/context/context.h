@@ -469,7 +469,7 @@ inline void OpLog::Log(std::uint32_t level, fmt::format_string<Args...> fmt, Arg
   const auto& cur_lgr = ctx_.GetLogger();
   if (level >= cur_lgr.GetLogLevel()) {
     std::string log_str = ::ibmw_fmt::format(fmt, std::forward<Args>(args)...);
-    cur_lgr.Log(level, loc_.line(), loc_.file_name(), __FUNCTION__, log_str.c_str(), log_str.size());
+    cur_lgr.Log(level, loc_.line(), loc_.file_name(), loc_.function_name(), log_str.c_str(), log_str.size());
   }
 }
 
