@@ -67,12 +67,27 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
 
     options_ = ServerOptions::Verify(options);
     connection_options_ptr_ = std::make_shared<ConnectionOptions>(options_);
-
-    MW_REQUIRE(CheckListenAddr(options_.ep),
-                            "{} is already in use.", ibmw::common::util::SSToString(options_.ep));
   }
 
   void Start() {
+    MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    acceptor_.open(options_.ep.protocol(), ec);
+    if (!ec) acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true), ec);
+    if (!ec) acceptor_.bind(options_.ep, ec);
+    if (!ec) acceptor_.listen(boost::asio::ip::tcp::acceptor::max_listen_connections, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      acceptor_.close(ignored);
+      MW_THROW("Grpc svr failed to listen on {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
     MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
@@ -81,11 +96,6 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          acceptor_.open(options_.ep.protocol());
-          acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-          acceptor_.bind(options_.ep);
-          acceptor_.listen();
-
           while (state_.load() == State::kStart) {
             bool accept_failed = false;
             try {
@@ -191,16 +201,6 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
 
  private:
   static constexpr std::chrono::milliseconds kAcceptRetryDelay{100};
-
-  static bool CheckListenAddr(const boost::asio::ip::tcp::endpoint& ep) {
-    try {
-      IOCtx io;
-      Tcp::acceptor acceptor(io, ep);
-      return true;
-    } catch (...) {
-      return false;
-    }
-  }
 
  private:
   enum class State : uint32_t {

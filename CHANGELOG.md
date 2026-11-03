@@ -8,6 +8,9 @@ details remain governed by the documentation for each release.
 
 ### Changed
 
+- Net/gRPC servers: the listen address is no longer probed by a trial bind in
+  `Initialize`; `Start` binds and reports a failure (the gRPC server used to
+  lose it in its accept coroutine). A failed `Start` can be retried.
 - Zenoh: leading and trailing `/` in `limit_domain` are ignored, and an empty
   `limit_domain` adds no key suffix. These values previously produced invalid
   key expressions (`//`, trailing `/`) and failed registration.

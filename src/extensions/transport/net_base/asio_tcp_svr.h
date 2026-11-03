@@ -115,9 +115,6 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
 
     options_ = Options::Verify(options);
     session_options_ptr_ = std::make_shared<SessionOptions>(options_);
-
-    MW_REQUIRE(CheckListenAddr(options_.ep),
-                            "{} is already in use.", ibmw::common::util::SSToString(options_.ep));
   }
 
   void Start() {
@@ -299,16 +296,6 @@ class AsioTcpServer : public std::enable_shared_from_this<AsioTcpServer> {
   static constexpr size_t kEagerRecvSize = 4 * 1024 * 1024;
   static constexpr size_t kRecvProbeSize = 256 * 1024;
   static constexpr uint64_t kPeerLogIntervalMs = 1000;
-
-  static bool CheckListenAddr(const Tcp::endpoint& ep) {
-    try {
-      IOCtx io;
-      Tcp::acceptor acceptor(io, ep);
-      return true;
-    } catch (...) {
-      return false;
-    }
-  }
 
   struct SessionOptions {
     explicit SessionOptions(const Options& options)

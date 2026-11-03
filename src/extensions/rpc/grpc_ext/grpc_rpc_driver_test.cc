@@ -541,6 +541,26 @@ TEST(GrpcListenAddressTest, LoopbackIsRecognizedAndBadAddressesThrow) {
   EXPECT_THROW(GrpcExtension::IsLoopbackListenAddress("256.0.0.1"), std::invalid_argument);
 }
 
+// TRANS-056: a bind failure is reported by Start instead of being lost in the
+// accept coroutine; Initialize no longer probes, and Start can be retried.
+TEST(GrpcServerAcceptTest, StartReportsBindFailureAndCanRetry) {
+  IoThreads io(1);
+  const uint16_t port = FreeTcpPort();
+  const asio::ip::tcp::endpoint ep(asio::ip::address_v4::loopback(), port);
+  asio::io_context other;
+  auto squatter = std::make_unique<asio::ip::tcp::acceptor>(other, ep);
+  auto svr = std::make_shared<server::AsioHttp2Server>(io.Io());
+  ASSERT_NO_THROW(svr->Initialize(server::ServerOptions{.ep = ep}));
+  EXPECT_ANY_THROW(svr->Start());
+  squatter.reset();
+  EXPECT_NO_THROW(svr->Start());
+  asio::ip::tcp::socket sock(other);
+  boost::system::error_code ec;
+  sock.connect(ep, ec);
+  EXPECT_FALSE(ec) << ec.message();
+  svr->Shutdown();
+}
+
 // EXT-008: when accept fails (here EMFILE) the server backs off instead of
 // spinning on the error, and accepts again once descriptors are available.
 TEST(GrpcServerAcceptTest, AcceptFailureBacksOffAndRecovers) {

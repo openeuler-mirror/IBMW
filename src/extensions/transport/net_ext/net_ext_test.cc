@@ -192,6 +192,35 @@ TEST(NetTcpServerTest, StartReportsBindFailure) {
   EXPECT_ANY_THROW(svr->Start());
 }
 
+// TRANS-056: the address is checked by the real bind in Start, not by a trial
+// bind in Initialize, so a failed Start can be retried once the port is free.
+TEST(NetTcpServerTest, InitializeDoesNotProbeAndStartCanRetry) {
+  IoThreads io;
+  Received received;
+  const uint16_t port = FreeTcpPort();
+  asio::io_context other;
+  auto squatter = std::make_unique<Tcp::acceptor>(other, Tcp::endpoint(kLoopback, port));
+  std::shared_ptr<ibmw::common::net::AsioTcpServer> svr;
+  ASSERT_NO_THROW(svr = MakeTcpServer(io, received, port));
+  EXPECT_ANY_THROW(svr->Start());
+  squatter.reset();
+  EXPECT_NO_THROW(svr->Start());
+  svr->Shutdown();
+}
+
+TEST(NetHttpServerTest, InitializeDoesNotProbeAndStartCanRetry) {
+  IoThreads io;
+  const uint16_t port = FreeTcpPort();
+  asio::io_context other;
+  auto squatter = std::make_unique<Tcp::acceptor>(other, Tcp::endpoint(kLoopback, port));
+  auto svr = std::make_shared<ibmw::common::net::AsioHttpServer>(io.Io());
+  ASSERT_NO_THROW(svr->Initialize({.ep = Tcp::endpoint(kLoopback, port)}));
+  EXPECT_ANY_THROW(svr->Start());
+  squatter.reset();
+  EXPECT_NO_THROW(svr->Start());
+  svr->Shutdown();
+}
+
 // TRANS-029/027: the handler gets the sender endpoint even after the
 // connection is gone, and a message above the eager limit arrives intact.
 TEST(NetTcpServerTest, DeliversSenderEndpointAndLargeMessages) {

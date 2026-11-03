@@ -129,9 +129,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
     options_ = Options::Verify(options);
     session_options_ptr_ = std::make_shared<SessionOptions>(options_);
-
-    MW_REQUIRE(CheckListenAddr(options_.ep),
-                            "{} is already in use.", ibmw::common::util::SSToString(options_.ep));
   }
 
   void Start() {
@@ -267,16 +264,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
   const ibmw::common::util::LoggerWrapper& GetLogger() const { return *logger_ptr_; }
 
  private:
-  static bool CheckListenAddr(const Tcp::endpoint& ep) {
-    try {
-      IOCtx io;
-      Tcp::acceptor acceptor(io, ep);
-      return true;
-    } catch (...) {
-      return false;
-    }
-  }
-
   struct SessionOptions {
     explicit SessionOptions(const Options& options)
         : doc_root(options.doc_root),

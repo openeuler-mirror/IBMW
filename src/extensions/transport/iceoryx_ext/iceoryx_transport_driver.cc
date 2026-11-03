@@ -142,7 +142,8 @@ ibmw_iceoryx_query_host_reporter_v1(void) noexcept {
 void IceoryxTransportDriver::Initialize(YAML::Node options_node) {
   static_assert(std::is_nothrow_move_assignable_v<Options>);
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-  // todo: check options_node->shm_init_size
+  // shm_init_size is an extension option checked by IceoryxBus::Initialize;
+  // a copy in the driver options is a legacy field and ignored.
 
   MW_REQUIRE(
       state_.load() == State::kPreInit,
