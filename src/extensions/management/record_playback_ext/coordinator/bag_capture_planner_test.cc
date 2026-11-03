@@ -3,6 +3,8 @@
 
 #include "record_playback_ext/coordinator/bag_capture_planner.h"
 
+#include <filesystem>
+
 #include "gtest/gtest.h"
 #include "engine/runtime_graph/topic_graph.h"
 #include "engine/transport/serialized_transport_driver.h"
@@ -148,6 +150,7 @@ TEST(BagCaptureGraphTest, NativeAddressMappingAndIsolatedObserverConfiguration) 
   EXPECT_FALSE(io::RegistrySubscriptionConfig({zenoh, "zenoh"})["ibmw"]["extensions"]["items"][0]["options"]["limit_domain"]);
   const auto config = io::RegistrySubscriptionConfig({ros, "ros2"})["ibmw"];
   EXPECT_FALSE(config["runtime_graph"]["enabled"].as<bool>());
+  EXPECT_EQ(config["config"]["temp_cfg_path"].as<std::string>(), std::filesystem::temp_directory_path().string());
   EXPECT_EQ(config["extensions"]["items"].size(), 1u);
   EXPECT_NE(config["extensions"]["items"][0]["options"]["participant_name"].as<std::string>(), "publisher");
 }

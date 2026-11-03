@@ -5,6 +5,7 @@
 #include "observation_test_support.h"
 
 #include <atomic>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <thread>
@@ -190,6 +191,8 @@ TEST_F(LocalHzTest, ConnectionConfigLoadsOnlySelectedTransportAndResolvesPaths) 
   const auto runtime = root["ibmw"];
   EXPECT_FALSE(runtime["modules"]);
   EXPECT_FALSE(runtime["runtime_graph"]["enabled"].as<bool>());
+  // The observer engine must not create ./cfg/tmp in the caller's cwd.
+  EXPECT_EQ(runtime["config"]["temp_cfg_path"].as<std::string>(), std::filesystem::temp_directory_path().string());
   ASSERT_EQ(runtime["extensions"]["items"].size(), 1u);
   const auto extension = runtime["extensions"]["items"][0];
   EXPECT_EQ(extension["path"].as<std::string>(), (directory / "libdds.so").string());

@@ -4,6 +4,7 @@
 #include "engine/topic_io/registry_subscription.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <tuple>
 #include <unistd.h>
 
@@ -173,6 +174,8 @@ YAML::Node RegistrySubscriptionConfig(const RegistrySubscription& subscription) 
   runtime["extensions"]["items"].push_back(extension);
   runtime["messaging"]["drivers"].push_back(driver);
   runtime["runtime_graph"]["enabled"] = false;
+  // No module configs are written here; keep ConfigSubsystem from creating ./cfg/tmp in the user's cwd.
+  runtime["config"]["temp_cfg_path"] = std::filesystem::temp_directory_path().string();
   runtime["logging"]["core_level"] = "WARN";
   console["type"] = "console";
   runtime["logging"]["backends"].push_back(console);

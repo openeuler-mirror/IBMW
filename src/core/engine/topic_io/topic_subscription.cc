@@ -4,6 +4,7 @@
 #include "engine/topic_io/topic_subscription.h"
 
 #include <atomic>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -128,6 +129,8 @@ YAML::Node SubscriptionRuntimeConfig(
   runtime["extensions"]["items"].push_back(extension);
   runtime["messaging"]["drivers"].push_back(transport);
   runtime["runtime_graph"]["enabled"] = false;
+  // No module configs are written here; keep ConfigSubsystem from creating ./cfg/tmp in the user's cwd.
+  runtime["config"]["temp_cfg_path"] = std::filesystem::temp_directory_path().string();
   runtime["logging"]["core_level"] = "WARN";
   YAML::Node console;
   console["type"] = "console";
