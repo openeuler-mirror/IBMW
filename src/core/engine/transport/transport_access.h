@@ -162,6 +162,7 @@ class SenderAccess {
 
   static ibmw_transport_sender_base_t GenBase(void* ctx) {
     return ibmw_transport_sender_base_t{
+        .struct_size = sizeof(ibmw_transport_sender_base_t),
         .register_send_type = [](void* ctx, const ibmw_type_support_base_t* msg_type_support) -> bool {
           try {
             return static_cast<SenderAccess*>(ctx)->RegisterSendType(msg_type_support);
@@ -357,6 +358,7 @@ class ReceiverAccess {
 
   static ibmw_transport_receiver_base_t GenBase(void* ctx) {
     return ibmw_transport_receiver_base_t{
+        .struct_size = sizeof(ibmw_transport_receiver_base_t),
         .on_message = [](void* ctx,
                         const ibmw_type_support_base_t* msg_type_support,
                         ibmw_function_base_t* callback) -> bool {
@@ -520,6 +522,7 @@ class TransportAccess {
 
   static ibmw_transport_handle_base_t GenBase(void* ctx) {
     return ibmw_transport_handle_base_t{
+        .struct_size = sizeof(ibmw_transport_handle_base_t),
         .get_sender = [](void* ctx, ibmw_string_view_t topic) -> const ibmw_transport_sender_base_t* {
           try {
             return static_cast<TransportAccess*>(ctx)->GetPublisher(topic);

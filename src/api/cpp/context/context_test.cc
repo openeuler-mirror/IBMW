@@ -31,27 +31,38 @@ struct RecordedLog {
   std::string text;
 };
 
+template <class Table>
+const Table* EmptyTable() {
+  static const Table table = [] {
+    Table t{};
+    t.struct_size = sizeof(Table);
+    return t;
+  }();
+  return &table;
+}
+
 TEST(ContextTest, LogReportsCallerFunction) {
   static RecordedLog recorded;
   static const ibmw_logger_base_t logger{
+      .struct_size = sizeof(ibmw_logger_base_t),
       .get_log_level = [](void*) { return IBMW_LOG_LEVEL_INFO; },
       .log = [](void*, ibmw_log_level_t lvl, uint32_t, const char*, const char* function_name,
                 const char* log_data, size_t log_data_size) {
         recorded = {static_cast<uint32_t>(lvl), function_name, std::string(log_data, log_data_size)};
       },
       .ctx = nullptr};
-  // Only the logger is used; other sub-handles just need to be non-null.
-  static char dummy;
+  // Only the logger is used; other sub-handles just need complete empty tables.
   ibmw_core_base_t base{};
   base.abi_version = IBMW_CORE_ABI_VERSION;
+  base.struct_size = sizeof(ibmw_core_base_t);
   base.info = [](void*) { return ibmw_module_info_t{}; };
-  base.configurator = [](void*) { return reinterpret_cast<const ibmw_configurator_base_t*>(&dummy); };
-  base.executor_bus = [](void*) { return reinterpret_cast<const ibmw_executor_bus_base_t*>(&dummy); };
+  base.configurator = [](void*) { return EmptyTable<ibmw_configurator_base_t>(); };
+  base.executor_bus = [](void*) { return EmptyTable<ibmw_executor_bus_base_t>(); };
   base.logger = [](void*) { return &logger; };
-  base.memory_handle = [](void*) { return reinterpret_cast<const ibmw_allocator_base_t*>(&dummy); };
-  base.service_handle = [](void*) { return reinterpret_cast<const ibmw_service_handle_base_t*>(&dummy); };
-  base.transport_handle = [](void*) { return reinterpret_cast<const ibmw_transport_handle_base_t*>(&dummy); };
-  base.parameter_handle = [](void*) { return reinterpret_cast<const ibmw_parameter_handle_base_t*>(&dummy); };
+  base.memory_handle = [](void*) { return EmptyTable<ibmw_allocator_base_t>(); };
+  base.service_handle = [](void*) { return EmptyTable<ibmw_service_handle_base_t>(); };
+  base.transport_handle = [](void*) { return EmptyTable<ibmw_transport_handle_base_t>(); };
+  base.parameter_handle = [](void*) { return EmptyTable<ibmw_parameter_handle_base_t>(); };
 
   auto ctx = std::make_shared<Context>(Runtime(&base));
   ctx->log().Info("hello {}", 1);

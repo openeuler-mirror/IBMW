@@ -136,6 +136,14 @@ details remain governed by the documentation for each release.
   falls back to `IbmwExtEntryV2` or the unversioned `IbmwExtEntry`; a library
   that exports only one of them is rejected with a request to rebuild, and its
   create function is never called. **All extensions must be rebuilt.**
+- Core ABI version is now 3 (API-024). `ibmw_core_base_t` gains `struct_size`
+  after `abi_version`, and every handle table it exposes (configurator,
+  executor bus/executor, logger, allocator, service, parameter, transport
+  handle/sender/receiver) starts with `size_t struct_size`. `Runtime` rejects a
+  core or sub-handle table smaller than the SDK's layout; `GetPublisher`,
+  `GetSubscriber` and `GetExecutor` return an empty handle for an undersized
+  table. Checks run only when a handle is obtained. **All modules and
+  extensions must be rebuilt.**
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

@@ -97,6 +97,7 @@ TEST(RuntimeV2Abi, RejectsMalformedCurrentVersionBeforeAnyAccessorCall) {
 
   ibmw_core_base_t base{};
   base.abi_version = IBMW_CORE_ABI_VERSION;
+  base.struct_size = sizeof(ibmw_core_base_t);
   base.info = [](void*) { return ibmw_module_info_t{}; };
   base.configurator = [](void* ctx) -> const ibmw_configurator_base_t* {
     ++static_cast<int*>(ctx)[0];
@@ -138,6 +139,7 @@ TEST(RuntimeV2Abi, RejectsNullReturnedSubHandleAfterValidFunctionTable) {
   for (size_t i = 0; i <= kRuntimeAccessorCount; ++i) calls[i] = 0;
   ibmw_core_base_t base{};
   base.abi_version = IBMW_CORE_ABI_VERSION;
+  base.struct_size = sizeof(ibmw_core_base_t);
   base.info = [](void*) { return ibmw_module_info_t{}; };
   base.configurator = [](void* ctx) -> const ibmw_configurator_base_t* {
     return static_cast<const ibmw_configurator_base_t*>(RecordRuntimeAccessor(ctx, 0));
@@ -166,6 +168,67 @@ TEST(RuntimeV2Abi, RejectsNullReturnedSubHandleAfterValidFunctionTable) {
   EXPECT_EQ(calls[kRuntimeAccessorCount], static_cast<int>(kRuntimeAccessorCount));
   for (size_t i = 0; i < kRuntimeAccessorCount; ++i) EXPECT_EQ(calls[i], i + 1);
   EXPECT_EQ(munmap(calls, sizeof(int) * (kRuntimeAccessorCount + 1)), 0);
+}
+
+// API-024: a table smaller than this SDK's layout is rejected, not read past its end.
+TEST(RuntimeV3Abi, RejectsUndersizedCoreStructSize) {
+  ibmw_core_base_t base{};
+  base.abi_version = IBMW_CORE_ABI_VERSION;
+  base.struct_size = sizeof(ibmw_core_base_t) - 1;
+  ExpectRuntimeRejected(&base, "Malformed core ABI: struct_size=");
+}
+
+template <class Table>
+const Table* FullTable() {
+  static const Table table = [] {
+    Table t{};
+    t.struct_size = sizeof(Table);
+    return t;
+  }();
+  return &table;
+}
+
+TEST(RuntimeV3Abi, RejectsUndersizedSubHandleTable) {
+  static const ibmw_logger_base_t short_logger = [] {
+    ibmw_logger_base_t t{};
+    t.struct_size = sizeof(ibmw_logger_base_t) - sizeof(void*);
+    return t;
+  }();
+  ibmw_core_base_t base{};
+  base.abi_version = IBMW_CORE_ABI_VERSION;
+  base.struct_size = sizeof(ibmw_core_base_t);
+  base.info = [](void*) { return ibmw_module_info_t{}; };
+  base.configurator = [](void*) { return FullTable<ibmw_configurator_base_t>(); };
+  base.executor_bus = [](void*) { return FullTable<ibmw_executor_bus_base_t>(); };
+  base.logger = [](void*) { return &short_logger; };
+  base.memory_handle = [](void*) { return FullTable<ibmw_allocator_base_t>(); };
+  base.service_handle = [](void*) { return FullTable<ibmw_service_handle_base_t>(); };
+  base.transport_handle = [](void*) { return FullTable<ibmw_transport_handle_base_t>(); };
+  base.parameter_handle = [](void*) { return FullTable<ibmw_parameter_handle_base_t>(); };
+  ExpectRuntimeRejected(&base, "a handle table is smaller than expected");
+
+  base.logger = [](void*) { return FullTable<ibmw_logger_base_t>(); };
+  EXPECT_NO_THROW(Runtime runtime(&base));
+}
+
+TEST(TransportV3Abi, UndersizedSenderOrReceiverIsNotReturned) {
+  static ibmw_transport_sender_base_t sender{};
+  static ibmw_transport_receiver_base_t receiver{};
+  ibmw_transport_handle_base_t transport_base{};
+  transport_base.struct_size = sizeof(transport_base);
+  transport_base.get_sender = [](void*, ibmw_string_view_t) -> const ibmw_transport_sender_base_t* { return &sender; };
+  transport_base.get_receiver = [](void*, ibmw_string_view_t) -> const ibmw_transport_receiver_base_t* { return &receiver; };
+  TransportRef transport(&transport_base);
+
+  sender.struct_size = sizeof(sender) - 1;
+  receiver.struct_size = 0;
+  EXPECT_FALSE(transport.GetPublisher("topic"));
+  EXPECT_FALSE(transport.GetSubscriber("topic"));
+
+  sender.struct_size = sizeof(sender);
+  receiver.struct_size = sizeof(receiver);
+  EXPECT_TRUE(transport.GetPublisher("topic"));
+  EXPECT_TRUE(transport.GetSubscriber("topic"));
 }
 
 ReceivedLoan MakeLoan(int& releases) {

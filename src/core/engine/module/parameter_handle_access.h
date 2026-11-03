@@ -24,6 +24,7 @@ class ParameterHandleAccess {
  private:
   static ibmw_parameter_handle_base_t GenBase(void* ctx) {
     return ibmw_parameter_handle_base_t{
+        .struct_size = sizeof(ibmw_parameter_handle_base_t),
         .get_parameter = [](void* ctx, ibmw_string_view_t key) -> ibmw_parameter_val_view_holder_t {
           auto ptr = static_cast<ParameterHandle*>(ctx)->GetParameter(ibmw::util::ToStdStringView(key));
           if (!ptr) [[unlikely]] {

@@ -45,6 +45,7 @@ class LoggerRef {
 
 inline LoggerRef GetSimpleLoggerRef() {
   static constexpr ibmw_logger_base_t kSimpleLogger{
+      .struct_size = sizeof(ibmw_logger_base_t),
       .get_log_level = [](void* ctx) -> ibmw_log_level_t {
         return static_cast<ibmw_log_level_t>(ibmw::common::util::SimpleLogger::GetLogLevel());
       },

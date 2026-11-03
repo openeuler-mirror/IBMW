@@ -14,6 +14,7 @@
 #include "cpp/logger/logger.h"
 #include "cpp/parameter/parameter_handle.h"
 #include "cpp/service/rpc_handle.h"
+#include "cpp/util/abi_table.h"
 
 namespace ibmw {
 
@@ -47,6 +48,11 @@ class Runtime {
             ", expected=" + std::to_string(IBMW_CORE_ABI_VERSION) +
             ". Recompile all plugins against the current SDK.");
       }
+      if (base_ptr_->struct_size < sizeof(ibmw_core_base_t)) {
+        throw std::invalid_argument(
+            "Malformed core ABI: struct_size=" + std::to_string(base_ptr_->struct_size) +
+            ", expected at least " + std::to_string(sizeof(ibmw_core_base_t)) + ".");
+      }
       // A matching version is not sufficient if the provider supplied a
       // truncated or otherwise malformed current-version function table.
       // Validate the complete top-level table before invoking any accessor so
@@ -75,6 +81,12 @@ class Runtime {
           cached_service_ == nullptr || cached_transport_ == nullptr ||
           cached_parameter_ == nullptr) {
         throw std::invalid_argument("Malformed current-version core ABI: required accessor returned null.");
+      }
+      if (!util::IsCompleteAbiTable(cached_configurator_) || !util::IsCompleteAbiTable(cached_executor_bus_) ||
+          !util::IsCompleteAbiTable(cached_logger_) || !util::IsCompleteAbiTable(cached_memory_) ||
+          !util::IsCompleteAbiTable(cached_service_) || !util::IsCompleteAbiTable(cached_transport_) ||
+          !util::IsCompleteAbiTable(cached_parameter_)) {
+        throw std::invalid_argument("Malformed current-version core ABI: a handle table is smaller than expected.");
       }
     }
   }

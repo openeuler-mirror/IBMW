@@ -168,6 +168,13 @@ typedef struct ibmw_loaned_subscription_base_t {
  */
 typedef struct {
   /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
+  /**
    * @brief Function to register publish type
    * @note
    * Input 1: Implement pointer to publisher handle
@@ -284,6 +291,13 @@ typedef struct {
  */
 typedef struct {
   /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
+  /**
    * @brief Function to subscribe msg
    * @note
    * Input 1: Implement pointer to subscriber handle
@@ -356,6 +370,13 @@ typedef struct {
  *
  */
 typedef struct {
+  /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
   /**
    * @brief Function to get publisher for a topic
    * Input 1: Implement pointer to transport bus

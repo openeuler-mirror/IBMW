@@ -50,6 +50,7 @@ class CoreAccess {
   static ibmw_core_base_t GenBase(void* ctx) {
     return ibmw_core_base_t{
         .abi_version = IBMW_CORE_ABI_VERSION,
+        .struct_size = sizeof(ibmw_core_base_t),
         .info = [](void* ctx) -> ibmw_module_info_t {
           return static_cast<CoreAccess*>(ctx)->module_info_;
         },

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stddef.h>
+
 #include <stdbool.h>
 
 #include "c/service/rpc_context_base.h"
@@ -62,6 +64,13 @@ typedef struct {
  *
  */
 typedef struct {
+  /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
   /**
    * @brief Function to register rpc service function
    * @note

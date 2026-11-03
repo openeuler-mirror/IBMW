@@ -83,6 +83,7 @@ class LoggerAccess {
 
   static ibmw_logger_base_t GenBase(void* ctx) {
     return ibmw_logger_base_t{
+        .struct_size = sizeof(ibmw_logger_base_t),
         .get_log_level = [](void* ctx) -> ibmw_log_level_t {
           return static_cast<LoggerAccess*>(ctx)->GetLogLevel();
         },

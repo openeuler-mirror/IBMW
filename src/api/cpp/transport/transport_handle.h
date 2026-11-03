@@ -9,6 +9,7 @@
 
 #include "c/transport/transport_handle_base.h"
 #include "cpp/transport/transport_context.h"
+#include "cpp/util/abi_table.h"
 #include "cpp/util/function.h"
 #include "cpp/util/string.h"
 #include "base/exception.h"
@@ -354,15 +355,15 @@ class TransportRef {
   SenderRef GetPublisher(std::string_view topic) {
     MW_ASSERT(base_ptr_, "Reference is null.");
     if (base_ptr_->get_sender == nullptr) return SenderRef();
-    return SenderRef(
-        base_ptr_->get_sender(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic)));
+    const auto* sender = base_ptr_->get_sender(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic));
+    return ibmw::util::IsCompleteAbiTable(sender) ? SenderRef(sender) : SenderRef();
   }
 
   ReceiverRef GetSubscriber(std::string_view topic) {
     MW_ASSERT(base_ptr_, "Reference is null.");
     if (base_ptr_->get_receiver == nullptr) return ReceiverRef();
-    return ReceiverRef(
-        base_ptr_->get_receiver(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic)));
+    const auto* receiver = base_ptr_->get_receiver(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic));
+    return ibmw::util::IsCompleteAbiTable(receiver) ? ReceiverRef(receiver) : ReceiverRef();
   }
 
   void MergeSubscribeContextToPublishContext(

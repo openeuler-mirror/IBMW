@@ -11,6 +11,13 @@ extern "C" {
 
 typedef struct {
   /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
+  /**
    * @brief Get thread local buf from core
    *
    */

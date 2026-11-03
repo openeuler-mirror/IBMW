@@ -108,6 +108,7 @@ class ServiceAccess {
 
   static ibmw_service_handle_base_t GenBase(void* ctx) {
     return ibmw_service_handle_base_t{
+        .struct_size = sizeof(ibmw_service_handle_base_t),
         .register_service_func = [](void* ctx,
                                     ibmw_string_view_t func_name,
                                     const void* custom_type_support_ptr,
