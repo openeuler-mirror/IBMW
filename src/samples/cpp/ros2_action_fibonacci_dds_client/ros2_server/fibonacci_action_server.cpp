@@ -1,10 +1,12 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <atomic>
 #include <iostream>
 #include <memory>
@@ -12,6 +14,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -53,6 +56,19 @@ std::string JoinSequence(const std::vector<int32_t> &sequence) {
   return oss.str();
 }
 
+// Parses the whole of `text` as a base-10 int; reports `flag` on failure.
+bool ParseIntArg(const char *flag, const char *text, int &out) {
+  const char *end = text + std::strlen(text);
+  int value = 0;
+  const auto [ptr, ec] = std::from_chars(text, end, value);
+  if (*text == '\0' || ec != std::errc() || ptr != end) {
+    std::cerr << "[FAIL] Invalid value for " << flag << ": '" << text << "'" << std::endl;
+    return false;
+  }
+  out = value;
+  return true;
+}
+
 std::optional<Options> ParseArgs(int argc, char *argv[]) {
   Options options;
   for (int i = 1; i < argc; ++i) {
@@ -77,7 +93,9 @@ std::optional<Options> ParseArgs(int argc, char *argv[]) {
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.feedback_delay_ms = std::stoi(value);
+      if (!ParseIntArg("--feedback-delay-ms", value, options.feedback_delay_ms)) {
+        return std::nullopt;
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "Usage: fibonacci_action_server [options]\n"

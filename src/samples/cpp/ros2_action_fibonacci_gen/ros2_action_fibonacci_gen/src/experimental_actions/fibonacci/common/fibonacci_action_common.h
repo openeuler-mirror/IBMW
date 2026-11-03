@@ -4,10 +4,13 @@
 #ifndef IBMW_SAMPLES_CPP_ROS2_ACTION_FIBONACCI_COMMON_FIBONACCI_ACTION_COMMON_H_
 #define IBMW_SAMPLES_CPP_ROS2_ACTION_FIBONACCI_COMMON_FIBONACCI_ACTION_COMMON_H_
 
+#include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -19,6 +22,7 @@ constexpr int32_t kMaxFibonacciOrder = 47;
 constexpr std::size_t kDefaultMaxConcurrentGoals = 4;
 constexpr std::size_t kDefaultMaxRetainedGoals = 32;
 constexpr std::size_t kDefaultMaxPendingResultsPerGoal = 16;
+constexpr uint32_t kMaxDomainId = 232;
 
 using EndpointNames = ibmw::internal::ros2_action_dds::EndpointNames;
 using EndpointQosProfile = ibmw::internal::ros2_action_dds::EndpointQosProfile;
@@ -41,6 +45,22 @@ inline EndpointQosProfile FeedbackQosProfile() {
 
 inline EndpointQosProfile StatusQosProfile() {
   return ibmw::internal::ros2_action_dds::StatusQosProfile();
+}
+
+// Parses the whole of `text` as a base-10 integer in [min_value, max_value].
+template <typename T>
+bool ParseInteger(const char* text, T min_value, T max_value, T& out) {
+  if (text == nullptr || *text == '\0') {
+    return false;
+  }
+  const char* end = text + std::strlen(text);
+  T value{};
+  const auto [ptr, ec] = std::from_chars(text, end, value);
+  if (ec != std::errc() || ptr != end || value < min_value || value > max_value) {
+    return false;
+  }
+  out = value;
+  return true;
 }
 
 inline std::vector<int32_t> BuildFibonacciSequence(int32_t order) {

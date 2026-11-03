@@ -393,26 +393,41 @@ class FibonacciActionServer {
   std::condition_variable status_cv_;
 };
 
-uint32_t ParseDomainId(int argc, char** argv) {
+std::optional<uint32_t> ParseDomainId(int argc, char** argv) {
+  const char* flag = "--domain-id";
+  const char* text = nullptr;
   for (int i = 1; i + 1 < argc; ++i) {
     if (std::strcmp(argv[i], "--domain-id") == 0) {
-      return static_cast<uint32_t>(std::stoul(argv[i + 1]));
+      text = argv[i + 1];
+      break;
     }
   }
-  const char* domain = std::getenv("ROS_DOMAIN_ID");
-  if (domain == nullptr || std::strlen(domain) == 0U) {
-    return 0;
+  if (text == nullptr) {
+    flag = "ROS_DOMAIN_ID";
+    text = std::getenv("ROS_DOMAIN_ID");
+    if (text == nullptr || std::strlen(text) == 0U) {
+      return 0U;
+    }
   }
-  return static_cast<uint32_t>(std::stoul(domain));
+  uint32_t domain_id = 0;
+  if (!action_common::ParseInteger<uint32_t>(text, 0, action_common::kMaxDomainId, domain_id)) {
+    std::cerr << "[FAIL] Invalid value for " << flag << ": '" << text << "'" << std::endl;
+    return std::nullopt;
+  }
+  return domain_id;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  const auto domain_id = ParseDomainId(argc, argv);
+  if (!domain_id.has_value()) {
+    return 2;
+  }
   std::signal(SIGINT, HandleSignal);
   std::signal(SIGTERM, HandleSignal);
   FibonacciActionServer server;
-  if (!server.Start(ParseDomainId(argc, argv))) {
+  if (!server.Start(*domain_id)) {
     return 1;
   }
   while (!g_stop.load()) {

@@ -1,13 +1,16 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <future>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -64,6 +67,19 @@ bool IsExpectedSequence(const std::vector<int32_t> &sequence, int order) {
   return sequence == BuildExpectedSequence(order);
 }
 
+// Parses the whole of `text` as a base-10 int; reports `flag` on failure.
+bool ParseIntArg(const char *flag, const char *text, int &out) {
+  const char *end = text + std::strlen(text);
+  int value = 0;
+  const auto [ptr, ec] = std::from_chars(text, end, value);
+  if (*text == '\0' || ec != std::errc() || ptr != end) {
+    std::cerr << "[FAIL] Invalid value for " << flag << ": '" << text << "'" << std::endl;
+    return false;
+  }
+  out = value;
+  return true;
+}
+
 std::optional<Options> ParseArgs(int argc, char *argv[]) {
   Options options;
   for (int i = 1; i < argc; ++i) {
@@ -94,25 +110,33 @@ std::optional<Options> ParseArgs(int argc, char *argv[]) {
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.order = std::stoi(value);
+      if (!ParseIntArg("--order", value, options.order)) {
+        return std::nullopt;
+      }
     } else if (arg == "--cancel-delay-ms") {
       const char *value = require_value("--cancel-delay-ms");
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.cancel_delay_ms = std::stoi(value);
+      if (!ParseIntArg("--cancel-delay-ms", value, options.cancel_delay_ms)) {
+        return std::nullopt;
+      }
     } else if (arg == "--server-wait-seconds") {
       const char *value = require_value("--server-wait-seconds");
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.server_wait_seconds = std::stoi(value);
+      if (!ParseIntArg("--server-wait-seconds", value, options.server_wait_seconds)) {
+        return std::nullopt;
+      }
     } else if (arg == "--result-wait-seconds") {
       const char *value = require_value("--result-wait-seconds");
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.result_wait_seconds = std::stoi(value);
+      if (!ParseIntArg("--result-wait-seconds", value, options.result_wait_seconds)) {
+        return std::nullopt;
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "Usage: fibonacci_action_client [options]\n"
