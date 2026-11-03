@@ -353,7 +353,6 @@ template <class T, concepts::SupportedSubscriber<T> TCallback>
 void OpSub::DoOnMessage(const res::Subscriber<T>& ch, TCallback callback, ibmw::executor::ExecutorHandle exe) {
   auto& transport_ctx = ctx_.GetTransportResource(ch, loc_);
   auto& sub_fn = std::any_cast<typename Context::SubscribeFunction<T>&>(transport_ctx.sub_f);
-  auto ctx = details::GetCurrentContext();
   const bool ok = sub_fn(transport_ctx.sub,
                          StandardizeSubscriber<T>(std::move(callback)),
                          std::move(exe));
