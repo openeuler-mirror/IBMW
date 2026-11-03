@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -64,6 +65,14 @@ TEXT_FILENAMES = {
     "NOTICE",
     "VERSION",
 }
+
+
+# Recorded bag fixtures are binary and cannot be reviewed as text: each one
+# must be listed with its SHA-256 in the index, which says where it comes
+# from and what it contains (HYG-022).
+BAG_FIXTURE_SUFFIXES = (".mcap", ".mcap.lz4", ".mcap.zst", ".db3")
+BAG_FIXTURE_INDEX = Path("src/samples/cpp/BAG_FIXTURES.zh.md")
+BAG_FIXTURE_ENTRY = re.compile(r"`([^`]+)`\s*\|\s*`?([0-9a-f]{64})`?")
 
 
 def _absolute_path(*parts: str) -> str:
@@ -135,8 +144,35 @@ def is_text_candidate(path: Path) -> bool:
     return path.name in TEXT_FILENAMES or path.suffix.lower() in TEXT_SUFFIXES
 
 
+def check_bag_fixtures(repo: Path, bags: dict[Path, Path]) -> list[str]:
+    index = repo / BAG_FIXTURE_INDEX
+    entries: dict[Path, str] = {}
+    if index.is_file():
+        for match in BAG_FIXTURE_ENTRY.finditer(index.read_text(encoding="utf-8")):
+            entries[Path(match.group(1))] = match.group(2)
+    errors: list[str] = []
+    for relative, path in sorted(bags.items()):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if relative not in entries:
+            errors.append(
+                f"undocumented bag fixture: {display(relative)} "
+                f"(add it to {display(BAG_FIXTURE_INDEX)})"
+            )
+        elif entries[relative] != digest:
+            errors.append(
+                f"bag fixture changed without updating {display(BAG_FIXTURE_INDEX)}: "
+                f"{display(relative)} sha256 {digest}"
+            )
+    for relative in sorted(set(entries) - set(bags)):
+        errors.append(
+            f"stale bag fixture entry in {display(BAG_FIXTURE_INDEX)}: {display(relative)}"
+        )
+    return errors
+
+
 def check_tree(repo: Path) -> list[str]:
     errors: list[str] = []
+    bags: dict[Path, Path] = {}
     for current, directory_names, file_names in os.walk(repo, topdown=True):
         current_path = Path(current)
         relative_current = current_path.relative_to(repo)
@@ -160,6 +196,9 @@ def check_tree(repo: Path) -> list[str]:
                 continue
             if path.suffix.lower() in FORBIDDEN_FILE_SUFFIXES:
                 errors.append(f"forbidden release file: {display(relative)}")
+                continue
+            if name.lower().endswith(BAG_FIXTURE_SUFFIXES):
+                bags[relative] = path
                 continue
             if not is_text_candidate(path):
                 continue
@@ -185,6 +224,7 @@ def check_tree(repo: Path) -> list[str]:
                             f"forbidden release content ({label}): "
                             f"{display(relative)}:{line_number}"
                         )
+    errors.extend(check_bag_fixtures(repo, bags))
     return errors
 
 

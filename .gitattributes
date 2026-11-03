@@ -1,0 +1,6 @@
+# Recorded bag fixtures: never diff, merge or convert line endings (HYG-022).
+# They are listed with their SHA-256 in src/samples/cpp/BAG_FIXTURES.zh.md.
+*.mcap     binary
+*.mcap.lz4 binary
+*.mcap.zst binary
+*.db3      binary

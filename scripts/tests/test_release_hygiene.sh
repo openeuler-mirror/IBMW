@@ -133,4 +133,36 @@ for value in "${legacy_ownership_markers[@]}"; do
   expect_rejected "$FIXTURE" "forbidden release content"
 done
 
-echo "PASS: release hygiene cache, swap file, private path, internal milestone, legacy ownership, and clean fixtures"
+# HYG-022: binary bag fixtures must be listed with their SHA-256.
+bag_fixture() {
+  local root
+  root="$(new_fixture "$1")"
+  mkdir -p "$root/src/samples/cpp/demo/bags/mcap"
+  printf 'bag bytes' > "$root/src/samples/cpp/demo/bags/mcap/data_0.mcap"
+  printf '%s\n' "$root"
+}
+bag_index() {
+  local root="$1" digest="$2"
+  printf '| `src/samples/cpp/demo/bags/mcap/data_0.mcap` | `%s` | demo |\n' "$digest" \
+    > "$root/src/samples/cpp/BAG_FIXTURES.zh.md"
+}
+BAG_DIGEST="$(printf 'bag bytes' | sha256sum | cut -d' ' -f1)"
+
+FIXTURE="$(bag_fixture bag-documented)"
+bag_index "$FIXTURE" "$BAG_DIGEST"
+python3 "$CHECKER" --repo-root "$FIXTURE" >/dev/null \
+  || fail "documented bag fixture was rejected"
+
+FIXTURE="$(bag_fixture bag-undocumented)"
+expect_rejected "$FIXTURE" "undocumented bag fixture: src/samples/cpp/demo/bags/mcap/data_0.mcap"
+
+FIXTURE="$(bag_fixture bag-changed)"
+bag_index "$FIXTURE" "$(printf 'other' | sha256sum | cut -d' ' -f1)"
+expect_rejected "$FIXTURE" "bag fixture changed without updating"
+
+FIXTURE="$(bag_fixture bag-stale)"
+bag_index "$FIXTURE" "$BAG_DIGEST"
+rm "$FIXTURE/src/samples/cpp/demo/bags/mcap/data_0.mcap"
+expect_rejected "$FIXTURE" "stale bag fixture entry"
+
+echo "PASS: release hygiene cache, swap file, private path, internal milestone, legacy ownership, bag fixture, and clean fixtures"
