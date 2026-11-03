@@ -94,7 +94,9 @@ class ServiceAccess {
 
     if (server_ctx_ref.GetType() != ibmw_rpc_context_type_t::IBMW_RPC_SERVER_CONTEXT ||
         client_ctx_ref.GetType() != ibmw_rpc_context_type_t::IBMW_RPC_CLIENT_CONTEXT) [[unlikely]] {
-      // TODO warn log
+      MW_LOG_INTERVAL(1000, service_driver_dispatcher_.GetLogger(), ibmw::common::util::kLogLevelWarn,
+                      "Service context merge skipped: expected server and client contexts, got types {} and {}.",
+                      static_cast<int>(server_ctx_ref.GetType()), static_cast<int>(client_ctx_ref.GetType()));
       return;
     }
 

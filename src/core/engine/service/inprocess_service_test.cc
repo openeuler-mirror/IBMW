@@ -9,10 +9,14 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/util/string.h"
 #include "engine/service/inprocess_service.h"
+#include "engine/service/service_access.h"
 #include "engine/service/service_driver_dispatcher.h"
 #include "engine/service/service_driver_tools.h"
 
@@ -173,4 +177,34 @@ TEST(ServiceDriverDispatcherCall, NotStartedReportsNotReady) {
 }
 
 }  // namespace
+// HYG-039: merging contexts of the wrong types is skipped with a warning
+// (rate limited), not silently.
+TEST(ServiceAccessMergeContext, WrongContextTypesAreLogged) {
+  std::vector<std::string> logs;
+  ServiceDriverDispatcher dispatcher;
+  dispatcher.SetLogger(std::make_shared<ibmw::common::util::LoggerWrapper>(ibmw::common::util::LoggerWrapper{
+      .get_log_level_func = [] { return ibmw::common::util::kLogLevelTrace; },
+      .log_func = [&logs](uint32_t, uint32_t, const char*, const char*, const char* data, size_t size) {
+        logs.emplace_back(data, size);
+      }}));
+  const std::unordered_set<std::string> passed_keys{"trace"};  // ServiceAccess keeps a reference
+  ServiceAccess access("pkg", "mod", dispatcher, passed_keys);
+  const auto* handle = access.NativeHandle();
+
+  ibmw::rpc::Context server(ibmw_rpc_context_type_t::IBMW_RPC_SERVER_CONTEXT);
+  ibmw::rpc::Context client;
+  server.SetMetaValue("trace", "t1");
+  handle->merge_server_context_to_client_context(handle->ctx, server.NativeHandle(), client.NativeHandle());
+  EXPECT_EQ(client.GetMetaValue("trace"), "t1");
+  EXPECT_TRUE(logs.empty());
+
+  ibmw::rpc::Context other_client;
+  for (int i = 0; i < 3; ++i) {
+    handle->merge_server_context_to_client_context(handle->ctx, client.NativeHandle(), other_client.NativeHandle());
+  }
+  EXPECT_TRUE(other_client.GetMetaValue("trace").empty());
+  ASSERT_EQ(logs.size(), 1u);
+  EXPECT_NE(logs[0].find("Service context merge skipped"), std::string::npos) << logs[0];
+}
+
 }  // namespace ibmw::runtime::core::service
