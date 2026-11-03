@@ -17,6 +17,7 @@
 #include "cpp/util/string.h"
 #include "engine/service/inprocess_service.h"
 #include "engine/service/service_access.h"
+#include "engine/service/service_dispatcher.h"
 #include "engine/service/service_driver_dispatcher.h"
 #include "engine/service/service_driver_tools.h"
 
@@ -228,6 +229,84 @@ TEST(ServiceDriverDispatcherCall, NotStartedReportsNotReady) {
   ASSERT_TRUE(code.has_value());
   EXPECT_EQ(*code, static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_NOT_READY));
 }
+
+// Keeps every call it gets and never answers on its own.
+class HoldingServiceDriver : public ServiceDriver {
+ public:
+  std::string_view Name() const noexcept override { return "holding"; }
+  void Initialize(YAML::Node) override {}
+  void Start() override {}
+  void Shutdown() override {}
+  bool RegisterServiceFunc(const ServiceFuncWrapper&) noexcept override { return true; }
+  bool RegisterClientFunc(const ClientFuncWrapper&) noexcept override { return true; }
+  void Call(const std::shared_ptr<ServiceMessageFrame>& frame) noexcept override { held = frame; }
+
+  std::shared_ptr<ServiceMessageFrame> held;
+};
+
+// One client "svc" routed to a HoldingServiceDriver through the given filters.
+// debug_log serializes the request, so the type support must serialize.
+class HoldingDispatcherTest : public ::testing::TestWithParam<const char*> {
+ protected:
+  void SetUp() override {
+    auto driver = std::make_unique<HoldingServiceDriver>();
+    driver_ = driver.get();
+    dispatcher_.RegisterRpcDriver(std::move(driver));
+    std::string filters = GetParam();
+    dispatcher_.Initialize(YAML::Load(
+        "drivers: [{type: holding}]\n"
+        "clients: [{func_name: svc, enable_drivers: [holding], enable_filters: [" + filters + "]}]"));
+    handle_ = dispatcher_.GetRpcAccess("mod").NativeHandle();
+    ASSERT_TRUE(handle_->register_client_func(
+        handle_->ctx, ibmw::util::ToIbmwStringView("svc"), nullptr, &kSerializingTs, &kSerializingTs));
+    dispatcher_.Start();
+  }
+
+  void TearDown() override { dispatcher_.Shutdown(); }
+
+  void Call() {
+    ibmw::rpc::ClientCallback callback([this](uint32_t c) { codes_.push_back(c); });
+    handle_->call(handle_->ctx, ibmw::util::ToIbmwStringView("svc"), ctx_.NativeHandle(),
+                  &req_, &rsp_, callback.NativeHandle());
+  }
+
+  ServiceDispatcher dispatcher_;
+  HoldingServiceDriver* driver_ = nullptr;
+  const ibmw_service_handle_base_t* handle_ = nullptr;
+  ibmw::rpc::Context ctx_;
+  int req_ = 0;
+  int rsp_ = 0;
+  std::vector<uint32_t> codes_;
+};
+
+// COMM-014: a driver that drops a call without answering must free the frame
+// and the caller must get an error, not wait forever.
+TEST_P(HoldingDispatcherTest, DroppedCallFreesFrameAndReportsInternalError) {
+  Call();
+  ASSERT_TRUE(driver_->held);
+  EXPECT_TRUE(codes_.empty());
+
+  std::weak_ptr<ServiceMessageFrame> weak_frame = driver_->held;
+  driver_->held.reset();
+  EXPECT_TRUE(weak_frame.expired());
+  ASSERT_EQ(codes_.size(), 1u);
+  EXPECT_EQ(codes_[0], static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+}
+
+// The drop fallback must not fire again after a real answer.
+TEST_P(HoldingDispatcherTest, AnsweredCallReportsOnlyTheAnswer) {
+  Call();
+  ASSERT_TRUE(driver_->held);
+  CallResultCallback(*driver_->held, ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+
+  std::weak_ptr<ServiceMessageFrame> weak_frame = driver_->held;
+  driver_->held.reset();
+  EXPECT_TRUE(weak_frame.expired());
+  ASSERT_EQ(codes_.size(), 1u);
+  EXPECT_EQ(codes_[0], static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
+}
+
+INSTANTIATE_TEST_SUITE_P(Filters, HoldingDispatcherTest, ::testing::Values("", "debug_log"));
 
 }  // namespace
 // HYG-039: merging contexts of the wrong types is skipped with a warning

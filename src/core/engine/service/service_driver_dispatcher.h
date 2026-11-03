@@ -13,6 +13,35 @@
 
 namespace ibmw::runtime::core::service {
 
+// Reports the client result exactly once. If every reference is dropped before
+// a driver reports a result, the destructor reports an internal error instead
+// of leaving the caller waiting forever.
+class ClientCompletion {
+ public:
+  explicit ClientCompletion(ibmw::rpc::ClientCallback&& callback) noexcept
+      : callback_(std::move(callback)) {}
+  ClientCompletion(const ClientCompletion&) = delete;
+  ClientCompletion& operator=(const ClientCompletion&) = delete;
+
+  ~ClientCompletion() {
+    if (done_) return;
+    try {
+      callback_(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+    } catch (...) {
+    }
+  }
+
+  void Complete(uint32_t code) {
+    if (done_) return;
+    done_ = true;
+    callback_(code);
+  }
+
+ private:
+  ibmw::rpc::ClientCallback callback_;
+  bool done_ = false;
+};
+
 struct RegisterServiceFuncAccessInfoWrapper {
   std::string_view pkg_path;
   std::string_view module_name;
@@ -98,9 +127,9 @@ class ServiceDriverDispatcher {
 
  private:
   void CallImpl(CallAccessInfoWrapper& wrapper,
-                std::shared_ptr<ibmw::rpc::ClientCallback>& client_callback_ptr,
+                std::shared_ptr<ClientCompletion>& completion_ptr,
                 std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr);
-  void FailCall(const std::shared_ptr<ibmw::rpc::ClientCallback>& client_callback_ptr,
+  void FailCall(const std::shared_ptr<ClientCompletion>& completion_ptr,
                 const std::shared_ptr<ServiceMessageFrame>& client_call_wrapper_ptr) noexcept;
 
   std::vector<ServiceDriver*> GetDriversByRules(

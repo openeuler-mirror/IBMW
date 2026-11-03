@@ -119,6 +119,10 @@ details remain governed by the documentation for each release.
   `subscriber_use_inline_executor` is corrected to `true`. Topic commands
   reading `--config-file` skip extension and driver items without `name` or
   `type` instead of failing.
+- RPC client calls that a driver drops without a result now complete with
+  `IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR` when the call is released, and
+  the call's frame is freed. Previously the frame kept itself alive and the
+  caller waited forever (COMM-014).
 
 ### Added
 
