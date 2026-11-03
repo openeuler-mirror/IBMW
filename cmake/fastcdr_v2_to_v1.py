@@ -18,6 +18,7 @@
 import re
 import sys
 import os
+import tempfile
 
 
 def transform_cdraux(content):
@@ -602,6 +603,19 @@ def inject_dependent_ipp_includes(content, filepath, upstream_dirs=None):
     return content
 
 
+def write_atomic(filepath, text):
+    """Replaces filepath with text; an interrupted build leaves it unchanged."""
+    fd, tmp = tempfile.mkstemp(prefix='.fastcdr-', dir=os.path.dirname(os.path.abspath(filepath)))
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        os.chmod(tmp, os.stat(filepath).st_mode & 0o7777)
+        os.replace(tmp, filepath)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} [--upstream-dir <dir>]... <file.ipp|.cxx|.hpp> [file2 ...]", file=sys.stderr)
@@ -626,11 +640,15 @@ def main():
             files.append(a)
             i += 1
 
-    for filepath in files:
-        if not os.path.exists(filepath):
-            print(f"Warning: {filepath} not found, skipping", file=sys.stderr)
-            continue
+    # Every input is an output of fastddsgen: a missing one is an error, found
+    # before anything is changed.
+    missing = [f for f in files if not os.path.isfile(f)]
+    if missing:
+        for filepath in missing:
+            print(f"Error: {filepath} not found", file=sys.stderr)
+        sys.exit(1)
 
+    for filepath in files:
         with open(filepath, 'r') as f:
             content = f.read()
 
@@ -645,8 +663,7 @@ def main():
         else:
             transformed = transform_cdraux(content)
 
-        with open(filepath, 'w') as f:
-            f.write(transformed)
+        write_atomic(filepath, transformed)
 
         print(f"Transformed: {filepath}")
 
