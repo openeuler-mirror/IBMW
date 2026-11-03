@@ -17,6 +17,7 @@
 #include "grpc_ext/http2/response.h"
 #include "grpc_ext/http2/server_session.h"
 #include "grpc_ext/server/options.h"
+#include "grpc_ext/server/recv_dump.h"
 #include "net_base/http_dispatcher.h"
 #include "base/string_util.h"
 
@@ -239,15 +240,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
     auto nread = co_await socket_.async_read_some(asio::buffer(buffer), asio::use_awaitable);
 
 #ifndef NDEBUG
-    std::string data_hex;
-    for (size_t i = 0; i < nread; ++i) {
-      data_hex += fmt::format("{:02x} ", buffer[i]);
-    }
-    std::string data_str;
-    for (size_t i = 0; i < nread; ++i) {
-      data_str += fmt::format("{:2c} ", isprint(buffer[i]) ? buffer[i] : '.');
-    }
-    MW_TRACE("Http svr session get data, remote addr {}, data: \n{}\n{}", RemoteAddr(), data_hex, data_str);
+    // The dump is only built when trace is enabled, and only for the first bytes.
+    MW_TRACE("Http svr session get data, remote addr {}, {} bytes:\n{}", RemoteAddr(), nread,
+             FormatRecvDump(buffer.data(), nread));
 #endif
 
     auto recv_ok = nghttp2_session_.ParseRecvMessage(
