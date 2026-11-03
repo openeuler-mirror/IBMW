@@ -802,7 +802,7 @@ void MqttRpcDriver::UnSubscribeMqttTopic() {
 }
 
 void MqttRpcDriver::ReturnRspWithStatusCode(
-    std::string_view mqtt_pub_topic,
+    const std::string& mqtt_pub_topic,
     int qos,
     std::string_view serialization_type,
     const char* req_id_buf,

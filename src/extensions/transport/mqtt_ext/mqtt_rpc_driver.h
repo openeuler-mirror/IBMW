@@ -80,7 +80,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver,
   using SubscriptionBatch = std::unordered_map<std::string, std::shared_ptr<SubscriptionStatus>>;
   std::shared_ptr<SubscriptionBatch> subscriptions_;
   void ReturnRspWithStatusCode(
-      std::string_view mqtt_pub_topic,
+      const std::string& mqtt_pub_topic,  // passed to MQTT as a C string
       int qos,
       std::string_view serialization_type,
       const char* req_id_buf,
