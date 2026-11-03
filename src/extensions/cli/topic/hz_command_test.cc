@@ -199,5 +199,34 @@ TEST_F(LocalHzTest, ConnectionConfigLoadsOnlySelectedTransportAndResolvesPaths) 
   EXPECT_EQ(runtime["messaging"]["drivers"][0]["type"].as<std::string>(), "dds");
 }
 
+// COMM-042: items of other extensions and drivers may lack the keys that
+// select one; a selected extension without a path is named in the error.
+TEST_F(LocalHzTest, ConnectionConfigToleratesIncompleteUnrelatedItems) {
+  const auto path = directory / "partial.yaml";
+  const auto write = [&](const std::string& extension_path) {
+    std::ofstream file(path);
+    file << "ibmw:\n  extensions:\n    items:\n"
+            "      - path: anonymous.so\n"
+            "      - name: dds_extension\n" << extension_path <<
+            "  messaging:\n    drivers:\n      - options: {}\n      - type: dds\n";
+  };
+  write("        path: libdds.so\n");
+  ibmw::discovery::DiscoveryOptions source{.backend = ibmw::discovery::DiscoveryBackend::kDds, .domain_id = 17};
+  YAML::Node root;
+  ASSERT_NO_THROW(root = io::SubscriptionRuntimeConfig(source, path));
+  EXPECT_EQ(root["ibmw"]["extensions"]["items"][0]["path"].as<std::string>(),
+            (directory / "libdds.so").string());
+  EXPECT_EQ(root["ibmw"]["messaging"]["drivers"][0]["type"].as<std::string>(), "dds");
+
+  write("");
+  try {
+    io::SubscriptionRuntimeConfig(source, path);
+    ADD_FAILURE() << "a selected extension without a path was accepted";
+  } catch (const std::exception& error) {
+    EXPECT_NE(std::string(error.what()).find("dds_extension requires a path"), std::string::npos)
+        << error.what();
+  }
+}
+
 }  // namespace
 }  // namespace ibmw::cli::topic

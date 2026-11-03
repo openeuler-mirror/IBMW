@@ -1288,7 +1288,7 @@ ibmw:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `subscriber_use_inline_executor` | bool | `false` | Run callbacks in publisher thread |
+| `subscriber_use_inline_executor` | bool | `true` | Run callbacks in publisher thread |
 | `subscriber_executor` | string | `""` | Default subscriber callback executor |
 
 ---

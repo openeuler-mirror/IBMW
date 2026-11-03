@@ -113,6 +113,12 @@ details remain governed by the documentation for each release.
   `SCHED_FIFO:` or `SCHED_RR:` must be a plain decimal number; values such as
   `5x`, `+5` or ` 5` are rejected instead of being read as far as they look
   numeric.
+- Local transport driver: `subscriber_use_inline_executor` and
+  `subscriber_executor` are optional, as documented; previously a missing key
+  failed initialization. The documented default of
+  `subscriber_use_inline_executor` is corrected to `true`. Topic commands
+  reading `--config-file` skip extension and driver items without `name` or
+  `type` instead of failing.
 
 ### Added
 

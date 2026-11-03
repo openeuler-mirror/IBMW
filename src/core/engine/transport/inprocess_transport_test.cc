@@ -168,6 +168,23 @@ struct Fixture {
   }
 };
 
+// COMM-042: every option key is optional and keeps its default.
+TEST(InProcessTransportTest, OptionKeysAreOptional) {
+  for (const char* options : {"{}", "{subscriber_executor: gated}"}) {
+    Fixture f;
+    EXPECT_NO_THROW(f.transport.Initialize(YAML::Load(options))) << options;
+  }
+  GatedExecutor executor;
+  Fixture f;
+  std::string requested = "unset";
+  f.transport.RegisterGetExecutorFunc([&](std::string_view name) {
+    requested = name;
+    return executor.Handle();
+  });
+  EXPECT_NO_THROW(f.transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false}")));
+  EXPECT_EQ(requested, "");
+}
+
 TEST(InProcessTransportTest, ShutdownDrainsQueuedAsyncDeliveries) {
   GatedExecutor executor;
   Fixture f;

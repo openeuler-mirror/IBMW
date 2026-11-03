@@ -1227,7 +1227,7 @@ ibmw:
 
 | Key | 类型 | 默认 | 说明 |
 |-----|------|------|------|
-| `subscriber_use_inline_executor` | bool | `false` | 在 publisher 线程中运行回调 |
+| `subscriber_use_inline_executor` | bool | `true` | 在 publisher 线程中运行回调 |
 | `subscriber_executor` | string | `""` | 默认 subscriber 回调 Executor |
 
 ---

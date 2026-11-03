@@ -27,8 +27,10 @@ struct convert<ibmw::runtime::core::transport::InProcessTransport::Options> {
   static bool decode(const Node& node, Options& rhs) {
     if (!node.IsMap()) return false;
 
-    rhs.subscriber_use_inline_executor = node["subscriber_use_inline_executor"].as<bool>();
-    if (!rhs.subscriber_use_inline_executor)
+    // Both keys are optional and keep their defaults when absent.
+    if (node["subscriber_use_inline_executor"])
+      rhs.subscriber_use_inline_executor = node["subscriber_use_inline_executor"].as<bool>();
+    if (node["subscriber_executor"])
       rhs.subscriber_executor = node["subscriber_executor"].as<std::string>();
 
     return true;

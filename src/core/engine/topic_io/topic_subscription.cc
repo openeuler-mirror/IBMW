@@ -82,9 +82,11 @@ YAML::Node SubscriptionRuntimeConfig(
     const auto items = config["extensions"]["items"];
     Require(items.IsSequence(), "--config-file requires ibmw.extensions.items.");
     unsigned matches = 0;
+    // Items of other extensions may lack fields; only the selected one is checked.
     for (const auto& item : items) {
-      if (item["name"].as<std::string>() != extension_name) continue;
+      if (!item.IsMap() || !item["name"] || item["name"].as<std::string>() != extension_name) continue;
       ++matches;
+      Require(bool(item["path"]), "--config-file " + extension_name + " requires a path.");
       extension = YAML::Clone(item);
       extension["path"] = resolve_path(item["path"].as<std::string>());
     }
@@ -93,7 +95,7 @@ YAML::Node SubscriptionRuntimeConfig(
     const auto drivers = config["messaging"]["drivers"];
     Require(drivers.IsSequence(), "--config-file requires ibmw.messaging.drivers.");
     for (const auto& item : drivers) {
-      if (item["type"].as<std::string>() != driver) continue;
+      if (!item.IsMap() || !item["type"] || item["type"].as<std::string>() != driver) continue;
       ++matches;
       transport = YAML::Clone(item);
     }
