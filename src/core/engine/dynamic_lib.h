@@ -143,7 +143,9 @@ class DynamicLib {
     LocalFree(lp_msg_buf);
     return ret;
 #else
-    return std::string(dlerror());
+    // dlerror() returns NULL when no error is pending (or it was already read).
+    const char* err = dlerror();
+    return err != nullptr ? std::string(err) : std::string("no dynamic library error pending");
 #endif
   }
 
