@@ -299,6 +299,93 @@ TEST(SqliteBagReaderIntegrityTest, EnforcesSequenceBoundaryOnRead) {
       ibmw::common::util::IbmwException);
 }
 
+// EXT-036: per-channel counts match the messages of each channel, both for
+// few channels (one COUNT per channel) and many (one GROUP BY pass);
+// channels without messages count 0.
+TEST(SqliteBagReaderIntegrityTest, CountsMessagesPerChannel) {
+  TemporaryDirectory temporary("ibmw-sqlite-counts");
+  for (const int channel_count : {3, 5}) {
+    const auto path = temporary.Path() / ("counts" + std::to_string(channel_count) + ".db3");
+    std::vector<std::string> statements{
+        kSchemasTable, kChannelsTable, kMessagesTable, InsertSchema(1),
+        "INSERT INTO channels VALUES(1,1,'/a','test:StorageMessage','cdr','{\"reliability\":\"reliable\"}')"};
+    for (int id = 2; id <= channel_count; ++id) {
+      statements.push_back("INSERT INTO channels VALUES(" + std::to_string(id) + ",1,'/t" + std::to_string(id) +
+                           "','test:StorageMessage','cdr','{}')");
+    }
+    for (int i = 0; i < 3; ++i) statements.push_back(InsertMessage(i));
+    for (int i = 0; i < 2; ++i) {
+      statements.push_back(
+          "INSERT INTO messages(channel_id,sequence,log_time,publish_time,payload) VALUES(2," +
+          std::to_string(i) + ",101,100,X'01')");
+    }
+    ExecuteSql(path, statements);
+    SqliteBagReader reader;
+    ASSERT_NO_THROW(reader.Open(path)) << channel_count;
+    const auto& channels = reader.Info().channels;
+    ASSERT_EQ(channels.size(), static_cast<size_t>(channel_count));
+    EXPECT_EQ(channels[0].message_count, 3u) << channel_count;
+    EXPECT_EQ(channels[1].message_count, 2u) << channel_count;
+    for (int id = 3; id <= channel_count; ++id) EXPECT_EQ(channels[id - 1].message_count, 0u) << channel_count;
+    EXPECT_EQ(channels[0].topic.qos.policies.at("reliability"), "reliable");
+    EXPECT_TRUE(reader.Info().closed_cleanly);
+  }
+}
+
+// EXT-036: qos_json is untrusted input and fails with an MW exception.
+TEST(SqliteBagReaderIntegrityTest, RejectsInvalidQosJson) {
+  TemporaryDirectory temporary("ibmw-sqlite-qos");
+  int index = 0;
+  for (const char* qos : {"not json", "[]", "{\"depth\":1}", ""}) {
+    const auto path = temporary.Path() / ("qos" + std::to_string(index++) + ".db3");
+    ExecuteSql(path, {kSchemasTable, kChannelsTable, kMessagesTable, InsertSchema(1),
+                      std::string("INSERT INTO channels VALUES(1,1,'/a','test:StorageMessage','cdr','") + qos +
+                          "')"});
+    SqliteBagReader reader;
+    EXPECT_THROW(reader.Open(path), ibmw::common::util::IbmwException) << qos;
+  }
+}
+
+// EXT-036: integrity_check: false skips PRAGMA quick_check. A damaged page in
+// a table the reader never reads fails only that check.
+TEST(SqliteBagReaderIntegrityTest, IntegrityCheckCanBeDisabled) {
+  TemporaryDirectory temporary("ibmw-sqlite-quick-check");
+  const auto path = temporary.Path() / "damaged.db3";
+  ExecuteSql(path, {"PRAGMA page_size=4096", kSchemasTable, kChannelsTable, kMessagesTable,
+                    InsertSchema(1), InsertChannel(1, 1), InsertMessage(1),
+                    "CREATE TABLE unrelated(data BLOB)", "INSERT INTO unrelated VALUES(zeroblob(100))"});
+  int64_t root_page = 0;
+  {
+    sqlite3* database = nullptr;
+    ASSERT_EQ(sqlite3_open(path.c_str(), &database), SQLITE_OK);
+    sqlite3_stmt* statement = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(database, "SELECT rootpage FROM sqlite_master WHERE name='unrelated'", -1,
+                                 &statement, nullptr),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_step(statement), SQLITE_ROW);
+    root_page = sqlite3_column_int64(statement, 0);
+    sqlite3_finalize(statement);
+    ASSERT_EQ(sqlite3_close(database), SQLITE_OK);
+  }
+  ASSERT_GT(root_page, 1);
+  {
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    file.seekp((root_page - 1) * 4096);
+    file.put(static_cast<char>(0xff));  // invalid b-tree page type
+  }
+
+  SqliteBagReader checked;
+  EXPECT_THROW(checked.Open(path), ibmw::common::util::IbmwException);
+
+  const auto config = temporary.Path() / "reader.yaml";
+  std::ofstream(config) << "integrity_check: false\n";
+  SqliteBagReader unchecked;
+  ASSERT_NO_THROW(unchecked.Open(path, {.storage_config_file = config}));
+  ASSERT_EQ(unchecked.Info().channels.size(), 1u);
+  EXPECT_EQ(unchecked.Info().channels[0].message_count, 1u);
+  EXPECT_FALSE(unchecked.Info().closed_cleanly);
+}
+
 TEST(StorageContentRoundTripTest, McapPreservesContentAndSequenceBoundary) {
   TemporaryDirectory temporary("ibmw-mcap-roundtrip");
   ExpectContentRoundTrip<McapStorage, McapBagReader>(

@@ -183,6 +183,11 @@ details remain governed by the documentation for each release.
   (COMM-039).
 - The console logger's `Flush()` now waits (up to 1 s) for the entries already queued on its
   log executor, and the engine no longer sleeps a fixed 50 ms after flushing at shutdown (CORE-015).
+- Opening a SQLite bag counts messages with one `GROUP BY` pass when the file
+  has more than three channels instead of one full table scan per channel, an
+  invalid `qos_json` now fails with an `IbmwException` naming the channel, and
+  the reader configuration accepts `integrity_check: false` to skip
+  `PRAGMA quick_check` on trusted files (default stays `true`) (EXT-036).
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /
