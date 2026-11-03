@@ -276,7 +276,7 @@ struct RuntimePlaybackServer::Session {
 
   void Start() {
     std::filesystem::remove(socket_path);
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime playback socket.");
     server_fd = fd;
     // Linux creates the socket file with this mode, so it is never more open
@@ -305,7 +305,7 @@ struct RuntimePlaybackServer::Session {
   }
 
   void Stream(int listen_fd) {
-    const int accepted = ::accept(listen_fd, nullptr, nullptr);
+    const int accepted = ::accept4(listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
     if (accepted < 0) {
       return;
     }
@@ -500,7 +500,7 @@ void UnixRuntimePlaybackClient::Start(
       advertisement.topic.topic, advertisement.publisher_id);
   session_id_ = session.session_id;
   try {
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime playback client socket.");
     stream_fd_ = fd;
     const auto address = MakeSocketAddress(session.stream_socket);

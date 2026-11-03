@@ -261,7 +261,7 @@ struct RuntimeTapServer::Session {
 
   void Start() {
     std::filesystem::remove(socket_path);
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime tap socket.");
     server_fd = fd;
     const auto address = MakeSocketAddress(socket_path.string());
@@ -280,7 +280,7 @@ struct RuntimeTapServer::Session {
     stream_thread = std::thread([this] {
       int accepted = -1;
       try {
-        accepted = ::accept(server_fd.load(), nullptr, nullptr);
+        accepted = ::accept4(server_fd.load(), nullptr, nullptr, SOCK_CLOEXEC);
         if (accepted < 0) {
           if (!stopping.load()) {
             Fail(
@@ -674,7 +674,7 @@ void UnixRuntimeTapClient::StartTap(
     const auto session = agent_client_.StartTap(
         advertisement.topic.topic, advertisement.publisher_id);
     session_id_ = session.session_id;
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime tap client socket.");
     stream_fd_ = fd;
     const auto address = MakeSocketAddress(session.stream_socket);

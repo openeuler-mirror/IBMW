@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -270,7 +271,7 @@ class FakeAgent {
     EXPECT_EQ(::bind(listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
     EXPECT_EQ(::listen(listen_fd_, 1), 0);
     thread_ = std::thread([this, id = std::move(id), delay] {
-      const int fd = ::accept(listen_fd_, nullptr, nullptr);
+      const int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
       if (fd < 0) return;
       std::string request;
       char c = 0;
@@ -324,6 +325,44 @@ TEST_F(RuntimeGraphAgentTest, ClientRetriesInterruptedReceive) {
 TEST_F(RuntimeGraphAgentTest, ClientRejectsAnswerForAnotherRequest) {
   FakeAgent fake(directory_ / "fake.sock", 2, 0ms);
   EXPECT_ANY_THROW(RuntimeGraphAgentClient(fake.Path()).StopTap("s"));
+}
+
+// Socket descriptors of this process that a child would inherit on exec.
+std::set<int> InheritableSockets() {
+  std::set<int> fds;
+  for (const auto& entry : std::filesystem::directory_iterator("/proc/self/fd")) {
+    const int fd = std::stoi(entry.path().filename().string());
+    std::error_code error;
+    const auto target = std::filesystem::read_symlink(entry.path(), error);
+    if (error || target.string().rfind("socket:", 0) != 0) continue;
+    const int flags = ::fcntl(fd, F_GETFD);
+    if (flags >= 0 && (flags & FD_CLOEXEC) == 0) fds.insert(fd);
+  }
+  return fds;
+}
+
+// COMM-029: the agent's listener, its accepted connections and the client's
+// socket are not inherited by processes the runtime starts.
+TEST_F(RuntimeGraphAgentTest, SocketsAreCloseOnExec) {
+  auto expected = InheritableSockets();
+  RuntimeGraphAgent agent({.registration = {.runtime_id = "cloexec-agent"},
+                           .registry_path = directory_});
+  agent.Initialize();
+  agent.Start();
+  RawClient stalled(agent.Registration().control_socket);
+  expected.insert(stalled.fd);  // the test's own socket
+  std::this_thread::sleep_for(200ms);  // the agent accepts and waits for the request
+  EXPECT_EQ(InheritableSockets(), expected);
+
+  FakeAgent fake(directory_ / "fake.sock", 1, 500ms);
+  std::set<int> during_call;
+  std::thread observer([&during_call] {
+    std::this_thread::sleep_for(200ms);
+    during_call = InheritableSockets();
+  });
+  EXPECT_TRUE(RuntimeGraphAgentClient(fake.Path()).StopTap("s"));
+  observer.join();
+  EXPECT_EQ(during_call, expected);
 }
 
 }  // namespace

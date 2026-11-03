@@ -94,7 +94,7 @@ bool RuntimeGraphAgentClient::StopPlayback(std::string_view session_id) const {
 nlohmann::json RuntimeGraphAgentClient::Call(
     std::string_view method,
     nlohmann::json params) const {
-  const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   MW_ASSERT(fd >= 0, "Failed to create Runtime Agent client socket.");
   struct SocketGuard {
     int fd;

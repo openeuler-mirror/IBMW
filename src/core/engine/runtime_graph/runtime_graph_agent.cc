@@ -217,7 +217,7 @@ void RuntimeGraphAgent::Initialize() {
         registration.runtime_id);
     std::filesystem::remove(registration.control_socket);
     std::filesystem::remove(registration_path_);
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime Agent socket.");
     server_fd_ = fd;
     const auto address = MakeSocketAddress(registration.control_socket);
@@ -302,7 +302,7 @@ void RuntimeGraphAgent::Serve() {
     if (fd < 0) {
       break;
     }
-    const int client = ::accept(fd, nullptr, nullptr);
+    const int client = ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
     if (client < 0) {
       if (errno == EINTR) {
         continue;
