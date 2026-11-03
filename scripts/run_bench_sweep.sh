@@ -32,6 +32,7 @@
 #   IBMW_BENCH_RETRIES=3 scripts/run_bench_sweep.sh  # retry failed sample/size runs
 #   IBMW_BUILD_DIR="<ibmw-build-dir>" scripts/run_bench_sweep.sh
 #   IBMW_BENCH_SAMPLES="dds_loaned dds_send_shm" scripts/run_bench_sweep.sh 4096 4KB
+#   IBMW_BENCH_LOG_DIR=<dir> scripts/run_bench_sweep.sh   # keep logs there (default: mktemp -d)
 #
 # Prerequisites:
 #   - cmake --build build && cmake --install build --prefix build
@@ -44,6 +45,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${IBMW_BUILD_DIR:-${REPO_ROOT}/build}"
 DURATION="${DURATION:-}"
+# Per-sample logs go to a private directory (default: new mktemp -d), not to
+# fixed names in the shared /tmp.
+LOG_DIR="${IBMW_BENCH_LOG_DIR:-}"
 IBMW_BENCH_RETRIES="${IBMW_BENCH_RETRIES:-1}"
 
 DEFAULT_SAMPLES=(iox_loaned_pod iox_loaned_ctx iox_send
@@ -251,7 +255,7 @@ run_one_size() {
 
   for s in "${SAMPLES[@]}"; do
     echo "--- ${s} @ ${label} ---"
-    local log="/tmp/sweep_${s}_${label}.log"
+    local log="${LOG_DIR}/sweep_${s}_${label}.log"
     local attempt=1
     local sample_ok=0
     while (( attempt <= IBMW_BENCH_RETRIES )); do
@@ -288,6 +292,12 @@ run_one_size() {
 }
 
 # --- main loop ---------------------------------------------------------------
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ibmw_bench_sweep.XXXXXX")"
+else
+  mkdir -p "${LOG_DIR}"
+fi
+echo "sweep logs: ${LOG_DIR}"
 backup_yaml
 
 if [[ -n "${SINGLE_SIZE}" ]]; then

@@ -3,7 +3,8 @@
 #
 # Smoke-test staging helper. Idempotent: removes the stage first.
 #
-# Inputs : $REPO_ROOT (auto-resolved), $BUILD ($REPO_ROOT/build), $STAGE (default /tmp/ibmw_regress/stage)
+# Inputs : $REPO_ROOT (auto-resolved), $BUILD ($REPO_ROOT/build), $STAGE (default /tmp/ibmw_regress/stage;
+#          its parent must be a real directory owned by the current user or root)
 # Output : staged binaries+libs+cfg+cli.yaml+run_all_tests.sh under $STAGE
 # Run    : after a successful `cmake --build build`. Then:
 #            cd $STAGE && LD_LIBRARY_PATH=$PWD/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH ./run_all_tests.sh
@@ -15,6 +16,14 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BUILD="${BUILD:-$REPO_ROOT/build}"
 STAGE="${STAGE:-/tmp/ibmw_regress/stage}"
 
+# The default stage is in the shared /tmp: do not delete it through a planted
+# link or inside another user's directory.
+STAGE_PARENT="$(dirname -- "${STAGE%/}")"
+mkdir -p "$STAGE_PARENT"
+if [ -L "$STAGE_PARENT" ] || { [ ! -O "$STAGE_PARENT" ] && [ "$(stat -c %u -- "$STAGE_PARENT")" != 0 ]; }; then
+  echo "stage: $STAGE_PARENT must be a directory owned by $(id -un) or root, not a link" >&2
+  exit 1
+fi
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$STAGE/cfg" "$STAGE/lib"
 

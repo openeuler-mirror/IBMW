@@ -28,7 +28,9 @@
 #   bash scripts/run_dual_build_matrix.sh --build-only ...    # build only (commit #3 behaviour)
 #
 # Environment:
-#   IBMW_MATRIX_ROOT   override build root (default /tmp/ibmw_matrix)
+#   IBMW_MATRIX_ROOT   override build root (default /tmp/ibmw_matrix); must be
+#                      a real directory of the current user (entries in it are
+#                      deleted with rm -rf)
 #   IBMW_MATRIX_JOBS   override -j parallelism (default $(nproc))
 #   IBMW_MATRIX_YAML   override yaml config path (default scripts/dual_build_matrix.yaml)
 #
@@ -189,6 +191,13 @@ else
 fi
 
 mkdir -p "${MATRIX_ROOT}"
+# The default root is in the shared /tmp and each entry below it is removed
+# with rm -rf: refuse a planted link or another user's directory.
+if [[ -L "${MATRIX_ROOT%/}" || ! -d "${MATRIX_ROOT}" || ! -O "${MATRIX_ROOT}" ]]; then
+  echo "[matrix] ${MATRIX_ROOT} must be a directory owned by $(id -un), not a link;" \
+       "set IBMW_MATRIX_ROOT" >&2
+  exit 2
+fi
 
 declare -A CONFIG_RC
 declare -A BUILD_RC
