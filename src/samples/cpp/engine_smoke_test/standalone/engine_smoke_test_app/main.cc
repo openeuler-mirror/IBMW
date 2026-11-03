@@ -19,12 +19,15 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -106,19 +109,39 @@ class OutputCapture {
   FILE* tmp_file_ = nullptr;
 };
 
-// Write a temporary config that enables a console logger (so all 11
-// subsystem "initialized" / "stopped" messages are visible on stderr).
-static const char* kTestCfgPath = "/tmp/ibmw_smoke_test_cfg.yaml";
+// A config file with a unique name in the temp directory, removed when the
+// object goes out of scope.
+class TempConfig {
+ public:
+  explicit TempConfig(const std::string& content)
+      : path_((std::filesystem::temp_directory_path() / "ibmw_smoke_test_XXXXXX.yaml").string()) {
+    const int fd = ::mkstemps(path_.data(), 5);
+    if (fd < 0) throw std::runtime_error("cannot create a temporary config file");
+    const bool written = ::write(fd, content.data(), content.size()) == static_cast<ssize_t>(content.size());
+    ::close(fd);
+    if (!written) {
+      std::remove(path_.c_str());
+      throw std::runtime_error("cannot write the temporary config file");
+    }
+  }
+  ~TempConfig() { std::remove(path_.c_str()); }
+  TempConfig(const TempConfig&) = delete;
+  TempConfig& operator=(const TempConfig&) = delete;
 
-static void WriteTestConfig() {
-  std::ofstream f(kTestCfgPath);
-  f << "ibmw:\n"
-    << "  logging:\n"
-    << "    core_level: INFO\n"
-    << "    backends:\n"
-    << "      - type: console\n";
-  f.close();
-}
+  const std::string& Path() const { return path_; }
+
+ private:
+  std::string path_;
+};
+
+// A config that enables a console logger (so all 11 subsystem "initialized" /
+// "stopped" messages are visible on stderr).
+static const char* kTestConfig =
+    "ibmw:\n"
+    "  logging:\n"
+    "    core_level: INFO\n"
+    "    backends:\n"
+    "      - type: console\n";
 
 // ---------------------------------------------------------------------------
 // Test 1: No-config lifecycle
@@ -195,13 +218,13 @@ bool test_topological_init_order() {
   };
 
   try {
-    WriteTestConfig();
+    TempConfig cfg(kTestConfig);
     std::string logs;
     {
       OutputCapture cap;
       Engine engine;
       Engine::Options options;
-      options.cfg_file_path = kTestCfgPath;
+      options.cfg_file_path = cfg.Path();
       engine.Initialize(options);
       // Shutdown while capture still active (to avoid mixing shutdown logs with test output).
       auto fu = engine.AsyncStart();
@@ -284,13 +307,13 @@ bool test_shutdown_reverse_order() {
   TEST_CASE("Shutdown reverse order verification");
 
   try {
-    WriteTestConfig();
+    TempConfig cfg(kTestConfig);
     std::string logs;
     {
       OutputCapture cap;
       Engine engine;
       Engine::Options options;
-      options.cfg_file_path = kTestCfgPath;
+      options.cfg_file_path = cfg.Path();
       engine.Initialize(options);
       auto fu = engine.AsyncStart();
       engine.Shutdown();
@@ -407,13 +430,13 @@ bool test_r15_init_report() {
   TEST_CASE("R15 initialization report (polymorphic generation)");
 
   try {
-    WriteTestConfig();
+    TempConfig cfg(kTestConfig);
     std::string logs;
     {
       OutputCapture cap;
       Engine engine;
       Engine::Options options;
-      options.cfg_file_path = kTestCfgPath;
+      options.cfg_file_path = cfg.Path();
       engine.Initialize(options);
       auto fu = engine.AsyncStart();
       engine.Shutdown();
@@ -490,24 +513,21 @@ bool test_init_rollback() {
   TEST_CASE("Init rollback on module load failure");
 
   // Write a temporary config that references a nonexistent .so.
-  const char* tmp_cfg = "/tmp/ibmw_smoke_test_rollback.yaml";
-  {
-    std::ofstream f(tmp_cfg);
-    f << "ibmw:\n"
-      << "  logging:\n"
-      << "    core_level: INFO\n"
-      << "    backends:\n"
-      << "      - type: console\n"
-      << "  modules:\n"
-      << "    packages:\n"
-      << "      - path: ./nonexistent_fake_pkg_12345.so\n"
-      << "        enable_modules: [FakeModule]\n"
-      << "    modules:\n"
-      << "      - name: FakeModule\n";
-    f.close();
-  }
+  std::ostringstream content;
+  content << "ibmw:\n"
+          << "  logging:\n"
+          << "    core_level: INFO\n"
+          << "    backends:\n"
+          << "      - type: console\n"
+          << "  modules:\n"
+          << "    packages:\n"
+          << "      - path: ./nonexistent_fake_pkg_12345.so\n"
+          << "        enable_modules: [FakeModule]\n"
+          << "    modules:\n"
+          << "      - name: FakeModule\n";
 
   try {
+    TempConfig cfg(content.str());
     bool caught_exception = false;
     std::string logs;
     Phase phase_after_rollback = Phase::kConfigure;
@@ -515,7 +535,7 @@ bool test_init_rollback() {
       OutputCapture cap;
       Engine engine;
       Engine::Options options;
-      options.cfg_file_path = tmp_cfg;
+      options.cfg_file_path = cfg.Path();
 
       try {
         engine.Initialize(options);
@@ -557,14 +577,10 @@ bool test_init_rollback() {
     std::cout << "  Rollback shut down " << stop_count
               << " subsystem(s)" << std::endl;
 
-    // Clean up.
-    std::remove(tmp_cfg);
-
     TEST_PASS("Init rollback on module load failure");
     return true;
   } catch (const std::exception& e) {
     std::cout << "  FAIL: unexpected exception: " << e.what() << std::endl;
-    std::remove(tmp_cfg);
     ++g_fail;
     return false;
   }
@@ -620,30 +636,27 @@ bool test_config_lifecycle() {
   TEST_CASE("Config-based lifecycle with YAML");
 
   // Write a minimal but valid config.
-  const char* tmp_cfg = "/tmp/ibmw_smoke_test_config.yaml";
-  {
-    std::ofstream f(tmp_cfg);
-    f << "ibmw:\n"
-      << "  logging:\n"
-      << "    core_level: INFO\n"
-      << "    backends:\n"
-      << "      - type: console\n"
-      << "  scheduling:\n"
-      << "    executors:\n"
-      << "      - name: test_pool\n"
-      << "        type: thread_pool\n"
-      << "        options:\n"
-      << "          thread_num: 1\n";
-    f.close();
-  }
+  std::ostringstream content;
+  content << "ibmw:\n"
+          << "  logging:\n"
+          << "    core_level: INFO\n"
+          << "    backends:\n"
+          << "      - type: console\n"
+          << "  scheduling:\n"
+          << "    executors:\n"
+          << "      - name: test_pool\n"
+          << "        type: thread_pool\n"
+          << "        options:\n"
+          << "          thread_num: 1\n";
 
   try {
+    TempConfig cfg(content.str());
     std::string logs;
     {
       OutputCapture cap;
       Engine engine;
       Engine::Options options;
-      options.cfg_file_path = tmp_cfg;
+      options.cfg_file_path = cfg.Path();
       engine.Initialize(options);
 
       auto fu = engine.AsyncStart();
@@ -670,13 +683,10 @@ bool test_config_lifecycle() {
     TEST_ASSERT(logs.find("console") != std::string::npos,
                 "Report should mention 'console' log driver");
 
-    std::remove(tmp_cfg);
-
     TEST_PASS("Config-based lifecycle with YAML");
     return true;
   } catch (const std::exception& e) {
     std::cout << "  FAIL: exception: " << e.what() << std::endl;
-    std::remove(tmp_cfg);
     ++g_fail;
     return false;
   }

@@ -96,7 +96,8 @@ bash ./start_record_demo.sh
 
 看到 `<N> record_demo publishers are running.` 后保持终端一运行（两种共享内存
 transport 都构建时 N 为 5，只有其中一种时为 4），脚本同时打印需要录制的 topic 列表。
-各 Runtime 的日志写入 `/tmp/record_demo_*.log`。启动脚本不会依赖旧构建产物：`ibmw`、
+各 Runtime 的日志写入脚本新建的私有目录 `${TMPDIR:-/tmp}/ibmw-record-demo.XXXXXX/record_demo_*.log`
+（启动时会打印实际路径；设置 `RECORD_DEMO_LOG_DIR` 可指定目录）。启动脚本不会依赖旧构建产物：`ibmw`、
 `iox-roudi`、`librecord_demo_pkg.so`、transport plugin、TypeSupport、YAML 和脚本均由
 前面的 fresh build 生成；系统只需提供 ROS2 运行库及 `mosquitto`。shm publisher 不需要
 daemon；recorder 与它必须解析到同一个 shm 根目录和 domain（`$IBMW_SHM_ROOT` /

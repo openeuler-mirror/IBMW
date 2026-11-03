@@ -13,6 +13,12 @@ fi
 source "${SCRIPT_DIR}/record_demo_transports.sh"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:+${XDG_RUNTIME_DIR}/ibmw}"
 RUNTIME_DIR="${RUNTIME_DIR:-/tmp/ibmw-$(id -u)}"
+# Logs go to a new private directory unless RECORD_DEMO_LOG_DIR names one.
+LOG_DIR="${RECORD_DEMO_LOG_DIR:-}"
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ibmw-record-demo.XXXXXX")"
+fi
+mkdir -p "${LOG_DIR}"
 
 # Publisher Runtimes, in start order: "<runtime_id> <cfg> <topic>".
 declare -a RUNTIMES=("record-demo-dds ./cfg/record_demo_dds.yaml record_demo_dds_topic")
@@ -75,21 +81,21 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [[ "${RECORD_DEMO_WITH_ICEORYX}" == 1 ]] && ! pgrep -x iox-roudi >/dev/null 2>&1; then
-  ./iox-roudi > /tmp/ibmw-record-demo-roudi.log 2>&1 &
+  ./iox-roudi > "${LOG_DIR}/roudi.log" 2>&1 &
   ROUDI_PID=$!
   sleep 1
   if ! kill -0 "${ROUDI_PID}" 2>/dev/null; then
-    echo "record_demo: fresh-build ./iox-roudi failed to start; see /tmp/ibmw-record-demo-roudi.log." >&2
+    echo "record_demo: fresh-build ./iox-roudi failed to start; see ${LOG_DIR}/roudi.log." >&2
     exit 1
   fi
 fi
 
 if ! ss -ltn '( sport = :1884 )' 2>/dev/null | tail -n +2 | grep -q .; then
-  mosquitto -p 1884 -v > /tmp/ibmw-record-demo-mosquitto.log 2>&1 &
+  mosquitto -p 1884 -v > "${LOG_DIR}/mosquitto.log" 2>&1 &
   MOSQUITTO_PID=$!
   sleep 1
   if ! kill -0 "${MOSQUITTO_PID}" 2>/dev/null; then
-    echo "record_demo: mosquitto failed to listen on 127.0.0.1:1884; see /tmp/ibmw-record-demo-mosquitto.log." >&2
+    echo "record_demo: mosquitto failed to listen on 127.0.0.1:1884; see ${LOG_DIR}/mosquitto.log." >&2
     exit 1
   fi
 fi
@@ -104,7 +110,7 @@ declare -a TOPICS=()
 for runtime in "${RUNTIMES[@]}"; do
   read -r runtime_id cfg topic <<< "${runtime}"
   echo "Starting ${cfg}"
-  ./ibmw run "${cfg}" > "/tmp/$(basename "${cfg%.yaml}").log" 2>&1 &
+  ./ibmw run "${cfg}" > "${LOG_DIR}/$(basename "${cfg%.yaml}").log" 2>&1 &
   child_pid=$!
   CHILDREN+=("${child_pid}")
   CHILD_PIDS[${runtime_id}]="${child_pid}"
@@ -142,5 +148,5 @@ echo "${#RUNTIME_IDS[@]} record_demo publishers are running."
 echo "Run recording in another terminal:"
 echo "  ./ibmw bag record ${TOPICS[*]} -o record_demo_bag"
 echo "Then run: ./ibmw bag info record_demo_bag"
-echo "Publisher logs: /tmp/record_demo_*.log"
+echo "Publisher logs: ${LOG_DIR}/record_demo_*.log"
 wait
