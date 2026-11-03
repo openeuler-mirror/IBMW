@@ -43,8 +43,6 @@ void set_console_window(void) {
   dwSize.Y = 1024;
   SetConsoleScreenBufferSize(g_hConsole, dwSize);
   SetConsoleMode(g_hConsole, ENABLE_QUICK_EDIT_MODE | ENABLE_EXTENDED_FLAGS);
-  // HMENU hMenu = GetSystemMenu(GetConsoleWindow(), FALSE);
-  // EnableMenuItem(hMenu, SC_CLOSE, MF_GRAYED);
 
   return;
 }
