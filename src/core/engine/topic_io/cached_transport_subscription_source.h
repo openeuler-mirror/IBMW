@@ -40,6 +40,8 @@ class CachedTransportSubscriptionRegistry {
     std::exception_ptr error;
     std::atomic<uint64_t> loaned_sequence{0};
     const ibmw::common::util::LoggerWrapper* logger = nullptr;
+    // Set after the first dropped undersized loan has been reported.
+    std::atomic<bool> undersized_loan_reported{false};
     // The in_flight deliveries, linked through their stack frames: Stop()
     // from a subscription callback must not wait for the delivery it runs in.
     struct Delivery {

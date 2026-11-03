@@ -115,6 +115,13 @@ typedef struct {
    */
   const void* (*custom_type_support_ptr)(void* ctx);
 
+  /**
+   * @brief Smallest byte size of one in-memory message, normally sizeof(T).
+   * 0 means unknown. A loaned payload smaller than this is never read as a
+   * message; loaned capture drops payloads whose type reports 0.
+   */
+  size_t msg_min_size;
+
   /// Implement pointer
   void* ctx;
 } ibmw_type_support_base_t;

@@ -1,6 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <string>
 #include <string_view>
 
 #include <gtest/gtest.h>
@@ -69,6 +70,18 @@ TEST(TypeSupportPkgLoader, RejectsTruncatedSchemaPackage) {
       loader.TryLoadTypeSupportPkg(
           TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH),
       ibmw::common::util::IbmwException);
+  EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
+}
+
+// COMM-024: packages built before msg_min_size existed must be rebuilt.
+TEST(TypeSupportPkgLoader, RejectsOlderPackageAbi) {
+  TypeSupportPkgLoader loader;
+  try {
+    loader.TryLoadTypeSupportPkg(TYPE_SUPPORT_OLD_PACKAGE_FIXTURE_PATH);
+    FAIL() << "older package ABI was accepted";
+  } catch (const ibmw::common::util::IbmwException& e) {
+    EXPECT_NE(std::string(e.what()).find("older ABI"), std::string::npos) << e.what();
+  }
   EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
 }
 

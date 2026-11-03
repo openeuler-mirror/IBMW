@@ -130,7 +130,11 @@ const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
   ++load_count;
   if (load_hook) load_hook(load_hook_context);
   static const ibmw_type_support_package_v1_t package{
+#if defined(IBMW_TYPE_SUPPORT_FIXTURE_OLD_PACKAGE_VERSION)
       .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+#else
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
+#endif
       .struct_size = sizeof(ibmw_type_support_package_v1_t),
       .entry_count = std::size(type_support_array),
       .entries = type_support_array,

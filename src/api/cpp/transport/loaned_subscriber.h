@@ -239,6 +239,7 @@ class LoanedSubscriber {
       .serialization_types_supported_num = [](void*) -> size_t { return 0; },
       .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return nullptr; },
       .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .msg_min_size = sizeof(T),
       .ctx = nullptr};
 };
 

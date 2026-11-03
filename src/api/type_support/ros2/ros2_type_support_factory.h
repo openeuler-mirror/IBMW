@@ -332,6 +332,7 @@ const ibmw_type_support_base_t* GetIbmwTypeSupport(const std::string& ros2_type_
         return &type_support;
       },
 
+      .msg_min_size = sizeof(ROS2MsgType),
       .ctx = nullptr};
 
   return &kTs;

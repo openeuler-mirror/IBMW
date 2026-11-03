@@ -6,7 +6,7 @@ extern "C" const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackage
   static const ibmw_type_support_base_t* entries[] = {
       ibmw::json::GetJsonMessageTypeSupport<Request>(), ibmw::json::GetJsonMessageTypeSupport<Response>()};
   static const ibmw_type_support_package_v1_t package{
-      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
       .struct_size = sizeof(ibmw_type_support_package_v1_t), .entry_count = 2, .entries = entries};
   return &package;
 }

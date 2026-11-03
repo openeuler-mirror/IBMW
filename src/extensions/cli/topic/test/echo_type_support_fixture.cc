@@ -81,7 +81,7 @@ extern "C" const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackage
 #endif
       WireDecoder<4>(), WireDecoder<6>()};
   static const ibmw_type_support_package_v1_t package{
-      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
       .struct_size = sizeof(ibmw_type_support_package_v1_t),
       .entry_count = sizeof(entries) / sizeof(entries[0]), .entries = entries};
   return &package;

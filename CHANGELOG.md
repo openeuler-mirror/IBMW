@@ -162,6 +162,14 @@ details remain governed by the documentation for each release.
   context table without `try_set_used` is rejected as already used. Publishing
   with a caller's context costs about +3.5 ns (measured, ~2%); publishing
   without one is unchanged.
+- Type-support package ABI is now 2 (`IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2`)
+  and `ibmw_type_support_base_t` gains `msg_min_size` before `ctx`. Loaders
+  reject version-1 packages with "older ABI ... rebuild"; every type-support
+  package must be rebuilt. The cached loaned capture now drops (and releases)
+  a loaned payload that is null, smaller than `msg_min_size`, or whose type
+  reports `msg_min_size == 0`, logging one warning per subscription. The
+  built-in POD, JSON, ROS 2 and DDS type supports and `ibmw_gen` output fill
+  it with `sizeof(T)`; hand-written tables must set it to keep loaned capture.
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

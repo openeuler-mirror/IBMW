@@ -101,8 +101,13 @@ bool TypeSupportPkgLoader::TryLoadTypeSupportPkg(std::string_view path) {
   const auto* package = reinterpret_cast<DynlibGetTypeSupportPackageV1Func>(
       get_package_func)();
   MW_ASSERT(
+      package == nullptr || package->abi_version != IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      "Library {} exports a TypeSupport package of an older ABI (version 1); rebuild it against this "
+      "IBMW (package ABI version 2).",
+      candidate_path);
+  MW_ASSERT(
       package != nullptr &&
-          package->abi_version == IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1 &&
+          package->abi_version == IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2 &&
           package->struct_size >= IBMW_TYPE_SUPPORT_PACKAGE_V1_REQUIRED_SIZE &&
           (package->entry_count == 0 || package->entries != nullptr),
       "Library {} exports an invalid TypeSupport package V1 descriptor.",

@@ -657,7 +657,7 @@ static const ibmw_type_support_base_t* kTypeSupportArray[] = {
 
 const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
   static const ibmw_type_support_package_v1_t kPackage{
-      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
       .struct_size = sizeof(ibmw_type_support_package_v1_t),
       .entry_count = std::size(kTypeSupportArray),
       .entries = kTypeSupportArray,

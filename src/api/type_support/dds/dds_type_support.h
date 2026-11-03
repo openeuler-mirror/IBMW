@@ -311,6 +311,7 @@ const ibmw_type_support_base_t* GetDdsMessageTypeSupport(
           return &ts;
         }
       },
+      .msg_min_size = sizeof(DdsType),
       .ctx = nullptr};
 
   return &kTs;

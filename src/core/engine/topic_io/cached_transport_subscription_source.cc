@@ -278,12 +278,31 @@ CachedTransportSubscriptionRegistry::Attach(
         ibmw::runtime::core::transport::LoanedMessageHandlerWrapper>();
     loaned_handler->info = handler_ptr->info;
     loaned_handler->callback =
-        [state, info = loaned_handler->info](
+        [state, info = loaned_handler->info, min_size = type_support.NativeHandle()->msg_min_size](
             const ibmw_transport_context_base_t* context,
             const void* payload,
             size_t payload_size,
             std::function<void()>&& release) {
-          static_cast<void>(payload_size);
+          // The payload is read as one typed message: a loan smaller than the
+          // type, or of a type whose size is unknown, is dropped (COMM-024).
+          if (payload == nullptr || min_size == 0 || payload_size < min_size) [[unlikely]] {
+            ReleaseGuard release_guard{std::move(release)};
+            if (!state->undersized_loan_reported.exchange(true, std::memory_order_relaxed)) {
+              const ibmw::common::util::LoggerWrapper* logger = nullptr;
+              {
+                std::lock_guard lock(state->mutex);
+                logger = state->logger;
+              }
+              if (logger != nullptr) {
+                MW_LOG(*logger, ibmw::common::util::kLogLevelWarn,
+                       "Dropping loaned message of {} bytes on topic '{}': type '{}' needs {} bytes{}. "
+                       "Further drops on this subscription are not reported.",
+                       payload_size, info.topic_name, info.msg_type, min_size,
+                       min_size == 0 ? " (size unknown)" : "");
+              }
+            }
+            return;
+          }
           ibmw::runtime::core::transport::MessageFrame frame{
               .info = info,
               .msg_ptr = payload,

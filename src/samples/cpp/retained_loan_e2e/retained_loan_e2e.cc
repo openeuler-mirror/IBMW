@@ -86,6 +86,7 @@ const ibmw_type_support_base_t* DirectTypeSupport() {
       .serialization_types_supported_num = [](void*) { return size_t{1}; },
       .serialization_types_supported_list = [](void*) { return serializations; },
       .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .msg_min_size = sizeof(SerializedPayload),
       .ctx = nullptr};
   return &support;
 }

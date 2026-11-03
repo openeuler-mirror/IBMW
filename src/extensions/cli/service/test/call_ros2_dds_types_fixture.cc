@@ -7,7 +7,7 @@ extern "C" const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackage
       ibmw::ros2::GetIbmwTypeSupport<example_interfaces::srv::AddTwoInts_Request>("example_interfaces/srv/AddTwoInts_Request"),
       ibmw::ros2::GetIbmwTypeSupport<example_interfaces::srv::AddTwoInts_Response>("example_interfaces/srv/AddTwoInts_Response")};
   static const ibmw_type_support_package_v1_t package{
-      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
       .struct_size = sizeof(ibmw_type_support_package_v1_t), .entry_count = 2, .entries = entries};
   return &package;
 }
