@@ -5,7 +5,6 @@ import os
 import sys
 import platform
 from jinja2 import Environment, PackageLoader
-import importlib.resources as importlib_resources
 
 
 chmod_shell_name = [
@@ -34,7 +33,6 @@ class GeneratorBase:
         else:
             template_package = 'ibmw_cli.' + template_info['template_package']
         template_file = template_info['template_file']
-        importlib_resources.files(template_package).joinpath(template_file)
 
         file_loader = PackageLoader(template_package, ".")
         env = Environment(loader=file_loader)
