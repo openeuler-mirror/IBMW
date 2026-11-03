@@ -6,14 +6,40 @@
 #include <chrono>
 #include <future>
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include "engine/executor/executor_access.h"
 #include "engine/executor/thread_pool_executor.h"
+#include "base/exception.h"
+#include "record_playback_ext/playback_action.h"
 #include "record_playback_ext/record_action.h"
 
 namespace ibmw::extensions::record_playback_extension {
 namespace {
+
+// EXT-043: a second Initialize names the action, not a transport driver.
+template <typename Action>
+std::string SecondInitializeError() {
+  Action action;
+  try {
+    action.Initialize(YAML::Node());  // may fail later; the state is already Init
+  } catch (const ibmw::common::util::IbmwException&) {
+  }
+  try {
+    action.Initialize(YAML::Node());
+  } catch (const ibmw::common::util::IbmwException& e) {
+    return e.what();
+  }
+  return {};
+}
+
+TEST(ActionInitializeTest, SecondInitializeNamesTheAction) {
+  EXPECT_NE(SecondInitializeError<RecordAction>().find("Record action can only be initialized once."),
+            std::string::npos);
+  EXPECT_NE(SecondInitializeError<PlaybackAction>().find("Playback action can only be initialized once."),
+            std::string::npos);
+}
 
 class RecordActionExecutorFixture : public testing::Test {
  protected:

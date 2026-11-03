@@ -219,7 +219,7 @@ RecordAction::~RecordAction() noexcept {
 void RecordAction::Initialize(YAML::Node options) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
-      "Local transport driver can only be initialized once.");
+      "Record action can only be initialized once.");
 
   if (options && !options.IsNull())
     options_ = options.as<Options>();

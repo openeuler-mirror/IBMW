@@ -90,7 +90,7 @@ PlaybackAction::~PlaybackAction() noexcept {
 void PlaybackAction::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
-      "Local transport driver can only be initialized once.");
+      "Playback action can only be initialized once.");
 
   if (options_node && !options_node.IsNull())
     options_ = options_node.as<Options>();
