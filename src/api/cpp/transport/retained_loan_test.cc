@@ -10,6 +10,7 @@
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <vector>
 
 #include <sys/mman.h>
 
@@ -549,6 +550,40 @@ TEST(LoanedSubscriber, ThrowingAttachCallbacksDoNotEscapeNoexceptBridge) {
       [](const Pod&, size_t) { throw std::runtime_error("expected"); }));
   callback = LoanedMessageCallback(fake.attached_callback);
   EXPECT_NO_THROW(callback(nullptr, &pod, sizeof(pod), nullptr));
+}
+
+// API-031: a throwing callback is reported, once per second per
+// subscription, instead of being swallowed silently.
+TEST(LoanedSubscriber, ThrowingCallbackIsReportedAndRateLimited) {
+  auto& logger = details::LoanedCallbackErrorLogger();
+  const auto saved = logger;
+  std::vector<std::string> errors;
+  logger.get_log_level_func = [] { return ibmw::common::util::kLogLevelTrace; };
+  logger.log_func = [&errors](uint32_t level, uint32_t, const char*, const char*, const char* text, size_t len) {
+    if (level == ibmw::common::util::kLogLevelError) errors.emplace_back(text, len);
+  };
+
+  FakeReceiver fake;
+  ASSERT_TRUE(LoanedSubscriber<Pod>::Attach(
+      ReceiverRef(&fake.base), "PodA",
+      [](const Pod&) { throw std::runtime_error("boom"); }));
+  LoanedMessageCallback first(fake.attached_callback);
+  Pod pod{42};
+  first(nullptr, &pod, sizeof(pod), nullptr);
+  first(nullptr, &pod, sizeof(pod), nullptr);
+  ASSERT_EQ(errors.size(), 1u);
+  EXPECT_NE(errors[0].find("'PodA' threw: boom"), std::string::npos) << errors[0];
+
+  // A second subscription has its own limit.
+  ASSERT_TRUE(LoanedSubscriber<Pod>::AttachBytes(
+      ReceiverRef(&fake.base), "PodB",
+      [](const Pod&, size_t) { throw 7; }));
+  LoanedMessageCallback second(fake.attached_callback);
+  second(nullptr, &pod, sizeof(pod), nullptr);
+  ASSERT_EQ(errors.size(), 2u);
+  EXPECT_NE(errors[1].find("'PodB' threw: unknown exception"), std::string::npos) << errors[1];
+
+  logger = saved;
 }
 
 TEST(LoanedSubscriber, ThrowingAttachDispatcherReturnsFalseFromNoexceptApi) {
