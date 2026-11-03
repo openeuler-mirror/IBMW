@@ -4,6 +4,7 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
 
+import argparse
 import os
 import sys
 import re
@@ -518,29 +519,21 @@ ibmw::co::Task<ibmw::rpc::Status> {{srv_filename}}IbmwImpl::{{srv_filename}}(
 
 
 if __name__ == '__main__':
-    pkg_name = ""
-    srv_file = ""
-    output_path = ""
-    for arg in sys.argv:
-        kv = arg.split('=')
-        if (kv[0] == '--pkg_name'):
-            pkg_name = kv[1]
-        elif (kv[0] == '--srv_file'):
-            srv_file = kv[1]
-        elif (kv[0] == '--output_path'):
-            output_path = kv[1]
+    parser = argparse.ArgumentParser(description="Generate ibmw RPC code for a ROS2 srv file.")
+    parser.add_argument('--pkg_name', required=True)
+    parser.add_argument('--srv_file', required=True)
+    parser.add_argument('--output_path', required=True)
+    # Further options (ARG_OPTIONS of Ros2IbmwRpcGenCode) are ignored, as before.
+    args, _ = parser.parse_known_args()
+    pkg_name = args.pkg_name
 
-    (path, file) = os.path.split(srv_file)
+    (path, file) = os.path.split(args.srv_file)
     (filename, ext) = os.path.splitext(file)
-    cc_file_path = os.path.join(output_path, filename + ".ibmw_rpc.srv.cc")
-    h_file_path = os.path.join(output_path, filename + ".ibmw_rpc.srv.h")
+    cc_file_path = os.path.join(args.output_path, filename + ".ibmw_rpc.srv.cc")
+    h_file_path = os.path.join(args.output_path, filename + ".ibmw_rpc.srv.h")
 
-    # cc file
-    f_cc_file = open(cc_file_path, 'w')
-    f_cc_file.write(gen_cc_file(pkg_name, filename))
-    f_cc_file.close()
+    with open(cc_file_path, 'w') as f_cc_file:
+        f_cc_file.write(gen_cc_file(pkg_name, filename))
 
-    # h file
-    f_h_file = open(h_file_path, 'w')
-    f_h_file.write(gen_h_file(pkg_name, filename))
-    f_h_file.close()
+    with open(h_file_path, 'w') as f_h_file:
+        f_h_file.write(gen_h_file(pkg_name, filename))
