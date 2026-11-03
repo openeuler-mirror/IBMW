@@ -98,7 +98,12 @@ namespace ibmw::ros2 {
 #if IBMW_ROS2_TYPES_HAS_STD_MSGS_STRING_HEADER
 template <>
 inline uint32_t ROS2CdrSerializer::EstimateSize(const std_msgs::msg::String& msg) {
-  return 4 + 4 + msg.data.size() + 1;  // encapsulation + string length + content + null
+  // encapsulation + string length + content + null, in size_t (API-034).
+  constexpr size_t kOverhead = 4 + 4 + 1;
+  if (msg.data.size() > std::numeric_limits<uint32_t>::max() - kOverhead) {
+    throw std::length_error("std_msgs::msg::String exceeds the CDR payload size limit");
+  }
+  return static_cast<uint32_t>(kOverhead + msg.data.size());
 }
 
 template <>
