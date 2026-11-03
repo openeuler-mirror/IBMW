@@ -33,6 +33,11 @@
 #                      deleted with rm -rf)
 #   IBMW_MATRIX_JOBS   override -j parallelism (default $(nproc))
 #   IBMW_MATRIX_YAML   override yaml config path (default scripts/dual_build_matrix.yaml)
+#   IBMW_ROS2_SETUP    ROS 2 setup script sourced for ctest/smoke (default
+#                      /opt/ros/humble/setup.bash when it exists; empty: none)
+#   IBMW_HOST_LIBDIR   library dir put first on LD_LIBRARY_PATH for ctest/smoke
+#                      (default /usr/lib/<gcc -print-multiarch> when it exists;
+#                      empty: none)
 #
 # Exit code (TOOL-040):
 #   0  every entry's enabled phases passed, or --report was given (the harness
@@ -48,6 +53,37 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MATRIX_ROOT="${IBMW_MATRIX_ROOT:-/tmp/ibmw_matrix}"
 JOBS="${IBMW_MATRIX_JOBS:-$(nproc)}"
 YAML_PATH="${IBMW_MATRIX_YAML:-${REPO_ROOT}/scripts/dual_build_matrix.yaml}"
+
+# Host-specific paths (TOOL-042). An explicitly set path must exist.
+if [[ -n "${IBMW_ROS2_SETUP+set}" ]]; then
+  ROS2_SETUP="${IBMW_ROS2_SETUP}"
+  if [[ -n "${ROS2_SETUP}" && ! -f "${ROS2_SETUP}" ]]; then
+    echo "[matrix] ERROR: IBMW_ROS2_SETUP not found: ${ROS2_SETUP}" >&2
+    exit 2
+  fi
+else
+  ROS2_SETUP=/opt/ros/humble/setup.bash
+  [[ -f "${ROS2_SETUP}" ]] || ROS2_SETUP=""
+fi
+export IBMW_ROS2_SETUP="${ROS2_SETUP}"  # stage_smoke.sh uses the same one.
+if [[ -n "${IBMW_HOST_LIBDIR+set}" ]]; then
+  HOST_LIBDIR="${IBMW_HOST_LIBDIR}"
+  if [[ -n "${HOST_LIBDIR}" && ! -d "${HOST_LIBDIR}" ]]; then
+    echo "[matrix] ERROR: IBMW_HOST_LIBDIR not found: ${HOST_LIBDIR}" >&2
+    exit 2
+  fi
+else
+  HOST_LIBDIR="/usr/lib/$(gcc -print-multiarch 2>/dev/null || true)"
+  [[ "${HOST_LIBDIR}" != /usr/lib/ && -d "${HOST_LIBDIR}" ]] || HOST_LIBDIR=""
+fi
+
+echo "[matrix] ROS 2 setup: ${ROS2_SETUP:-none}; host libdir: ${HOST_LIBDIR:-none}"
+
+source_ros2_setup() {
+  if [[ -n "${ROS2_SETUP}" ]]; then
+    set +u; source "${ROS2_SETUP}" 2>/dev/null || true; set -u
+  fi
+}
 
 BASE_FLAGS=(
   "-DCMAKE_BUILD_TYPE=Release"
@@ -260,8 +296,8 @@ run_ctest() {
   local pattern="${ENTRY_CTEST[$entry]}"
   (
     cd "${build_dir}"
-    set +u; source /opt/ros/humble/setup.bash 2>/dev/null || true; set -u
-    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    source_ros2_setup
+    export LD_LIBRARY_PATH="${HOST_LIBDIR:+${HOST_LIBDIR}:}${LD_LIBRARY_PATH:-}"
     if [[ -n "${pattern}" ]]; then
       ctest -E "${pattern}" --output-on-failure
     else
@@ -288,7 +324,7 @@ run_smoke() {
   local excludes="${ENTRY_SMOKE[$entry]}"
   rm -rf "${stage}"
   (
-    set +u; source /opt/ros/humble/setup.bash 2>/dev/null || true; set -u
+    source_ros2_setup
     export REPO_ROOT="${REPO_ROOT}" BUILD="${build_dir}" STAGE="${stage}"
     bash "${REPO_ROOT}/scripts/stage_smoke.sh"
   ) >"${smoke_log}" 2>&1
@@ -299,7 +335,7 @@ run_smoke() {
   fi
   (
     cd "${stage}"
-    export LD_LIBRARY_PATH="${stage}/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="${stage}/lib${HOST_LIBDIR:+:${HOST_LIBDIR}}:${LD_LIBRARY_PATH:-}"
     ./run_all_tests.sh 2>&1 || true
   ) >>"${smoke_log}" 2>&1
 

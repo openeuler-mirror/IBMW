@@ -7,9 +7,24 @@
 #          its parent must be a real directory owned by the current user or root)
 # Output : staged binaries+libs+cfg+cli.yaml+run_all_tests.sh under $STAGE
 # Run    : after a successful `cmake --build build`. Then:
-#            cd $STAGE && LD_LIBRARY_PATH=$PWD/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH ./run_all_tests.sh
+#            cd $STAGE && LD_LIBRARY_PATH=$PWD/lib:/usr/lib/$(gcc -print-multiarch):$LD_LIBRARY_PATH ./run_all_tests.sh
+# Env    : IBMW_ROS2_SETUP — ROS 2 setup script to source (default
+#          /opt/ros/humble/setup.bash when it exists; empty: none) (TOOL-042)
 set -e
-set +u; source /opt/ros/humble/setup.bash; set -u
+if [ -n "${IBMW_ROS2_SETUP+set}" ]; then
+  ROS2_SETUP="$IBMW_ROS2_SETUP"
+  if [ -n "$ROS2_SETUP" ] && [ ! -f "$ROS2_SETUP" ]; then
+    echo "stage: IBMW_ROS2_SETUP not found: $ROS2_SETUP" >&2
+    exit 1
+  fi
+else
+  ROS2_SETUP=/opt/ros/humble/setup.bash
+  [ -f "$ROS2_SETUP" ] || ROS2_SETUP=""
+fi
+if [ -n "$ROS2_SETUP" ]; then
+  set +u; source "$ROS2_SETUP"
+fi
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
