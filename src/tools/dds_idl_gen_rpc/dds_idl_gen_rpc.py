@@ -874,7 +874,11 @@ def main():
 
     # Determine IDL file stem for the output filenames
     if "idl_file" in config:
-        idl_file_stem = os.path.splitext(config["idl_file"])[0]
+        # Only the file name: the outputs stay inside output_path.
+        idl_file_stem = os.path.splitext(os.path.basename(config["idl_file"]))[0]
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", idl_file_stem):
+            print(f"Error: invalid idl_file '{config['idl_file']}'", file=sys.stderr)
+            sys.exit(1)
     else:
         # Fallback: use the service file stem
         idl_file_stem = os.path.splitext(os.path.basename(service_file))[0]
