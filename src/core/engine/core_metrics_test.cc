@@ -39,7 +39,7 @@ class ReceiveMetricsDriver final : public transport::TransportDriver {
   void Start() override {}
   void Shutdown() override {}
   bool RegisterSendType(const transport::SendTypeWrapper&) noexcept override {
-    return false;
+    return accept_send_types;
   }
   bool OnMessage(const transport::MessageHandlerWrapper&) noexcept override {
     return false;
@@ -54,6 +54,8 @@ class ReceiveMetricsDriver final : public transport::TransportDriver {
   void Trigger(int& releases) {
     callback_(nullptr, nullptr, 0, [&releases] { ++releases; });
   }
+
+  bool accept_send_types = false;
 
  private:
   transport::LoanedMessageHandlerCallback callback_;
@@ -234,9 +236,10 @@ TEST_F(CoreMetrics, DispatcherShutdownInvalidatesCachedMetricsBeforeFinalize) {
   wrapper.info.topic_name = "camera";
   wrapper.info.pkg_path = "pkg";
   wrapper.info.module_name = "module";
-  // The receive-only fake rejects its driver registration, while the
-  // dispatcher catalog retains the canonical wrapper used by the hot path.
-  EXPECT_FALSE(dispatcher.RegisterSendType(std::move(wrapper)));
+  // A publisher refused by a driver is retired with no metrics (COMM-022),
+  // so this driver accepts it.
+  driver.accept_send_types = true;
+  EXPECT_TRUE(dispatcher.RegisterSendType(std::move(wrapper)));
   controller.Start(&dispatcher);
   dispatcher.Start();
 
@@ -252,6 +255,35 @@ TEST_F(CoreMetrics, DispatcherShutdownInvalidatesCachedMetricsBeforeFinalize) {
   EXPECT_EQ(registered->cached_metrics, nullptr);
   EXPECT_TRUE(controller.FinalizeSnapshot(&dispatcher));
   EXPECT_EQ(controller.StorageSizeForTesting(), 0U);
+}
+
+// COMM-022: a publisher refused by a driver is retired and gets no metrics.
+TEST_F(CoreMetrics, RefusedPublisherRegistersNoMetrics) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& controller = Controller::Instance();
+  transport::TransportCatalog catalog;
+  transport::TransportDriverDispatcher dispatcher;
+  ReceiveMetricsDriver driver;
+  transport::FrameworkAsyncTransportFilterBus publish_filters;
+  controller.Initialize(&dispatcher);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&publish_filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"receive-driver"}}});
+  dispatcher.RegisterTransportDriver(&driver);
+  dispatcher.Initialize();
+
+  transport::SendTypeWrapper wrapper;
+  wrapper.info.msg_type = "Frame";
+  wrapper.info.topic_name = "camera";
+  wrapper.info.pkg_path = "pkg";
+  wrapper.info.module_name = "module";
+  EXPECT_FALSE(dispatcher.RegisterSendType(std::move(wrapper)));
+  EXPECT_EQ(catalog.GetSendTypeWrapperPtr("Frame", "camera", "pkg", "module"), nullptr);
+  EXPECT_EQ(controller.StorageSizeForTesting(), 0U);
+  controller.Start(&dispatcher);
+  dispatcher.Start();
+  dispatcher.Shutdown();
+  EXPECT_TRUE(controller.FinalizeSnapshot(&dispatcher));
 }
 
 TEST_F(CoreMetrics, InvalidateWaitsForCachedMetricsReader) {

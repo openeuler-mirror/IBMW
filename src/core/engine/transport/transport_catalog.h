@@ -127,6 +127,11 @@ class TransportCatalog {
   bool RegisterSendType(
       std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr);
 
+  // Removes a registered publisher from every lookup. The wrapper stays
+  // allocated until the catalog is destroyed, because drivers that accepted it
+  // may still reference it. Only valid before 'Start'.
+  void RetireSendType(const SendTypeWrapper& send_type_wrapper);
+
   const MessageHandlerWrapper* GetMessageHandlerWrapperPtr(
       std::string_view msg_type,
       std::string_view topic_name,
@@ -203,6 +208,8 @@ class TransportCatalog {
   // index map, topic:wrapper
   std::unordered_map<std::string_view, std::vector<SendTypeWrapper*>>
       pub_topic_index_map_;
+
+  std::vector<std::unique_ptr<SendTypeWrapper>> retired_send_type_wrappers_;
 
   std::unordered_map<Key, std::unique_ptr<MessageHandlerWrapper>, Key::Hash>
       message_handler_map_;

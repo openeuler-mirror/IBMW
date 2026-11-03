@@ -123,6 +123,10 @@ details remain governed by the documentation for each release.
   `IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR` when the call is released, and
   the call's frame is freed. Previously the frame kept itself alive and the
   caller waited forever (COMM-014).
+- A publisher that any transport driver refuses is now disabled on all drivers
+  and gets no metrics. `RegisterSendType` still returns false, and `Send` on
+  that publisher warns and sends nothing. Previously the drivers that accepted
+  it kept publishing (COMM-022).
 
 ### Added
 

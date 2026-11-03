@@ -200,6 +200,9 @@ class TransportDriverDispatcher {
   std::vector<LoanedPodTopicInfo> GetLoanedPodTopics() const;
 
  private:
+  bool CommitSendType(std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr,
+                      const std::vector<TransportDriver*>& drivers);
+
   std::vector<TransportDriver*> GetDriversByRules(
       std::string_view topic_name,
       const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);

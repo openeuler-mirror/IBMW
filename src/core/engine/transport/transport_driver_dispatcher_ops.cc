@@ -703,30 +703,7 @@ bool TransportDriverDispatcher::RegisterSendType(RegisterSendTypeAccessInfoWrapp
   send_type_wrapper_ptr->cached_seq_counter = seq_counter_ptr;
   send_type_wrapper_ptr->cached_filter_collector = filter_collector_ptr;
 
-  // register pub wrapper
-  const auto& send_type_wrapper_ref = *send_type_wrapper_ptr;
-
-#ifdef IBMW_ENABLE_CORE_METRICS
-  observability::MetricsEntry* cached_metric_slots = nullptr;
-  try {
-    (void)observability::CoreMetricsController().Register(
-        this, &send_type_wrapper_ref, wrapper.pkg_path, wrapper.module_name,
-        topic_name, msg_type, driver_itr->second, &cached_metric_slots);
-  } catch (...) {
-    // Observability is fail-open and cannot alter publisher registration.
-  }
-  send_type_wrapper_ptr->cached_metrics = cached_metric_slots;
-  send_type_wrapper_ptr->cached_metrics_gate = cached_metrics_gate_;
-#endif
-  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr))) return false;
-
-  bool ret = true;
-  for (auto& itr : driver_itr->second) {
-    MW_TRACE("Register publish type '{}' for topic '{}' to driver '{}'.",
-                msg_type, topic_name, itr->Name());
-    ret &= itr->RegisterSendType(send_type_wrapper_ref);
-  }
-  return ret;
+  return CommitSendType(std::move(send_type_wrapper_ptr), driver_itr->second);
 }
 
 bool TransportDriverDispatcher::RegisterLoanedPodTopic(
@@ -1160,7 +1137,6 @@ bool TransportDriverDispatcher::RegisterSendType(SendTypeWrapper&& wrapper) {
   auto send_type_wrapper_ptr = std::make_unique<SendTypeWrapper>(std::move(wrapper));
 
   std::string_view topic_name = send_type_wrapper_ptr->info.topic_name;
-  std::string_view msg_type = send_type_wrapper_ptr->info.msg_type;
 
   // initialize publish sequence for this topic (only in Init state)
   auto seq_emplace = pub_topic_seq_map_.try_emplace(std::string(topic_name), 0);
@@ -1200,31 +1176,7 @@ bool TransportDriverDispatcher::RegisterSendType(SendTypeWrapper&& wrapper) {
   send_type_wrapper_ptr->cached_seq_counter = seq_counter_ptr;
   send_type_wrapper_ptr->cached_filter_collector = filter_collector_ptr;
 
-  // register pub wrapper
-  const auto& send_type_wrapper_ref = *send_type_wrapper_ptr;
-
-#ifdef IBMW_ENABLE_CORE_METRICS
-  observability::MetricsEntry* cached_metric_slots = nullptr;
-  try {
-    (void)observability::CoreMetricsController().Register(
-        this, &send_type_wrapper_ref, send_type_wrapper_ref.info.pkg_path,
-        send_type_wrapper_ref.info.module_name, topic_name, msg_type,
-        driver_itr->second, &cached_metric_slots);
-  } catch (...) {
-    // Observability is fail-open and cannot alter publisher registration.
-  }
-  send_type_wrapper_ptr->cached_metrics = cached_metric_slots;
-  send_type_wrapper_ptr->cached_metrics_gate = cached_metrics_gate_;
-#endif
-  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr))) return false;
-
-  bool ret = true;
-  for (auto& itr : driver_itr->second) {
-    MW_TRACE("Register publish type '{}' for topic '{}' to driver '{}'.",
-                msg_type, topic_name, itr->Name());
-    ret &= itr->RegisterSendType(send_type_wrapper_ref);
-  }
-  return ret;
+  return CommitSendType(std::move(send_type_wrapper_ptr), driver_itr->second);
 }
 
 bool TransportDriverDispatcher::RegisterSendType(
@@ -1251,7 +1203,6 @@ bool TransportDriverDispatcher::RegisterSendType(
       std::make_unique<SendTypeWrapper>(std::move(wrapper));
   const std::string_view topic_name =
       send_type_wrapper_ptr->info.topic_name;
-  const std::string_view msg_type = send_type_wrapper_ptr->info.msg_type;
   auto seq_emplace =
       pub_topic_seq_map_.try_emplace(std::string(topic_name), 0);
   auto filter_names = GetFilterRules(topic_name, publish_filters_rules_);
@@ -1265,35 +1216,50 @@ bool TransportDriverDispatcher::RegisterSendType(
   send_type_wrapper_ptr->cached_seq_counter = &seq_emplace.first->second;
   send_type_wrapper_ptr->cached_filter_collector =
       &publish_filter_bus_ptr_->GetFilterCollector(topic_name);
-  const auto& send_type_wrapper = *send_type_wrapper_ptr;
   pub_topics_driver_index_map_.try_emplace(
       std::string(topic_name), drivers);
+  return CommitSendType(std::move(send_type_wrapper_ptr), drivers);
+}
+
+// Every driver must accept the publisher. If one refuses, the publisher is
+// retired from the catalog, so Send() finds nothing for it on any driver; the
+// wrapper itself stays alive because drivers that accepted it keep references.
+// Metrics are registered only for publishers that every driver accepted.
+bool TransportDriverDispatcher::CommitSendType(
+    std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr,
+    const std::vector<TransportDriver*>& drivers) {
+  SendTypeWrapper& send_type_wrapper = *send_type_wrapper_ptr;
+  if (!transport_catalog_ptr_->RegisterSendType(std::move(send_type_wrapper_ptr))) return false;
+
+  const auto& info = send_type_wrapper.info;
+  bool ret = true;
+  for (auto* driver : drivers) {
+    MW_TRACE("Register publish type '{}' for topic '{}' to driver '{}'.",
+             info.msg_type, info.topic_name, driver->Name());
+    ret &= driver->RegisterSendType(send_type_wrapper);
+  }
+  if (!ret) [[unlikely]] {
+    MW_ERROR(
+        "A driver refused publish type '{}' for topic '{}', module '{}', pkg path '{}'; "
+        "the publisher is disabled on all drivers.",
+        info.msg_type, info.topic_name, info.module_name, info.pkg_path);
+    transport_catalog_ptr_->RetireSendType(send_type_wrapper);
+    return false;
+  }
 
 #ifdef IBMW_ENABLE_CORE_METRICS
   observability::MetricsEntry* cached_metric_slots = nullptr;
   try {
     (void)observability::CoreMetricsController().Register(
-        this, &send_type_wrapper, send_type_wrapper.info.pkg_path,
-        send_type_wrapper.info.module_name, topic_name, msg_type, drivers,
-        &cached_metric_slots);
+        this, &send_type_wrapper, info.pkg_path, info.module_name,
+        info.topic_name, info.msg_type, drivers, &cached_metric_slots);
   } catch (...) {
     // Observability is fail-open and cannot alter publisher registration.
   }
-  send_type_wrapper_ptr->cached_metrics = cached_metric_slots;
-  send_type_wrapper_ptr->cached_metrics_gate = cached_metrics_gate_;
+  send_type_wrapper.cached_metrics = cached_metric_slots;
+  send_type_wrapper.cached_metrics_gate = cached_metrics_gate_;
 #endif
-  if (!transport_catalog_ptr_->RegisterSendType(
-          std::move(send_type_wrapper_ptr))) {
-    return false;
-  }
-
-  bool result = true;
-  for (auto* driver : drivers) {
-    MW_TRACE("Explicitly register publish type '{}' for topic '{}' to driver '{}'.",
-             msg_type, topic_name, driver->Name());
-    result &= driver->RegisterSendType(send_type_wrapper);
-  }
-  return result;
+  return true;
 }
 
 void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
