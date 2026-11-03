@@ -34,9 +34,7 @@ class ConsoleLoggerDriver : public LoggerDriverBase {
   void Start() override {}
   void Shutdown() override { run_flag_.store(false); }
 
-  void Flush() noexcept override {
-    std::cout.flush();
-  }
+  void Flush() noexcept override;
 
   bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept override {
     if (!run_flag_.load()) return false;

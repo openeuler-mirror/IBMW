@@ -181,6 +181,8 @@ details remain governed by the documentation for each release.
 - Sender C ABI entries now reject a null `ctx`, and exceptions they swallow are counted
   (`SenderAccess::AbiExceptionCount`) and logged as errors at most once per second per sender
   (COMM-039).
+- The console logger's `Flush()` now waits (up to 1 s) for the entries already queued on its
+  log executor, and the engine no longer sleeps a fixed 50 ms after flushing at shutdown (CORE-015).
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

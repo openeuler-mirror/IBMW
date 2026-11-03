@@ -3,7 +3,10 @@
 
 #include "engine/logger/console_logger_driver.h"
 
+#include <chrono>
+#include <future>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <regex>
 
@@ -187,6 +190,23 @@ void ConsoleLoggerDriver::Log(const LogDataWrapper& log_data_wrapper) noexcept {
     log_executor_.Dispatch(std::move(log_work));
   } catch (const std::exception& e) {
     fprintf(stderr, "Log get exception: %s\n", e.what());
+  }
+}
+
+void ConsoleLoggerDriver::Flush() noexcept {
+  // Entries are written on the log executor, so wait until the ones queued
+  // before this call have run (CORE-015). The barrier owns the only reference
+  // to the promise: if the executor drops it, the wait returns at once.
+  try {
+    if (log_executor_ && !log_executor_.IsInCurrentExecutor()) {
+      auto done = std::make_shared<std::promise<void>>();
+      auto flushed = done->get_future();
+      log_executor_.Dispatch([done = std::move(done)] { done->set_value(); });
+      // A stalled log executor must not hold up the shutdown.
+      (void)flushed.wait_for(std::chrono::seconds(1));
+    }
+    std::cout.flush();
+  } catch (...) {
   }
 }
 

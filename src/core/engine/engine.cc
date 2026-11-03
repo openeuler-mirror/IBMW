@@ -153,8 +153,7 @@ void Engine::BuildSubsystemTable() {
        },
        .pre_shutdown = [this] {
          ResetCoreLogger();
-         logging_subsystem_.Flush();
-         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+         logging_subsystem_.Flush();  // waits for the queued entries (CORE-015)
        }},
 
       // 6 — Allocator
