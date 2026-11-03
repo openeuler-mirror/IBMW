@@ -108,6 +108,11 @@ details remain governed by the documentation for each release.
   now fails with `SVR_DESERIALIZATION_FAILED` and a response the client can
   not deserialize with `CLI_DESERIALIZATION_FAILED`, like the other drivers;
   the two codes were swapped.
+- Thread scheduling options (`thread_sched_policy`,
+  `listener_thread_sched_policy` and the like): the priority after
+  `SCHED_FIFO:` or `SCHED_RR:` must be a plain decimal number; values such as
+  `5x`, `+5` or ` 5` are rejected instead of being read as far as they look
+  numeric.
 
 ### Added
 

@@ -4,16 +4,16 @@
 #include "engine/thread_tools.h"
 
 #include <atomic>
+#include <charconv>
 #include <cstdlib>
 #include <thread>
 
 #include "base/exception.h"
 #include "base/format.h"
 
-#include <pthread.h>
-#include <sched.h>
-
 #if !defined(_WIN32)
+  #include <pthread.h>
+  #include <sched.h>
   #include <signal.h>
   #include <sys/mman.h>
 #endif
@@ -71,7 +71,12 @@ void BindCpuForCurrentThread(const std::vector<uint32_t>& cpu_set) {
   throw ibmw::common::util::IbmwException(
       "BindCpuForCurrentThread currently not supported on the Windows platform.");
 #else
-  static const uint32_t kMaxCpuIdx = std::thread::hardware_concurrency();
+  // hardware_concurrency() may be 0 when unknown; CPU_SET must stay inside
+  // cpu_set_t either way.
+  static const uint32_t kMaxCpuIdx = [] {
+    const uint32_t count = std::thread::hardware_concurrency();
+    return (count == 0 || count > CPU_SETSIZE) ? static_cast<uint32_t>(CPU_SETSIZE) : count;
+  }();
   for (auto cpu_idx : cpu_set) {
     if (cpu_idx >= kMaxCpuIdx) {
       throw ibmw::common::util::IbmwException(::ibmw_fmt::format(
@@ -143,7 +148,14 @@ void SetCpuSchedForCurrentThread(std::string_view sched) {
 
     struct sched_param param;
     auto sched_priority_str = sched.substr(pos + 1);
-    param.sched_priority = atoi(sched_priority_str.data());
+    const auto* priority_end = sched_priority_str.data() + sched_priority_str.size();
+    const auto [parsed_end, parse_error] =
+        std::from_chars(sched_priority_str.data(), priority_end, param.sched_priority);
+    if (parse_error != std::errc() || parsed_end != priority_end) {
+      throw ibmw::common::util::IbmwException(::ibmw_fmt::format(
+          "Invalid sched priority '{}', required range {}~{}",
+          sched_priority_str, priority_min, priority_max));
+    }
     if (param.sched_priority < priority_min ||
         param.sched_priority > priority_max) {
       throw ibmw::common::util::IbmwException(::ibmw_fmt::format(
