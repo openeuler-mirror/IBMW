@@ -7,6 +7,7 @@
 """Parse and validate .ibmw.yaml project definitions."""
 
 import os
+import re
 import sys
 from typing import Any
 
@@ -865,6 +866,24 @@ def _validate_experimental_actions(data: dict[str, Any]) -> None:
         action["roles"] = roles
 
 
+# Module values are emitted into C++ string literals, #include lines and YAML
+# double-quoted scalars without escaping; these characters would end the literal
+# or the line there (TOOL-023).
+_UNSAFE_MODULE_CHARS = re.compile(r'["\\\x00-\x1f\x7f]')
+
+
+def _check_module_strings(module: str, value, path: str):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _check_module_strings(module, item, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _check_module_strings(module, item, f"{path}[{index}]")
+    elif isinstance(value, str) and _UNSAFE_MODULE_CHARS.search(value):
+        _error(f"Module '{module}': '{path}' must not contain '\"', '\\' or control "
+               f"characters: {value!r}")
+
+
 def _validate_modules(data: dict):
     """Validate the modules section."""
     if "modules" not in data:
@@ -887,6 +906,7 @@ def _validate_modules(data: dict):
     for mod in data["modules"]:
         if "name" not in mod:
             _error("Each module must have a 'name' field")
+        _check_module_strings(str(mod["name"]), mod, "")
         if "type" not in mod:
             _error(f"Module '{mod['name']}' must have a 'type' field")
         if mod["type"] not in VALID_MODULE_TYPES:
