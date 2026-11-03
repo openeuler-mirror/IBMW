@@ -25,7 +25,7 @@ backend access is an explicit, named escape hatch rather than the default path.
    backend implementation details.
 6. **Message types:** application-facing type names and declarations remain
    stable across backends. Backend typesupport is generated/internal.
-7. **Package ABI:** packages export one `IbmwPkgEntry` and receive capabilities
+7. **Package ABI:** packages export one `IbmwPkgEntryV2` and receive capabilities
    through typed slots, without public driver-name strings or dual entries.
 8. **Zero copy:** loaned and ordinary send APIs are separate paths. A missing
    loan-capable backend fails clearly; no silent copy, allocation, or fallback is

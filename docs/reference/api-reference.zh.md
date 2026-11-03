@@ -655,7 +655,11 @@ Module package 是包含一个或多个 IBMW module 的共享库。
 ### 入口点
 
 ```cpp
+#define IBMW_PKG_ABI_VERSION_V2 2
+
 typedef struct {
+    uint32_t abi_version;  // IBMW_PKG_ABI_VERSION_V2
+    uint32_t struct_size;  // sizeof(ibmw_pkg_entry_v2_t)
     size_t (*get_module_num)();
     const ibmw_string_view_t* (*get_module_name_list)();
     const ibmw_module_base_t* (*create_module)(ibmw_string_view_t module_name);
@@ -663,10 +667,13 @@ typedef struct {
     void (*set_driver_slot)(ibmw_string_view_t module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 
-IBMW_PKG_EXPORT ibmw_pkg_entry_t IbmwPkgEntry();
+IBMW_PKG_EXPORT ibmw_pkg_entry_v2_t IbmwPkgEntryV2();
 ```
+
+加载器拒绝 `abi_version` 不符或 `struct_size` 小于 `sizeof(ibmw_pkg_entry_v2_t)` 的入口；
+只导出旧的无版本 `IbmwPkgEntry` 的库会被拒绝，并提示重新编译。
 
 ### 便捷宏
 
@@ -677,7 +684,7 @@ static const auto kModuleArray = std::array{
 IBMW_PKG_MAIN(kModuleArray)
 ```
 
-自动生成单一 `IbmwPkgEntry` 符号。
+自动生成单一 `IbmwPkgEntryV2` 符号。
 
 ---
 
@@ -735,11 +742,11 @@ typedef struct {
     void (*set_driver_slot)(const char* module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 ```
 
 `IBMW_PKG_MAIN(...)` 宏在 `src/api/pkg/pkg_main.h` 中导出
-入口符号 `IbmwPkgEntry`（typed slot）。该符号在每一个 pkg `.so` 中都通过
+入口符号 `IbmwPkgEntryV2`（typed slot）。该符号在每一个 pkg `.so` 中都通过
 `nm -D` 可见。
 
 ### `src/api/cpp/module_base.h` —— `IBMW_USE_DRIVER` / `IBMW_USE_DRIVERS`
@@ -791,7 +798,7 @@ ModuleBus::BroadcastDriverSlot(slot_id, driver_ptr)
     │  for each PackageHandle:
     ▼
 PackageHandle::SetDriverSlot(module_name, slot_id, driver_ptr)
-    │  -> IbmwPkgEntry.set_driver_slot
+    │  -> IbmwPkgEntryV2.set_driver_slot
     ▼
 Module::SetDriverSlot(slot_id, driver_ptr)        // IBMW_USE_DRIVER(S) 生成的 override
     │  fold over IBMW_DRIVER_ENTRY 列表

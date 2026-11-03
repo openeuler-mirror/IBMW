@@ -238,13 +238,17 @@ if(IBMW_BUILD_TESTS AND test_files)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
   endforeach()
-  foreach(fixture IN ITEMS pkg_fixture pkg_too_many_fixture)
+  foreach(fixture IN ITEMS pkg_fixture pkg_too_many_fixture pkg_legacy_fixture
+                           pkg_bad_version_fixture pkg_short_fixture)
     add_library(${fixture} MODULE ${PKG_FIXTURE_SRC})
     target_link_libraries(${fixture} PRIVATE ibmw::api::cpp)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
   endforeach()
   target_compile_definitions(pkg_too_many_fixture PRIVATE IBMW_PKG_FIXTURE_TOO_MANY)
+  target_compile_definitions(pkg_legacy_fixture PRIVATE IBMW_PKG_FIXTURE_LEGACY)
+  target_compile_definitions(pkg_bad_version_fixture PRIVATE IBMW_PKG_FIXTURE_BAD_VERSION)
+  target_compile_definitions(pkg_short_fixture PRIVATE IBMW_PKG_FIXTURE_SHORT)
   target_compile_definitions(extension_legacy_fixture
                              PRIVATE IBMW_EXT_FIXTURE_LEGACY)
   target_compile_definitions(extension_v2_entry_fixture
@@ -300,7 +304,10 @@ if(IBMW_BUILD_TESTS AND test_files)
       "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\""
       "TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_duplicate_type_v1_fixture>\""
       "PKG_FIXTURE_PATH=\"$<TARGET_FILE:pkg_fixture>\""
-      "PKG_TOO_MANY_FIXTURE_PATH=\"$<TARGET_FILE:pkg_too_many_fixture>\"")
+      "PKG_TOO_MANY_FIXTURE_PATH=\"$<TARGET_FILE:pkg_too_many_fixture>\""
+      "PKG_LEGACY_FIXTURE_PATH=\"$<TARGET_FILE:pkg_legacy_fixture>\""
+      "PKG_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:pkg_bad_version_fixture>\""
+      "PKG_SHORT_FIXTURE_PATH=\"$<TARGET_FILE:pkg_short_fixture>\"")
 
   set(COMM_TRACE_COMPILE_OUT_TEST_TARGET
       ${CUR_TARGET_NAME}_comm_trace_compile_out_test)

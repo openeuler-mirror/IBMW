@@ -7,7 +7,7 @@ distribution, backend combination, or application payload.
 | Capability | Status | Boundary |
 |---|---|---|
 | C++ module/context APIs | Supported | Public installed `cpp/...` headers and documented lifecycle/messaging/RPC contracts. |
-| Loadable package ABI | Supported | Single `IbmwPkgEntry` with typed-slot driver injection. |
+| Loadable package ABI | Supported | Single `IbmwPkgEntryV2` with typed-slot driver injection. |
 | Local messaging and RPC | Supported | Suitable for in-process examples and application validation. |
 | DDS messaging and RPC | Supported | Requires compatible FastDDS/FastCDR dependencies and application-specific type/payload validation. |
 | DDS-only ROS2 pub/sub interoperability | Supported, scoped | FastDDS wire interoperability without rcl/rclcpp in the IBMW runtime; validate the ROS2 distribution and interface set used. |

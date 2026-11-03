@@ -13,7 +13,7 @@
 #include "pkg/pkg_main.h"
 
 // ---------------------------------------------------------------------------
-// IBMW_PKG_MAIN — generates the single package entry point IbmwPkgEntry().
+// IBMW_PKG_MAIN — generates the single package entry point IbmwPkgEntryV2().
 //
 // Usage:
 //   static std::tuple<std::string_view, std::function<ibmw::Module*()>>
@@ -127,8 +127,10 @@
   }                                                                                             \
                                                                                                  \
   extern "C" {                                                                                  \
-  IBMW_PKG_EXPORT ibmw_pkg_entry_t IbmwPkgEntry() {                                            \
-    return ibmw_pkg_entry_t{                                                                    \
+  IBMW_PKG_EXPORT ibmw_pkg_entry_v2_t IbmwPkgEntryV2() {                                        \
+    return ibmw_pkg_entry_v2_t{                                                                 \
+        .abi_version = IBMW_PKG_ABI_VERSION_V2,                                                 \
+        .struct_size = sizeof(ibmw_pkg_entry_v2_t),                                             \
         .get_module_num = __IbmwPkgGetModuleNum,                                                \
         .get_module_name_list = __IbmwPkgGetModuleNameList,                                     \
         .create_module = __IbmwPkgCreateModule,                                                 \

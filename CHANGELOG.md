@@ -144,6 +144,12 @@ details remain governed by the documentation for each release.
   `GetSubscriber` and `GetExecutor` return an empty handle for an undersized
   table. Checks run only when a handle is obtained. **All modules and
   extensions must be rebuilt.**
+- Module packages now export `IbmwPkgEntryV2`, returning
+  `ibmw_pkg_entry_v2_t` that starts with `abi_version`
+  (`IBMW_PKG_ABI_VERSION_V2`) and `struct_size` (CORE-021). The loader rejects
+  another version or a short entry before calling any callback, and a library
+  exporting only the old `IbmwPkgEntry` is rejected with a request to rebuild.
+  `IBMW_PKG_MAIN` emits the new entry. **All module packages must be rebuilt.**
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

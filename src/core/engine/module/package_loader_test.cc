@@ -49,5 +49,23 @@ TEST(PackageLoaderTest, ModuleCountIsBounded) {
   EXPECT_EQ(LiveModules(loader), 0);
 }
 
+// CORE-021: only the versioned package entry is accepted; nothing of a
+// rejected library's modules is created.
+TEST(PackageLoaderTest, UnversionedEntryAsksForRebuild) {
+  PackageLoader loader;
+  const auto error = LoadError(loader, PKG_LEGACY_FIXTURE_PATH);
+  EXPECT_NE(error.find("older IBMW package ABI"), std::string::npos) << error;
+  EXPECT_EQ(LiveModules(loader), 0);
+}
+
+TEST(PackageLoaderTest, WrongVersionOrShortEntryIsRejected) {
+  for (const char* path : {PKG_BAD_VERSION_FIXTURE_PATH, PKG_SHORT_FIXTURE_PATH}) {
+    PackageLoader loader;
+    const auto error = LoadError(loader, path);
+    EXPECT_NE(error.find("package ABI version"), std::string::npos) << path << ": " << error;
+    EXPECT_EQ(LiveModules(loader), 0) << path;
+  }
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::module

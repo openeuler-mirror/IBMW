@@ -659,7 +659,11 @@ Module packages are shared libraries containing one or more IBMW modules.
 ### Entry Points
 
 ```cpp
+#define IBMW_PKG_ABI_VERSION_V2 2
+
 typedef struct {
+    uint32_t abi_version;  // IBMW_PKG_ABI_VERSION_V2
+    uint32_t struct_size;  // sizeof(ibmw_pkg_entry_v2_t)
     size_t (*get_module_num)();
     const ibmw_string_view_t* (*get_module_name_list)();
     const ibmw_module_base_t* (*create_module)(ibmw_string_view_t module_name);
@@ -667,10 +671,14 @@ typedef struct {
     void (*set_driver_slot)(ibmw_string_view_t module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 
-IBMW_PKG_EXPORT ibmw_pkg_entry_t IbmwPkgEntry();
+IBMW_PKG_EXPORT ibmw_pkg_entry_v2_t IbmwPkgEntryV2();
 ```
+
+The loader rejects a library whose entry has another `abi_version` or a
+`struct_size` below `sizeof(ibmw_pkg_entry_v2_t)`. A library exporting only the
+old unversioned `IbmwPkgEntry` is rejected with a request to rebuild it.
 
 ### Convenience Macro
 
@@ -681,7 +689,7 @@ static const auto kModuleArray = std::array{
 IBMW_PKG_MAIN(kModuleArray)
 ```
 
-Generates the single `IbmwPkgEntry` symbol automatically.
+Generates the single `IbmwPkgEntryV2` symbol automatically.
 
 ---
 
@@ -740,15 +748,17 @@ the Engine fires at `Start()`:
 
 ```c
 typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
     /* ... module entry points ... */
     void (*set_driver_slot)(const char* module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 ```
 
 `IBMW_PKG_MAIN(...)` in `src/api/pkg/pkg_main.h` exports the
-entry symbol `IbmwPkgEntry` (typed slot). It must be visible via `nm -D`
+entry symbol `IbmwPkgEntryV2` (typed slot). It must be visible via `nm -D`
 from every pkg `.so`.
 
 ### `src/api/cpp/module_base.h` -- `IBMW_USE_DRIVER` / `IBMW_USE_DRIVERS`
@@ -806,7 +816,7 @@ ModuleBus::BroadcastDriverSlot(slot_id, driver_ptr)
     |  for each PackageHandle:
     v
 PackageHandle::SetDriverSlot(module_name, slot_id, driver_ptr)
-    |  -> IbmwPkgEntry.set_driver_slot
+    |  -> IbmwPkgEntryV2.set_driver_slot
     v
 Module::SetDriverSlot(slot_id, driver_ptr)        // override emitted by IBMW_USE_DRIVER(S)
     |  fold over the IBMW_DRIVER_ENTRY list

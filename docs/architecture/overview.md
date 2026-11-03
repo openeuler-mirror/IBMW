@@ -11,7 +11,7 @@ configuration, and parameters through public APIs.
    modules use transport-neutral C++ interfaces and generated type bindings.
 2. **Public API and package ABI** expose module, context, messaging, RPC, and
    package-loading contracts. Loadable packages export the single
-   `IbmwPkgEntry` entry and receive drivers through typed slots.
+   `IbmwPkgEntryV2` entry and receive drivers through typed slots.
 3. **Core runtime** owns lifecycle, scheduling, configuration, package loading,
    and routing. Core code depends on extension interfaces, not extension
    implementations.

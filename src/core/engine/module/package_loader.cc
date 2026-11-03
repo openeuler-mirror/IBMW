@@ -7,9 +7,12 @@
 
 namespace ibmw::runtime::core::module {
 
-using PkgEntryFunc = ibmw_pkg_entry_t (*)();
+using PkgEntryFunc = ibmw_pkg_entry_v2_t (*)();
 
-static constexpr const char* kPkgEntryFuncName = "IbmwPkgEntry";
+static constexpr const char* kPkgEntryFuncName = "IbmwPkgEntryV2";
+// Entry point of the unversioned package ABI. Only looked up to explain the
+// rejection; never called.
+static constexpr const char* kOldPkgEntryFuncName = "IbmwPkgEntry";
 
 // The name list length is only known from get_module_num(); bounding it keeps
 // a broken package from making the loader read far past its array.
@@ -24,13 +27,23 @@ void PackageLoader::LoadPkg(std::string_view pkg_path,
                           "Load dynamic lib failed, lib path {}, error info {}",
                           pkg_path_, ibmw::common::util::DynamicLib::GetErr());
 
-  // pkg ABI: typed-slot dispatch via IbmwPkgEntry().
+  // pkg ABI: typed-slot dispatch via IbmwPkgEntryV2().
   auto* entry_sym = dynamic_lib_.GetSymbol(kPkgEntryFuncName);
+  if (entry_sym == nullptr) {
+    MW_REQUIRE(dynamic_lib_.GetSymbol(kOldPkgEntryFuncName) == nullptr,
+               "Lib {} exports '{}' from an older IBMW package ABI; "
+               "rebuild it against this IBMW (package ABI {}).",
+               pkg_path_, kOldPkgEntryFuncName, IBMW_PKG_ABI_VERSION_V2);
+  }
   MW_REQUIRE(entry_sym != nullptr,
                           "Cannot find symbol '{}' in lib {}.",
                           kPkgEntryFuncName, pkg_path_);
 
   auto entry = ((PkgEntryFunc)entry_sym)();
+  MW_REQUIRE(entry.abi_version == IBMW_PKG_ABI_VERSION_V2 && entry.struct_size >= sizeof(ibmw_pkg_entry_v2_t),
+             "Lib {} has package ABI version {} with struct_size {}; expected version {} and size at least {}. "
+             "Rebuild it against this IBMW.",
+             pkg_path_, entry.abi_version, entry.struct_size, IBMW_PKG_ABI_VERSION_V2, sizeof(ibmw_pkg_entry_v2_t));
   MW_REQUIRE(entry.get_module_num != nullptr && entry.get_module_name_list != nullptr &&
                  entry.create_module != nullptr && entry.destroy_module != nullptr,
                           "pkg ABI entry has null mandatory callbacks in lib {}.", pkg_path_);

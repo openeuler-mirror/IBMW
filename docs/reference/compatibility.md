@@ -44,7 +44,7 @@ case-specific verification.
   effective UID. Symlink components and writable untrusted ancestors are
   rejected; existing directory permissions are never silently changed.
 
-- Package loading has one public entry, `IbmwPkgEntry`, with typed-slot driver
+- Package loading has one public entry, `IbmwPkgEntryV2`, with typed-slot driver
   injection. Slot IDs are stable; string driver names and dual-entry ABI behavior
   are not public contracts. See [API Reference](api-reference.md).
 - Public user includes use `cpp/...` and the installed

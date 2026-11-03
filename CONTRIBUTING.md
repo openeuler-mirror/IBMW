@@ -26,7 +26,7 @@ event. Fix the source; do not move the baseline to hide the violation.
 | R4 | `src/api/` and `src/core/` do not include extension implementations. |
 | R5 | Core/public API does not statically link extension implementations. |
 | R6 | Managed messaging goes through Module/Context public APIs. |
-| R7 | Package injection uses the single `IbmwPkgEntry` typed-slot ABI, not driver-name strings or dual public entries. |
+| R7 | Package injection uses the single `IbmwPkgEntryV2` typed-slot ABI, not driver-name strings or dual public entries. |
 | R8 | Loaned/direct send combinations are protected by compile-time transport capability guards and fail fast when unsupported. |
 | R9 | Framework-generated typesupport/transport initialization does not leak into editable user regions. |
 | R10 | Intentional low-level APIs use explicit `direct_<transport>_*` escape-hatch modules and their documented anchors. |
@@ -45,7 +45,7 @@ Run verification proportional to the affected boundary:
 3. For generator changes, run pytest and byte-equal in-tree regeneration; commit
    intentional fixture changes with the generator.
 4. Build changed targets, then run applicable ctest and strict functional smoke.
-5. For package ABI/export changes, inspect `IbmwPkgEntry` with `nm -D`.
+5. For package ABI/export changes, inspect `IbmwPkgEntryV2` with `nm -D`.
 6. For feature/configuration changes, run the affected dual-build cells.
 7. For hot-path changes, run the current pinned performance protocol and compare
    p99 with the accepted baseline. Functional PASS is not a performance seal.

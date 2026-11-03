@@ -49,7 +49,7 @@ pattern and must be labeled accordingly.
 
 ## ABI and feature selection
 
-- Loadable packages expose `IbmwPkgEntry` and typed-slot injection. Do not add a
+- Loadable packages expose `IbmwPkgEntryV2` and typed-slot injection. Do not add a
   second package entry or driver-name string dispatch to the public ABI.
 - Feature macros such as `IBMW_HAS_<TRANSPORT>` are compile-time selectors only.
   Use preprocessor checks or `static_assert`, never runtime branching on a macro.
