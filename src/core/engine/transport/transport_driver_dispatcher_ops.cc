@@ -401,6 +401,7 @@ uint64_t TransportDriverDispatcher::RegisterPublishTap(PublishTap tap) {
   const uint64_t handle = next_publish_tap_handle_++;
   publish_taps_.emplace(
       handle, std::make_shared<PublishTapState>(std::move(tap)));
+  publish_tap_count_.store(publish_taps_.size(), std::memory_order_release);
   return handle;
 }
 
@@ -417,6 +418,7 @@ bool TransportDriverDispatcher::UnregisterPublishTap(uint64_t handle) {
     }
     tap_state = std::move(found->second);
     publish_taps_.erase(found);
+    publish_tap_count_.store(publish_taps_.size(), std::memory_order_release);
   }
   DeactivatePublishTap(tap_state);
   return true;
@@ -435,6 +437,7 @@ void TransportDriverDispatcher::DeactivatePublishTap(
 }
 
 void TransportDriverDispatcher::InvokePublishTaps(MessageFrame& frame) noexcept {
+  if (publish_tap_count_.load(std::memory_order_acquire) == 0) return;
   std::vector<std::shared_ptr<PublishTapState>> taps;
   {
     std::lock_guard lock(publish_taps_mutex_);

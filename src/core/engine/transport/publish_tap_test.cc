@@ -244,6 +244,35 @@ TEST_F(MetricsPublishTapTest,
 }
 #endif
 
+TEST_F(PublishTapTest, TapsAreSeenAfterTheCountReturnsToZero) {
+  SendOnce();
+  int first_calls = 0;
+  int second_calls = 0;
+  const auto first = dispatcher_.RegisterPublishTap(
+      [&](MessageFrame&) { ++first_calls; });
+  const auto second = dispatcher_.RegisterPublishTap(
+      [&](MessageFrame&) { ++second_calls; });
+  SendOnce();
+  EXPECT_EQ(first_calls, 1);
+  EXPECT_EQ(second_calls, 1);
+
+  ASSERT_TRUE(dispatcher_.UnregisterPublishTap(first));
+  SendOnce();
+  EXPECT_EQ(first_calls, 1);
+  EXPECT_EQ(second_calls, 2);
+
+  ASSERT_TRUE(dispatcher_.UnregisterPublishTap(second));
+  SendOnce();
+  EXPECT_EQ(second_calls, 2);
+
+  const auto again = dispatcher_.RegisterPublishTap(
+      [&](MessageFrame&) { ++first_calls; });
+  SendOnce();
+  EXPECT_EQ(first_calls, 2);
+  EXPECT_TRUE(dispatcher_.UnregisterPublishTap(again));
+  EXPECT_EQ(driver_.send_calls, 5);
+}
+
 TEST_F(PublishTapTest, ExternalUnregisterWaitsForInFlightCallback) {
   std::mutex mutex;
   std::condition_variable release_cv;

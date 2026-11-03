@@ -74,6 +74,7 @@ void TransportDriverDispatcher::Shutdown() {
       publish_taps.emplace_back(std::move(tap_state));
     }
     publish_taps_.clear();
+    publish_tap_count_.store(0, std::memory_order_release);
   }
   for (const auto& tap_state : publish_taps) {
     DeactivatePublishTap(tap_state);

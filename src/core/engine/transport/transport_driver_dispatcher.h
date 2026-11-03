@@ -283,6 +283,8 @@ class TransportDriverDispatcher {
       owned_legacy_message_handler_pool_;
 
   std::mutex publish_taps_mutex_;
+  // Mirrors publish_taps_.size() so publishes without taps skip the mutex.
+  std::atomic_size_t publish_tap_count_{0};
   struct PublishTapState {
     struct InvocationToken {
       PublishTapState* state;
