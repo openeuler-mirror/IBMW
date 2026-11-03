@@ -59,6 +59,7 @@ python3 "$SCRIPT_DIR/check_docs_governance.py" --check --repo-root "$REPO_ROOT"
 bash "$SCRIPT_DIR/tests/test_docs_governance.sh"
 bash "$SCRIPT_DIR/tests/test_release_hygiene.sh"
 bash "$SCRIPT_DIR/tests/test_commit_msg_hook.sh"
+bash "$SCRIPT_DIR/tests/test_check_python_package.sh"
 
 step "commit messages"
 if [[ -z "$BASE" ]]; then

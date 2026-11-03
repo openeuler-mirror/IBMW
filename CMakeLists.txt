@@ -488,9 +488,9 @@ if(IBMW_BUILD_CLI_TOOLS)
   find_package(Python3 REQUIRED)
 
   include(CheckPythonPackage)
-  check_python_package(pyinstaller PYINSTALLER_FOUND)
+  check_python_package(PyInstaller PYINSTALLER_FOUND)
   check_python_package(jinja2 JINJA2_FOUND)
-  check_python_package(pyyaml PYYAML_FOUND)
+  check_python_package(yaml PYYAML_FOUND)
 
   if(NOT PYINSTALLER_FOUND
      OR NOT JINJA2_FOUND
