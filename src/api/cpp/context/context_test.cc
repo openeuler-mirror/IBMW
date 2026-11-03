@@ -75,5 +75,18 @@ TEST(ContextTest, LogReportsCallerFunction) {
   EXPECT_TRUE(recorded.text.empty());
 }
 
+// API-053: without a current context the assertion reports the caller.
+TEST(ContextTest, MissingCurrentContextThrowsAtCaller) {
+  details::ScopedThreadContextRestore restore;
+  details::g_thread_ctx.ctx_ptr.reset();
+  try {
+    details::GetCurrentContext();
+    FAIL() << "no exception";
+  } catch (const ibmw::common::util::IbmwException& e) {
+    EXPECT_NE(std::string(e.what()).find("context_test.cc"), std::string::npos) << e.what();
+    EXPECT_NE(std::string(e.what()).find("Broken context"), std::string::npos) << e.what();
+  }
+}
+
 }  // namespace
 }  // namespace ibmw::context

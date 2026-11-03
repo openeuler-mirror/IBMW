@@ -40,8 +40,7 @@ class ScopedThreadContextRestore {
 inline std::shared_ptr<Context> GetCurrentContext(const ibmw::common::util::SourceLocation& call_loc = ibmw::common::util::SourceLocation::current()) {
   const std::shared_ptr ctx_ptr = g_thread_ctx.ctx_ptr.lock();
 
-  if (ctx_ptr == nullptr) [[unlikely]]
-    MW_ASSERT_LOC(call_loc, ctx_ptr != nullptr, "Broken context !");
+  MW_ASSERT_LOC(call_loc, ctx_ptr != nullptr, "Broken context !");
   return ctx_ptr;
 }
 
