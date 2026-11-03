@@ -190,6 +190,8 @@ namespace {
 // crash sees the previous or the new metadata, never a truncated file. No
 // fsync: it could stall the record executor on slow storage.
 void WriteMetadataFile(const std::filesystem::path& path, const YAML::Node& node) {
+  // No bag folder yet: the metadata is written when the first file opens.
+  if (path.empty()) return;
   auto tmp_path = path;
   tmp_path += ".tmp";
   std::ofstream ofs(tmp_path, std::ios::trunc);

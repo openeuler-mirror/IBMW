@@ -214,6 +214,21 @@ TEST_F(RecordServiceTest, ExtraAttributeCountIsBounded) {
   FAIL() << "no bag folder was created";
 }
 
+// EXT-027: metadata updated before the bag folder exists is kept in memory
+// and must not leave a ".tmp" file in the working directory.
+TEST_F(RecordServiceTest, MetadataBeforeBagOpenWritesNoFile) {
+  const auto cwd = root_ / "cwd";
+  fs::create_directories(cwd);
+  const auto previous_cwd = fs::current_path();
+  fs::current_path(cwd);
+  auto& action = AddAction("signal", true);
+  action.UpdateMetadata({{"k", "v"}});
+  EXPECT_EQ(action.UpdateTopicMetaRecord({}, std::nullopt), RecordAction::UpdateResult::kOk);
+  action.Shutdown();
+  fs::current_path(previous_cwd);
+  EXPECT_TRUE(fs::is_empty(cwd));
+}
+
 // EXT-027: metadata.yaml is replaced by a rename, never rewritten in place,
 // and a failed write keeps the previous file.
 TEST_F(RecordServiceTest, MetadataIsReplacedAtomically) {
