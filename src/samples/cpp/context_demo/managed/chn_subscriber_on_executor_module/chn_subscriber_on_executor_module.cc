@@ -1,7 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-#include "chn_subscriber_on_exeutor_module/chn_subscriber_on_exeutor_module.h"
+#include "chn_subscriber_on_executor_module/chn_subscriber_on_executor_module.h"
 
 #include "yaml-cpp/yaml.h"
 

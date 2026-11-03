@@ -27,7 +27,7 @@ target_link_libraries(
   ${CUR_TARGET_NAME}
   PRIVATE ibmw::api::pkg
           ${CUR_SUPERIOR_NAMESPACE}::chn_publisher_module
-          ${CUR_SUPERIOR_NAMESPACE}::chn_subscriber_on_exeutor_module
+          ${CUR_SUPERIOR_NAMESPACE}::chn_subscriber_on_executor_module
           ${CUR_SUPERIOR_NAMESPACE}::chn_subscriber_inline_module
           ${CUR_SUPERIOR_NAMESPACE}::rpc_client_module
           ${CUR_SUPERIOR_NAMESPACE}::rpc_server_inline_module

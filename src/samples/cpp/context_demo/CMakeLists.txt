@@ -16,7 +16,7 @@ set_namespace()
 
 # Modules
 add_subdirectory(managed/chn_publisher_module)
-add_subdirectory(managed/chn_subscriber_on_exeutor_module)
+add_subdirectory(managed/chn_subscriber_on_executor_module)
 add_subdirectory(managed/chn_subscriber_inline_module)
 add_subdirectory(managed/rpc_client_module)
 add_subdirectory(managed/rpc_server_inline_module)
