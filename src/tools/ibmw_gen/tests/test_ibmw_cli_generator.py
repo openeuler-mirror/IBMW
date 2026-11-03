@@ -4,6 +4,7 @@
 #
 # Behaviour of the ibmw_cli project generator that does not need a full build.
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -54,3 +55,29 @@ def test_missing_section_is_a_readable_error(tmp_path, monkeypatch, section, mis
     generator = ProjectGenerator(cfg_path="cfg.yaml", output_dir=str(tmp_path / "out"))
     with pytest.raises(Exception, match=section):
         generator.generate()
+
+
+def _render(template_file, **kwargs):
+    template = GeneratorBase.get_template_environment(
+        {"template_package": "templates.workspace", "template_file": template_file})
+    return template.render(**kwargs)
+
+
+def _stub(bin_dir, name, body):
+    path = bin_dir / name
+    path.write_text("#!/bin/bash\n" + body + "\n")
+    path.chmod(0o755)
+
+
+# TOOL-018: arguments of the generated build.sh reach cmake unsplit.
+def test_build_script_keeps_arguments_with_spaces(tmp_path):
+    script = tmp_path / "build.sh"
+    script.write_text(_render("template.sh.jinja2", workspace={"definitions": []}))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "args.txt"
+    _stub(bin_dir, "cmake", f'for a in "$@"; do echo "$a" >> "{log}"; done')
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    subprocess.run(["bash", str(script), "-DNAME=a b"], cwd=tmp_path, env=env, check=True,
+                   capture_output=True, timeout=60)
+    assert "-DNAME=a b" in log.read_text().splitlines()
