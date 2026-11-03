@@ -186,12 +186,11 @@ if [[ -d "$PROBE_BUILD/CMakeFiles" ]]; then
   done < <(find "$PROBE_BUILD/CMakeFiles" -type f \( -name 'CMake*.log' -o -name '*.log' \) -print0)
 fi
 
-if grep -E '/opt/ros/humble|(^|[^A-Za-z0-9_])(x86_64|amd64)([^A-Za-z0-9_]|$)' "${PROBE_ARTIFACTS[@]}" >/tmp/ibmw_aarch64_dds_prefix_leak.$$ 2>/dev/null; then
-  cat /tmp/ibmw_aarch64_dds_prefix_leak.$$ >&2
-  rm -f /tmp/ibmw_aarch64_dds_prefix_leak.$$
+LEAK_REPORT="$BUILD_DIR/leak.txt"
+if grep -E '/opt/ros/humble|(^|[^A-Za-z0-9_])(x86_64|amd64)([^A-Za-z0-9_]|$)' "${PROBE_ARTIFACTS[@]}" >"$LEAK_REPORT" 2>/dev/null; then
+  cat "$LEAK_REPORT" >&2
   fail "host leakage detected in CMake probe artifacts"
 fi
-rm -f /tmp/ibmw_aarch64_dds_prefix_leak.$$
 
 declare -a LIB_CANDIDATES=()
 for lib_dir in "$TARGET_PREFIX/lib" "$TARGET_PREFIX/lib64" "$TARGET_PREFIX/lib/aarch64-linux-gnu"; do
