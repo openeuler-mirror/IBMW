@@ -72,6 +72,8 @@ enum class LoanMode : uint8_t {
  * dispatcher- and user-level wrappers (LoanedSample<T>) can route
  * Publish/Release back to the correct driver without an extra lookup.
  * Set by TransportDriver::LoanSample() implementations on success.
+ * It must be the driver registered with the dispatcher: the dispatcher drops
+ * a handle naming any other driver without calling it.
  *
  * Phase 7 §7.3 §K-3.3: added source_driver field to support
  * dispatcher-level Loan/PublishLoaned ops that fan out across drivers.

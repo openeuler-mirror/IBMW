@@ -127,6 +127,10 @@ details remain governed by the documentation for each release.
   and gets no metrics. `RegisterSendType` still returns false, and `Send` on
   that publisher warns and sends nothing. Previously the drivers that accepted
   it kept publishing (COMM-022).
+- `PublishLoaned` and `ReleaseLoaned` now drop a handle whose `source_driver`
+  is not registered with the dispatcher, log an error, and do not call that
+  driver. Previously the pointer was dereferenced without any check. A driver
+  must set `source_driver` to itself (COMM-002).
 
 ### Added
 

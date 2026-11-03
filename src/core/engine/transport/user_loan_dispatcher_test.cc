@@ -216,20 +216,19 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
   EXPECT_EQ(good.release_calls, 1);
   EXPECT_TRUE(dispatcher.UnregisterPublishTap(tap_handle));
 
-  // The established handle contract routes solely by source_driver. Side data
-  // and dispatcher membership are driver-private and must not be validated by
-  // observability or dispatcher glue.
+  // A handle from a driver this dispatcher does not know is dropped without
+  // calling into that driver. Other side data stays driver-private.
   FakeUserLoanDriver outsider("outsider", FakeUserLoanDriver::Result::kSuccess);
   LoanedSampleHandle forged;
   forged.source_driver = &outsider;
   dispatcher.PublishLoaned(forged);
   EXPECT_EQ(forged.source_driver, nullptr);
-  EXPECT_EQ(outsider.publish_calls, 1);
+  EXPECT_EQ(outsider.publish_calls, 0);
 
   forged.source_driver = &outsider;
   dispatcher.ReleaseLoaned(forged);
   EXPECT_EQ(forged.source_driver, nullptr);
-  EXPECT_EQ(outsider.release_calls, 1);
+  EXPECT_EQ(outsider.release_calls, 0);
 
 #ifdef IBMW_ENABLE_CORE_METRICS
   const auto json = metrics.registry().SnapshotJsonl();

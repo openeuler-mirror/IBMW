@@ -158,6 +158,8 @@ class TransportDriverDispatcher {
   // PublishLoaned() / ReleaseLoaned() route through handle.source_driver
   // populated by the issuing driver. Both clear the handle on completion,
   // and are no-ops on an empty/already-consumed handle.
+  // A handle whose source_driver is not registered here is dropped without
+  // being dereferenced.
   LoanedSampleHandle Loan(LoanAccessInfoWrapper&& wrapper);
   void PublishLoaned(LoanedSampleHandle& handle);
   void ReleaseLoaned(LoanedSampleHandle& handle);
@@ -200,6 +202,13 @@ class TransportDriverDispatcher {
   std::vector<LoanedPodTopicInfo> GetLoanedPodTopics() const;
 
  private:
+  // The list only changes before Start and holds a handful of drivers.
+  bool IsRegisteredDriver(const TransportDriver* driver) const noexcept {
+    for (const auto* registered : transport_driver_index_vec_) {
+      if (registered == driver) return true;
+    }
+    return false;
+  }
   bool CommitSendType(std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr,
                       const std::vector<TransportDriver*>& drivers);
 

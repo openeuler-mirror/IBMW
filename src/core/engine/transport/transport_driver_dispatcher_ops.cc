@@ -1506,6 +1506,11 @@ void TransportDriverDispatcher::PublishLoaned(LoanedSampleHandle& handle) {
   }
 
   auto* source_driver = handle.source_driver;
+  if (!IsRegisteredDriver(source_driver)) [[unlikely]] {
+    MW_ERROR("PublishLoaned called with a handle from an unknown driver; the handle is dropped.");
+    handle = {};
+    return;
+  }
 #ifdef IBMW_ENABLE_CORE_METRICS
   std::optional<observability::CachedMetricsReadGuard> metrics_guard;
   if (cached_metrics_gate_) metrics_guard.emplace(cached_metrics_gate_);
@@ -1545,6 +1550,11 @@ void TransportDriverDispatcher::ReleaseLoaned(LoanedSampleHandle& handle) {
   }
 
   auto* source_driver = handle.source_driver;
+  if (!IsRegisteredDriver(source_driver)) [[unlikely]] {
+    MW_ERROR("ReleaseLoaned called with a handle from an unknown driver; the handle is dropped.");
+    handle = {};
+    return;
+  }
 #ifdef IBMW_ENABLE_CORE_METRICS
   std::optional<observability::CachedMetricsReadGuard> metrics_guard;
   if (cached_metrics_gate_) metrics_guard.emplace(cached_metrics_gate_);
