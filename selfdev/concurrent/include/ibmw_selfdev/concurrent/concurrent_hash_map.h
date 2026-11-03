@@ -24,9 +24,12 @@ template <class Key, class Value, class Hash = std::hash<Key>, class KeyEqual = 
 class ConcurrentHashMap {
  public:
   static constexpr size_t kMaxShards = size_t{1} << 16;
-  /// Enough that 16 busy threads rarely meet on a shard (16 shards cost up to
-  /// 2x against tbb at 16 threads, see 性能对比.md); ~8 KiB of shard headers.
-  static constexpr size_t kDefaultShards = 64;
+  /// Sized for large, busy maps: with random keys each access moves the
+  /// shard's lock cache line between cores, and fewer shards make that the
+  /// bottleneck (on a 20-core aarch64 board, read-mostly over 100k entries at
+  /// 16 threads: 64 shards 2.0x tbb, 512 shards 1.3x). Costs ~64 KiB of shard
+  /// headers; maps with few live entries can pass a smaller count.
+  static constexpr size_t kDefaultShards = 512;
 
   /// Rounded up to a power of two and clamped to [1, kMaxShards]. `hash` is
   /// used for shard selection and copied into every shard.

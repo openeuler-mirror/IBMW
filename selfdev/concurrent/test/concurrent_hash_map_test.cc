@@ -102,7 +102,7 @@ TEST(ConcurrentHashMapTest, ShardCountRounding) {
   EXPECT_EQ((ConcurrentHashMap<int, int>(1).ShardCount()), 1u);
   EXPECT_EQ((ConcurrentHashMap<int, int>(3).ShardCount()), 4u);
   EXPECT_EQ((ConcurrentHashMap<int, int>(16).ShardCount()), 16u);
-  EXPECT_EQ((ConcurrentHashMap<int, int>().ShardCount()), 64u);
+  EXPECT_EQ((ConcurrentHashMap<int, int>().ShardCount()), 512u);
 }
 
 // HM-08

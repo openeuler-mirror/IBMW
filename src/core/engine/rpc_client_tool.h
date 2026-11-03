@@ -94,10 +94,15 @@ class RpcClientTool {
 
 #if defined(IBMW_SELFDEV_CONCURRENT)
   using ClientMsgRecorderMap = ibmw::selfdev::concurrent::ConcurrentHashMap<uint32_t, MsgRecorder>;
+  // Few requests are in flight per client and every client has its own map:
+  // 64 shards keep the shard headers at ~8 KiB per client instead of the
+  // default ~64 KiB.
+  static constexpr size_t kRecorderShards = 64;
+  ClientMsgRecorderMap client_msg_recorder_map_{kRecorderShards};
 #else
   using ClientMsgRecorderMap = tbb::concurrent_hash_map<uint32_t, MsgRecorder>;
-#endif
   ClientMsgRecorderMap client_msg_recorder_map_;
+#endif
 };
 
 }  // namespace ibmw::runtime::core::util
