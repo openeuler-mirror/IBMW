@@ -6,6 +6,8 @@
 # Each wrapper runs a sibling shell harness as a subprocess; non-zero exit
 # fails the test. The harnesses own the assertions; these wrappers exist
 # solely so the synthetic tests count in the Gate 1 pytest total.
+import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -59,3 +61,28 @@ def test_red_lines_option_without_value_fails(option):
     )
     assert result.returncode == 64
     assert f"Missing value for {option}" in result.stderr
+
+
+# TOOL-036: every temp file is removed by the trap, also when interrupted
+# during the baseline comparison.
+def test_red_lines_interrupted_run_leaves_no_temp_files(tmp_path):
+    repo_root = Path(__file__).resolve().parents[4]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "comm").write_text("#!/bin/bash\nkill -TERM $PPID\nexit 7\n")
+    (bin_dir / "comm").chmod(0o755)
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", TMPDIR=str(temp_dir))
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "check_red_lines.sh"), "--baseline", str(baseline)],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == -signal.SIGTERM
+    assert list(temp_dir.iterdir()) == []

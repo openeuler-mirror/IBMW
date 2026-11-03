@@ -128,6 +128,10 @@ cleanup() {
   [[ -n "${VIOLATIONS_RAW:-}"   && -f "$VIOLATIONS_RAW"   ]] && rm -f "$VIOLATIONS_RAW"
   [[ -n "${VIOLATIONS_NEW:-}"   && -f "$VIOLATIONS_NEW"   ]] && rm -f "$VIOLATIONS_NEW"
   [[ -n "${R8_HITS:-}"          && -f "$R8_HITS"          ]] && rm -f "$R8_HITS"
+  [[ -n "${VIOLATION_LINES_FILE:-}" && -f "$VIOLATION_LINES_FILE" ]] && rm -f "$VIOLATION_LINES_FILE"
+  [[ -n "${BASELINE_LINES_FILE:-}"  && -f "$BASELINE_LINES_FILE"  ]] && rm -f "$BASELINE_LINES_FILE"
+  [[ -n "${CURRENT_LINES_NORM:-}"   && -f "$CURRENT_LINES_NORM"   ]] && rm -f "$CURRENT_LINES_NORM"
+  return 0
 }
 trap cleanup EXIT
 
@@ -479,7 +483,6 @@ echo "════════════════════════�
 
 if [[ "$SCAN_ERRORS" -gt 0 ]]; then
   echo "[$MODE] ERROR: $SCAN_ERRORS scan step(s) failed; the result above is incomplete." >&2
-  rm -f "$VIOLATION_LINES_FILE"
   exit 64
 fi
 
@@ -487,7 +490,6 @@ fi
 case "$MODE" in
   report)
     echo "[--report] exit 0 regardless of violations."
-    rm -f "$VIOLATION_LINES_FILE"
     exit 0
     ;;
   baseline)
@@ -517,11 +519,9 @@ case "$MODE" in
       cat "$VIOLATIONS_NEW"
       echo ""
       echo "[--baseline] FAIL: $NEW_COUNT new violation(s) introduced."
-      rm -f "$VIOLATION_LINES_FILE" "$BASELINE_LINES_FILE" "$CURRENT_LINES_NORM"
       exit 2
     fi
     echo "[--baseline] OK: no new violations vs baseline."
-    rm -f "$VIOLATION_LINES_FILE" "$BASELINE_LINES_FILE" "$CURRENT_LINES_NORM"
     exit 0
     ;;
   strict|*)
@@ -530,11 +530,9 @@ case "$MODE" in
       echo "[--strict] FAIL: $VIOLATION_COUNT R1-R12 violation(s) detected."
       echo "  Use '--report' to view without blocking."
       echo "  Use '--baseline <file>' to gate only on new regressions."
-      rm -f "$VIOLATION_LINES_FILE"
       exit 1
     fi
     echo "[--strict] OK: all R1-R12 red-lines green."
-    rm -f "$VIOLATION_LINES_FILE"
     exit 0
     ;;
 esac
