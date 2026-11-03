@@ -28,6 +28,7 @@ def gen_h_file(pkg_name, srv_filename):
 #pragma once
 
 #include <future>
+#include <memory>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/service/rpc_status.h"
@@ -143,6 +144,20 @@ class {{srv_filename}}AsyncAccess : public ibmw::rpc::AsyncAccessBase {
       std::function<void(ibmw::rpc::Status)>&& callback) {
     {{srv_filename}}(ibmw::rpc::ContextRef(), req, rsp, std::move(callback));
   }
+
+  // Keeps req and rsp alive until the call completes.
+  void {{srv_filename}}(
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback);
+
+  void {{srv_filename}}(
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback) {
+    {{srv_filename}}(ibmw::rpc::ContextRef(), std::move(req), std::move(rsp), std::move(callback));
+  }
 };
 
 class {{srv_filename}}FutureAccess : public ibmw::rpc::FutureAccessBase {
@@ -168,6 +183,18 @@ class {{srv_filename}}FutureAccess : public ibmw::rpc::FutureAccessBase {
       const {{srv_filename}}_Request& req,
       {{srv_filename}}_Response& rsp) {
     return {{srv_filename}}(ibmw::rpc::ContextRef(), req, rsp);
+  }
+
+  // Keeps req and rsp alive until the call completes.
+  std::future<ibmw::rpc::Status> {{srv_filename}}(
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp);
+
+  std::future<ibmw::rpc::Status> {{srv_filename}}(
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp) {
+    return {{srv_filename}}(ibmw::rpc::ContextRef(), std::move(req), std::move(rsp));
   }
 };
 
@@ -408,6 +435,15 @@ void {{srv_filename}}AsyncAccess::{{srv_filename}}(
   Call(full_func_name, ctx_ref, req, rsp, std::move(callback));
 }
 
+void {{srv_filename}}AsyncAccess::{{srv_filename}}(
+    ibmw::rpc::ContextRef ctx_ref,
+    std::shared_ptr<const {{srv_filename}}_Request> req,
+    std::shared_ptr<{{srv_filename}}_Response> rsp,
+    std::function<void(ibmw::rpc::Status)>&& callback) {
+  const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, kFuncName);
+  Call(full_func_name, ctx_ref, std::move(req), std::move(rsp), std::move(callback));
+}
+
 {{srv_filename}}FutureAccess::{{srv_filename}}FutureAccess(ibmw::rpc::ServiceRef service_ref)
     : ibmw::rpc::FutureAccessBase(service_ref, kRpcType, kServiceName) {}
 
@@ -420,6 +456,14 @@ std::future<ibmw::rpc::Status> {{srv_filename}}FutureAccess::{{srv_filename}}(
     {{srv_filename}}_Response& rsp) {
   const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, kFuncName);
   return Call(full_func_name, ctx_ref, req, rsp);
+}
+
+std::future<ibmw::rpc::Status> {{srv_filename}}FutureAccess::{{srv_filename}}(
+    ibmw::rpc::ContextRef ctx_ref,
+    std::shared_ptr<const {{srv_filename}}_Request> req,
+    std::shared_ptr<{{srv_filename}}_Response> rsp) {
+  const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, kFuncName);
+  return Call(full_func_name, ctx_ref, std::move(req), std::move(rsp));
 }
 
 {{srv_filename}}CoAccess::{{srv_filename}}CoAccess(ibmw::rpc::ServiceRef service_ref)

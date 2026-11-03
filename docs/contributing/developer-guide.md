@@ -771,6 +771,13 @@ Key implementation details:
 | Future | `FutureAccessBase<Req, Rsp>` | No | `std::future<rpc::Status>` |
 | Coroutine | `CoAccessBase<Req, Rsp>` | No | `co::Task<rpc::Status>` |
 
+The async and future patterns pass `req` and `rsp` to the provider by address.
+With the reference overloads, the caller must keep both alive until the
+callback runs or the future is ready. Generated `AsyncAccess` and
+`FutureAccess` classes also take `std::shared_ptr<const Req>` and
+`std::shared_ptr<Rsp>`; those overloads keep both objects alive until the call
+completes. A null `req` or `rsp` completes with `IBMW_RPC_STATUS_CLI_UNKNOWN`.
+
 ### RPC Filters
 
 Coroutine-based RPC filters intercept calls for cross-cutting concerns:

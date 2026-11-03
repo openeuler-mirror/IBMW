@@ -756,6 +756,8 @@ ROS2 节点发现和调用（`ros2 service call`、`ros2 service list`）。
 | Future | `FutureAccessBase<Req, Rsp>` | 否 | `std::future<rpc::Status>` |
 | 协程 | `CoAccessBase<Req, Rsp>` | 否 | `co::Task<rpc::Status>` |
 
+异步和 future 模式按地址把 `req`、`rsp` 交给 provider。使用引用版本时，调用方必须保证两者存活到回调执行或 future 就绪。生成的 `AsyncAccess`、`FutureAccess` 还接受 `std::shared_ptr<const Req>` 和 `std::shared_ptr<Rsp>`，这组重载会把两个对象保活到调用完成。`req` 或 `rsp` 为空时以 `IBMW_RPC_STATUS_CLI_UNKNOWN` 完成。
+
 ### RPC Filter
 
 基于协程的 RPC filter 拦截调用以实现横切关注点：

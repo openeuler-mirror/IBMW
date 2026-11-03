@@ -133,6 +133,10 @@ details remain governed by the documentation for each release.
   must set `source_driver` to itself (COMM-002).
 
 ### Added
+- `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /
+  `FutureAccess` classes (ROS2 `.srv` and DDS IDL generators) accept
+  `std::shared_ptr` request and response objects and keep them alive until the
+  call completes. The reference overloads are unchanged (API-012).
 
 - Recorder `storage_policy` disk limits `min_free_space_m`, `max_folder_num`
   and `max_total_size_m`; all default to 0 (disabled).

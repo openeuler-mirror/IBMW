@@ -300,6 +300,13 @@ using ServiceFunc = ibmw::util::Function<...>;       // void(ContextRef, const v
 | `FutureAccessBase<Req, Rsp>` | `std::future<Status> Invoke(ctx, req, rsp)` | Future-based |
 | `CoAccessBase<Req, Rsp>` | `co::Task<Status> Invoke(ctx, req, rsp)` | Coroutine-based |
 
+The async and future patterns pass `req` and `rsp` to the provider by address.
+With the reference overloads, the caller must keep both alive until the
+callback runs or the future is ready. Generated `AsyncAccess` and
+`FutureAccess` classes also take `std::shared_ptr<const Req>` and
+`std::shared_ptr<Rsp>`; those overloads keep both objects alive until the call
+completes. A null `req` or `rsp` completes with `IBMW_RPC_STATUS_CLI_UNKNOWN`.
+
 ---
 
 ### RPC Context

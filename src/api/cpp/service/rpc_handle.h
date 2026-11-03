@@ -344,9 +344,11 @@ class SyncAccessBase : public AccessBase {
 
 };
 
-// NOTE: req/rsp are passed to the provider by address. For AsyncAccessBase and
-// FutureAccessBase the caller must keep both alive until the callback runs /
-// the future becomes ready.
+// NOTE: req/rsp are passed to the provider by address. With the reference
+// overloads of AsyncAccessBase and FutureAccessBase the caller must keep both
+// alive until the callback runs / the future becomes ready. The shared_ptr
+// overloads keep them alive until the provider drops its completion callback;
+// a null req or rsp completes with IBMW_RPC_STATUS_CLI_UNKNOWN.
 class AsyncAccessBase : public AccessBase {
  public:
   AsyncAccessBase(ServiceRef service_ref, std::string_view rpc_type, std::string_view service_name)
@@ -381,6 +383,25 @@ class AsyncAccessBase : public AccessBase {
         [ctx_ptr, callback{std::move(callback)}](uint32_t code) {
           callback(ibmw::rpc::Status(code));
         });
+  }
+
+  template <class ReqType, class RspType>
+  void Call(
+      std::string_view full_func_name,
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const ReqType> req,
+      std::shared_ptr<RspType> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback) {
+    if (!req || !rsp) [[unlikely]] {
+      callback(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_UNKNOWN));
+      return;
+    }
+    const ReqType& req_ref = *req;
+    RspType& rsp_ref = *rsp;
+    Call(full_func_name, ctx_ref, req_ref, rsp_ref,
+         [req{std::move(req)}, rsp{std::move(rsp)}, callback{std::move(callback)}](ibmw::rpc::Status status) {
+           callback(status);
+         });
   }
 };
 
@@ -419,6 +440,41 @@ class FutureAccessBase : public AccessBase {
     service_ref_.Call(
         full_func_name, *ctx_ptr, &req, &rsp,
         [ctx_ptr, status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
+          if (std::exchange(done, true)) return;  // ignore duplicate completion
+          status_promise.set_value(ibmw::rpc::Status(code));
+        });
+
+    return status_future;
+  }
+
+  template <class ReqType, class RspType>
+  std::future<ibmw::rpc::Status> Call(
+      std::string_view full_func_name,
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const ReqType> req,
+      std::shared_ptr<RspType> rsp) {
+    std::promise<ibmw::rpc::Status> status_promise;
+    std::future<ibmw::rpc::Status> status_future = status_promise.get_future();
+    if (!req || !rsp) [[unlikely]] {
+      status_promise.set_value(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_UNKNOWN));
+      return status_future;
+    }
+
+    std::shared_ptr<Context> ctx_ptr;
+    if (ctx_ref) {
+      ctx_ref.SetFunctionName(full_func_name);
+    } else {
+      ctx_ptr = NewContextSharedPtr();
+      ctx_ptr->SetFunctionName(full_func_name);
+      ctx_ref = ibmw::rpc::ContextRef(*ctx_ptr);
+    }
+
+    const void* req_ptr = req.get();
+    void* rsp_ptr = rsp.get();
+    service_ref_.Call(
+        full_func_name, ctx_ref, req_ptr, rsp_ptr,
+        [ctx_ptr{std::move(ctx_ptr)}, req{std::move(req)}, rsp{std::move(rsp)},
+         status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
           if (std::exchange(done, true)) return;  // ignore duplicate completion
           status_promise.set_value(ibmw::rpc::Status(code));
         });
