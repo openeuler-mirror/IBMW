@@ -13,7 +13,11 @@ HEADER = re.compile(
     r"^(feat|fix|docs|test|build|refactor|chore|ci|perf|bench|diag|revert)"
     r"\(([A-Za-z0-9][A-Za-z0-9._/-]*)\): (\S(?:.*\S)?)$"
 )
-AUTOMATIC = re.compile(r"^(Merge\b|Revert \"|fixup! |squash! )", re.I)
+# Case-sensitive prefixes that git (or a forge merge button) generates itself (TOOL-044).
+AUTOMATIC = re.compile(
+    r"^(Merge (branch|branches|remote-tracking branch|tag|commit|pull request) "
+    r"|Revert \"|fixup! |squash! |amend! )"
+)
 BODY_REQUIRED_TYPES = {"feat", "fix", "refactor", "perf", "bench", "diag", "revert"}
 REQUIRED_SECTIONS = ("What:", "Why:", "Verification:")
 
