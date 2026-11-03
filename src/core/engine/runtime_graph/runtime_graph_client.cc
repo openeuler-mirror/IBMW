@@ -109,8 +109,9 @@ nlohmann::json RuntimeGraphAgentClient::Call(
       std::strerror(errno));
   RequireSameUid(fd);
   ConfigureRuntimeSocket(fd);
+  constexpr int kRequestId = 1;  // one request per connection
   const std::string request = nlohmann::json{
-      {"protocol_version", kRuntimeProtocolVersion}, {"id", 1},
+      {"protocol_version", kRuntimeProtocolVersion}, {"id", kRequestId},
       {"method", method}, {"params", std::move(params)}}
                                   .dump() +
                               "\n";
@@ -119,7 +120,9 @@ nlohmann::json RuntimeGraphAgentClient::Call(
     const ssize_t written =
         ::send(fd, request.data() + offset, request.size() - offset,
                MSG_NOSIGNAL);
-    MW_ASSERT(written > 0, "Failed to send Runtime Agent request.");
+    if (written < 0 && errno == EINTR) continue;
+    MW_ASSERT(written > 0, "Failed to send Runtime Agent request: {}.",
+              std::strerror(errno));
     offset += static_cast<size_t>(written);
   }
 
@@ -128,6 +131,9 @@ nlohmann::json RuntimeGraphAgentClient::Call(
   while (response_data.find('\n') == std::string::npos &&
          response_data.size() < kRuntimeMaxControlMessage) {
     const ssize_t received = ::recv(fd, buffer.data(), buffer.size(), 0);
+    if (received < 0 && errno == EINTR) continue;
+    MW_ASSERT(received >= 0, "Failed to receive Runtime Agent response: {}.",
+              std::strerror(errno));
     MW_ASSERT(received > 0, "Runtime Agent closed without a response.");
     response_data.append(buffer.data(), static_cast<size_t>(received));
   }
@@ -142,6 +148,9 @@ nlohmann::json RuntimeGraphAgentClient::Call(
   MW_ASSERT(
       response.value("ok", false), "Runtime Agent request '{}' failed: {}.",
       method, response.value("error", "unknown error"));
+  MW_ASSERT(
+      response.value("id", nlohmann::json()) == kRequestId,
+      "Runtime Agent answered another request than '{}'.", method);
   return response.at("result");
 }
 

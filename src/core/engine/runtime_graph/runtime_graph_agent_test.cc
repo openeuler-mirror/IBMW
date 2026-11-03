@@ -12,6 +12,8 @@
 #include <thread>
 
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <poll.h>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -255,6 +257,73 @@ TEST_F(RuntimeGraphAgentTest, ShutdownWakesIdleListenerAndRemovesRegistration) {
   EXPECT_FALSE(std::filesystem::exists(socket_path));
   EXPECT_FALSE(std::filesystem::exists(
       ibmw::extension::RuntimeRegistryDirectory(directory_) / "shutdown-agent.json"));
+}
+
+// Answers one StopTap request with the given id after a delay.
+class FakeAgent {
+ public:
+  FakeAgent(const std::filesystem::path& path, nlohmann::json id, std::chrono::milliseconds delay)
+      : path_(path.string()) {
+    listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    sockaddr_un address{.sun_family = AF_UNIX};
+    std::strncpy(address.sun_path, path_.c_str(), sizeof(address.sun_path) - 1);
+    EXPECT_EQ(::bind(listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    EXPECT_EQ(::listen(listen_fd_, 1), 0);
+    thread_ = std::thread([this, id = std::move(id), delay] {
+      const int fd = ::accept(listen_fd_, nullptr, nullptr);
+      if (fd < 0) return;
+      std::string request;
+      char c = 0;
+      while (::recv(fd, &c, 1, 0) == 1 && c != '\n') request.push_back(c);
+      std::this_thread::sleep_for(delay);
+      const std::string response =
+          nlohmann::json{{"protocol_version", kRuntimeProtocolVersion}, {"id", id},
+                         {"ok", true}, {"result", {{"stopped", true}}}}
+              .dump() +
+          "\n";
+      ::send(fd, response.data(), response.size(), MSG_NOSIGNAL);
+      ::close(fd);
+    });
+  }
+  ~FakeAgent() {
+    thread_.join();
+    ::close(listen_fd_);
+  }
+  const std::string& Path() const { return path_; }
+
+ private:
+  std::string path_;
+  int listen_fd_ = -1;
+  std::thread thread_;
+};
+
+// COMM-028: a signal arriving while the client waits for the answer does not
+// fail the request.
+TEST_F(RuntimeGraphAgentTest, ClientRetriesInterruptedReceive) {
+  struct sigaction action {};
+  action.sa_handler = [](int) {};
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = 0;  // no SA_RESTART: recv returns EINTR
+  struct sigaction previous {};
+  ASSERT_EQ(::sigaction(SIGUSR1, &action, &previous), 0);
+
+  FakeAgent fake(directory_ / "fake.sock", 1, 500ms);
+  const pthread_t caller = ::pthread_self();
+  std::thread interrupter([caller] {
+    std::this_thread::sleep_for(150ms);
+    ::pthread_kill(caller, SIGUSR1);
+  });
+  bool stopped = false;
+  EXPECT_NO_THROW(stopped = RuntimeGraphAgentClient(fake.Path()).StopTap("s"));
+  EXPECT_TRUE(stopped);
+  interrupter.join();
+  ::sigaction(SIGUSR1, &previous, nullptr);
+}
+
+// COMM-028: an answer carrying another request id is rejected.
+TEST_F(RuntimeGraphAgentTest, ClientRejectsAnswerForAnotherRequest) {
+  FakeAgent fake(directory_ / "fake.sock", 2, 0ms);
+  EXPECT_ANY_THROW(RuntimeGraphAgentClient(fake.Path()).StopTap("s"));
 }
 
 }  // namespace
