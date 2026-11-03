@@ -82,7 +82,7 @@ fi
 # regex commonly contains '|' (alternation) and the smoke_excludes glob
 # list is joined with '|' as the inner separator. Field syntax:
 #   ENTRIES\t<comma-separated names in declared order>
-#   FLAGS\t<entry>\t<space-joined cmake_flags>
+#   FLAGS\t<entry>\t<cmake_flags joined with \x1f (unit separator)>
 #   CTEST\t<entry>\t<ctest_exclude regex, may contain '|'>
 #   SMOKE\t<entry>\t<glob1>|<glob2>|...
 PARSED="$(python3 - "${YAML_PATH}" <<'PY'
@@ -93,7 +93,7 @@ entries = cfg.get("entries") or []
 names = [e["name"] for e in entries]
 print("ENTRIES\t" + ",".join(names))
 for e in entries:
-    flags = " ".join(e.get("cmake_flags") or [])
+    flags = "\x1f".join(e.get("cmake_flags") or [])
     print(f"FLAGS\t{e['name']}\t{flags}")
     print(f"CTEST\t{e['name']}\t{e.get('ctest_exclude','') or ''}")
     smoke = e.get("smoke_excludes") or []
@@ -345,14 +345,16 @@ run_entry() {
   local smoke_log="${entry_dir}/smoke.log"
 
   echo "===================================================================="
-  echo "[matrix] entry=${entry}  flags=${ENTRY_FLAGS[$entry]}"
+  echo "[matrix] entry=${entry}  flags=${ENTRY_FLAGS[$entry]//$'\x1f'/ }"
   echo "[matrix] build_dir=${build_dir}"
   echo "===================================================================="
 
   rm -rf "${entry_dir}"
   mkdir -p "${entry_dir}"
 
-  local entry_extra=(${ENTRY_FLAGS[$entry]})
+  # One array element per cmake_flags item: no word splitting, no globbing.
+  local entry_extra=()
+  IFS=$'\x1f' read -ra entry_extra <<< "${ENTRY_FLAGS[$entry]}"
   (
     cd "${REPO_ROOT}"
     cmake -B "${build_dir}" -S "${REPO_ROOT}" \

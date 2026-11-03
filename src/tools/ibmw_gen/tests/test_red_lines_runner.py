@@ -41,6 +41,10 @@ def test_target_ros2_prefix_synthetic_harness():
     _run_harness("test_target_ros2_prefix.sh")
 
 
+def test_dual_build_matrix_flags_synthetic_harness():
+    _run_harness("test_dual_build_matrix_flags.sh")
+
+
 # TOOL-035: an option that takes a value, given last, is an error instead of
 # an endless loop.
 @pytest.mark.parametrize("option", ["--baseline", "--scan-path", "--exclude"])
