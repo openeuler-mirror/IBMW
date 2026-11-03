@@ -545,8 +545,8 @@ void DdsRpcDriver::ServerListener::on_data_available(
       req_identity.writer_guid() = related_guid;
     }
 
-    MW_INFO("DDS RPC server received request: func='{}', identity seq=({},{})",
-            info.func_name, req_identity.sequence_number().high, req_identity.sequence_number().low);
+    MW_TRACE("DDS RPC server received request: func='{}', identity seq=({},{})",
+             info.func_name, req_identity.sequence_number().high, req_identity.sequence_number().low);
 
     // Create service invoke wrapper
     auto service_invoke_wrapper_ptr = std::make_shared<runtime::core::service::ServiceMessageFrame>(
