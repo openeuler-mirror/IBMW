@@ -97,11 +97,11 @@ class PackageLoader {
       module_ptr_map_;
 
   // Create an enumeration class to identify the usage of the pkgs module (UseNone: use all, UseEnable: use enabled module, UseDisable: use disabled module, use UseNone by default)
-  enum class Enable_or_Disable : uint32_t {
+  enum class EnableOrDisable : uint32_t {
     kUseNone,
     kUseEnable,
     kUseDisable,
-  } enable_or_disable_for_pkg_ = Enable_or_Disable::kUseNone;
+  } enable_or_disable_for_pkg_ = EnableOrDisable::kUseNone;
 };
 
 }  // namespace ibmw::runtime::core::module

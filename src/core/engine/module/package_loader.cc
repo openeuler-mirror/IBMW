@@ -72,14 +72,14 @@ void PackageLoader::LoadPkg(std::string_view pkg_path,
 
   // Before loading the module, check whether the enabled and disabled modules conflict (alarm only once)
   if (!disable_modules.empty() && !enable_modules.empty()) {
-    MW_WARN("Enabled modules and disabled modules are conficted! Only enabled modules are loaded, disabled modules are ignored!\n");
-    enable_or_disable_for_pkg_ = Enable_or_Disable::kUseEnable;
+    MW_WARN("Enabled modules and disabled modules are conflicted! Only enabled modules are loaded, disabled modules are ignored!\n");
+    enable_or_disable_for_pkg_ = EnableOrDisable::kUseEnable;
   } else if (!disable_modules.empty() && enable_modules.empty()) {
-    enable_or_disable_for_pkg_ = Enable_or_Disable::kUseDisable;
+    enable_or_disable_for_pkg_ = EnableOrDisable::kUseDisable;
   } else if (disable_modules.empty() && !enable_modules.empty()) {
-    enable_or_disable_for_pkg_ = Enable_or_Disable::kUseEnable;
+    enable_or_disable_for_pkg_ = EnableOrDisable::kUseEnable;
   } else {
-    enable_or_disable_for_pkg_ = Enable_or_Disable::kUseNone;
+    enable_or_disable_for_pkg_ = EnableOrDisable::kUseNone;
   }
 
   try {
@@ -104,12 +104,12 @@ void PackageLoader::CreateModules(CreateModuleFunc create_module_fn,
     auto finditr_enable = std::find(enable_modules.begin(), enable_modules.end(), module_name);
 
     // If enable_or_disable_for_pkg_ selects the disabled module, it will skip the module in the disabled list when it encounters the module in the disabled list.
-    if (enable_or_disable_for_pkg_ == Enable_or_Disable::kUseDisable && finditr_disable != disable_modules.end()) {
+    if (enable_or_disable_for_pkg_ == EnableOrDisable::kUseDisable && finditr_disable != disable_modules.end()) {
       continue;
     }
 
     // If enable_or_disable_for_pkg_ selects the enable module, it will skip it if it encounters a module that is not in the enable list.
-    if (enable_or_disable_for_pkg_ == Enable_or_Disable::kUseEnable && finditr_enable == enable_modules.end()) {
+    if (enable_or_disable_for_pkg_ == EnableOrDisable::kUseEnable && finditr_enable == enable_modules.end()) {
       continue;
     }
 

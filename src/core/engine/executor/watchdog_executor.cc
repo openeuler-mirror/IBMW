@@ -142,7 +142,6 @@ void WatchdogExecutor::Shutdown() {
 
   MW_INFO("[Watchdog] stopped");
 }
-// todo
 void WatchdogExecutor::Dispatch(ibmw::executor::Task&& task) {
   auto cur_state = state_.load(std::memory_order_acquire);
   if (cur_state != State::kInit && cur_state != State::kStart) [[unlikely]] {
