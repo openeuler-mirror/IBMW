@@ -178,6 +178,9 @@ details remain governed by the documentation for each release.
   (sender: `register_send_type`, `send`, `get_topic`,
   `merge_subscribe_context_to_publish_context`, `loan`, `publish_loaned`,
   `release_loaned`; receiver: `on_message`, `get_topic`).
+- Sender C ABI entries now reject a null `ctx`, and exceptions they swallow are counted
+  (`SenderAccess::AbiExceptionCount`) and logged as errors at most once per second per sender
+  (COMM-039).
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

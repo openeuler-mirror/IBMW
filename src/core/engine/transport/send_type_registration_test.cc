@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -142,6 +143,45 @@ TEST_F(SendTypeRegistrationTest, CallerContextIsClaimedOnce) {
   good.Send("T", ibmw::transport::ContextRef(), &msg);
   EXPECT_EQ(a_.sends, 3);
   dispatcher_.Shutdown();
+}
+
+// COMM-039: exceptions at the sender C ABI entries are counted and logged at
+// most once per second; a null ctx is rejected instead of dereferenced.
+TEST_F(SendTypeRegistrationTest, AbiExceptionIsCountedAndRateLimited) {
+  std::vector<std::string> errors;
+  logger_.get_log_level_func = [] { return ibmw::common::util::kLogLevelTrace; };
+  logger_.log_func = [&errors](uint32_t level, uint32_t, const char*, const char*, const char* text, size_t len) {
+    if (level == ibmw::common::util::kLogLevelError) errors.emplace_back(text, len);
+  };
+  ibmw_type_support_base_t throwing = kTs;
+  throwing.type_name = [](void*) -> ibmw_string_view_t { throw std::runtime_error("boom"); };
+
+  Sender("good");
+  const auto* base = senders_.back()->NativeHandle();
+  EXPECT_FALSE(base->register_send_type(base->ctx, &throwing));
+  EXPECT_FALSE(base->register_send_type(base->ctx, &throwing));
+  EXPECT_EQ(senders_.back()->AbiExceptionCount(), 2u);
+  ASSERT_EQ(errors.size(), 1u);
+  EXPECT_NE(errors[0].find("register_send_type"), std::string::npos);
+  EXPECT_NE(errors[0].find("boom"), std::string::npos);
+}
+
+TEST_F(SendTypeRegistrationTest, NullCtxIsRejectedAtEveryEntry) {
+  Sender("good");
+  const auto* base = senders_.back()->NativeHandle();
+  int msg = 0;
+  ibmw_loaned_sample_handle_t handle{};
+  handle.user_payload_size = 7;
+  EXPECT_FALSE(base->register_send_type(nullptr, &kTs));
+  base->send(nullptr, ibmw::util::ToIbmwStringView("T"), nullptr, &msg);
+  EXPECT_EQ(base->get_topic(nullptr).len, 0u);
+  base->merge_subscribe_context_to_publish_context(nullptr, nullptr, nullptr);
+  base->loan(nullptr, ibmw::util::ToIbmwStringView("T"), 4, IBMW_LOAN_MODE_POD_ONLY, &handle);
+  EXPECT_EQ(handle.user_payload_size, 0u);
+  base->publish_loaned(nullptr, &handle);
+  base->release_loaned(nullptr, &handle);
+  EXPECT_FALSE(base->register_loaned_pod_topic(nullptr, ibmw::util::ToIbmwStringView("T"), 4, 4));
+  EXPECT_EQ(a_.sends + b_.sends, 0);
 }
 
 }  // namespace
