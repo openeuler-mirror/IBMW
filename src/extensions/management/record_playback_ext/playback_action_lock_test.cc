@@ -1,6 +1,7 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -238,9 +239,13 @@ TEST(PlaybackActionLockRegression, SignalPlaybackRestarts) {
     std::lock_guard<std::mutex> lock(mutex);
     payloads.push_back(static_cast<unsigned char>(data.at(0)));
   });
+  // Records are dispatched one task each; with two executor threads records
+  // due at the same time may publish in either order, so compare sorted.
   const auto take = [&] {
     std::lock_guard<std::mutex> lock(mutex);
-    return std::exchange(payloads, {});
+    auto result = std::exchange(payloads, {});
+    std::sort(result.begin(), result.end());
+    return result;
   };
   const auto wait_for = [&](size_t count) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
