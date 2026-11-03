@@ -56,13 +56,21 @@ BASELINE_FILE=""
 SCAN_PATH_OVERRIDE=""   # testing-only override of default scan paths
 EXCLUDE_FILES=()
 
+# An option missing its value would make `shift 2` fail and loop forever.
+require_value() {
+  if [[ $# -lt 2 ]]; then
+    echo "Missing value for $1" >&2
+    exit 64
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --strict)    MODE="strict";   shift ;;
     --report)    MODE="report";   shift ;;
-    --baseline)  MODE="baseline"; BASELINE_FILE="${2:-}"; shift 2 ;;
-    --scan-path) SCAN_PATH_OVERRIDE="${2:-}"; shift 2 ;;
-    --exclude)   EXCLUDE_FILES+=("${2:-}"); shift 2 ;;
+    --baseline)  require_value "$@"; MODE="baseline"; BASELINE_FILE="$2"; shift 2 ;;
+    --scan-path) require_value "$@"; SCAN_PATH_OVERRIDE="$2"; shift 2 ;;
+    --exclude)   require_value "$@"; EXCLUDE_FILES+=("$2"); shift 2 ;;
     -h|--help)
       sed -n '2,40p' "$0"
       exit 0

@@ -9,6 +9,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 def _run_harness(harness_name: str) -> None:
     repo_root = Path(__file__).resolve().parents[4]
@@ -37,3 +39,19 @@ def test_red_lines_exempt_anchors_synthetic_harness():
 
 def test_target_ros2_prefix_synthetic_harness():
     _run_harness("test_target_ros2_prefix.sh")
+
+
+# TOOL-035: an option that takes a value, given last, is an error instead of
+# an endless loop.
+@pytest.mark.parametrize("option", ["--baseline", "--scan-path", "--exclude"])
+def test_red_lines_option_without_value_fails(option):
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "check_red_lines.sh"), option],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 64
+    assert f"Missing value for {option}" in result.stderr
