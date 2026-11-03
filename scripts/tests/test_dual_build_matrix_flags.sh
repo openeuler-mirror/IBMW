@@ -2,7 +2,8 @@
 # Copyright (c) 2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # TOOL-041: each cmake_flags item of the matrix yaml reaches cmake as one
 # argument, without word splitting or pathname expansion. A stub cmake
-# records the arguments and fails, so nothing is built.
+# records the arguments and fails, so nothing is built; --report keeps the
+# expected build failure from failing the run.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,7 +34,7 @@ YAML
 
 (cd "$SCRATCH/cwd" && PATH="$SCRATCH/bin:$PATH" IBMW_MATRIX_ROOT="$SCRATCH/root" \
   IBMW_MATRIX_YAML="$SCRATCH/matrix.yaml" \
-  bash "$REPO_ROOT/scripts/run_dual_build_matrix.sh" --build-only probe empty > "$SCRATCH/out.txt" 2>&1) \
+  bash "$REPO_ROOT/scripts/run_dual_build_matrix.sh" --report --build-only probe empty > "$SCRATCH/out.txt" 2>&1) \
   || fail "matrix harness failed: $(tail -5 "$SCRATCH/out.txt")"
 
 expected=$'-DGLOB=*\n-DSPACE=a b\n-DOTHER=ON'
