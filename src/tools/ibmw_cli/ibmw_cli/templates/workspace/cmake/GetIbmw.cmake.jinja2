@@ -3,10 +3,21 @@ include(FetchContent)
 
 message(STATUS "get ibmw ...")
 
+# A tag or branch can be moved upstream; pin a reviewed commit with
+# -DIBMW_GIT_TAG=<40-character commit sha>.
+set(IBMW_GIT_TAG
+    "v0.1.0"
+    CACHE STRING "IB_Robot git ref fetched as ibmw (prefer a commit sha)")
+string(LENGTH "${IBMW_GIT_TAG}" _ibmw_git_tag_length)
+if(NOT _ibmw_git_tag_length EQUAL 40 OR NOT IBMW_GIT_TAG MATCHES "^[0-9a-fA-F]+$")
+  message(WARNING "ibmw: IBMW_GIT_TAG '${IBMW_GIT_TAG}' is not a commit sha; "
+                  "the fetched source can change upstream. Pin a reviewed commit sha.")
+endif()
+
 FetchContent_Declare(
   ibmw #
   GIT_REPOSITORY https://gitcode.com/openeuler/IB_Robot.git #
-  GIT_TAG v0.1.0)
+  GIT_TAG ${IBMW_GIT_TAG})
 
 FetchContent_GetProperties(ibmw)
 if(NOT ibmw_POPULATED)
