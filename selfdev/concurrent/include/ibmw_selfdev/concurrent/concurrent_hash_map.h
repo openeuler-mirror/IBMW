@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "ibmw_selfdev/concurrent/detail/adaptive_lock.h"
+#include "ibmw_selfdev/concurrent/detail/node_cache.h"
 
 namespace ibmw::selfdev::concurrent {
 
@@ -26,9 +27,11 @@ class ConcurrentHashMap {
   static constexpr size_t kMaxShards = size_t{1} << 16;
   /// Sized for large, busy maps: with random keys each access moves the
   /// shard's lock cache line between cores, and fewer shards make that the
-  /// bottleneck (on a 20-core aarch64 board, read-mostly over 100k entries at
-  /// 16 threads: 64 shards 2.0x tbb, 512 shards 1.3x). Costs ~64 KiB of shard
-  /// headers; maps with few live entries can pass a smaller count.
+  /// bottleneck (on a 20-core aarch64 OHOS board, Emplace + Take of distinct
+  /// keys over 100k entries at 16 threads, with the node cache: 64 shards
+  /// 0.29-0.36x tbb's time, 512 shards 0.08-0.11x). Costs ~64 KiB of shard
+  /// headers with libc++ (~96 KiB with libstdc++); maps with few live entries
+  /// can pass a smaller count.
   static constexpr size_t kDefaultShards = 512;
 
   /// Rounded up to a power of two and clamped to [1, kMaxShards]. `hash` is
@@ -161,7 +164,7 @@ class ConcurrentHashMap {
 
   void Clear() {
     for (size_t i = 0; i < shard_count_; ++i) {
-      std::unordered_map<Key, Value, Hash, KeyEqual> dropped(0, hash_);
+      ShardMap dropped(0, hash_, KeyEqual(), typename ShardMap::allocator_type(&shards_[i].nodes));
       {
         std::lock_guard<detail::AdaptiveMutex> lock(shards_[i].mu);
         dropped.swap(shards_[i].map);
@@ -177,11 +180,20 @@ class ConcurrentHashMap {
   }
 
  private:
+  using ShardMap =
+      std::unordered_map<Key, Value, Hash, KeyEqual, detail::NodeCacheAllocator<std::pair<const Key, Value>>>;
+
   struct alignas(64) Shard {
-    explicit Shard(const Hash& hash) : map(0, hash) {}
+    explicit Shard(const Hash& hash) : map(0, hash, KeyEqual(), typename ShardMap::allocator_type(&nodes)) {}
     mutable detail::AdaptiveMutex mu;
-    std::unordered_map<Key, Value, Hash, KeyEqual> map;
+    detail::NodeCache nodes;  // before map: the map returns its nodes here when destroyed
+    ShardMap map;
   };
+#if defined(__OHOS__) && defined(_LIBCPP_VERSION) && defined(__aarch64__)
+  // The size kDefaultShards and NodeCache::kCapacity were measured with.
+  static_assert(!std::is_empty_v<Hash> || !std::is_empty_v<KeyEqual> || sizeof(Shard) == 128,
+                "shard outgrew two cache lines");
+#endif
 
   static size_t RoundUpPow2(size_t n) {
     size_t p = 1;

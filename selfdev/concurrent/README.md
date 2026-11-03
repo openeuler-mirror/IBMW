@@ -5,7 +5,7 @@ Header-only concurrent containers; replace the two oneTBB types IBMW uses.
 | Type | Replaces | Notes |
 |---|---|---|
 | `BoundedBlockingQueue<T>` | `tbb::concurrent_bounded_queue<T>` | ticketed queue: one atomic ticket per item, items spread over 8 lanes of 16-cell blocks, so producers (and consumers, when `T` moves without throwing) take no lock; a thread that must wait (empty, full, or an item still being written) spins briefly and then sleeps on a condition variable, and wakers only signal registered sleepers; `Push`/`Emplace` block when full, `Pop` blocks when empty; `Abort()` wakes all waiters and makes later blocking calls fail (sticky until `Reset()`) |
-| `ConcurrentHashMap<K, V>` | `tbb::concurrent_hash_map<K, V>` | sharded `unordered_map` (power-of-two shards, 512 by default, cache-line aligned); value-returning API (`Emplace`, `InsertOrAssign`, `Take`, `Get`, `Erase`) plus `Visit` / `ForEach` under the shard lock |
+| `ConcurrentHashMap<K, V>` | `tbb::concurrent_hash_map<K, V>` | sharded `unordered_map` (power-of-two shards, 512 by default, cache-line aligned); value-returning API (`Emplace`, `InsertOrAssign`, `Take`, `Get`, `Erase`) plus `Visit` / `ForEach` under the shard lock; each shard keeps up to two freed nodes for reuse |
 
 ```cpp
 #include "ibmw_selfdev/concurrent/bounded_blocking_queue.h"
@@ -23,6 +23,14 @@ destructor may use the map. `InsertOrAssign(key, v)` builds the new value
 before taking the lock and swaps it in, so `V` must be constructible from
 `v`, move constructible and swappable (checked by `static_assert`); if
 building it throws, the map is unchanged.
+
+Each shard keeps up to two freed node blocks (raw memory; the values in
+them are destroyed as usual) and reuses them for the next insert, so a map
+that keeps inserting and removing entries mostly skips malloc and free. On
+the OHOS board musl's allocator was most of the cost of Emplace + Take
+(hiperf; tbb's map uses the same allocator). `Clear` keeps the blocks and
+the map's destructor frees them; the most a map holds back is two nodes per
+shard.
 
 `BoundedBlockingQueue` notes:
 

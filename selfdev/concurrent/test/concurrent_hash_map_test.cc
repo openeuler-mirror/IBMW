@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "ibmw_selfdev/concurrent/concurrent_hash_map.h"
+#include "ibmw_selfdev/concurrent/detail/node_cache.h"
 
 #include <atomic>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <new>
 #include <random>
 #include <string>
 #include <thread>
@@ -312,6 +314,117 @@ TEST(ConcurrentHashMapTest, ValueDestructorMayUseMap) {
   });
   EXPECT_TRUE(took) << "deadlock: Take destroyed the moved-from value under its shard lock";
   if (took) delete tm;
+}
+
+// HM-21: NodeCache keeps up to kCapacity blocks of one size and hands them
+// back last in, first out; other sizes pass through until it is empty.
+TEST(NodeCacheTest, KeepsBlocksOfOneSize) {
+  using ibmw::selfdev::concurrent::detail::NodeCache;
+  NodeCache c;
+  EXPECT_EQ(c.Pop(32), nullptr);
+  void* a = ::operator new(32);
+  void* b = ::operator new(32);
+  void* extra = ::operator new(32);
+  void* other = ::operator new(48);
+  EXPECT_TRUE(c.Push(a, 32));
+  EXPECT_FALSE(c.Push(other, 48));  // holds 32-byte blocks now
+  EXPECT_EQ(c.Pop(48), nullptr);
+  EXPECT_TRUE(c.Push(b, 32));
+  static_assert(NodeCache::kCapacity == 2);
+  EXPECT_FALSE(c.Push(extra, 32));  // full
+  EXPECT_EQ(c.Pop(32), b);
+  EXPECT_EQ(c.Pop(32), a);
+  EXPECT_EQ(c.Pop(32), nullptr);
+  EXPECT_TRUE(c.Push(other, 48));  // empty: any size
+  EXPECT_EQ(c.Pop(48), other);
+  if constexpr (sizeof(size_t) > sizeof(uint32_t)) {
+    EXPECT_FALSE(c.Push(extra, size_t{UINT32_MAX} + 1));
+  }
+  ::operator delete(a);
+  ::operator delete(b);
+  ::operator delete(extra);
+  EXPECT_TRUE(c.Push(other, 48));  // freed by ~NodeCache (ASAN/LSAN: no leak)
+}
+
+// HM-22: NodeCacheAllocator caches single, normally aligned objects only;
+// rebound copies share the cache and compare equal.
+TEST(NodeCacheTest, AllocatorRoutesSingleObjects) {
+  using ibmw::selfdev::concurrent::detail::NodeCache;
+  using ibmw::selfdev::concurrent::detail::NodeCacheAllocator;
+  struct alignas(64) Wide {
+    char c[64];
+  };
+  NodeCache c;
+  NodeCache other_cache;
+  NodeCacheAllocator<uint64_t> a(&c);
+  NodeCacheAllocator<Wide> w(a);
+  EXPECT_TRUE(a == w);
+  EXPECT_FALSE(a != w);
+  EXPECT_TRUE(a != NodeCacheAllocator<uint64_t>(&other_cache));
+
+  uint64_t* one = a.allocate(1);
+  a.deallocate(one, 1);
+  uint64_t* again = a.allocate(1);
+  ASSERT_EQ(again, one);  // reused
+  uint64_t* many = a.allocate(4);
+  a.deallocate(many, 4);  // n > 1: not cached
+  EXPECT_EQ(c.Pop(4 * sizeof(uint64_t)), nullptr);
+  a.deallocate(one, 1);
+  EXPECT_EQ(c.Pop(sizeof(uint64_t)), one);
+  ::operator delete(one);
+
+  Wide* x = w.allocate(1);  // over-aligned: not cached
+  EXPECT_EQ(reinterpret_cast<uintptr_t>(x) % alignof(Wide), 0u);
+  w.deallocate(x, 1);
+  EXPECT_EQ(c.Pop(sizeof(Wide)), nullptr);
+}
+
+// HM-23: threads Pop and Push one cache at once; every block ends up either
+// cached (freed by ~NodeCache) or deleted by its thread. TSAN: no race;
+// ASAN: no leak or double free.
+TEST(NodeCacheTest, ConcurrentPushPop) {
+  using ibmw::selfdev::concurrent::detail::NodeCache;
+  constexpr int kThreads = 8;
+  constexpr int kIters = 20000;
+  NodeCache c;
+  std::atomic<int> reused{0};
+  std::vector<std::thread> ts;
+  for (int t = 0; t < kThreads; ++t) {
+    ts.emplace_back([&] {
+      for (int i = 0; i < kIters; ++i) {
+        void* p = c.Pop(24);
+        if (p != nullptr) {
+          reused.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          p = ::operator new(24);
+        }
+        static_cast<volatile char*>(p)[0] = 1;  // the block is this thread's now
+        if (!c.Push(p, 24)) ::operator delete(p);
+      }
+    });
+  }
+  for (auto& th : ts) th.join();
+  EXPECT_GT(reused.load(), 0);
+}
+
+// HM-24: Clear's dropped map returns its nodes to the shard's cache, which
+// the next inserts reuse and the map's destructor frees; Erase, Take and
+// InsertOrAssign keep working across reuse. ASAN/LSAN: no leak.
+TEST(ConcurrentHashMapTest, NodeReuse) {
+  ConcurrentHashMap<uint32_t, std::string> m(1);
+  for (int round = 0; round < 3; ++round) {
+    for (uint32_t k = 0; k < 4; ++k) ASSERT_TRUE(m.Emplace(k, std::string(40, static_cast<char>('a' + k))));
+    EXPECT_EQ(m.Take(0).value_or(""), std::string(40, 'a'));
+    EXPECT_TRUE(m.Erase(1));
+    EXPECT_FALSE(m.InsertOrAssign(2, std::string(40, 'z')));
+    EXPECT_TRUE(m.Emplace(9, "nine"));
+    EXPECT_EQ(m.Get(2).value_or(""), std::string(40, 'z'));
+    EXPECT_EQ(m.Get(9).value_or(""), "nine");
+    EXPECT_EQ(m.Size(), 3u);
+    m.Clear();
+    EXPECT_TRUE(m.Empty());
+  }
+  ASSERT_TRUE(m.Emplace(5, "left for the destructor"));
 }
 
 }  // namespace concurrent_hash_map_test

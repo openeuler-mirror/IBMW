@@ -44,6 +44,11 @@ if(IBMW_BUILD_TESTS)
     SRCS test/bounded_blocking_queue_alloc_test.cc
     LIBS ibmw::selfdev::concurrent)
   target_link_options(ibmw_selfdev_concurrent_alloc_test PRIVATE "LINKER:--wrap=_Znwm")
+  # Same wrap, counting the hash map's node allocations.
+  ibmw_selfdev_add_test(ibmw_selfdev_concurrent_hash_map_alloc_test
+    SRCS test/concurrent_hash_map_alloc_test.cc
+    LIBS ibmw::selfdev::concurrent)
+  target_link_options(ibmw_selfdev_concurrent_hash_map_alloc_test PRIVATE "LINKER:--wrap=_Znwm")
   # Membarrier opt-out and failure; run once as is and once opted out.
   ibmw_selfdev_add_test(ibmw_selfdev_concurrent_barrier_test
     SRCS test/bounded_blocking_queue_barrier_test.cc
