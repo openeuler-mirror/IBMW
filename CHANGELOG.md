@@ -114,6 +114,11 @@ details remain governed by the documentation for each release.
   dropped first.
 - CMake option `IBMW_ENABLE_HARDENING` (default `OFF`) adds stack protector,
   `_FORTIFY_SOURCE=2`, full RELRO, noexecstack and PIE executables.
+- CMake options `IBMW_ENABLE_ASAN`, `IBMW_ENABLE_TSAN` and `IBMW_ENABLE_UBSAN`
+  (default `OFF`) build with the sanitizer; ASan and TSan can not be combined.
+  ASan/TSan builds turn off `IBMW_ENABLE_DLOPEN_DEEPBIND`, and all sanitizer
+  builds skip coverage. Presets `asan` (ASan + UBSan) and `tsan` use
+  `build-asan` and `build-tsan`.
 
 ### Documentation
 

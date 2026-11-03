@@ -211,6 +211,55 @@ if(IBMW_ENABLE_COVERAGE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
                   "binaries are instrumented and slower. Pass -DIBMW_ENABLE_COVERAGE=OFF to disable.")
 endif()
 
+# Sanitizer builds, all off by default. ASan and TSan can not be combined. The
+# older ADDRESS_SANITIZER / THREAD_SANITIZER variables (flags passed by hand)
+# still turn coverage off.
+option(IBMW_ENABLE_ASAN "IBMW build with AddressSanitizer." OFF)
+option(IBMW_ENABLE_TSAN "IBMW build with ThreadSanitizer." OFF)
+option(IBMW_ENABLE_UBSAN "IBMW build with UndefinedBehaviorSanitizer." OFF)
+if(IBMW_ENABLE_ASAN AND IBMW_ENABLE_TSAN)
+  message(FATAL_ERROR "IBMW_ENABLE_ASAN and IBMW_ENABLE_TSAN can not be combined.")
+endif()
+set(_ibmw_sanitizers)
+if(IBMW_ENABLE_ASAN)
+  list(APPEND _ibmw_sanitizers address)
+endif()
+if(IBMW_ENABLE_TSAN)
+  list(APPEND _ibmw_sanitizers thread)
+endif()
+if(IBMW_ENABLE_UBSAN)
+  list(APPEND _ibmw_sanitizers undefined)
+endif()
+if(_ibmw_sanitizers OR ADDRESS_SANITIZER OR THREAD_SANITIZER)
+  set(IBMW_SANITIZER_BUILD ON)
+else()
+  set(IBMW_SANITIZER_BUILD OFF)
+endif()
+if(_ibmw_sanitizers)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "IBMW_ENABLE_ASAN/TSAN/UBSAN need GCC or Clang.")
+  endif()
+  list(JOIN _ibmw_sanitizers "," _ibmw_sanitize)
+  set(_ibmw_sanitizer_flags "-fsanitize=${_ibmw_sanitize} -fno-omit-frame-pointer")
+  if(IBMW_ENABLE_UBSAN)
+    string(APPEND _ibmw_sanitizer_flags " -fno-sanitize-recover=undefined")
+  endif()
+  string(APPEND CMAKE_C_FLAGS " ${_ibmw_sanitizer_flags}")
+  string(APPEND CMAKE_CXX_FLAGS " ${_ibmw_sanitizer_flags}")
+  foreach(_ibmw_link_kind EXE SHARED MODULE)
+    string(APPEND CMAKE_${_ibmw_link_kind}_LINKER_FLAGS " -fsanitize=${_ibmw_sanitize}")
+  endforeach()
+  # The ASan/TSan interceptors do not work with RTLD_DEEPBIND plugins.
+  if((IBMW_ENABLE_ASAN OR IBMW_ENABLE_TSAN) AND IBMW_ENABLE_DLOPEN_DEEPBIND)
+    message(STATUS "IBMW_ENABLE_DLOPEN_DEEPBIND is turned off for this sanitizer build.")
+    set(IBMW_ENABLE_DLOPEN_DEEPBIND OFF)
+  endif()
+  unset(_ibmw_link_kind)
+  unset(_ibmw_sanitize)
+  unset(_ibmw_sanitizer_flags)
+endif()
+unset(_ibmw_sanitizers)
+
 file(READ "${PROJECT_SOURCE_DIR}/VERSION" IBMW_RUNTIME_VERSION)
 string(STRIP "${IBMW_RUNTIME_VERSION}" IBMW_RUNTIME_VERSION)
 message("IBMW Version : ${IBMW_RUNTIME_VERSION}")
@@ -294,7 +343,7 @@ if(IBMW_MASTER_PROJECT)
   set(CMAKE_CXX_VISIBILITY_INLINES_HIDDEN ON)
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(IBMW_ENABLE_COVERAGE AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
+    if(IBMW_ENABLE_COVERAGE AND NOT IBMW_SANITIZER_BUILD)
       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
     endif()
@@ -389,7 +438,7 @@ if(IBMW_BUILD_TESTS)
       set(IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
           "IBMW_INSTALLED_TYPESUPPORT_IBMW_BUILD=${CMAKE_BINARY_DIR}")
       if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND IBMW_ENABLE_COVERAGE
-         AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
+         AND NOT IBMW_SANITIZER_BUILD)
         list(APPEND IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
              "IBMW_INSTALLED_TYPESUPPORT_LOADER_LINK_COVERAGE=1")
       endif()
@@ -785,7 +834,10 @@ list(
   IBMW_ENABLE_COMM_TRACE
   IBMW_ENABLE_REPORTER_V1
   IBMW_BUILD_WITH_WERROR
-  IBMW_ENABLE_HARDENING)
+  IBMW_ENABLE_HARDENING
+  IBMW_ENABLE_ASAN
+  IBMW_ENABLE_TSAN
+  IBMW_ENABLE_UBSAN)
 
 foreach(var ${ibmw_vars})
   string(LENGTH ${var} var_length)

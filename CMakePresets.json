@@ -142,6 +142,27 @@
       }
     },
     {
+      "name": "asan",
+      "displayName": "ASan — test build with AddressSanitizer and UBSan",
+      "description": "Test build instrumented with AddressSanitizer and UndefinedBehaviorSanitizer.",
+      "inherits": "test",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "IBMW_ENABLE_ASAN": "ON",
+        "IBMW_ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "TSan — test build with ThreadSanitizer",
+      "description": "Test build instrumented with ThreadSanitizer.",
+      "inherits": "test",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "IBMW_ENABLE_TSAN": "ON"
+      }
+    },
+    {
       "name": "cross-aarch64-minimal",
       "displayName": "Cross AArch64 — minimal runtime scaffolding",
       "description": "Configures a minimal AArch64 cross build with direct ROS2 feature tiers disabled by default.",
@@ -266,6 +287,14 @@
     {
       "name": "test",
       "configurePreset": "test"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
     },
     {
       "name": "cross-aarch64-minimal",
