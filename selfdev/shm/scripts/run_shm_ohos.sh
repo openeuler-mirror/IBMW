@@ -47,9 +47,12 @@
 #            resources (restool, app_packing_tool). Needs dyn-build (it also
 #            copies the sources)
 #   hap-device sign the HAP for the connected device (OpenHarmony test
-#            certificate, debug profile with the device UDID), install HAP_BUNDLE,
-#            run it with `aa test`, copy the logs from the application sandbox to
-#            logs/hap-<time>/, check them and uninstall the bundle
+#            certificate; debug profile with the device UDID, or the release
+#            profile with HAP_SIGN=release), install HAP_BUNDLE, run it with
+#            `aa test`, copy the logs from the application sandbox to
+#            logs/hap-<time>/ (hap-release-<time>/), check them and uninstall
+#            the bundle
+#   hap-release  hap with HAP_SIGN=release (normal_hap domain)
 #
 # Environment:
 #   OUT                 outputs (default: <repo>/build-ohos-shm)
@@ -76,6 +79,10 @@
 #                       uid and an unused uid of the user-100 application range)
 #   HAP_BUNDLE          bundle name of the test HAP (default: com.ibmw.shmhap); it
 #                       is installed and uninstalled again by hap-device
+#   HAP_SIGN            debug (default): debug profile with the device UDID and
+#                       "debug": true, runs in u:r:debug_hap:s0; release: release
+#                       profile (os_integration) and "debug": false, runs in
+#                       u:r:normal_hap:s0. hap-build and hap-device must agree
 #
 # build/qemu/device/bench/bench-ext use fully static binaries (-static,
 # c++_static), which do not exercise the device's dynamic linker. The SDK
@@ -120,6 +127,7 @@ PLUGIN_SO="${DYN}/rt/libibmw_shm_transport.so"
 RUN_AS="${OUT}/run_as"
 HAP="${OUT}/hap"
 HAP_BUNDLE="${HAP_BUNDLE:-com.ibmw.shmhap}"
+HAP_SIGN="${HAP_SIGN:-debug}"
 SDK_ROOT="$(dirname "${SDK}")"
 SIGN_LIB="${SDK_ROOT}/toolchains/lib"
 mkdir -p "${LOGS}"
@@ -633,6 +641,7 @@ hap_check_libs() {
 # HAP_BUNDLE goes into device shell commands: only a plain bundle name.
 hap_bundle_ok() {
   [[ "${HAP_BUNDLE}" =~ ^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$ ]] || { fail "bad HAP_BUNDLE ${HAP_BUNDLE}"; return 1; }
+  [[ "${HAP_SIGN}" == debug || "${HAP_SIGN}" == release ]] || { fail "bad HAP_SIGN ${HAP_SIGN}"; return 1; }
 }
 
 stage_hap-build() {
@@ -658,7 +667,9 @@ stage_hap-build() {
     { echo "libibmw_shm_ext_hap.so links libchild_process.so"; return 1; }
   # ArkTS (plain JS) to one merged abc, as the IDE's build does.
   cp -r "${src}/resources" "${stage}/src/"
-  sed "s/@BUNDLE@/${HAP_BUNDLE}/g" "${src}/module.json" >"${stage}/src/module.json"
+  local debug=true
+  [[ "${HAP_SIGN}" == release ]] && debug=false
+  sed -e "s/@BUNDLE@/${HAP_BUNDLE}/g" -e "s/@DEBUG@/${debug}/" "${src}/module.json" >"${stage}/src/module.json"
   sed "s/@BUNDLE@/${HAP_BUNDLE}/g" "${src}/pack.info" >"${stage}/pack.info"
   sed "s/@BUNDLE@/${HAP_BUNDLE}/g" "${src}/OpenHarmonyTestRunner.js" >"${stage}/js/OpenHarmonyTestRunner.js"
   cp "${src}/EntryAbility.js" "${stage}/js/"
@@ -687,17 +698,21 @@ EOF
     --pack-info-path "${stage}/pack.info" --ets-path "${stage}/abc" --lib-path "${stage}/libs" \
     --out-path "${HAP}/unsigned.hap" --force true >"${LOGS}/hap-pack.log" 2>&1 || { cat "${LOGS}/hap-pack.log"; return 1; }
   unzip -l "${HAP}/unsigned.hap" | tee "${LOGS}/hap-contents.txt"
-  echo "hap-build OK: ${HAP}/unsigned.hap"
+  echo "${HAP_SIGN}" >"${HAP}/sign-mode"
+  echo "hap-build OK: ${HAP}/unsigned.hap (${HAP_SIGN})"
 }
 
 # hap_sign <udid>: OUT/hap/signed.hap with the SDK's OpenHarmony test keys. The
-# profile's development certificate is the one of the SDK template (issued by
-# the Application CA); the app certificate chain is that leaf plus the CA and
-# root certificates of OpenHarmony.p12.
+# profile's development (debug) or distribution (release) certificate is the
+# one of the SDK template (issued by the Application CA); the app certificate
+# chain is that leaf plus the CA and root certificates of OpenHarmony.p12. Only
+# the debug profile names the device.
 hap_sign() {
-  local sign="${HAP}/sign" ks="${SIGN_LIB}/OpenHarmony.p12"
+  local sign="${HAP}/sign" ks="${SIGN_LIB}/OpenHarmony.p12" template=Debug pkey=debug pcert=Debug
+  [[ "${HAP_SIGN}" == release ]] && template=Released pkey=release pcert=Release
+  rm -rf "${sign}" "${HAP}/signed.hap"
   mkdir -p "${sign}"
-  python3 - "${SIGN_LIB}/UnsgnedDebugProfileTemplate.json" "${sign}" "${HAP_BUNDLE}" "$1" <<'EOF' || return 1
+  python3 - "${SIGN_LIB}/Unsgned${template}ProfileTemplate.json" "${sign}" "${HAP_BUNDLE}" "$1" <<'EOF' || return 1
 import json, sys, time, uuid
 template, out, bundle, udid = sys.argv[1:]
 p = json.load(open(template))
@@ -705,8 +720,11 @@ now = int(time.time())
 p["uuid"] = str(uuid.uuid4())
 p["validity"] = {"not-before": now - 86400, "not-after": now + 30 * 86400}
 p["bundle-info"]["bundle-name"] = bundle
-p["debug-info"] = {"device-ids": [udid], "device-id-type": "udid"}
-cert = p["bundle-info"]["development-certificate"]
+if p["type"] == "debug":
+    p["debug-info"] = {"device-ids": [udid], "device-id-type": "udid"}
+    cert = p["bundle-info"]["development-certificate"]
+else:
+    cert = p["bundle-info"]["distribution-certificate"]
 open(out + "/profile.json", "w").write(json.dumps(p, indent=1))
 open(out + "/app_chain.cer", "w").write(cert if cert.endswith("\n") else cert + "\n")
 EOF
@@ -714,8 +732,8 @@ EOF
   for a in cacert rootcacert; do
     keytool -exportcert -rfc -alias "${a}" -keystore "${ks}" -storepass 123456 >>"${sign}/app_chain.cer" 2>/dev/null || return 1
   done
-  java -jar "${SIGN_LIB}/hap-sign-tool.jar" sign-profile -keyAlias "openharmony application profile debug" \
-    -signAlg SHA256withECDSA -mode localSign -profileCertFile "${SIGN_LIB}/OpenHarmonyProfileDebug.pem" \
+  java -jar "${SIGN_LIB}/hap-sign-tool.jar" sign-profile -keyAlias "openharmony application profile ${pkey}" \
+    -signAlg SHA256withECDSA -mode localSign -profileCertFile "${SIGN_LIB}/OpenHarmonyProfile${pcert}.pem" \
     -inFile "${sign}/profile.json" -keystoreFile "${ks}" -outFile "${sign}/profile.p7b" -keyPwd 123456 \
     -keystorePwd 123456 >"${LOGS}/hap-sign.log" 2>&1 || { cat "${LOGS}/hap-sign.log"; return 1; }
   java -jar "${SIGN_LIB}/hap-sign-tool.jar" sign-app -keyAlias "openharmony application release" \
@@ -759,6 +777,8 @@ stage_hap-device() {
   hap_bundle_ok || return 1
   hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
   [[ -f "${HAP}/unsigned.hap" ]] || { fail "hap-device: run hap-build first"; return 1; }
+  [[ "$(cat "${HAP}/sign-mode" 2>/dev/null)" == "${HAP_SIGN}" ]] ||
+    { fail "hap-device: the HAP was not built with HAP_SIGN=${HAP_SIGN}; run hap-build again"; return 1; }
   local udid runs log uid ctx f
   udid="$(hdc shell "bm get --udid" | tr -d '\r' | grep -E '^[0-9A-F]{64}$')"
   [[ -n "${udid}" ]] || { fail "hap-device: no device UDID"; return 1; }
@@ -774,7 +794,7 @@ stage_hap-device() {
     absent) ;;
     *) fail "hap-device: device does not answer"; return 1 ;;
   esac
-  runs="${LOGS}/hap-$(date +%Y%m%d-%H%M%S)"
+  runs="${LOGS}/hap-$([[ "${HAP_SIGN}" == release ]] && echo release-)$(date +%Y%m%d-%H%M%S)"
   mkdir -p "${runs}"
   hdc install "${HAP}/signed.hap" | tr -d '\r' | tee "${runs}/install.log"
   grep -q 'install bundle successfully' "${runs}/install.log" || { fail "hap-device: install"; hap_exit; return 1; }
@@ -782,8 +802,8 @@ stage_hap-device() {
   uid="$(sed -n 's/^ *"uid": \([0-9]*\),*$/\1/p' "${runs}/bundle.json" | head -1)"
   echo "bundle uid=${uid}"
   log="${runs}/aa-test.log"
-  # Native steps: TEST_TIMEOUT each for the two EXT runs, 300 s for the
-  # runner; aa test allows that plus 5 minutes.
+  # Native steps: TEST_TIMEOUT each for the two EXT runs, 300 s each for the
+  # runner's two waits, plus the exit waits.
   hdc shell "aa test -b ${HAP_BUNDLE} -m entry -s unittest /ets/testrunner/OpenHarmonyTestRunner -s repeat ${REPEAT} \
     -s steptimeout ${TEST_TIMEOUT} -s timeout $(((TEST_TIMEOUT * 2 + 700) * 1000))" | tr -d '\r' | tee "${log}"
   # The sandbox cache directory as root sees it (el2, user 100 only: `aa test`
@@ -808,7 +828,12 @@ stage_hap-device() {
   # Every child: the application uid/gid for all ids and the HAP domain (not su).
   # Supplementary groups and capabilities are the application's own (0x0a here),
   # so they are logged, not checked.
+  # The installed bundle is what was asked for (provision type, debug flag).
+  local ptype=debug debug=true
   ctx="u:r:debug_hap:s0"
+  [[ "${HAP_SIGN}" == release ]] && ptype=release debug=false ctx="u:r:normal_hap:s0"
+  grep -qx " *\"appProvisionType\": \"${ptype}\"," "${runs}/bundle.json" || fail "hap-device: appProvisionType is not ${ptype}"
+  grep -qx " *\"debug\": ${debug}," "${runs}/bundle.json" || fail "hap-device: debug is not ${debug}"
   for f in ext-once ext-repeat runner-pub runner-sub; do
     grep -q "^HAP_CHILD pid=[0-9]* context=${ctx} " "${runs}/${f}.log" || fail "hap-device ${f}: not in ${ctx}"
     grep '^PROC_CREDS ' "${runs}/${f}.log" | grep -vE "^PROC_CREDS bin=[a-z_]+ uid=${uid},${uid},${uid},${uid} gid=${uid},${uid},${uid},${uid} " &&
@@ -846,9 +871,15 @@ stage_hap-device() {
 }
 
 stage_hap() {
+  hap_bundle_ok || return 1
   stage_dyn-build || return 1
   stage_hap-build || return 1
   stage_hap-device
+}
+
+stage_hap-release() {
+  local HAP_SIGN=release
+  stage_hap
 }
 
 [[ $# -eq 0 ]] && set -- build qemu
@@ -856,7 +887,7 @@ for s in "$@"; do
   echo "==== [shm-ohos] ${s} ===="
   case "${s}" in
     build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-uid | dyn-bench | dyn-clean | \
-      hap | hap-build | hap-device)
+      hap | hap-build | hap-device | hap-release)
       "stage_${s}" || fail "stage ${s}" ;;
     *) echo "unknown stage ${s}" >&2; exit 64 ;;
   esac

@@ -9,7 +9,7 @@
     "minAPIVersion": 13,
     "targetAPIVersion": 18,
     "apiReleaseType": "Release",
-    "debug": true,
+    "debug": @DEBUG@,
     "compileSdkVersion": "5.1.0",
     "compileSdkType": "OpenHarmony"
   },
