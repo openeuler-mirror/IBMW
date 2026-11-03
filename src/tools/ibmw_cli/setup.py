@@ -16,9 +16,14 @@ setup(
     install_requires=[
         'PyYAML>=5.4.1',
         'Jinja2>=3.0.3',
-        'pyinstaller>=6.1.0',
-        'autopep8>=1.6.0',
     ],
+    # Not needed to run ibmw_cli: 'build' packs the standalone binary and
+    # 'format' is used by the generated workspace format.sh. Pin versions
+    # with `pip install -c constraints.txt`.
+    extras_require={
+        'build': ['pyinstaller>=6.1.0'],
+        'format': ['autopep8>=1.6.0'],
+    },
     author='IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame',
     author_email='fanglinxu@huawei.com',
     description='IB Middleware application python tools',
