@@ -113,4 +113,4 @@ void IceoryxExtension::RegisterIceoryxTransportDriver() {
 
 }  // namespace ibmw::extensions::iceoryx_extension
 
-IBMW_EXT_ENTRY_V2(ibmw::extensions::iceoryx_extension::IceoryxExtension)
+IBMW_EXT_ENTRY(ibmw::extensions::iceoryx_extension::IceoryxExtension)

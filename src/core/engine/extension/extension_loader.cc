@@ -6,11 +6,12 @@
 
 namespace ibmw::runtime::core::extension {
 
-using ExtEntryFunc = ibmw_ext_entry_t (*)();
-using ExtEntryV2Func = ibmw_ext_entry_v2_t (*)();
+using ExtEntryFunc = ibmw_ext_entry_v3_t (*)();
 
-static constexpr const char* kExtEntryFuncName = "IbmwExtEntry";
-static constexpr const char* kExtEntryV2FuncName = "IbmwExtEntryV2";
+static constexpr const char* kExtEntryFuncName = "IbmwExtEntryV3";
+// Entry points of earlier extension ABIs. They are only looked up to explain
+// the rejection and are never called.
+static constexpr const char* kOldExtEntryFuncNames[] = {"IbmwExtEntryV2", "IbmwExtEntry"};
 
 void ExtensionLoader::LoadExtension(std::string_view ext_path) {
   MW_REQUIRE(!dynamic_lib_.IsLoaded() && extension_ptr_ == nullptr,
@@ -24,35 +25,30 @@ void ExtensionLoader::LoadExtension(std::string_view ext_path) {
                           ext_path_, ibmw::common::util::DynamicLib::GetErr());
 
   try {
-    auto* entry_v2_sym = dynamic_lib_.GetSymbol(kExtEntryV2FuncName);
-    if (entry_v2_sym != nullptr) {
-      const auto entry = reinterpret_cast<ExtEntryV2Func>(entry_v2_sym)();
-      MW_REQUIRE(entry.abi_version == kIbmwExtensionAbiVersionV2,
-                 "Extension ABI version mismatch in lib {}: expected {}, got {}.",
-                 ext_path_, kIbmwExtensionAbiVersionV2, entry.abi_version);
-      MW_REQUIRE(entry.struct_size == sizeof(ibmw_ext_entry_v2_t),
-                 "Extension ABI descriptor size mismatch in lib {}: expected {}, got {}.",
-                 ext_path_, sizeof(ibmw_ext_entry_v2_t), entry.struct_size);
-      MW_REQUIRE(entry.create != nullptr,
-                 "Extension V2 entry has null create function in lib {}.", ext_path_);
-      MW_REQUIRE(entry.destroy != nullptr,
-                 "Extension V2 entry has null destroy function in lib {}.", ext_path_);
-      destroy_func_ = entry.destroy;
-      extension_ptr_ = entry.create();
-    } else {
-      auto* entry_sym = dynamic_lib_.GetSymbol(kExtEntryFuncName);
-      MW_REQUIRE(entry_sym != nullptr,
-                 "Cannot find symbols '{}' or '{}' in lib {}.",
-                 kExtEntryV2FuncName, kExtEntryFuncName, ext_path_);
-
-      const auto entry = reinterpret_cast<ExtEntryFunc>(entry_sym)();
-      MW_REQUIRE(entry.create != nullptr,
-                 "Extension entry has null create function in lib {}.", ext_path_);
-      MW_REQUIRE(entry.destroy != nullptr,
-                 "Extension entry has null destroy function in lib {}.", ext_path_);
-      destroy_func_ = entry.destroy;
-      extension_ptr_ = entry.create();
+    auto* entry_sym = dynamic_lib_.GetSymbol(kExtEntryFuncName);
+    if (entry_sym == nullptr) {
+      for (const char* old_name : kOldExtEntryFuncNames) {
+        MW_REQUIRE(dynamic_lib_.GetSymbol(old_name) == nullptr,
+                   "Extension lib {} exports '{}' from an older IBMW extension ABI; "
+                   "rebuild it against this IBMW (extension ABI {}).",
+                   ext_path_, old_name, kIbmwExtensionAbiVersionV3);
+      }
+      MW_REQUIRE(false, "Cannot find symbol '{}' in lib {}.", kExtEntryFuncName, ext_path_);
     }
+
+    const auto entry = reinterpret_cast<ExtEntryFunc>(entry_sym)();
+    MW_REQUIRE(entry.abi_version == kIbmwExtensionAbiVersionV3,
+               "Extension ABI version mismatch in lib {}: expected {}, got {}.",
+               ext_path_, kIbmwExtensionAbiVersionV3, entry.abi_version);
+    MW_REQUIRE(entry.struct_size == sizeof(ibmw_ext_entry_v3_t),
+               "Extension ABI descriptor size mismatch in lib {}: expected {}, got {}.",
+               ext_path_, sizeof(ibmw_ext_entry_v3_t), entry.struct_size);
+    MW_REQUIRE(entry.create != nullptr,
+               "Extension entry has null create function in lib {}.", ext_path_);
+    MW_REQUIRE(entry.destroy != nullptr,
+               "Extension entry has null destroy function in lib {}.", ext_path_);
+    destroy_func_ = entry.destroy;
+    extension_ptr_ = entry.create();
 
     MW_REQUIRE(extension_ptr_ != nullptr,
                "Cannot create extension in lib {}.", ext_path_);

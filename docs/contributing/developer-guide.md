@@ -503,7 +503,7 @@ class MyExtension : public ibmw::ExtensionBase {
 // my_extension.cc, at global scope
 #include "my_extension.h"
 
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 ### Extension Logging

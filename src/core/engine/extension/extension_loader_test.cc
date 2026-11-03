@@ -91,17 +91,19 @@ TEST(ExtensionLoaderAbi, InitializesMatchingRuntimeV2AcrossDso) {
   bus.Shutdown();
 }
 
-TEST(ExtensionLoaderAbi, V2OnlyFixtureFailsClosedForLegacyLoader) {
+TEST(ExtensionLoaderAbi, CurrentFixtureExportsOnlyV3Entry) {
   const uint32_t creates = MappedCreateCount(EXTENSION_V2_FIXTURE_PATH);
   auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 
   dlerror();
+  EXPECT_NE(dlsym(library.get(), "IbmwExtEntryV3"), nullptr);
+  EXPECT_EQ(dlsym(library.get(), "IbmwExtEntryV2"), nullptr);
   EXPECT_EQ(dlsym(library.get(), "IbmwExtEntry"), nullptr);
   EXPECT_EQ(CreateCount(library.get()), creates);
 }
 
-TEST(ExtensionLoaderAbi, LoadsValidatedV2OnlyFixture) {
+TEST(ExtensionLoaderAbi, LoadsValidatedV3Fixture) {
   auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
   const uint32_t creates = CreateCount(library.get());
@@ -114,20 +116,36 @@ TEST(ExtensionLoaderAbi, LoadsValidatedV2OnlyFixture) {
   loader.UnLoadExtension();
 }
 
-TEST(ExtensionLoaderAbi, FallsBackToLegacyEntry) {
-  auto library = OpenFixture(EXTENSION_LEGACY_FIXTURE_PATH);
+// Libraries built against an earlier extension ABI are rejected without
+// calling their entry or create function.
+class ExtensionLoaderOldAbi : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(ExtensionLoaderOldAbi, RejectsOldEntryBeforeCreate) {
+  auto library = OpenFixture(GetParam());
   ASSERT_NE(library, nullptr) << dlerror();
   const uint32_t creates = CreateCount(library.get());
 
   ExtensionLoader loader;
-  loader.LoadExtension(EXTENSION_LEGACY_FIXTURE_PATH);
-  ASSERT_NE(loader.GetExtension(), nullptr);
-  EXPECT_EQ(loader.GetExtension()->Name(), "extension-v2-fixture");
-  EXPECT_EQ(CreateCount(library.get()), creates + 1);
+  try {
+    loader.LoadExtension(GetParam());
+    ADD_FAILURE() << "old extension entry was accepted";
+  } catch (const ibmw::common::util::IbmwException& e) {
+    EXPECT_NE(std::string(e.what()).find("rebuild"), std::string::npos) << e.what();
+  }
+  EXPECT_EQ(loader.GetExtension(), nullptr);
+  EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
+  EXPECT_EQ(CreateCount(library.get()), creates);
+
+  EXPECT_NO_THROW(loader.LoadExtension(EXTENSION_V2_FIXTURE_PATH));
+  EXPECT_NE(loader.GetExtension(), nullptr);
   loader.UnLoadExtension();
 }
 
-TEST(ExtensionLoaderAbi, RejectsWrongV2VersionBeforeCreate) {
+INSTANTIATE_TEST_SUITE_P(Entries, ExtensionLoaderOldAbi,
+                         ::testing::Values(EXTENSION_LEGACY_FIXTURE_PATH,
+                                           EXTENSION_V2_ENTRY_FIXTURE_PATH));
+
+TEST(ExtensionLoaderAbi, RejectsWrongVersionBeforeCreate) {
   auto library = OpenFixture(EXTENSION_V2_BAD_VERSION_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 
@@ -142,7 +160,7 @@ TEST(ExtensionLoaderAbi, RejectsWrongV2VersionBeforeCreate) {
   loader.UnLoadExtension();
 }
 
-TEST(ExtensionLoaderAbi, RejectsWrongV2SizeBeforeCreate) {
+TEST(ExtensionLoaderAbi, RejectsWrongSizeBeforeCreate) {
   auto library = OpenFixture(EXTENSION_V2_BAD_SIZE_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 

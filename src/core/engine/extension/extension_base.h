@@ -120,8 +120,10 @@ class ExtensionBase : public EngineExtensionBase {
 #define IBMW_EXT_ENTRY(ExtensionClass)                                              \
   extern "C" {                                                                      \
   IBMW_CORE_EXTENSION_EXPORT                                                        \
-  ibmw_ext_entry_t IbmwExtEntry() {                                                 \
-    return ibmw_ext_entry_t{                                                        \
+  ibmw_ext_entry_v3_t IbmwExtEntryV3() {                                            \
+    return ibmw_ext_entry_v3_t{                                                      \
+        .abi_version = kIbmwExtensionAbiVersionV3,                                  \
+        .struct_size = sizeof(ibmw_ext_entry_v3_t),                                 \
         .create = []() -> ibmw::EngineExtensionBase* {                              \
           return new ExtensionClass();                                               \
         },                                                                          \
@@ -131,20 +133,6 @@ class ExtensionBase : public EngineExtensionBase {
   }                                                                                 \
   } /* extern "C" */
 
-// V2 is intentionally a separate macro so existing extensions remain legacy
-// compatible until they explicitly opt in.
-#define IBMW_EXT_ENTRY_V2(ExtensionClass)                                           \
-  extern "C" {                                                                      \
-  IBMW_CORE_EXTENSION_EXPORT                                                        \
-  ibmw_ext_entry_v2_t IbmwExtEntryV2() {                                            \
-    return ibmw_ext_entry_v2_t{                                                      \
-        .abi_version = kIbmwExtensionAbiVersionV2,                                  \
-        .struct_size = sizeof(ibmw_ext_entry_v2_t),                                 \
-        .create = []() -> ibmw::EngineExtensionBase* {                              \
-          return new ExtensionClass();                                               \
-        },                                                                          \
-        .destroy = [](const ibmw::EngineExtensionBase* ext) {                       \
-          delete ext;                                                               \
-        }};                                                                         \
-  }                                                                                 \
-  } /* extern "C" */
+// Kept so sources that opted into the V2 macro still build. Both macros define
+// the current entry point.
+#define IBMW_EXT_ENTRY_V2(ExtensionClass) IBMW_EXT_ENTRY(ExtensionClass)

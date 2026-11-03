@@ -489,7 +489,7 @@ class MyExtension : public ibmw::ExtensionBase {
 // my_extension.cc，在全局作用域
 #include "my_extension.h"
 
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 ### Extension 日志

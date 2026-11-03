@@ -192,7 +192,11 @@ if(IBMW_BUILD_TESTS)
 endif()
 
 if(IBMW_BUILD_TESTS AND test_files)
+  # The extension_v2_* fixtures export the current (V3) entry; the names
+  # predate V3. extension_legacy_fixture and extension_v2_entry_fixture export
+  # the entries of earlier extension ABIs, which the loader must reject.
   foreach(fixture IN ITEMS extension_legacy_fixture
+                           extension_v2_entry_fixture
                            extension_v2_fixture
                            extension_v2_bad_version_fixture
                            extension_v2_bad_size_fixture
@@ -243,6 +247,8 @@ if(IBMW_BUILD_TESTS AND test_files)
   target_compile_definitions(pkg_too_many_fixture PRIVATE IBMW_PKG_FIXTURE_TOO_MANY)
   target_compile_definitions(extension_legacy_fixture
                              PRIVATE IBMW_EXT_FIXTURE_LEGACY)
+  target_compile_definitions(extension_v2_entry_fixture
+                             PRIVATE IBMW_EXT_FIXTURE_ENTRY_V2)
   target_compile_definitions(extension_v2_bad_version_fixture
                              PRIVATE IBMW_EXT_FIXTURE_BAD_VERSION)
   target_compile_definitions(extension_v2_bad_size_fixture
@@ -261,6 +267,7 @@ if(IBMW_BUILD_TESTS AND test_files)
   set_tests_properties(${CUR_TARGET_NAME}_test PROPERTIES TIMEOUT 120)
   add_dependencies(${CUR_TARGET_NAME}_test
                    extension_legacy_fixture
+                   extension_v2_entry_fixture
                    extension_v2_fixture
                    extension_v2_bad_version_fixture
                    extension_v2_bad_size_fixture
@@ -279,6 +286,7 @@ if(IBMW_BUILD_TESTS AND test_files)
     ${CUR_TARGET_NAME}_test
     PRIVATE
       "EXTENSION_LEGACY_FIXTURE_PATH=\"$<TARGET_FILE:extension_legacy_fixture>\""
+      "EXTENSION_V2_ENTRY_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_entry_fixture>\""
       "EXTENSION_V2_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_fixture>\""
       "EXTENSION_V2_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_version_fixture>\""
       "EXTENSION_V2_BAD_SIZE_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_size_fixture>\""

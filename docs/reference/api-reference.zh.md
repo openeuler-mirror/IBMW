@@ -629,7 +629,7 @@ const ibmw_type_support_base_t* GetJsonMessageTypeSupport();
 
 ```cpp
 // 在 extension .so 的全局作用域中使用
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 `ExtensionBase` 提供框架生命周期方法 `Initialize` 和 `Shutdown`；
@@ -639,7 +639,7 @@ Extension 实现 `OnInit` 和 `OnShutdown`。
 
 | 宏 | 描述 |
 |-------|-------------|
-| `IBMW_EXT_ENTRY_V2(ExtensionClass)` | 定义带版本的 Extension 入口点 |
+| `IBMW_EXT_ENTRY(ExtensionClass)` | 定义带版本的 Extension 入口点 `IbmwExtEntryV3`（`IBMW_EXT_ENTRY_V2` 为别名）。基于旧版 IBMW 编译的 Extension 会被拒绝加载，需要重新编译 |
 | `IBMW_CORE_EXTENSION_EXPORT` | 导出 visibility 属性 |
 | `IBMW_DECLARE_EXTENSION_LOGGER(ns)` | 声明 per-extension logger |
 | `IBMW_DEFINE_EXTENSION_LOGGER(ns)` | 定义 per-extension logger |

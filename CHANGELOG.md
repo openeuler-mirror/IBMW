@@ -131,6 +131,11 @@ details remain governed by the documentation for each release.
   is not registered with the dispatcher, log an error, and do not call that
   driver. Previously the pointer was dereferenced without any check. A driver
   must set `source_driver` to itself (COMM-002).
+- Extension ABI 3: extensions export `IbmwExtEntryV3`, and both
+  `IBMW_EXT_ENTRY` and `IBMW_EXT_ENTRY_V2` now define it. The loader no longer
+  falls back to `IbmwExtEntryV2` or the unversioned `IbmwExtEntry`; a library
+  that exports only one of them is rejected with a request to rebuild, and its
+  create function is never called. **All extensions must be rebuilt.**
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

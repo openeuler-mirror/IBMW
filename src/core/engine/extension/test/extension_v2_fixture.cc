@@ -71,21 +71,37 @@ IBMW_CORE_EXTENSION_EXPORT uint32_t IbmwExtFixtureRuntimeInitCount() {
 }
 
 #if defined(IBMW_EXT_FIXTURE_LEGACY)
-IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_t IbmwExtEntry() {
-  return ibmw_ext_entry_t{.create = &Create, .destroy = &Destroy};
+// Entry exported by extensions built before the versioned ABI.
+struct LegacyEntry {
+  ibmw::EngineExtensionBase* (*create)();
+  void (*destroy)(const ibmw::EngineExtensionBase*);
+};
+IBMW_CORE_EXTENSION_EXPORT LegacyEntry IbmwExtEntry() {
+  return LegacyEntry{.create = &Create, .destroy = &Destroy};
+}
+#elif defined(IBMW_EXT_FIXTURE_ENTRY_V2)
+// Entry exported by extensions built against extension ABI 2.
+struct EntryV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  ibmw::EngineExtensionBase* (*create)();
+  void (*destroy)(const ibmw::EngineExtensionBase*);
+};
+IBMW_CORE_EXTENSION_EXPORT EntryV2 IbmwExtEntryV2() {
+  return EntryV2{.abi_version = 2U, .struct_size = sizeof(EntryV2), .create = &Create, .destroy = &Destroy};
 }
 #else
-IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_v2_t IbmwExtEntryV2() {
-  return ibmw_ext_entry_v2_t{
+IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_v3_t IbmwExtEntryV3() {
+  return ibmw_ext_entry_v3_t{
 #if defined(IBMW_EXT_FIXTURE_BAD_VERSION)
-      .abi_version = kIbmwExtensionAbiVersionV2 + 1U,
+      .abi_version = kIbmwExtensionAbiVersionV3 + 1U,
 #else
-      .abi_version = kIbmwExtensionAbiVersionV2,
+      .abi_version = kIbmwExtensionAbiVersionV3,
 #endif
 #if defined(IBMW_EXT_FIXTURE_BAD_SIZE)
-      .struct_size = sizeof(ibmw_ext_entry_v2_t) - 1U,
+      .struct_size = sizeof(ibmw_ext_entry_v3_t) - 1U,
 #else
-      .struct_size = sizeof(ibmw_ext_entry_v2_t),
+      .struct_size = sizeof(ibmw_ext_entry_v3_t),
 #endif
       .create = &Create,
       .destroy = &Destroy};

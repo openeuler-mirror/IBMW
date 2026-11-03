@@ -633,7 +633,7 @@ and nlohmann `to_json`/`from_json` ADL functions. Serialization type: `"json"`.
 
 ```cpp
 // At global scope in the extension .so
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 `ExtensionBase` provides the framework lifecycle methods `Initialize` and
@@ -643,7 +643,7 @@ IBMW_EXT_ENTRY_V2(MyExtension)
 
 | Macro | Description |
 |-------|-------------|
-| `IBMW_EXT_ENTRY_V2(ExtensionClass)` | Define the versioned extension entry point |
+| `IBMW_EXT_ENTRY(ExtensionClass)` | Define the versioned extension entry point `IbmwExtEntryV3` (`IBMW_EXT_ENTRY_V2` is an alias). Extensions built against an earlier IBMW are rejected and must be rebuilt |
 | `IBMW_CORE_EXTENSION_EXPORT` | Export visibility attribute |
 | `IBMW_DECLARE_EXTENSION_LOGGER(ns)` | Declare per-extension logger |
 | `IBMW_DEFINE_EXTENSION_LOGGER(ns)` | Define per-extension logger |

@@ -735,12 +735,12 @@ void RecordPlaybackExtension::PublishRuntimePlaybackMessage(
 
 }  // namespace ibmw::extensions::record_playback_extension
 
-extern "C" IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_v2_t IbmwExtEntryV2() {
+extern "C" IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_v3_t IbmwExtEntryV3() {
   using Extension =
       ibmw::extensions::record_playback_extension::RecordPlaybackExtension;
-  return ibmw_ext_entry_v2_t{
-      .abi_version = kIbmwExtensionAbiVersionV2,
-      .struct_size = sizeof(ibmw_ext_entry_v2_t),
+  return ibmw_ext_entry_v3_t{
+      .abi_version = kIbmwExtensionAbiVersionV3,
+      .struct_size = sizeof(ibmw_ext_entry_v3_t),
       .create = []() -> ibmw::EngineExtensionBase* { return new Extension(); },
       .destroy = [](const ibmw::EngineExtensionBase* extension) {
         delete extension;
