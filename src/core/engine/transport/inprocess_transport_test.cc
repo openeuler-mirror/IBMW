@@ -185,6 +185,16 @@ TEST(InProcessTransportTest, OptionKeysAreOptional) {
   EXPECT_EQ(requested, "");
 }
 
+// COMM-041: Initialize writes the effective options back into the caller's
+// tree (used by --dump_cfg).
+TEST(InProcessTransportTest, InitializeWritesEffectiveOptionsBack) {
+  Fixture f;
+  YAML::Node root = YAML::Load("{}");
+  f.transport.Initialize(root["inprocess"]);
+  ASSERT_TRUE(root["inprocess"]);
+  EXPECT_TRUE(root["inprocess"]["subscriber_use_inline_executor"]);
+}
+
 TEST(InProcessTransportTest, ShutdownDrainsQueuedAsyncDeliveries) {
   GatedExecutor executor;
   Fixture f;

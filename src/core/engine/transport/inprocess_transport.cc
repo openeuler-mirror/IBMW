@@ -157,6 +157,7 @@ bool InProcessTransport::RegisterSendType(
       return false;
     }
 
+    // Nothing to prepare: Send looks up the subscribers of the topic itself.
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());

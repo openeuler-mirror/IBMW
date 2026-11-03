@@ -451,8 +451,11 @@ void RuntimeTapServer::Start() {
   bool expected = false;
   MW_ASSERT(started_.compare_exchange_strong(expected, true),
             "Runtime tap server is already started.");
-  const auto root = runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
-  const auto directory = runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
+  // Only for the side effect: create both directories and check that each is
+  // private to this UID (the second call checks the parent only as an
+  // ancestor). The descriptors are closed right away.
+  runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
+  runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
 }
 
 TapSessionDescriptor RuntimeTapServer::StartSession(

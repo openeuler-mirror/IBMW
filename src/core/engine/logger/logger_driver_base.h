@@ -43,6 +43,9 @@ class LoggerDriverBase {
 
   virtual std::string_view Type() const noexcept = 0;  // It should always return the same value
 
+  // Implementations assign their effective options back to options_node.
+  // YAML::Node shares storage with the caller's tree, so this fills in the
+  // config that --dump_cfg writes out; it is not a dead store.
   virtual void Initialize(YAML::Node options_node) = 0;
   virtual void Start() = 0;
   virtual void Shutdown() = 0;
