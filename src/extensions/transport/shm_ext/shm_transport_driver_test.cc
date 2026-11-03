@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -39,6 +40,7 @@
 #include "cpp/util/buffer_array_allocator.h"
 #include "engine/transport/transport_driver_dispatcher.h"
 #include "shm_ext/global.h"
+#include "test_peer/proc_creds.h"
 #include "shm_ext/iox_style_publisher.h"
 #include "shm_ext/shm_bus.h"
 #include "shm_ext/shm_ctx_publisher.h"
@@ -113,6 +115,7 @@ void RemoveTree(const std::string& path) {
 class ShmExtEnvironment : public ::testing::Environment {
  public:
   void SetUp() override {
+    test::PrintProcCreds(stdout, "ext_test");
     root_ = MakeRoot();
     ::setenv("IBMW_SHM_ROOT", root_.c_str(), 1);
     ::unsetenv("IBMW_SHM_DOMAIN");
@@ -1573,12 +1576,27 @@ struct CallbackThreadProbe {
   }
 };
 
-int LastAllowedCpu() {
+// The highest allowed CPU that a thread can be bound to alone. Not simply the
+// highest allowed one: for a non-root process the OHOS device kernel widens a
+// request within CPUs 12-19 to 4-19 and still returns 0. Each candidate is
+// tried on a scratch thread, so the test thread keeps its affinity.
+int LastExactlyBindableCpu() {
   cpu_set_t set;
   CPU_ZERO(&set);
   if (::sched_getaffinity(0, sizeof(set), &set) != 0) return -1;
   for (int cpu = CPU_SETSIZE - 1; cpu >= 0; --cpu) {
-    if (CPU_ISSET(cpu, &set) && static_cast<unsigned>(cpu) < std::thread::hardware_concurrency()) return cpu;
+    if (!CPU_ISSET(cpu, &set) || static_cast<unsigned>(cpu) >= std::thread::hardware_concurrency()) continue;
+    bool exact = false;
+    std::thread([cpu, &exact] {
+      cpu_set_t one;
+      CPU_ZERO(&one);
+      CPU_SET(cpu, &one);
+      cpu_set_t now;
+      CPU_ZERO(&now);
+      exact = ::sched_setaffinity(0, sizeof(one), &one) == 0 && ::sched_getaffinity(0, sizeof(now), &now) == 0 &&
+              CPU_EQUAL(&now, &one);
+    }).join();
+    if (exact) return cpu;
   }
   return -1;
 }
@@ -1586,8 +1604,10 @@ int LastAllowedCpu() {
 // EXT-33 listener_thread_bind_cpu covers every subscriber kind and every pool
 // thread, and is in effect before the first callback of each thread.
 TEST_F(ShmDriverTest, ListenerThreadOptionsCoverEveryKindAndThread) {
-  const int cpu = LastAllowedCpu();
-  ASSERT_GE(cpu, 0);
+  const int cpu = LastExactlyBindableCpu();
+  ASSERT_GE(cpu, 0) << "no CPU accepts a single-CPU affinity";
+  RecordProperty("bind_cpu", cpu);
+  std::printf("EXT-33 bind_cpu=%d\n", cpu);
   YAML::Node options;
   options["listener_thread_bind_cpu"].push_back(cpu);
   auto& d = Init(options);
@@ -2006,11 +2026,17 @@ TEST(ShmGateTest, WaitsRespectDeadline) {
 
 // ============================================================ send failures
 
-// Counts what reaches the extension's logger; undone on destruction.
+// Counts what reaches the extension's logger; undone on destruction. Set()
+// also copies the level into the logger's fallback, so the destructor puts the
+// previous level back first: otherwise every later test would log at ERROR
+// only, and how much a run logs would depend on the test order.
 class ScopedLogCounter {
  public:
-  ScopedLogCounter() { g_logger.Set(ibmw::logger::LoggerRef(&base_)); }
-  ~ScopedLogCounter() { g_logger.Set(ibmw::logger::LoggerRef()); }
+  ScopedLogCounter() : previous_level_(g_logger.Get().GetLogLevel()) { g_logger.Set(ibmw::logger::LoggerRef(&base_)); }
+  ~ScopedLogCounter() {
+    g_logger.Set(ibmw::logger::LoggerRef(&restore_base_));
+    g_logger.Set(ibmw::logger::LoggerRef());
+  }
   uint64_t Errors() const { return errors_.load(); }
   std::string Last() {
     std::lock_guard<std::mutex> lock(mu_);
@@ -2026,6 +2052,13 @@ class ScopedLogCounter {
         std::lock_guard<std::mutex> lock(self->mu_);
         self->last_.assign(data, size);
       },
+      .ctx = this};
+  const uint32_t previous_level_;
+  ibmw_logger_base_t restore_base_{
+      .get_log_level = [](void* ctx) -> ibmw_log_level_t {
+        return static_cast<ibmw_log_level_t>(static_cast<ScopedLogCounter*>(ctx)->previous_level_);
+      },
+      .log = [](void*, ibmw_log_level_t, uint32_t, const char*, const char*, const char*, size_t) {},
       .ctx = this};
   std::atomic_uint64_t errors_{0};
   std::mutex mu_;
@@ -2108,6 +2141,10 @@ TEST_F(ShmDriverTest, InvalidLocationIsReportedClearly) {
     const auto error = InitializeError(bus, options);
     EXPECT_NE(error.find("domain"), std::string::npos) << error;
   }
+  // The runtime must already run for the next check: as the first test of a
+  // process (e.g. --gtest_shuffle) the group request would start it in group
+  // mode instead and break every later test.
+  auto& d = Init();
   {
     // A numeric group selects another service directory than the running one.
     ShmBus bus;
@@ -2116,7 +2153,6 @@ TEST_F(ShmDriverTest, InvalidLocationIsReportedClearly) {
     const auto error = InitializeError(bus, options);
     EXPECT_NE(error.find("group '" + std::to_string(::getegid()) + "'"), std::string::npos) << error;
   }
-  auto& d = Init();
   const auto report = d.GenInitializationReport();
   std::map<std::string, std::string> rows(report.begin(), report.end());
   const std::string dir = shm::Runtime::ServiceDirectory();

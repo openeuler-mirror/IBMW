@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "ibmw_selfdev/shm/shm.h"
+#include "proc_creds.h"
 
 using namespace ibmw::selfdev::shm;  // NOLINT
 
@@ -159,6 +160,8 @@ int RunStall(const std::string& url) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // stderr: stdout carries the protocol to the test.
+  ibmw::extensions::shm_extension::test::PrintProcCreds(stderr, "peer");
   if (argc >= 5 && std::strcmp(argv[1], "pub") == 0) return RunPub(argv[2], std::atoi(argv[3]), std::atoi(argv[4]));
   if (argc >= 4 && std::strcmp(argv[1], "sub") == 0) return RunSub(argv[2], std::atoi(argv[3]));
   if (argc >= 3 && std::strcmp(argv[1], "stall") == 0) return RunStall(argv[2]);

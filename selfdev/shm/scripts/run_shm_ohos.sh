@@ -17,7 +17,7 @@
 #            baseline tree; run them interleaved on the device, print a summary and
 #            remove BENCH_DEVICE_DIR and BENCH_DEVICE_ROOT again (no pass/fail on
 #            the numbers). Needs neither `build` nor `device` first.
-#   dynamic  dyn-build dyn-device dyn-bench dyn-clean (the plugin as a shared object)
+#   dynamic  dyn-build dyn-device dyn-uid dyn-bench dyn-clean (the plugin as a shared object)
 #   dyn-build  build into OUT/dyn: libibmw_shm_transport.so (the real plugin),
 #            ibmw_shm_ext_dyn_runner and ibmw_shm_ext_bench_so (rt/), the EXT tests
 #            and peer as PIE against libc++_shared.so (test/) and the static
@@ -27,6 +27,11 @@
 #            publisher + subscriber process (both dlopen the plugin through the core
 #            ExtensionLoader, two load/unload cycles each), then the EXT tests once
 #            and REPEAT times shuffled
+#   dyn-uid  the dyn-device runner and EXT tests again as each uid of RUN_UIDS
+#            instead of root: ohos/run_as.c takes the uid and gid without
+#            supplementary groups and clears the capabilities (HongMeng keeps them
+#            across setuid), checks that a root-owned 0700 directory refuses it,
+#            then execs the test; the SELinux domain stays su. Needs dyn-build
 #   dyn-bench  run three benches interleaved DYN_BENCH_ROUNDS times: static (static
 #            musl + c++_static), pie (plugin sources compiled in, device libc +
 #            libc++_shared.so) and so (linked against the plugin .so). pie vs static
@@ -56,6 +61,8 @@
 #   DYN_DEVICE_ROOT     dynamic-stage TMPDIR / IBMW_SHM_ROOT parent; keep it short
 #                       (default: /data/local/tmp/ibd)
 #   DYN_BENCH_ROUNDS    dyn-bench rounds per binary (default: 15)
+#   RUN_UIDS            dyn-uid uids, gid = uid (default: 2000 20099999: the shell
+#                       uid and an unused uid of the user-100 application range)
 #
 # build/qemu/device/bench/bench-ext use fully static binaries (-static,
 # c++_static), which do not exercise the device's dynamic linker. The SDK
@@ -85,6 +92,7 @@ BENCH_DEVICE_ROOT="${BENCH_DEVICE_ROOT:-/data/local/tmp/ibx}"
 DYN_DEVICE_DIR="${DYN_DEVICE_DIR:-/data/local/tmp/ibmw_shm_dyn}"
 DYN_DEVICE_ROOT="${DYN_DEVICE_ROOT:-/data/local/tmp/ibd}"
 DYN_BENCH_ROUNDS="${DYN_BENCH_ROUNDS:-15}"
+RUN_UIDS="${RUN_UIDS:-2000 20099999}"
 SRC="${OUT}/src"
 LOGS="${OUT}/logs"
 CORE_TEST="${OUT}/core/shm/ibmw_selfdev_shm_test"
@@ -96,6 +104,7 @@ PROBE="${OUT}/shm_probe"
 DYN="${OUT}/dyn"
 LIBCXX_SHARED="${SDK}/llvm/lib/aarch64-linux-ohos/libc++_shared.so"
 PLUGIN_SO="${DYN}/rt/libibmw_shm_transport.so"
+RUN_AS="${OUT}/run_as"
 mkdir -p "${LOGS}"
 
 rc=0
@@ -295,7 +304,7 @@ stage_clean() {
 }
 
 # Our processes on the device: the dynamic-stage binaries by name.
-DYN_PROC_NAMES=(ibmw_shm_ext_dyn_runner ibmw_extensions_shm_ext_test ibmw_shm_ext_peer bench_static bench_pie bench_so)
+DYN_PROC_NAMES=(run_as ibmw_shm_ext_dyn_runner ibmw_extensions_shm_ext_test ibmw_shm_ext_peer bench_static bench_pie bench_so)
 DYN_PROCS="$(IFS='|'; echo "${DYN_PROC_NAMES[*]}")"
 
 # On Ctrl-C or SIGTERM during a dyn stage, stop what still runs on the device
@@ -391,53 +400,152 @@ stage_dyn-build() {
   echo "dyn-build OK (TLS report: ${LOGS}/dyn-tls.txt)"
 }
 
-# dyn_push <file> [name]: copy to DYN_DEVICE_DIR.
+# dyn_push <file> [name]: copy to DYN_DEVICE_DIR. The old copy is removed first
+# and the size compared afterwards (hdc does not reliably report failures), so
+# a missing artifact or a failed send cannot leave a stale binary to be tested.
 dyn_push() {
-  local to="${DYN_DEVICE_DIR}/${2:-$(basename "$1")}"
+  local to="${DYN_DEVICE_DIR}/${2:-$(basename "$1")}" size
+  [[ -f "$1" ]] || { fail "missing $1 (run dyn-build)"; return 1; }
+  size="$(stat -c %s "$1")"
+  hdc shell "rm -f ${to}" >/dev/null
   hdc file send "$1" "${to}" >/dev/null
   hdc shell "chmod 755 ${to}" >/dev/null
+  [[ "$(hdc shell "stat -c %s ${to} 2>/dev/null" | tr -d '\r')" == "${size}" ]] || { fail "push ${to}"; return 1; }
 }
 
 stage_dyn-device() {
   hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" || return 1
   trap dyn_interrupted INT TERM
   hdc shell "mkdir -p ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}" >/dev/null
   local f
   for f in "${LIBCXX_SHARED}" "${PLUGIN_SO}" "${DYN}/rt/ibmw_shm_ext_dyn_runner" "${DYN}/test/ibmw_extensions_shm_ext_test" \
     "${DYN}/test/ibmw_shm_ext_peer"; do
-    dyn_push "${f}"
+    dyn_push "${f}" || return 1
   done
-  local env="LD_LIBRARY_PATH=${DYN_DEVICE_DIR} TMPDIR=${DYN_DEVICE_ROOT}"
-  local log="${LOGS}/dyn-runner.log" root="${DYN_DEVICE_ROOT}/r"
+  device_rm "${DYN_DEVICE_ROOT}/r" >/dev/null || return 1
+  hdc shell "mkdir -p ${DYN_DEVICE_ROOT}/r/s ${DYN_DEVICE_ROOT}/r/sync" >/dev/null
+  dyn_runner_check dyn-runner "${DYN_DEVICE_ROOT}/r" ""
+  dyn_test_check dyn-ext-once "${DYN_DEVICE_ROOT}" ""
+  dyn_test_check dyn-ext-repeat "${DYN_DEVICE_ROOT}" "" --gtest_repeat="${REPEAT}" --gtest_shuffle
+}
+
+# dyn_runner_check <name> <dir> <prefix>: the runner as publisher + subscriber
+# process with TMPDIR=<dir>, IBMW_SHM_ROOT=<dir>/s and the sync directory
+# <dir>/sync (both must exist), each started through <prefix> (empty, or
+# run_as ...); log LOGS/<name>.log (<name> may contain a directory). The device
+# shell writes the process output to DYN_DEVICE_ROOT/<last part of name>.{pub,sub}.log,
+# outside <dir>.
+dyn_runner_check() {
+  local name=$1 root=$2 prefix=$3 log="${LOGS}/$1.log" out="${DYN_DEVICE_ROOT}/${1##*/}"
   local args="--plugin ${DYN_DEVICE_DIR}/libibmw_shm_transport.so --sync ${root}/sync --topics 20 --early 6 --messages 2000 --cycles 2"
   # One shell runs both processes; hdc does not reliably return the remote exit
   # code, so both are reported in-band.
-  device_rm "${root}" >/dev/null || return 1
-  hdc shell "mkdir -p ${root}/s ${root}/sync && cd ${DYN_DEVICE_DIR} && export ${env} IBMW_SHM_ROOT=${root}/s; \
-    (timeout 300 ./ibmw_shm_ext_dyn_runner sub ${args} >${root}/sub.log 2>&1; echo SUB_RC=\$? >>${root}/sub.log) & \
-    timeout 300 ./ibmw_shm_ext_dyn_runner pub ${args} >${root}/pub.log 2>&1; echo PUB_RC=\$? >>${root}/pub.log; wait; \
-    cat ${root}/pub.log ${root}/sub.log" | tr -d '\r' >"${log}"
-  grep -E '^(DYN_|PUB_RC|SUB_RC)' "${log}" | grep -v '^DYN_ABI .*result=PASS$'
-  grep '^DYN_ABI' "${log}" | sort -u -t' ' -k2,2 | sed 's/^/  /' 
+  hdc shell "cd ${DYN_DEVICE_DIR} && export LD_LIBRARY_PATH=${DYN_DEVICE_DIR} TMPDIR=${root} IBMW_SHM_ROOT=${root}/s; \
+    (timeout 300 ${prefix} ./ibmw_shm_ext_dyn_runner sub ${args} >${out}.sub.log 2>&1; echo SUB_RC=\$? >>${out}.sub.log) & \
+    timeout 300 ${prefix} ./ibmw_shm_ext_dyn_runner pub ${args} >${out}.pub.log 2>&1; echo PUB_RC=\$? >>${out}.pub.log; wait; \
+    cat ${out}.pub.log ${out}.sub.log; rm -f ${out}.pub.log ${out}.sub.log" | tr -d '\r' >"${log}"
+  grep -E '^(RUN_AS|PROC_CREDS|DYN_|PUB_RC|SUB_RC)' "${log}" | grep -v '^DYN_ABI .*result=PASS$'
+  grep '^DYN_ABI' "${log}" | sort -u -t' ' -k2,2 | sed 's/^/  /'
   if ! grep -q '^PUB_RC=0$' "${log}" || ! grep -q '^SUB_RC=0$' "${log}" ||
     [[ "$(grep -c '^DYN_CYCLE .*result=PASS$' "${log}")" -ne 4 ]] ||
     [[ "$(grep -c '^DYN_THROW .*result=PASS$' "${log}")" -ne 2 ]] || grep -q '^DYN_ABI .*result=FAIL$' "${log}" ||
     ! grep -q '^DYN_RESULT role=pub cycles=2 result=PASS' "${log}" || ! grep -q '^DYN_RESULT role=sub cycles=2 result=PASS' "${log}"; then
-    fail "dyn-runner (${log})"
+    fail "${name} (${log})"
   fi
+}
 
-  run_dyn_test() {
-    local name=$1
-    shift
-    log="${LOGS}/dyn-${name}.log"
-    hdc shell "cd ${DYN_DEVICE_DIR} && ${env} IBMW_SHM_EXT_PEER_PATH=${DYN_DEVICE_DIR}/ibmw_shm_ext_peer timeout ${TEST_TIMEOUT} ./ibmw_extensions_shm_ext_test $* 2>&1; echo DEVICE_RC=\$?" \
-      | tr -d '\r' >"${log}"
-    local run_rc
-    run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
-    summarize "dyn-${name}" "${run_rc:-255}" "${log}" || fail "dyn-${name} (${log})"
-  }
-  run_dyn_test ext-once
-  run_dyn_test ext-repeat --gtest_repeat="${REPEAT}" --gtest_shuffle
+# dyn_test_check <name> <tmpdir> <prefix> [gtest args...]: the EXT tests (and the
+# peers they spawn) with TMPDIR=<tmpdir>, started through <prefix>.
+dyn_test_check() {
+  local name=$1 tmp=$2 prefix=$3 log="${LOGS}/$1.log"
+  shift 3
+  hdc shell "cd ${DYN_DEVICE_DIR} && LD_LIBRARY_PATH=${DYN_DEVICE_DIR} TMPDIR=${tmp} IBMW_SHM_EXT_PEER_PATH=${DYN_DEVICE_DIR}/ibmw_shm_ext_peer timeout ${TEST_TIMEOUT} ${prefix} ./ibmw_extensions_shm_ext_test $* 2>&1; echo DEVICE_RC=\$?" \
+    | tr -d '\r' >"${log}"
+  local run_rc
+  run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
+  summarize "${name}" "${run_rc:-255}" "${log}" || fail "${name} (${log})"
+}
+
+# creds_check <log> <uid> <bin>=<min count>...: every PROC_CREDS line of <log>
+# (printed by the runner, the EXT tests and the peer about themselves) shows
+# <uid>/<uid> for all ids, no supplementary groups and no capabilities, and each
+# <bin> printed at least <min count> of them.
+creds_check() {
+  local log=$1 uid=$2 want bin min z=0000000000000000
+  shift 2
+  want="uid=${uid},${uid},${uid},${uid} gid=${uid},${uid},${uid},${uid} groups= CapInh=${z} CapPrm=${z} CapEff=${z} CapAmb=${z}"
+  grep '^PROC_CREDS ' "${log}" | grep -vxE "PROC_CREDS bin=[a-z_]+ ${want}" >/dev/null &&
+    { fail "privileges in ${log}: $(grep '^PROC_CREDS ' "${log}" | grep -vxE "PROC_CREDS bin=[a-z_]+ ${want}" | head -1)"; }
+  for want in "$@"; do
+    bin=${want%%=*} min=${want#*=}
+    [[ "$(grep -c "^PROC_CREDS bin=${bin} " "${log}")" -ge "${min}" ]] || fail "${log}: fewer than ${min} PROC_CREDS lines of ${bin}"
+  done
+}
+
+stage_dyn-uid() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" || return 1
+  trap dyn_interrupted INT TERM
+  "${SDK}/llvm/bin/clang" --target=aarch64-linux-ohos --sysroot="${SDK}/sysroot" -static -O1 -Wall -Wextra -Werror \
+    "${HERE}/ohos/run_as.c" -o "${RUN_AS}" || return 1
+  hdc shell "mkdir -p ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}" >/dev/null
+  local f
+  for f in "${LIBCXX_SHARED}" "${PLUGIN_SO}" "${DYN}/rt/ibmw_shm_ext_dyn_runner" "${DYN}/test/ibmw_extensions_shm_ext_test" \
+    "${DYN}/test/ibmw_shm_ext_peer" "${RUN_AS}"; do
+    dyn_push "${f}" || return 1
+  done
+  # A new directory per run, so the logs of a failed run are kept.
+  local runs
+  runs="dyn-uid-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "${LOGS}/${runs}"
+  local deny="${DYN_DEVICE_ROOT}/deny" uid dir others prefix n=0 ctx left
+  # run_as does not change the SELinux domain: the uids keep that of the shell.
+  ctx="$(hdc shell "cat /proc/self/attr/current" | tr -d '\r\0')"
+  [[ -n "${ctx}" ]] || { fail "dyn-uid: cannot read the SELinux context"; return 1; }
+  # The uids reach only DYN_DEVICE_DIR (0755) and their own 0700 directory.
+  hdc shell "chmod 755 ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT} && mkdir -p ${deny} && chmod 700 ${deny} && rm -f ${deny}/run_as_probe.*" >/dev/null
+  for uid in ${RUN_UIDS}; do
+    [[ "${uid}" =~ ^[1-9][0-9]*$ ]] || { fail "dyn-uid: bad uid ${uid}"; continue; }
+    # Short: the service directory <dir>/ibmwx.XXXXXX/ibmw_shm.<uid>.default of
+    # the EXT tests must stay within 63 bytes, and app uids have 8 digits.
+    dir="${DYN_DEVICE_ROOT}/u$((++n))"
+    local base="${runs}/uid${uid}"
+    prefix="./run_as ${uid} ${uid} ${deny}"
+    others="$(hdc shell "ps -A -o UID,PID,ARGS | awk '\$1 == ${uid}'" | tr -d '\r')"
+    [[ -z "${others}" ]] || echo "NOTE: uid ${uid} already has processes on the device: ${others}"
+    device_rm "${dir}" >/dev/null || return 1
+    hdc shell "mkdir -p ${dir}/s ${dir}/sync && chown -R ${uid}:${uid} ${dir} && chmod 700 ${dir}" >/dev/null
+    # The launcher about itself after the exec; the test binaries report
+    # themselves through PROC_CREDS below.
+    hdc shell "cd ${DYN_DEVICE_DIR} && ${prefix} ./run_as --caps 2>&1" | tr -d '\r' | tee "${LOGS}/${base}-caps.log"
+    grep -q "^RUN_AS_CAPS uid=${uid} euid=${uid} gid=${uid} egid=${uid} groups=0 CapInh=0\{16\} CapEff=0\{16\} CapPrm=0\{16\} .*CapAmb=0\{16\} context=${ctx}$" \
+      "${LOGS}/${base}-caps.log" || fail "dyn-uid${uid}: privileges or domain changed after exec (${LOGS}/${base}-caps.log)"
+    dyn_runner_check "${base}-runner" "${dir}" "${prefix}"
+    [[ "$(grep -c "^RUN_AS uid=${uid} .*result=PASS context=${ctx}$" "${LOGS}/${base}-runner.log")" -eq 2 ]] ||
+      fail "dyn-uid${uid}-runner: not both processes as uid ${uid}"
+    creds_check "${LOGS}/${base}-runner.log" "${uid}" runner=2
+    dyn_test_check "${base}-ext-once" "${dir}" "${prefix}"
+    dyn_test_check "${base}-ext-repeat" "${dir}" "${prefix}" --gtest_repeat="${REPEAT}" --gtest_shuffle
+    for f in ext-once ext-repeat; do
+      grep -q "^RUN_AS uid=${uid} .*result=PASS context=${ctx}$" "${LOGS}/${base}-${f}.log" || fail "dyn-uid${uid}-${f}: not run as uid ${uid}"
+      creds_check "${LOGS}/${base}-${f}.log" "${uid}" ext_test=1 peer=1
+    done
+    # What is left in the directory must belong to the uid (the EXT tests
+    # remove their own tree on exit, so this mostly covers the runner).
+    hdc shell "find ${dir} ! -user ${uid} -print 2>&1" | tr -d '\r' >"${LOGS}/${base}-foreign.log"
+    [[ ! -s "${LOGS}/${base}-foreign.log" ]] || fail "dyn-uid${uid}: files not owned by ${uid} (${LOGS}/${base}-foreign.log)"
+    # Nothing of ours may still run as the uid (e.g. a peer after a timeout).
+    left="$(hdc shell "ps -A -o UID,PID,ARGS | awk '\$1 == ${uid}'" | tr -d '\r' | grep -E "${DYN_PROCS}")"
+    if [[ -n "${left}" ]]; then
+      fail "dyn-uid${uid}: processes left: ${left}"
+      for f in "${DYN_PROC_NAMES[@]}"; do hdc shell "pkill -f '[/]${f}'" >/dev/null 2>&1; done
+    fi
+    device_rm "${dir}" >/dev/null || fail "dyn-uid${uid}: removing ${dir}"
+  done
+  [[ "${n}" -gt 0 ]] || fail "dyn-uid: no valid uid in RUN_UIDS"
+  device_rm "${deny}" >/dev/null || fail "dyn-uid: removing ${deny}"
+  echo "dyn-uid logs: ${LOGS}/${runs}"
 }
 
 stage_dyn-bench() {
@@ -445,11 +553,11 @@ stage_dyn-bench() {
   device_path_ok "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" || return 1  # rm -rf ROOT/b/* below
   trap dyn_interrupted INT TERM
   hdc shell "mkdir -p ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}/b" >/dev/null
-  dyn_push "${LIBCXX_SHARED}"
-  dyn_push "${PLUGIN_SO}"
-  dyn_push "${DYN}/static/ibmw_shm_ext_bench" bench_static
-  dyn_push "${DYN}/rt/ibmw_shm_ext_bench" bench_pie
-  dyn_push "${DYN}/rt/ibmw_shm_ext_bench_so" bench_so
+  dyn_push "${LIBCXX_SHARED}" || return 1
+  dyn_push "${PLUGIN_SO}" || return 1
+  dyn_push "${DYN}/static/ibmw_shm_ext_bench" bench_static || return 1
+  dyn_push "${DYN}/rt/ibmw_shm_ext_bench" bench_pie || return 1
+  dyn_push "${DYN}/rt/ibmw_shm_ext_bench_so" bench_so || return 1
   # A new directory per run: earlier results stay where the docs cite them.
   local runs="${LOGS}/dyn-bench-$(date +%Y%m%d-%H%M%S)" round label log run_rc others
   mkdir -p "${runs}"
@@ -485,6 +593,7 @@ stage_dynamic() {
   stage_dyn-build || return 1
   local ok=0
   stage_dyn-device || ok=1
+  stage_dyn-uid || ok=1
   stage_dyn-bench || ok=1
   stage_dyn-clean
   return "${ok}"
@@ -494,7 +603,7 @@ stage_dynamic() {
 for s in "$@"; do
   echo "==== [shm-ohos] ${s} ===="
   case "${s}" in
-    build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-bench | dyn-clean)
+    build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-uid | dyn-bench | dyn-clean)
       "stage_${s}" || fail "stage ${s}" ;;
     *) echo "unknown stage ${s}" >&2; exit 64 ;;
   esac

@@ -63,6 +63,7 @@
 #include "cpp/util/json_transport.h"
 #include "engine/engine.h"
 #include "engine/extension/extension_loader.h"
+#include "proc_creds.h"
 #include "yaml-cpp/yaml.h"
 
 namespace shm_ext_dyn {
@@ -610,6 +611,7 @@ int Main(int argc, char** argv) {
 }  // namespace shm_ext_dyn
 
 int main(int argc, char** argv) {
+  ibmw::extensions::shm_extension::test::PrintProcCreds(stdout, "runner");
   try {
     return shm_ext_dyn::Main(argc, argv);
   } catch (const std::exception& e) {
