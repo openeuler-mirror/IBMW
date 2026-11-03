@@ -22,7 +22,7 @@
 # Usage:
 #   bash scripts/run_dual_build_matrix.sh                     # all entries
 #   bash scripts/run_dual_build_matrix.sh dds_off net_off     # subset
-#   bash scripts/run_dual_build_matrix.sh --strict ...        # fail on any per-entry FAIL
+#   bash scripts/run_dual_build_matrix.sh --report ...        # report only: exit 0 on per-entry FAIL
 #   bash scripts/run_dual_build_matrix.sh --skip-ctest ...    # build + smoke only
 #   bash scripts/run_dual_build_matrix.sh --skip-smoke ...    # build + ctest only
 #   bash scripts/run_dual_build_matrix.sh --build-only ...    # build only (commit #3 behaviour)
@@ -34,11 +34,12 @@
 #   IBMW_MATRIX_JOBS   override -j parallelism (default $(nproc))
 #   IBMW_MATRIX_YAML   override yaml config path (default scripts/dual_build_matrix.yaml)
 #
-# Exit code:
-#   0  by default — harness ran end-to-end. Per-entry results are reported
-#      in the SUMMARY table and per-entry artefacts under
-#      ${IBMW_MATRIX_ROOT}/<entry>/.
-#   1  with --strict if any entry's enabled phases FAILed.
+# Exit code (TOOL-040):
+#   0  every entry's enabled phases passed, or --report was given (the harness
+#      ran end-to-end; per-entry results are in the SUMMARY table and the
+#      artefacts under ${IBMW_MATRIX_ROOT}/<entry>/).
+#   1  any entry's enabled phases FAILed (the default; --strict is accepted
+#      for compatibility and changes nothing).
 #   2  bad CLI usage (unknown entry / missing yaml).
 
 set -uo pipefail
@@ -157,7 +158,7 @@ if [[ ${#ALL_ENTRIES[@]} -eq 0 ]]; then
   exit 2
 fi
 
-STRICT=0
+STRICT=1
 SKIP_CTEST=0
 SKIP_SMOKE=0
 BUILD_ONLY=0
@@ -165,6 +166,7 @@ ARGS=()
 for arg in "$@"; do
   case "${arg}" in
     --strict)      STRICT=1 ;;
+    --report)      STRICT=0 ;;
     --skip-ctest)  SKIP_CTEST=1 ;;
     --skip-smoke)  SKIP_SMOKE=1 ;;
     --build-only)  BUILD_ONLY=1 ;;
@@ -561,10 +563,10 @@ if [[ ${overall} -ne 0 ]]; then
   echo "[matrix] per-entry artefacts under ${MATRIX_ROOT}/<entry>/"
   echo "[matrix] features.h warns: ${features_warns}  (non-blocking)"
   if [[ ${STRICT} -eq 1 ]]; then
-    echo "[matrix] OVERALL: FAIL (--strict)"
+    echo "[matrix] OVERALL: FAIL (use --report to exit 0)"
     exit 1
   fi
-  echo "[matrix] OVERALL: HARNESS-OK, ENTRIES-PARTIAL — see SUMMARY above."
+  echo "[matrix] OVERALL: HARNESS-OK, ENTRIES-PARTIAL (--report) — see SUMMARY above."
   exit 0
 fi
 
