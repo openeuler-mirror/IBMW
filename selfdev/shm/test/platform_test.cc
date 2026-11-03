@@ -74,6 +74,29 @@ TEST(ShmPlatformTest, MapSegmentRejectsSizeMismatch) {
   EXPECT_FALSE(MapSegment(-1, 4096, false).ok());
 }
 
+// PL-14 Where fstat is denied (OHOS HAP, see MapSegment) the size check goes
+// through lseek: still the exact segment size, larger announced sizes and 0
+// rejected, and the file offset does not matter.
+TEST(ShmPlatformTest, MapSegmentChecksSizeWithoutFstat) {
+  struct Restore {
+    ~Restore() { fault::fstat_denied.store(false); }
+  } restore;
+  fault::fstat_denied.store(true);
+  auto seg = CreateSegment("pl14", 4096, true, false);
+  ASSERT_TRUE(seg.ok());
+  EXPECT_EQ(MapSegment(seg->fd.Get(), 4097, false).error(), Error::kCorrupted);
+  EXPECT_EQ(MapSegment(seg->fd.Get(), 0, false).error(), Error::kCorrupted);
+  ASSERT_EQ(::lseek(seg->fd.Get(), 100, SEEK_SET), 100);
+  auto ro = MapSegment(seg->fd.Get(), 4096, false);
+  ASSERT_TRUE(ro.ok()) << ErrorName(ro.error());
+  EXPECT_TRUE(MapSegment(seg->fd.Get(), 2048, false).ok());
+  int pipe_fds[2];
+  ASSERT_EQ(::pipe(pipe_fds), 0);
+  EXPECT_FALSE(MapSegment(pipe_fds[0], 4096, false).ok());
+  ::close(pipe_fds[0]);
+  ::close(pipe_fds[1]);
+}
+
 // PL-04 Futex wait honours the timeout and the expected value.
 TEST(ShmPlatformTest, FutexTimeoutAndValueMismatch) {
   std::atomic<uint32_t> word{5};

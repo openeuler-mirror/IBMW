@@ -1606,5 +1606,40 @@ TEST(ShmRegressionTest, RewatchRetriesWithoutMemory) {
   ASSERT_TRUE(WaitFor([&] { return sub.Stats().connections == 1; }));
 }
 
+// RG-43 OHOS application processes may not fstat() a memfd (SELinux, EACCES
+// in a HAP): segments are still accepted, their size checked through lseek,
+// and an unsealed segment is still refused.
+TEST(ShmRegressionTest, SegmentsMapWithoutFstat) {
+  struct Restore {
+    ~Restore() { fault::fstat_denied.store(false); }
+  } restore;
+  fault::fstat_denied.store(true);
+  auto url = UniqueUrl("rg43");
+  Publisher pub(url);
+  Subscriber sub(url, SubscriberOptions{4, QueueFullPolicy::kDiscardOldest, 4});
+  ASSERT_TRUE(WaitFor([&] { return pub.HasSubscribers() && sub.Stats().connections == 1; }));
+  PublishSeq(pub, 1);
+  auto big = pub.Loan(1 << 20);  // a further data segment
+  ASSERT_TRUE(big.ok()) << ErrorName(big.error());
+  pub.Release(*big);
+  PublishSeq(pub, 2);
+  for (uint64_t s = 1; s <= 2; ++s) {
+    ASSERT_TRUE(WaitFor([&] { return sub.HasData(); }));
+    auto t = sub.Take();
+    ASSERT_TRUE(t.ok()) << ErrorName(t.error());
+    EXPECT_EQ(CheckPattern(*t, 64), s);
+    sub.Release(*t);
+  }
+  EXPECT_EQ(sub.Stats().connections, 1u);
+
+  auto raw_url = UniqueUrl("rg43");
+  RawPublisher raw;
+  ASSERT_TRUE(raw.Listen(raw_url));
+  Subscriber strict(raw_url, SubscriberOptions{4, QueueFullPolicy::kDiscardOldest, 4});
+  ASSERT_TRUE(raw.Handshake(/*seal_conn=*/false));
+  EXPECT_TRUE(raw.Closed());
+  EXPECT_EQ(strict.Stats().connections, 0u);
+}
+
 }  // namespace
 }  // namespace ibmw::selfdev::shm

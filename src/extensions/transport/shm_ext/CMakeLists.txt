@@ -128,3 +128,34 @@ if(IBMW_BUILD_SHM_EXT_DYN_CHECK)
   target_compile_definitions(ibmw_shm_ext_bench_so PRIVATE IBMW_SHM_EXT_BENCH_SO)
   add_werror(ibmw_shm_ext_bench_so)
 endif()
+
+# OHOS test HAP for run_shm_ohos.sh `hap`, never installed. HAP processes cannot
+# exec files, so the test programs are shared objects started as native child
+# processes by the NAPI module ibmw_shm_ext_hap (test_peer/shm_ext_hap.cc):
+# the EXT tests (needs IBMW_BUILD_TESTS; the peer is not available, its three
+# tests are filtered out there) and the runner. OHOS SDK only (ace_napi, child_process).
+option(IBMW_BUILD_SHM_EXT_HAP_CHECK "Build the shm_ext test libraries of the OHOS test HAP" OFF)
+if(IBMW_BUILD_SHM_EXT_HAP_CHECK)
+  add_library(ibmw_shm_ext_hap SHARED test_peer/shm_ext_hap.cc)
+  # child_process: dlopen'ed, see shm_ext_hap.cc.
+  target_link_libraries(ibmw_shm_ext_hap PRIVATE ace_napi.z ${CMAKE_DL_LIBS})
+  add_werror(ibmw_shm_ext_hap)
+  add_library(ibmw_shm_ext_hap_runner SHARED test_peer/shm_ext_dyn_runner.cc)
+  target_link_libraries(ibmw_shm_ext_hap_runner PRIVATE ibmw::core::engine ibmw::api::cpp ${CMAKE_DL_LIBS})
+  target_compile_definitions(ibmw_shm_ext_hap_runner PRIVATE IBMW_SHM_EXT_DYN_RUNNER_LIBRARY)
+  add_werror(ibmw_shm_ext_hap_runner)
+  if(IBMW_BUILD_TESTS AND test_files)
+    # As add_gtest_target for a shared plugin, without gtest_main.
+    set(hap_test ${CUR_TARGET_NAME}_hap_test)
+    get_target_property(hap_test_sources ${CUR_TARGET_NAME} SOURCES)
+    get_target_property(hap_test_includes ${CUR_TARGET_NAME} INCLUDE_DIRECTORIES)
+    get_target_property(hap_test_links ${CUR_TARGET_NAME} LINK_LIBRARIES)
+    get_target_property(selfdev_shm_source_dir ibmw_selfdev_shm SOURCE_DIR)
+    add_library(${hap_test} SHARED ${test_files} ${hap_test_sources} test_peer/shm_ext_hap_test_main.cc
+                                   ${selfdev_shm_source_dir}/test/fail_alloc.cc)
+    target_include_directories(${hap_test} PRIVATE ${hap_test_includes} ${selfdev_shm_source_dir}/test)
+    target_link_libraries(${hap_test} PRIVATE ${hap_test_links} GTest::gtest GTest::gmock)
+    target_compile_definitions(${hap_test} PRIVATE IBMW_SHM_EXT_PEER_PATH="/nonexistent/ibmw_shm_ext_peer")
+    add_werror(${hap_test})
+  endif()
+endif()

@@ -1,0 +1,45 @@
+{
+  "app": {
+    "bundleName": "@BUNDLE@",
+    "vendor": "ibmw",
+    "versionCode": 1,
+    "versionName": "1.0.0",
+    "icon": "$media:app_icon",
+    "label": "$string:app_name",
+    "minAPIVersion": 13,
+    "targetAPIVersion": 18,
+    "apiReleaseType": "Release",
+    "debug": true,
+    "compileSdkVersion": "5.1.0",
+    "compileSdkType": "OpenHarmony"
+  },
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    "deviceTypes": ["2in1", "default", "tablet"],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    "compileMode": "esmodule",
+    "virtualMachine": "ark",
+    "compressNativeLibs": true,
+    "dependencies": [],
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:module_desc",
+        "icon": "$media:app_icon",
+        "label": "$string:app_name",
+        "startWindowIcon": "$media:app_icon",
+        "startWindowBackground": "$color:start_bg",
+        "exported": false
+      }
+    ],
+    "testRunner": {
+      "name": "OpenHarmonyTestRunner",
+      "srcPath": "./ets/testrunner/OpenHarmonyTestRunner.ets"
+    }
+  }
+}

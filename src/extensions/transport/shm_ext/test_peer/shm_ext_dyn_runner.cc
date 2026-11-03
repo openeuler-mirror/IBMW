@@ -474,7 +474,24 @@ bool SubCycle(const Args& a, int cycle) {
   return ok;
 }
 
-// Owning DSO of `sym` as the exe resolves it (RTLD_DEFAULT) and as dlsym on the
+// The lookup scope of the runner's own code: the exe's global scope, or in the
+// HAP library build the runner library and its dependencies (the HAP child
+// opens it RTLD_LOCAL, so RTLD_DEFAULT does not see its libc++_shared.so).
+void* RunnerScope() {
+#ifdef IBMW_SHM_EXT_DYN_RUNNER_LIBRARY
+  static void* const self = [] {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&RunnerScope), &info) == 0 || info.dli_fname == nullptr) return RTLD_DEFAULT;
+    void* h = dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD);
+    return h != nullptr ? h : RTLD_DEFAULT;
+  }();
+  return self;
+#else
+  return RTLD_DEFAULT;
+#endif
+}
+
+// Owning DSO of `sym` as the exe resolves it (RunnerScope) and as dlsym on the
 // plugin handle resolves it (the handle's dependency order). The plugin's own
 // relocations bind through the global scope first, so the plugin column is a
 // proxy, not a dump of its relocations. The plugin and the exe throw and catch
@@ -490,7 +507,7 @@ bool AbiCheck(ExtensionLoader& loader) {
   };
   bool ok = true;
   for (const char* sym : kSymbols) {
-    const std::string exe = owner(dlsym(RTLD_DEFAULT, sym));
+    const std::string exe = owner(dlsym(RunnerScope(), sym));
     const std::string plugin = owner(loader.GetDynamicLib().GetSymbol(sym));
     const bool same = exe == plugin && exe != "unresolved" && exe.find("chipset") == std::string::npos;
     std::printf("DYN_ABI symbol=%s exe=%s plugin=%s result=%s\n", sym, exe.c_str(), plugin.c_str(),
@@ -610,7 +627,14 @@ int Main(int argc, char** argv) {
 
 }  // namespace shm_ext_dyn
 
+// IBMW_SHM_EXT_DYN_RUNNER_LIBRARY: built into a shared object for the OHOS
+// test HAP, whose processes cannot exec files; a native child process of the
+// HAP calls this entry instead of main.
+#ifdef IBMW_SHM_EXT_DYN_RUNNER_LIBRARY
+extern "C" __attribute__((visibility("default"))) int ShmExtDynRunnerMain(int argc, char** argv) {
+#else
 int main(int argc, char** argv) {
+#endif
   ibmw::extensions::shm_extension::test::PrintProcCreds(stdout, "runner");
   try {
     return shm_ext_dyn::Main(argc, argv);

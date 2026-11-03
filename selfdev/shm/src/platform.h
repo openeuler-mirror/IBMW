@@ -185,6 +185,7 @@ extern std::atomic<bool> no_future_write_seal;  // CreateSegment() behaves as if
 extern std::atomic<bool> no_pidfd;              // PidfdOpen() fails with ENOSYS
 extern std::atomic<bool> kill_eperm;            // PidGone() sees EPERM (peer of another uid)
 extern std::atomic<uint32_t> map_segment_fail;  // MapSegment() fails with kNoMemory
+extern std::atomic<bool> fstat_denied;          // MapSegment(): fstat() fails with EACCES (OHOS HAP)
 extern std::atomic<uint32_t> grow_bad_alloc;    // GrowLocked(): per-connection bookkeeping throws std::bad_alloc
 extern std::atomic<uint32_t> offer_bad_alloc;   // RuntimeImpl::OfferPublisher() throws std::bad_alloc
 extern std::atomic<size_t> send_queue_limit;    // SendQueue bound instead of kMaxMessages (0: unchanged)

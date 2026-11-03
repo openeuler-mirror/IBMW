@@ -39,6 +39,17 @@
 #            to a new logs/dyn-bench-<time>/ each run; loadavg and leftover ibmw
 #            processes are logged before every round (no pass/fail on the numbers)
 #   dyn-clean  remove DYN_DEVICE_DIR and DYN_DEVICE_ROOT from the device
+#   hap      dyn-build hap-build hap-device (the tests inside an application process)
+#   hap-build  build the test HAP into OUT/hap/unsigned.hap: the plugin, the
+#            runner and the EXT tests as shared objects (dyn trees with
+#            IBMW_BUILD_SHM_EXT_HAP_CHECK), the NAPI module that starts them as
+#            native child processes, the ArkTS test runner (es2abc) and the
+#            resources (restool, app_packing_tool). Needs dyn-build (it also
+#            copies the sources)
+#   hap-device sign the HAP for the connected device (OpenHarmony test
+#            certificate, debug profile with the device UDID), install HAP_BUNDLE,
+#            run it with `aa test`, copy the logs from the application sandbox to
+#            logs/hap-<time>/, check them and uninstall the bundle
 #
 # Environment:
 #   OUT                 outputs (default: <repo>/build-ohos-shm)
@@ -63,6 +74,8 @@
 #   DYN_BENCH_ROUNDS    dyn-bench rounds per binary (default: 15)
 #   RUN_UIDS            dyn-uid uids, gid = uid (default: 2000 20099999: the shell
 #                       uid and an unused uid of the user-100 application range)
+#   HAP_BUNDLE          bundle name of the test HAP (default: com.ibmw.shmhap); it
+#                       is installed and uninstalled again by hap-device
 #
 # build/qemu/device/bench/bench-ext use fully static binaries (-static,
 # c++_static), which do not exercise the device's dynamic linker. The SDK
@@ -105,6 +118,10 @@ DYN="${OUT}/dyn"
 LIBCXX_SHARED="${SDK}/llvm/lib/aarch64-linux-ohos/libc++_shared.so"
 PLUGIN_SO="${DYN}/rt/libibmw_shm_transport.so"
 RUN_AS="${OUT}/run_as"
+HAP="${OUT}/hap"
+HAP_BUNDLE="${HAP_BUNDLE:-com.ibmw.shmhap}"
+SDK_ROOT="$(dirname "${SDK}")"
+SIGN_LIB="${SDK_ROOT}/toolchains/lib"
 mkdir -p "${LOGS}"
 
 rc=0
@@ -170,8 +187,10 @@ summarize() {
 }
 
 stage_qemu() {
-  local tmp="${OUT}/q"
-  rm -rf "${tmp}" && mkdir -p "${tmp}"
+  # Short: the service directories below it must fit the socket path limit
+  # (63 bytes); OUT/q is too deep for most checkouts.
+  local tmp
+  tmp="$(mktemp -d /tmp/ibq.XXXXXX)" || return 1
   run_qemu() {
     local name=$1 bin=$2 peer_var=$3 peer=$4
     shift 4
@@ -183,6 +202,7 @@ stage_qemu() {
   run_qemu core-repeat "${CORE_TEST}" IBMW_SHM_PEER_PATH "${CORE_PEER}" --gtest_repeat="${REPEAT}" --gtest_shuffle
   run_qemu ext-once "${EXT_TEST}" IBMW_SHM_EXT_PEER_PATH "${EXT_PEER}"
   run_qemu ext-repeat "${EXT_TEST}" IBMW_SHM_EXT_PEER_PATH "${EXT_PEER}" --gtest_repeat="${REPEAT}" --gtest_shuffle
+  rm -rf "${tmp}"
 }
 
 stage_device() {
@@ -599,11 +619,244 @@ stage_dynamic() {
   return "${ok}"
 }
 
+# ---------------------------------------------------------------- test HAP
+
+hap_check_libs() {
+  local readelf="${SDK}/llvm/bin/llvm-readelf" f
+  for f in "$@"; do
+    "${readelf}" -dW "${f}" | grep 'NEEDED.*libc++_shared.so' >/dev/null || { echo "${f}: not linked to libc++_shared.so"; return 1; }
+    "${readelf}" -dW "${f}" | grep 'NEEDED.*libibmw_shm_transport' >/dev/null && { echo "${f}: links the plugin"; return 1; }
+  done
+  return 0
+}
+
+# HAP_BUNDLE goes into device shell commands: only a plain bundle name.
+hap_bundle_ok() {
+  [[ "${HAP_BUNDLE}" =~ ^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$ ]] || { fail "bad HAP_BUNDLE ${HAP_BUNDLE}"; return 1; }
+}
+
+stage_hap-build() {
+  [[ -f "${PLUGIN_SO}" && -d "${DYN}/test" ]] || { fail "hap-build: run dyn-build first"; return 1; }
+  hap_bundle_ok || return 1
+  # Added to the dyn-build trees and kept in their caches; the option only
+  # adds targets, later dyn-build runs build what they built before.
+  local t
+  for t in rt test; do
+    cmake -S "${DYN}/src" -B "${DYN}/${t}" -DIBMW_BUILD_SHM_EXT_HAP_CHECK=ON >"${LOGS}/hap-${t}.configure.log" 2>&1 ||
+      { tail -20 "${LOGS}/hap-${t}.configure.log"; return 1; }
+  done
+  dyn_make rt ibmw_extensions_shm_ext ibmw_shm_ext_hap ibmw_shm_ext_hap_runner || return 1
+  dyn_make test ibmw_extensions_shm_ext_hap_test || return 1
+  local lib="${HAP}/stage/libs/arm64-v8a" src="${HERE}/ohos/hap" stage="${HAP}/stage"
+  rm -rf "${HAP}" && mkdir -p "${lib}" "${stage}/js" "${stage}/res" "${stage}/abc" "${stage}/src/resources/base/media"
+  cp "${PLUGIN_SO}" "${LIBCXX_SHARED}" "${DYN}/rt/libibmw_shm_ext_hap.so" "${DYN}/rt/libibmw_shm_ext_hap_runner.so" \
+    "${DYN}/test/libibmw_extensions_shm_ext_hap_test.so" "${lib}/" || return 1
+  hap_check_libs "${lib}/libibmw_shm_transport.so" "${lib}/libibmw_shm_ext_hap.so" "${lib}/libibmw_shm_ext_hap_runner.so" \
+    "${lib}/libibmw_extensions_shm_ext_hap_test.so" || return 1
+  # The NAPI module must not link libchild_process.so (see shm_ext_hap.cc).
+  "${SDK}/llvm/bin/llvm-readelf" -dW "${lib}/libibmw_shm_ext_hap.so" | grep -q 'NEEDED.*libchild_process' &&
+    { echo "libibmw_shm_ext_hap.so links libchild_process.so"; return 1; }
+  # ArkTS (plain JS) to one merged abc, as the IDE's build does.
+  cp -r "${src}/resources" "${stage}/src/"
+  sed "s/@BUNDLE@/${HAP_BUNDLE}/g" "${src}/module.json" >"${stage}/src/module.json"
+  sed "s/@BUNDLE@/${HAP_BUNDLE}/g" "${src}/pack.info" >"${stage}/pack.info"
+  sed "s/@BUNDLE@/${HAP_BUNDLE}/g" "${src}/OpenHarmonyTestRunner.js" >"${stage}/js/OpenHarmonyTestRunner.js"
+  cp "${src}/EntryAbility.js" "${stage}/js/"
+  # A plain 64x64 icon, generated rather than kept as a binary file.
+  python3 - "${stage}/src/resources/base/media/app_icon.png" <<'EOF' || return 1
+import struct, sys, zlib
+w = h = 64
+raw = b"".join(b"\0" + b"\x40\x80\xc0" * w for _ in range(h))
+chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                              + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+EOF
+  # filesInfo: <file>;<record>;esm;<source>;<package>;<shared>;<language>
+  {
+    echo "${stage}/js/EntryAbility.js;${HAP_BUNDLE}/entry/ets/entryability/EntryAbility;esm;entry/src/main/ets/entryability/EntryAbility.ets;entry;false;js"
+    echo "${stage}/js/OpenHarmonyTestRunner.js;${HAP_BUNDLE}/entry/ets/testrunner/OpenHarmonyTestRunner;esm;entry/src/main/ets/testrunner/OpenHarmonyTestRunner.ets;entry;false;js"
+  } >"${stage}/filesInfo.txt"
+  : >"${stage}/npmEntries.txt"
+  "${SDK_ROOT}/ets/build-tools/ets-loader/bin/ark/build/bin/es2abc" "@${stage}/filesInfo.txt" \
+    --npm-module-entry-list "${stage}/npmEntries.txt" --output "${stage}/abc/modules.abc" --merge-abc \
+    --target-api-version=13 --module >"${LOGS}/hap-es2abc.log" 2>&1 || { cat "${LOGS}/hap-es2abc.log"; return 1; }
+  "${SDK_ROOT}/toolchains/restool" -i "${stage}/src" -j "${stage}/src/module.json" -p "${HAP_BUNDLE}" -o "${stage}/res" \
+    -r "${stage}/res/ResourceTable.h" -f >"${LOGS}/hap-restool.log" 2>&1 || { cat "${LOGS}/hap-restool.log"; return 1; }
+  java -jar "${SIGN_LIB}/app_packing_tool.jar" --mode hap --json-path "${stage}/res/module.json" \
+    --resources-path "${stage}/res/resources" --index-path "${stage}/res/resources.index" \
+    --pack-info-path "${stage}/pack.info" --ets-path "${stage}/abc" --lib-path "${stage}/libs" \
+    --out-path "${HAP}/unsigned.hap" --force true >"${LOGS}/hap-pack.log" 2>&1 || { cat "${LOGS}/hap-pack.log"; return 1; }
+  unzip -l "${HAP}/unsigned.hap" | tee "${LOGS}/hap-contents.txt"
+  echo "hap-build OK: ${HAP}/unsigned.hap"
+}
+
+# hap_sign <udid>: OUT/hap/signed.hap with the SDK's OpenHarmony test keys. The
+# profile's development certificate is the one of the SDK template (issued by
+# the Application CA); the app certificate chain is that leaf plus the CA and
+# root certificates of OpenHarmony.p12.
+hap_sign() {
+  local sign="${HAP}/sign" ks="${SIGN_LIB}/OpenHarmony.p12"
+  mkdir -p "${sign}"
+  python3 - "${SIGN_LIB}/UnsgnedDebugProfileTemplate.json" "${sign}" "${HAP_BUNDLE}" "$1" <<'EOF' || return 1
+import json, sys, time, uuid
+template, out, bundle, udid = sys.argv[1:]
+p = json.load(open(template))
+now = int(time.time())
+p["uuid"] = str(uuid.uuid4())
+p["validity"] = {"not-before": now - 86400, "not-after": now + 30 * 86400}
+p["bundle-info"]["bundle-name"] = bundle
+p["debug-info"] = {"device-ids": [udid], "device-id-type": "udid"}
+cert = p["bundle-info"]["development-certificate"]
+open(out + "/profile.json", "w").write(json.dumps(p, indent=1))
+open(out + "/app_chain.cer", "w").write(cert if cert.endswith("\n") else cert + "\n")
+EOF
+  local a
+  for a in cacert rootcacert; do
+    keytool -exportcert -rfc -alias "${a}" -keystore "${ks}" -storepass 123456 >>"${sign}/app_chain.cer" 2>/dev/null || return 1
+  done
+  java -jar "${SIGN_LIB}/hap-sign-tool.jar" sign-profile -keyAlias "openharmony application profile debug" \
+    -signAlg SHA256withECDSA -mode localSign -profileCertFile "${SIGN_LIB}/OpenHarmonyProfileDebug.pem" \
+    -inFile "${sign}/profile.json" -keystoreFile "${ks}" -outFile "${sign}/profile.p7b" -keyPwd 123456 \
+    -keystorePwd 123456 >"${LOGS}/hap-sign.log" 2>&1 || { cat "${LOGS}/hap-sign.log"; return 1; }
+  java -jar "${SIGN_LIB}/hap-sign-tool.jar" sign-app -keyAlias "openharmony application release" \
+    -signAlg SHA256withECDSA -mode localSign -appCertFile "${sign}/app_chain.cer" -profileFile "${sign}/profile.p7b" \
+    -inFile "${HAP}/unsigned.hap" -keystoreFile "${ks}" -outFile "${HAP}/signed.hap" -keyPwd 123456 \
+    -keystorePwd 123456 -signCode 1 >>"${LOGS}/hap-sign.log" 2>&1 || { cat "${LOGS}/hap-sign.log"; return 1; }
+  grep -q 'sign-app success' "${LOGS}/hap-sign.log" || { cat "${LOGS}/hap-sign.log"; return 1; }
+}
+
+# hap_state: prints "installed", "absent" or, when the device does not answer
+# (hdc failed), "unknown"; only an answering device's bundle list counts.
+hap_state() {
+  local out
+  out="$(hdc shell "echo hdc_ok; bm dump -a" 2>/dev/null | tr -d '\r')"
+  if ! grep -qx 'hdc_ok' <<<"${out}" || ! grep -q '^ID: ' <<<"${out}"; then
+    echo unknown
+  elif grep -qxF "$(printf '\t%s' "${HAP_BUNDLE}")" <<<"${out}"; then
+    echo installed
+  else
+    echo absent
+  fi
+}
+
+# Uninstalls HAP_BUNDLE; succeeds only if the device then lists it as absent.
+hap_uninstall() {
+  hdc shell "bm uninstall -n ${HAP_BUNDLE}" >/dev/null 2>&1
+  [[ "$(hap_state)" == absent ]]
+}
+
+# Whatever ends the script while the bundle may be installed (error, signal,
+# lost terminal) uninstalls it first.
+HAP_PENDING=0
+hap_exit() {
+  if [[ ${HAP_PENDING} -eq 1 ]]; then
+    hap_uninstall || echo "FAIL: ${HAP_BUNDLE} may still be installed; run: hdc shell bm uninstall -n ${HAP_BUNDLE}" >&2
+    HAP_PENDING=0
+  fi
+}
+
+stage_hap-device() {
+  hap_bundle_ok || return 1
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  [[ -f "${HAP}/unsigned.hap" ]] || { fail "hap-device: run hap-build first"; return 1; }
+  local udid runs log uid ctx f
+  udid="$(hdc shell "bm get --udid" | tr -d '\r' | grep -E '^[0-9A-F]{64}$')"
+  [[ -n "${udid}" ]] || { fail "hap-device: no device UDID"; return 1; }
+  hap_sign "${udid}" || { fail "hap-device: signing"; return 1; }
+  trap hap_exit EXIT
+  trap 'exit 130' INT TERM HUP
+  HAP_PENDING=1
+  case "$(hap_state)" in
+    installed)
+      # An earlier run's install keeps its data (cache, stale results): start clean.
+      echo "NOTE: ${HAP_BUNDLE} is already installed (an earlier run?); uninstalling it first"
+      hap_uninstall || { fail "hap-device: cannot uninstall the earlier ${HAP_BUNDLE}"; return 1; } ;;
+    absent) ;;
+    *) fail "hap-device: device does not answer"; return 1 ;;
+  esac
+  runs="${LOGS}/hap-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "${runs}"
+  hdc install "${HAP}/signed.hap" | tr -d '\r' | tee "${runs}/install.log"
+  grep -q 'install bundle successfully' "${runs}/install.log" || { fail "hap-device: install"; hap_exit; return 1; }
+  hdc shell "bm dump -n ${HAP_BUNDLE}" | tr -d '\r' >"${runs}/bundle.json"
+  uid="$(sed -n 's/^ *"uid": \([0-9]*\),*$/\1/p' "${runs}/bundle.json" | head -1)"
+  echo "bundle uid=${uid}"
+  log="${runs}/aa-test.log"
+  # Native steps: TEST_TIMEOUT each for the two EXT runs, 300 s for the
+  # runner; aa test allows that plus 5 minutes.
+  hdc shell "aa test -b ${HAP_BUNDLE} -m entry -s unittest /ets/testrunner/OpenHarmonyTestRunner -s repeat ${REPEAT} \
+    -s steptimeout ${TEST_TIMEOUT} -s timeout $(((TEST_TIMEOUT * 2 + 700) * 1000))" | tr -d '\r' | tee "${log}"
+  # The sandbox cache directory as root sees it (el2, user 100 only: `aa test`
+  # runs the current user's install).
+  local cache="/data/app/el2/100/base/${HAP_BUNDLE}/cache"
+  [[ "$(hdc shell "ls -d ${cache}" | tr -d '\r')" == "${cache}" ]] || fail "hap-device: no ${cache}"
+  for f in summary.txt ext-once.log ext-once.rc ext-repeat.log ext-repeat.rc runner-pub.log runner-pub.rc \
+    runner-sub.log runner-sub.rc; do
+    # A child that died leaves no .rc: an empty file here.
+    hdc shell "cat ${cache}/${f} 2>/dev/null" | tr -d '\r' >"${runs}/${f}"
+  done
+  if hap_uninstall; then
+    HAP_PENDING=0
+  else
+    fail "hap-device: ${HAP_BUNDLE} still installed or device not answering"
+  fi
+  trap - INT TERM HUP
+
+  grep -q '^TestFinished-ResultCode: 0$' "${log}" && grep -q '^HAP_RESULT result=PASS$' "${runs}/summary.txt" ||
+    fail "hap-device: aa test (${log})"
+  [[ "${uid}" =~ ^[1-9][0-9]{7}$ ]] || fail "hap-device: bundle uid '${uid}'"
+  # Every child: the application uid/gid for all ids and the HAP domain (not su).
+  # Supplementary groups and capabilities are the application's own (0x0a here),
+  # so they are logged, not checked.
+  ctx="u:r:debug_hap:s0"
+  for f in ext-once ext-repeat runner-pub runner-sub; do
+    grep -q "^HAP_CHILD pid=[0-9]* context=${ctx} " "${runs}/${f}.log" || fail "hap-device ${f}: not in ${ctx}"
+    grep '^PROC_CREDS ' "${runs}/${f}.log" | grep -vE "^PROC_CREDS bin=[a-z_]+ uid=${uid},${uid},${uid},${uid} gid=${uid},${uid},${uid},${uid} " &&
+      fail "hap-device ${f}: ids other than ${uid}"
+    grep -q '^PROC_CREDS ' "${runs}/${f}.log" || fail "hap-device ${f}: no PROC_CREDS"
+    # One C++ runtime (see shm_ext_hap.cc): the standard typeinfo of the child's
+    # own code is libc++_shared.so's, and a typed catch works.
+    grep -qE '^HAP_ABI self typeid\(std::exception\)=/[^ ]*/libc\+\+_shared\.so typeid\(std::runtime_error\)=/[^ ]*/libc\+\+_shared\.so$' \
+      "${runs}/${f}.log" && grep -q '^HAP_EH typed_catch=1$' "${runs}/${f}.log" || fail "hap-device ${f}: C++ runtime"
+  done
+  # Measured, not gated: whether fstat on a memfd is denied in the HAP domain
+  # (selfdev MapSegment then sizes segments with lseek). Gated: that fallback
+  # relies on F_GET_SEALS failing on files other than shmem ones.
+  grep -h '^HAP_MEMFD ' "${runs}/ext-once.log" | head -2
+  grep -q '^HAP_SEALS pipe=-1 dir=-1 devnull=-1 file=-1$' "${runs}/ext-once.log" ||
+    fail "hap-device: F_GET_SEALS works on a pipe, directory, /dev/null or regular file"
+  for f in ext-once ext-repeat; do
+    grep -qE '^HAP_ABI test typeid\(std::exception\)=/[^ ]*/libc\+\+_shared\.so ' "${runs}/${f}.log" ||
+      fail "hap-device ${f}: the tests' typeinfo is not libc++_shared.so's"
+    summarize "hap-${f}" "$(grep -xE -- '-?[0-9]+' "${runs}/${f}.rc" || echo -2)" "${runs}/${f}.log" ||
+      fail "hap-device ${f} (${runs}/${f}.log)"
+    [[ "$(grep -c '^\[  PASSED  \] 57 tests\.$' "${runs}/${f}.log")" -eq "$([[ ${f} == ext-once ]] && echo 1 || echo "${REPEAT}")" ]] ||
+      fail "hap-device ${f}: expected 57 tests passed per iteration"
+  done
+  cat "${runs}/runner-pub.log" "${runs}/runner-sub.log" >"${runs}/runner.log"
+  grep -E '^(HAP_CHILD|PROC_CREDS|DYN_)' "${runs}/runner.log" | grep -v '^DYN_ABI .*result=PASS$'
+  if [[ "$(head -1 "${runs}/runner-pub.rc")" != 0 || "$(head -1 "${runs}/runner-sub.rc")" != 0 ]] ||
+    [[ "$(grep -c '^DYN_CYCLE .*result=PASS$' "${runs}/runner.log")" -ne 4 ]] ||
+    [[ "$(grep -c '^DYN_THROW .*result=PASS$' "${runs}/runner.log")" -ne 2 ]] || grep -q '^DYN_ABI .*result=FAIL$' "${runs}/runner.log" ||
+    ! grep -q '^DYN_RESULT role=pub cycles=2 result=PASS' "${runs}/runner.log" ||
+    ! grep -q '^DYN_RESULT role=sub cycles=2 result=PASS' "${runs}/runner.log"; then
+    fail "hap-device runner (${runs}/runner.log)"
+  fi
+  echo "hap logs: ${runs}"
+}
+
+stage_hap() {
+  stage_dyn-build || return 1
+  stage_hap-build || return 1
+  stage_hap-device
+}
+
 [[ $# -eq 0 ]] && set -- build qemu
 for s in "$@"; do
   echo "==== [shm-ohos] ${s} ===="
   case "${s}" in
-    build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-uid | dyn-bench | dyn-clean)
+    build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-uid | dyn-bench | dyn-clean | \
+      hap | hap-build | hap-device)
       "stage_${s}" || fail "stage ${s}" ;;
     *) echo "unknown stage ${s}" >&2; exit 64 ;;
   esac

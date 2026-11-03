@@ -367,7 +367,11 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
   }
 
   if (mh.type == MsgType::kReject) {
-    Log("rejected by publisher", url_);
+    RejectMsg rm{};
+    std::memcpy(&rm, data, std::min(len, sizeof(rm)));
+    // No allocation here (noexcept, see RG-40..42).
+    const char* reason = len >= sizeof(rm) && rm.reason <= 0xff ? ErrorName(static_cast<Error>(rm.reason)) : "?";
+    std::fprintf(stderr, "[ibmw_shm] subscriber %s: rejected by publisher: %s\n", url_.c_str(), reason);
   }
   HandleHangup(conn);
 }

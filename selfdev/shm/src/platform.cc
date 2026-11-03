@@ -57,6 +57,7 @@ std::atomic<bool> no_future_write_seal{false};
 std::atomic<bool> no_pidfd{false};
 std::atomic<bool> kill_eperm{false};
 std::atomic<uint32_t> map_segment_fail{0};
+std::atomic<bool> fstat_denied{false};
 std::atomic<uint32_t> grow_bad_alloc{0};
 std::atomic<uint32_t> offer_bad_alloc{0};
 std::atomic<size_t> send_queue_limit{0};
@@ -138,13 +139,31 @@ Result<Mapping> MapSegment(int fd, size_t size, bool writable) {
   struct statfs sfs {};
   if (::fstatfs(fd, &sfs) != 0) return Error::kSystem;
   if (static_cast<unsigned long>(sfs.f_type) != kTmpfsMagic) return Error::kCorrupted;
-  struct stat st {};
-  if (::fstat(fd, &st) != 0) return Error::kSystem;
-  if (!S_ISREG(st.st_mode) || size == 0 || static_cast<uint64_t>(st.st_size) < size) return Error::kCorrupted;
   // A peer-provided file that can still shrink would turn our accesses into
   // SIGBUS; only accept memfds sealed against shrinking.
   int seals = ::fcntl(fd, F_GET_SEALS);
   if (seals < 0 || (seals & F_SEAL_SHRINK) == 0) return Error::kCorrupted;
+  struct stat st {};
+  if (fault::fstat_denied.load(std::memory_order_relaxed)) {
+    errno = EACCES;
+  } else if (::fstat(fd, &st) == 0) {
+    if (!S_ISREG(st.st_mode)) return Error::kCorrupted;
+    errno = 0;
+  }
+  if (errno == EACCES) {
+    // OHOS application processes (SELinux domain *_hap) may not getattr a
+    // memfd, fstatfs, F_GET_SEALS and mmap work (measured). Seals exist only
+    // on shmem regular files, so the file type is settled; the size, from
+    // lseek, cannot change any more (F_SEAL_SHRINK). The offset moved here is
+    // shared with the sender's open file description; segment fds are only
+    // ever mapped, never read or written through their offset.
+    const off_t end = ::lseek(fd, 0, SEEK_END);
+    if (end < 0) return Error::kSystem;
+    st.st_size = end;
+  } else if (errno != 0) {
+    return Error::kSystem;
+  }
+  if (size == 0 || static_cast<uint64_t>(st.st_size) < size) return Error::kCorrupted;
   int prot = PROT_READ | (writable ? PROT_WRITE : 0);
   void* p = ::mmap(nullptr, size, prot, MAP_SHARED, fd, 0);
   if (p == MAP_FAILED) return errno == ENOMEM ? Error::kNoMemory : Error::kSystem;
