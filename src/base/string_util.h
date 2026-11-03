@@ -358,32 +358,31 @@ inline std::string& ReplaceString(std::string& str,
     vec_pos.emplace_back(pos);
     pos += old_len;
   }
-  size_t& vec_len = pos = vec_pos.size();
+  const size_t vec_len = vec_pos.size();
   if (vec_len) {
     if (old_len == new_len) {
       for (size_t ii = 0; ii < vec_len; ++ii)
-        memcpy(const_cast<char*>(str.c_str() + vec_pos[ii]), nv.data(),
-               new_len);
+        memcpy(str.data() + vec_pos[ii], nv.data(), new_len);
     } else if (old_len > new_len) {
-      char* p = const_cast<char*>(str.c_str()) + vec_pos[0];
+      char* p = str.data() + vec_pos[0];
       vec_pos.emplace_back(str.size());
       for (size_t ii = 0; ii < vec_len; ++ii) {
         memcpy(p, nv.data(), new_len);
         p += new_len;
         size_t cplen = vec_pos[ii + 1] - vec_pos[ii] - old_len;
-        memmove(p, str.c_str() + vec_pos[ii] + old_len, cplen);
+        memmove(p, str.data() + vec_pos[ii] + old_len, cplen);
         p += cplen;
       }
-      str.resize(p - str.c_str());
+      str.resize(static_cast<size_t>(p - str.data()));
     } else {
       size_t diff = new_len - old_len;
       vec_pos.emplace_back(str.size());
       str.resize(str.size() + diff * vec_len);
-      char* p = const_cast<char*>(str.c_str()) + str.size();
+      char* p = str.data() + str.size();
       for (size_t ii = vec_len - 1; ii < vec_len; --ii) {
         size_t cplen = vec_pos[ii + 1] - vec_pos[ii] - old_len;
         p -= cplen;
-        memmove(p, str.c_str() + vec_pos[ii] + old_len, cplen);
+        memmove(p, str.data() + vec_pos[ii] + old_len, cplen);
         p -= new_len;
         memcpy(p, nv.data(), new_len);
       }
@@ -637,21 +636,24 @@ inline std::string FormatTree(
  * @brief Replace the part of the string in the form of ${XXX_ENV} with the value of the corresponding environment variable
  */
 inline std::string ReplaceEnvVars(std::string_view input) {
-  std::regex pattern(R"(\$\{([^}]+)\})");
-  std::smatch match;
+  // A linear scan instead of a std::regex built on every call (API-040).
+  // Same rules as before: the name is everything up to the first '}', must
+  // be non-empty, and inserted values are not expanded again.
   std::string result(input);
   size_t cur_pos = 0;
-
-  while (std::regex_search(result.cbegin() + cur_pos, result.cend(), match, pattern)) {
-    std::string env_name = match[1].str();
+  while ((cur_pos = result.find("${", cur_pos)) != std::string::npos) {
+    const size_t close = result.find('}', cur_pos + 2);
+    if (close == std::string::npos) break;
+    if (close == cur_pos + 2) {  // "${}" is kept literally
+      ++cur_pos;
+      continue;
+    }
+    const std::string env_name = result.substr(cur_pos + 2, close - cur_pos - 2);
     const char* env_val = std::getenv(env_name.c_str());
     if (env_val == nullptr) env_val = "";
-
-    result.replace(cur_pos + match.position(0), match.length(0), env_val);
-
-    cur_pos += (match.position(0) + strlen(env_val));
+    result.replace(cur_pos, close + 1 - cur_pos, env_val);
+    cur_pos += strlen(env_val);
   }
-
   return result;
 }
 
