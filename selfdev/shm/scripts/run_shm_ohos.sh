@@ -17,6 +17,23 @@
 #            baseline tree; run them interleaved on the device, print a summary and
 #            remove BENCH_DEVICE_DIR and BENCH_DEVICE_ROOT again (no pass/fail on
 #            the numbers). Needs neither `build` nor `device` first.
+#   dynamic  dyn-build dyn-device dyn-bench dyn-clean (the plugin as a shared object)
+#   dyn-build  build into OUT/dyn: libibmw_shm_transport.so (the real plugin),
+#            ibmw_shm_ext_dyn_runner and ibmw_shm_ext_bench_so (rt/), the EXT tests
+#            and peer as PIE against libc++_shared.so (test/) and the static
+#            ibmw_shm_ext_bench (static/); checks NEEDED/INTERP and writes the TLS
+#            model of the plugin and of the static bench to logs/dyn-tls.txt
+#   dyn-device push to DYN_DEVICE_DIR with the SDK libc++_shared.so; run the runner as
+#            publisher + subscriber process (both dlopen the plugin through the core
+#            ExtensionLoader, two load/unload cycles each), then the EXT tests once
+#            and REPEAT times shuffled
+#   dyn-bench  run three benches interleaved DYN_BENCH_ROUNDS times: static (static
+#            musl + c++_static), pie (plugin sources compiled in, device libc +
+#            libc++_shared.so) and so (linked against the plugin .so). pie vs static
+#            is the libc/libc++ effect, so vs pie the shared-object effect. Results go
+#            to a new logs/dyn-bench-<time>/ each run; loadavg and leftover ibmw
+#            processes are logged before every round (no pass/fail on the numbers)
+#   dyn-clean  remove DYN_DEVICE_DIR and DYN_DEVICE_ROOT from the device
 #
 # Environment:
 #   OUT                 outputs (default: <repo>/build-ohos-shm)
@@ -35,9 +52,19 @@
 #   BENCH_CPUS          worker CPUs on the device (default: 12-19, one core type)
 #   BENCH_DEVICE_DIR    bench-ext binaries (default: /data/local/tmp/ibmw_shm_bench_ext)
 #   BENCH_DEVICE_ROOT   bench-ext IBMW_SHM_ROOT; keep it short (default: /data/local/tmp/ibx)
+#   DYN_DEVICE_DIR      dynamic-stage binaries (default: /data/local/tmp/ibmw_shm_dyn)
+#   DYN_DEVICE_ROOT     dynamic-stage TMPDIR / IBMW_SHM_ROOT parent; keep it short
+#                       (default: /data/local/tmp/ibd)
+#   DYN_BENCH_ROUNDS    dyn-bench rounds per binary (default: 15)
 #
-# The binaries are fully static because the SDK libc.so is a link stub. Static
-# binaries do not exercise the device's dynamic linker namespaces.
+# build/qemu/device/bench/bench-ext use fully static binaries (-static,
+# c++_static), which do not exercise the device's dynamic linker. The SDK
+# libc.so is only a link stub, but a PIE linked against it runs with the
+# device's /lib/ld-musl-aarch64.so.1; the dyn-* stages use that: the core and
+# selfdev archives (STATIC targets, built -fPIC) are linked into the plugin
+# .so and into each executable as in production, and every binary shares one
+# libc++_shared.so copied from the SDK (OHOS_STL=c++_shared), because the
+# runner and the plugin pass std types, YAML nodes and exceptions to each other.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
@@ -55,6 +82,9 @@ BENCH_ARGS="${BENCH_ARGS:---reps 3 --ms 50}"
 BENCH_CPUS="${BENCH_CPUS:-12,13,14,15,16,17,18,19}"
 BENCH_DEVICE_DIR="${BENCH_DEVICE_DIR:-/data/local/tmp/ibmw_shm_bench_ext}"
 BENCH_DEVICE_ROOT="${BENCH_DEVICE_ROOT:-/data/local/tmp/ibx}"
+DYN_DEVICE_DIR="${DYN_DEVICE_DIR:-/data/local/tmp/ibmw_shm_dyn}"
+DYN_DEVICE_ROOT="${DYN_DEVICE_ROOT:-/data/local/tmp/ibd}"
+DYN_BENCH_ROUNDS="${DYN_BENCH_ROUNDS:-15}"
 SRC="${OUT}/src"
 LOGS="${OUT}/logs"
 CORE_TEST="${OUT}/core/shm/ibmw_selfdev_shm_test"
@@ -63,6 +93,9 @@ CORE_BENCH="${OUT}/core/shm/ibmw_shm_bench"
 EXT_TEST="${OUT}/ext/ibmw_extensions_shm_ext_test"
 EXT_PEER="${OUT}/ext/ibmw_shm_ext_peer"
 PROBE="${OUT}/shm_probe"
+DYN="${OUT}/dyn"
+LIBCXX_SHARED="${SDK}/llvm/lib/aarch64-linux-ohos/libc++_shared.so"
+PLUGIN_SO="${DYN}/rt/libibmw_shm_transport.so"
 mkdir -p "${LOGS}"
 
 rc=0
@@ -209,6 +242,7 @@ bench_ext_build() {
 
 stage_bench-ext() {
   hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${BENCH_DEVICE_DIR}" "${BENCH_DEVICE_ROOT}" || return 1  # rm -rf ROOT/* below
   local labels=(new) label round log run_rc
   bench_ext_build new "${REPO}" || return 1
   if [[ -n "${BENCH_BASE_SRC}" ]]; then
@@ -233,19 +267,235 @@ stage_bench-ext() {
       [[ "${run_rc:-255}" -eq 0 ]] || fail "bench-ext ${label} round ${round} (${log})"
     done
   done
-  hdc shell "rm -rf ${BENCH_DEVICE_DIR} ${BENCH_DEVICE_ROOT}" >/dev/null
+  device_rm "${BENCH_DEVICE_DIR}" "${BENCH_DEVICE_ROOT}" >/dev/null
   python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" | tee "${LOGS}/bench-ext-summary.txt"
 }
 
+# device_path_ok <path...>: true when every path is strictly below
+# /data/local/tmp and made only of [A-Za-z0-9._-] components (no "..", spaces,
+# globs or shell metacharacters). The directory variables can be overridden and
+# are expanded by the device shell, so they are checked before any rm.
+device_path_ok() {
+  local p
+  for p in "$@"; do
+    # Each component needs a character other than "." (rejects "." and "..").
+    [[ "${p}" =~ ^/data/local/tmp(/[A-Za-z0-9._-]*[A-Za-z0-9_-][A-Za-z0-9._-]*)+$ && "${p}" != *..* ]] ||
+      { echo "refusing to use ${p} on the device" >&2; return 1; }
+  done
+}
+
+# device_rm <path...>: rm -rf on the device for paths that pass device_path_ok.
+device_rm() {
+  device_path_ok "$@" || return 1
+  hdc shell "rm -rf $*"
+}
+
 stage_clean() {
-  hdc shell "rm -rf ${DEVICE_DIR} ${DEVICE_TMP}"
+  device_rm "${DEVICE_DIR}" "${DEVICE_TMP}"
+}
+
+# Our processes on the device: the dynamic-stage binaries by name.
+DYN_PROC_NAMES=(ibmw_shm_ext_dyn_runner ibmw_extensions_shm_ext_test ibmw_shm_ext_peer bench_static bench_pie bench_so)
+DYN_PROCS="$(IFS='|'; echo "${DYN_PROC_NAMES[*]}")"
+
+# On Ctrl-C or SIGTERM during a dyn stage, stop what still runs on the device
+# (hdc does not forward the signal) and remove the dynamic-stage directories.
+dyn_interrupted() {
+  trap - INT TERM
+  echo "interrupted: stopping device processes and removing ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}" >&2
+  local name
+  # Started as ./<name> or, for the EXT peer, by absolute path. The pattern
+  # [/]<name> matches both but not the command line of the device shell running
+  # pkill (which contains "]<name>").
+  for name in "${DYN_PROC_NAMES[@]}"; do hdc shell "pkill -f '[/]${name}'" >/dev/null 2>&1; done
+  device_rm "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" >/dev/null 2>&1
+  exit 130
+}
+
+# dyn_cmake <name> <stl> <extra cmake args...>: configure OUT/dyn/<name> from OUT/dyn/src.
+dyn_cmake() {
+  local name=$1 stl=$2
+  shift 2
+  ext_cmake_args
+  cmake -S "${DYN}/src" -B "${DYN}/${name}" -G Ninja -DCMAKE_TOOLCHAIN_FILE="${DYN}/src/cmake/toolchains/ohos-arm64-v8a.cmake" \
+    -DOHOS_SDK_NATIVE_ROOT="${SDK}" -DOHOS_STL="${stl}" -DCMAKE_BUILD_TYPE=RelWithDebInfo -DIBMW_BUILD_WITH_WERROR=ON \
+    "${ext_args[@]}" "$@" >"${LOGS}/dyn-${name}.configure.log" 2>&1 || { tail -20 "${LOGS}/dyn-${name}.configure.log"; return 1; }
+}
+
+dyn_make() {
+  local name=$1
+  shift
+  cmake --build "${DYN}/${name}" -j "${JOBS}" --target "$@" >"${LOGS}/dyn-${name}.build.log" 2>&1 ||
+    { tail -40 "${LOGS}/dyn-${name}.build.log"; return 1; }
+}
+
+# TLS access in the plugin .so and in the static bench: which runtime or
+# relocation each one uses, and the code of ShmOperationGate::TryAcquire, the
+# hot path that reads the ThreadStripe() thread_local.
+tls_report() {
+  local f bin=("${SDK}/llvm/bin/llvm-objdump" -d --no-show-raw-insn)
+  local readelf="${SDK}/llvm/bin/llvm-readelf" nm="${SDK}/llvm/bin/llvm-nm"
+  for f in "$@"; do
+    echo "== $(basename "${f}")"
+    echo "PT_TLS segments: $("${readelf}" -lW "${f}" | grep -c ' TLS ')"
+    echo "bl __emutls_get_address: $("${bin[@]}" "${f}" | grep -c 'bl.*<__emutls_get_address')"
+    echo "__emutls_get_address symbol: $("${readelf}" -sW "${f}" | awk '$NF == "__emutls_get_address" {v = $5 " " $6 " " $7} END {print v}')"
+    echo "__emutls_v.* control objects: $("${nm}" "${f}" | grep -c ' __emutls_v\.')"
+    echo "bl __tls_get_addr: $("${bin[@]}" "${f}" | grep -c 'bl.*<__tls_get_addr')"
+    echo "__tls_get_addr relocations: $("${readelf}" -rW "${f}" | grep -c '__tls_get_addr')"
+    echo "TLSDESC relocations: $("${readelf}" -rW "${f}" | grep -c 'TLSDESC')"
+    echo "TLS_TPREL (initial-exec) relocations: $("${readelf}" -rW "${f}" | grep -c 'TLS_TPREL')"
+    echo "mrs tpidr_el0 (direct thread-pointer reads): $("${bin[@]}" "${f}" | grep -c 'mrs.*tpidr_el0')"
+    echo "shm_ext thread_locals:"
+    "${nm}" -C "${f}" | grep -E '__emutls_v\..*(t_stripe|t_current_subscription|t_listener_thread_ready|TopicKey)' | sed 's/^/  /'
+    echo "ShmOperationGate::TryAcquire:"
+    "${bin[@]}" --disassemble-symbols=_ZN4ibmw10extensions13shm_extension16ShmOperationGate10TryAcquireEv "${f}" |
+      grep -E '^\s+[0-9a-f]+:' | sed -n '1,24s/^/  /p'
+  done
+}
+
+stage_dyn-build() {
+  mkdir -p "${DYN}/src"
+  rsync -a --delete --exclude .git --exclude '.omc' --exclude '/build*/' "${REPO}/" "${DYN}/src/" || return 1
+  (cd "${DYN}/src" && patch -p1 --quiet <"${HERE}/ohos/ibmw-core-workaround.diff") || return 1
+  [[ -f "${LIBCXX_SHARED}" ]] || { echo "missing ${LIBCXX_SHARED}"; return 1; }
+  # rt: no IBMW_BUILD_TESTS, whose --coverage would be measured by the bench and
+  # would make the plugin write counters when it is unloaded.
+  dyn_cmake rt c++_shared -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON -DIBMW_BUILD_SHM_EXT_DYN_CHECK=ON || return 1
+  dyn_make rt ibmw_extensions_shm_ext ibmw_shm_ext_dyn_runner ibmw_shm_ext_bench_so ibmw_shm_ext_bench || return 1
+  # test: the EXT tests compile the plugin sources in (they need its hidden
+  # symbols and the one copy of the selfdev state), linked dynamically.
+  dyn_cmake test c++_shared -DIBMW_BUILD_TESTS=ON || return 1
+  dyn_make test ibmw_extensions_shm_ext_test ibmw_shm_ext_peer || return 1
+  # static: the bench as bench-ext builds it, the base of dyn-bench.
+  dyn_cmake static c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON || return 1
+  dyn_make static ibmw_shm_ext_bench || return 1
+
+  local readelf="${SDK}/llvm/bin/llvm-readelf" f
+  for f in "${DYN}/rt/ibmw_shm_ext_dyn_runner" "${DYN}/rt/ibmw_shm_ext_bench_so" "${DYN}/rt/ibmw_shm_ext_bench" \
+    "${DYN}/test/ibmw_extensions_shm_ext_test" \
+    "${DYN}/test/ibmw_shm_ext_peer"; do
+    "${readelf}" -lW "${f}" | grep 'ld-musl-aarch64.so.1' >/dev/null || { echo "${f}: no dynamic interpreter"; return 1; }
+    "${readelf}" -dW "${f}" | grep 'NEEDED.*libc++_shared.so' >/dev/null || { echo "${f}: not linked to libc++_shared.so"; return 1; }
+  done
+  "${readelf}" -dW "${PLUGIN_SO}" | grep 'NEEDED.*libc++_shared.so' >/dev/null || { echo "plugin not linked to libc++_shared.so"; return 1; }
+  # The runner must reach the plugin only through dlopen; the bench_so links it.
+  "${readelf}" -dW "${DYN}/rt/ibmw_shm_ext_dyn_runner" | grep 'NEEDED.*libibmw_shm_transport' >/dev/null &&
+    { echo "runner links the plugin"; return 1; }
+  "${readelf}" -dW "${DYN}/rt/ibmw_shm_ext_bench_so" | grep 'NEEDED.*libibmw_shm_transport.so' >/dev/null ||
+    { echo "bench_so does not link the plugin"; return 1; }
+  "${readelf}" -dW "${DYN}/rt/ibmw_shm_ext_bench" | grep 'NEEDED.*libibmw_shm_transport' >/dev/null &&
+    { echo "pie bench links the plugin"; return 1; }
+  "${readelf}" -lW "${DYN}/static/ibmw_shm_ext_bench" | grep INTERP >/dev/null && { echo "static bench is dynamic"; return 1; }
+  tls_report "${PLUGIN_SO}" "${DYN}/static/ibmw_shm_ext_bench" >"${LOGS}/dyn-tls.txt"
+  echo "dyn-build OK (TLS report: ${LOGS}/dyn-tls.txt)"
+}
+
+# dyn_push <file> [name]: copy to DYN_DEVICE_DIR.
+dyn_push() {
+  local to="${DYN_DEVICE_DIR}/${2:-$(basename "$1")}"
+  hdc file send "$1" "${to}" >/dev/null
+  hdc shell "chmod 755 ${to}" >/dev/null
+}
+
+stage_dyn-device() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  trap dyn_interrupted INT TERM
+  hdc shell "mkdir -p ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}" >/dev/null
+  local f
+  for f in "${LIBCXX_SHARED}" "${PLUGIN_SO}" "${DYN}/rt/ibmw_shm_ext_dyn_runner" "${DYN}/test/ibmw_extensions_shm_ext_test" \
+    "${DYN}/test/ibmw_shm_ext_peer"; do
+    dyn_push "${f}"
+  done
+  local env="LD_LIBRARY_PATH=${DYN_DEVICE_DIR} TMPDIR=${DYN_DEVICE_ROOT}"
+  local log="${LOGS}/dyn-runner.log" root="${DYN_DEVICE_ROOT}/r"
+  local args="--plugin ${DYN_DEVICE_DIR}/libibmw_shm_transport.so --sync ${root}/sync --topics 20 --early 6 --messages 2000 --cycles 2"
+  # One shell runs both processes; hdc does not reliably return the remote exit
+  # code, so both are reported in-band.
+  device_rm "${root}" >/dev/null || return 1
+  hdc shell "mkdir -p ${root}/s ${root}/sync && cd ${DYN_DEVICE_DIR} && export ${env} IBMW_SHM_ROOT=${root}/s; \
+    (timeout 300 ./ibmw_shm_ext_dyn_runner sub ${args} >${root}/sub.log 2>&1; echo SUB_RC=\$? >>${root}/sub.log) & \
+    timeout 300 ./ibmw_shm_ext_dyn_runner pub ${args} >${root}/pub.log 2>&1; echo PUB_RC=\$? >>${root}/pub.log; wait; \
+    cat ${root}/pub.log ${root}/sub.log" | tr -d '\r' >"${log}"
+  grep -E '^(DYN_|PUB_RC|SUB_RC)' "${log}" | grep -v '^DYN_ABI .*result=PASS$'
+  grep '^DYN_ABI' "${log}" | sort -u -t' ' -k2,2 | sed 's/^/  /' 
+  if ! grep -q '^PUB_RC=0$' "${log}" || ! grep -q '^SUB_RC=0$' "${log}" ||
+    [[ "$(grep -c '^DYN_CYCLE .*result=PASS$' "${log}")" -ne 4 ]] ||
+    [[ "$(grep -c '^DYN_THROW .*result=PASS$' "${log}")" -ne 2 ]] || grep -q '^DYN_ABI .*result=FAIL$' "${log}" ||
+    ! grep -q '^DYN_RESULT role=pub cycles=2 result=PASS' "${log}" || ! grep -q '^DYN_RESULT role=sub cycles=2 result=PASS' "${log}"; then
+    fail "dyn-runner (${log})"
+  fi
+
+  run_dyn_test() {
+    local name=$1
+    shift
+    log="${LOGS}/dyn-${name}.log"
+    hdc shell "cd ${DYN_DEVICE_DIR} && ${env} IBMW_SHM_EXT_PEER_PATH=${DYN_DEVICE_DIR}/ibmw_shm_ext_peer timeout ${TEST_TIMEOUT} ./ibmw_extensions_shm_ext_test $* 2>&1; echo DEVICE_RC=\$?" \
+      | tr -d '\r' >"${log}"
+    local run_rc
+    run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
+    summarize "dyn-${name}" "${run_rc:-255}" "${log}" || fail "dyn-${name} (${log})"
+  }
+  run_dyn_test ext-once
+  run_dyn_test ext-repeat --gtest_repeat="${REPEAT}" --gtest_shuffle
+}
+
+stage_dyn-bench() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" || return 1  # rm -rf ROOT/b/* below
+  trap dyn_interrupted INT TERM
+  hdc shell "mkdir -p ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}/b" >/dev/null
+  dyn_push "${LIBCXX_SHARED}"
+  dyn_push "${PLUGIN_SO}"
+  dyn_push "${DYN}/static/ibmw_shm_ext_bench" bench_static
+  dyn_push "${DYN}/rt/ibmw_shm_ext_bench" bench_pie
+  dyn_push "${DYN}/rt/ibmw_shm_ext_bench_so" bench_so
+  # A new directory per run: earlier results stay where the docs cite them.
+  local runs="${LOGS}/dyn-bench-$(date +%Y%m%d-%H%M%S)" round label log run_rc others
+  mkdir -p "${runs}"
+  for ((round = 1; round <= DYN_BENCH_ROUNDS; ++round)); do
+    for label in static pie so; do
+      log="${runs}/${label}.${round}.log"
+      others="$(hdc shell "ps -ef | grep -E '${DYN_PROCS}' | grep -v grep" | tr -d '\r')"
+      [[ -z "${others}" ]] || echo "WARN: round ${round} ${label}: our processes still on the device: ${others}"
+      echo "round ${round} ${label} loadavg $(hdc shell 'cat /proc/loadavg' | tr -d '\r')" | tee -a "${runs}/load.txt"
+      hdc shell "cd ${DYN_DEVICE_DIR} && LD_LIBRARY_PATH=${DYN_DEVICE_DIR} IBMW_SHM_ROOT=${DYN_DEVICE_ROOT}/b timeout 300 ./bench_${label} --cpus ${BENCH_CPUS} ${BENCH_ARGS} 2>&1; echo DEVICE_RC=\$?; rm -rf ${DYN_DEVICE_ROOT}/b/*" \
+        | tr -d '\r' >"${log}"
+      run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
+      [[ "${run_rc:-255}" -eq 0 ]] || fail "dyn-bench ${label} round ${round} (${log})"
+    done
+  done
+  {
+    echo "# ${runs}: ${DYN_BENCH_ROUNDS} rounds, ${BENCH_ARGS}, CPUs ${BENCH_CPUS}"
+    echo "# static = -static (SDK musl, c++_static); pie = plugin sources compiled in, device libc + libc++_shared.so;"
+    echo "# so = linked against libibmw_shm_transport.so"
+    echo; echo "## pie vs static (libc/libc++)"; python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" static pie
+    echo; echo "## so vs pie (shared object)"; python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" pie so
+  } | tee "${runs}/summary.txt"
+}
+
+stage_dyn-clean() {
+  device_rm "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}"
+  local rc=$?
+  trap - INT TERM
+  return "${rc}"
+}
+
+stage_dynamic() {
+  stage_dyn-build || return 1
+  local ok=0
+  stage_dyn-device || ok=1
+  stage_dyn-bench || ok=1
+  stage_dyn-clean
+  return "${ok}"
 }
 
 [[ $# -eq 0 ]] && set -- build qemu
 for s in "$@"; do
   echo "==== [shm-ohos] ${s} ===="
   case "${s}" in
-    build | qemu | device | bench | bench-ext | clean) "stage_${s}" || fail "stage ${s}" ;;
+    build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-bench | dyn-clean)
+      "stage_${s}" || fail "stage ${s}" ;;
     *) echo "unknown stage ${s}" >&2; exit 64 ;;
   esac
 done

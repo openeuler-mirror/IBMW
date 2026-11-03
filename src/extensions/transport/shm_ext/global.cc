@@ -4,3 +4,7 @@
 #include "shm_ext/global.h"
 
 IBMW_DEFINE_EXTENSION_LOGGER(ibmw::extensions::shm_extension)
+
+namespace ibmw::extensions::shm_extension {
+void SetShmExtensionLogger(::ibmw::logger::LoggerRef logger) { g_logger.Set(logger); }
+}  // namespace ibmw::extensions::shm_extension

@@ -59,6 +59,15 @@ target_include_directories(
 
 include(AddWerror)
 add_werror(${CUR_TARGET_NAME})
+# dlclose must not unmap the plugin (ELF only). The selfdev runtime is linked
+# into it: the process-wide runtime and its ibmw_shm_ctl thread live until
+# process exit, ~ShmExtension deliberately leaks a bus that is still in use,
+# and thread_locals with destructors (registered via __cxa_thread_atexit) run
+# in threads outside the plugin. musl unmaps on dlclose (SIGSEGV in
+# ibmw_shm_ctl on the OHOS device). The engine never unloads extensions anyway.
+if(NOT APPLE AND NOT WIN32)
+  target_link_options(${CUR_TARGET_NAME} PRIVATE "LINKER:-z,nodelete")
+endif()
 
 if(IBMW_INSTALL)
   set_property(TARGET ${CUR_TARGET_NAME}
@@ -102,3 +111,20 @@ if(IBMW_BUILD_SHM_EXT_BENCH)
   add_werror(ibmw_shm_ext_bench)
 endif()
 # END shm_ext bench block
+
+# Shared-object checks for run_shm_ohos.sh `dynamic`, never installed:
+# ibmw_shm_ext_dyn_runner loads the plugin through the core ExtensionLoader in a
+# publisher and a subscriber process (it does not link the plugin), and
+# ibmw_shm_ext_bench_so is the microbenchmark linked against the plugin instead
+# of compiling its sources in, so its hot path runs in the shared object.
+option(IBMW_BUILD_SHM_EXT_DYN_CHECK "Build the shm_ext plugin runner and the bench linked against the plugin" OFF)
+if(IBMW_BUILD_SHM_EXT_DYN_CHECK)
+  add_executable(ibmw_shm_ext_dyn_runner test_peer/shm_ext_dyn_runner.cc)
+  target_link_libraries(ibmw_shm_ext_dyn_runner PRIVATE ibmw::core::engine ibmw::api::cpp ${CMAKE_DL_LIBS})
+  add_dependencies(ibmw_shm_ext_dyn_runner ${CUR_TARGET_NAME})
+  add_werror(ibmw_shm_ext_dyn_runner)
+  add_executable(ibmw_shm_ext_bench_so test_peer/shm_ext_bench.cc)
+  target_link_libraries(ibmw_shm_ext_bench_so PRIVATE ${CUR_TARGET_NAME} ibmw::core::extension_api)
+  target_compile_definitions(ibmw_shm_ext_bench_so PRIVATE IBMW_SHM_EXT_BENCH_SO)
+  add_werror(ibmw_shm_ext_bench_so)
+endif()

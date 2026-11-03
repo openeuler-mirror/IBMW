@@ -35,7 +35,6 @@
 #include <thread>
 #include <vector>
 
-#include "base/url_encode.h"
 #include "cpp/transport/transport_handle.h"
 #include "cpp/util/buffer_array_allocator.h"
 #include "shm_ext/global.h"
@@ -250,17 +249,6 @@ class Bench {
   ShmTransportDriver& Driver() { return *driver_; }
   ShmBus& Bus() { return *bus_; }
 
-  void WaitForSubscriber(const std::string& url) {
-    const auto end = std::chrono::steady_clock::now() + 5s;
-    while (std::chrono::steady_clock::now() < end) {
-      auto lease = bus_->TryAcquireOperation();
-      auto* pub = bus_->GetPublisher(lease, url);
-      if (pub != nullptr && pub->HasSubscribers()) return;
-      std::this_thread::sleep_for(1ms);
-    }
-    throw std::runtime_error("no subscriber on " + url);
-  }
-
  private:
   std::unique_ptr<ShmBus> bus_;
   std::unique_ptr<ShmTransportDriver> driver_;
@@ -337,7 +325,15 @@ void PodLoanPublishSubscriber(size_t payload) {
     throw std::runtime_error("RegisterPodSubscriber");
   }
   d.Start();
-  b.WaitForSubscriber("/transport_zc_pod/" + common::util::UrlEncode(topic) + "/" + common::util::UrlEncode(kBlobType));
+  // Publish until the subscriber has connected and taken a sample. Only API the
+  // plugin exports, so ibmw_shm_ext_bench_so (linked against it) can do it too.
+  const auto end = std::chrono::steady_clock::now() + 5s;
+  while (delivered.load() == 0) {
+    if (std::chrono::steady_clock::now() > end) throw std::runtime_error("no subscriber on " + topic);
+    transport::LoanedSampleHandle h;
+    if (LoanPod(d, infos[0], payload, h)) d.TryPublishLoaned(h);
+    std::this_thread::sleep_for(1ms);
+  }
   Measure(
       "pod_loan_publish_sub", payload, 1,
       [&](int) {
@@ -432,7 +428,24 @@ int Main(int argc, char** argv) {
   }
   ::unsetenv("IBMW_SHM_DOMAIN");
   ::signal(SIGPIPE, SIG_IGN);
-  g_logger.Set(ibmw::logger::LoggerRef(&g_warn_logger));
+#ifdef IBMW_SHM_EXT_BENCH_SO
+  SetShmExtensionLogger(ibmw::logger::LoggerRef(&g_warn_logger));  // g_logger is not exported
+#else
+  g_logger.Set(ibmw::logger::LoggerRef(&g_warn_logger));  // also builds against older trees
+#endif
+
+  {
+    // Downcast a base pointer as shm_loaned_pod does. In ibmw_shm_ext_bench_so
+    // the object and its vtable come from the .so, so this needs the exported
+    // ShmTransportDriver typeinfo to be the one the exe compares against.
+    Bench bench;
+    runtime::core::transport::TransportDriver* base = &bench.Driver();
+    asm volatile("" : "+r"(base));  // keep the compiler from folding the cast
+    if (dynamic_cast<ShmTransportDriver*>(base) != &bench.Driver()) {
+      throw std::runtime_error("dynamic_cast<ShmTransportDriver*> from TransportDriver* failed");
+    }
+    std::printf("DYNCAST_SHM_DRIVER=PASS\n");
+  }
 
   for (int threads : kThreadCounts) GatePair(threads);
   for (size_t payload : kPayloads) {

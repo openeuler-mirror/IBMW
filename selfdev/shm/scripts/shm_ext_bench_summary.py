@@ -8,6 +8,9 @@ With labels base and new it adds the delta of the medians and the median and ran
 of the per-round paired delta (round i of new minus round i of base). The paired
 median is the one to read when a machine changes speed during a run: the delta of
 two medians can then compare a fast round with a slow one. Rows also show Mops/s.
+
+Usage: shm_ext_bench_summary.py <dir> [<base label> <new label>]. With two labels
+only those are compared (a directory may hold more, e.g. three interleaved arms).
 """
 import re
 import statistics
@@ -19,7 +22,7 @@ LINE = re.compile(r"^RESULT case=(\S+) payload=(\d+) threads=(\d+) ns_per_op=(\S
                   r"rep_min_mops=\S+ rep_max_mops=\S+ ops=(\d+) fails=(\d+) delivered=(\d+)")
 
 
-def main(root):
+def main(root, pair=None):
     data = defaultdict(lambda: defaultdict(dict))  # key -> label -> round -> (ns, mops, ops, fails, delivered)
     labels, pin_failures = set(), 0
     for path in sorted(Path(root).glob("*.*.log")):
@@ -32,7 +35,14 @@ def main(root):
                 data[key][label][int(round_no)] = (float(m[4]), float(m[5]), int(m[6]), int(m[7]), int(m[8]))
             elif line.startswith("PIN_FAILURES="):
                 pin_failures += int(line.split("=")[1])
-    order = [x for x in ("base", "new") if x in labels] or sorted(labels)
+    if pair:
+        missing = [x for x in pair if x not in labels]
+        if missing:
+            print(f"labels {missing} not found in {root}", file=sys.stderr)
+            return 1
+        order = list(pair)
+    else:
+        order = [x for x in ("base", "new") if x in labels] or sorted(labels)
 
     print("## per-round ns/op (Mops/s for scale_*)")
     for key in data:
@@ -40,14 +50,15 @@ def main(root):
             rows = data[key][label]
             vals = [rows[r][1 if key[0].startswith("scale") else 0] for r in sorted(rows)]
             print(f"{key[0]} {key[1]}B x{key[2]} {label}: " + " ".join(f"{v:.2f}" for v in vals))
-    print(f"\npin failures in all runs: {pin_failures}")
+    print(f"\npin failures in all runs (every label in the directory): {pin_failures}")
     bad = [(k, lb, r) for k in data for lb in order for r, v in data[k][lb].items()
            if v[3] > v[2] // 100 and not k[0].endswith("_sub")]
     print(f"rounds with more than 1% failed ops: {bad if bad else 'none'}")
 
     print("\n## summary (ns/op, median [min..max] over rounds)")
     print("| case | payload | threads | " + " | ".join(order) +
-          (" | delta ns | delta % | paired delta median [min..max] | Mops/s base -> new |" if len(order) == 2 else " | Mops/s |"))
+          (f" | delta ns | delta % | paired delta median [min..max] | Mops/s {order[0]} -> {order[-1]} |"
+           if len(order) == 2 else " | Mops/s |"))
     print("|---|---|---|" + "---|" * (len(order) + (4 if len(order) == 2 else 1)))
     for key in data:
         cells, med = [], {}
@@ -77,4 +88,7 @@ def main(root):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1]))
+    if len(sys.argv) not in (2, 4):
+        print(__doc__, file=sys.stderr)
+        sys.exit(64)
+    sys.exit(main(sys.argv[1], sys.argv[2:4] if len(sys.argv) == 4 else None))
