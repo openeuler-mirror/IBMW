@@ -299,7 +299,8 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
       *publish_tap_, registration_.runtime_id, options_.registry_path, GetLogger());
   tap_server_->Start();
   agent_ = std::make_unique<RuntimeGraphAgent>(RuntimeGraphAgent::Options{
-      .registration = registration_, .registry_path = options_.registry_path});
+      .registration = registration_, .registry_path = options_.registry_path,
+      .logger = GetLogger()});
   agent_->SetListModuleLifecycleHandler([this] {
     return engine_->GetModuleBus().GetModuleLifecycleStatuses();
   });

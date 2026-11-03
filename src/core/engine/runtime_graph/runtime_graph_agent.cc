@@ -32,7 +32,9 @@ void SendAll(int fd, std::string_view data) {
   while (offset < data.size()) {
     const ssize_t written =
         ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
-    MW_ASSERT(written > 0, "Failed to send Runtime Agent response.");
+    if (written < 0 && errno == EINTR) continue;
+    MW_ASSERT(written > 0, "Failed to send Runtime Agent response: {}.",
+              std::strerror(errno));
     offset += static_cast<size_t>(written);
   }
 }
@@ -321,13 +323,28 @@ void RuntimeGraphAgent::Serve() {
       RequireSameUid(client);
       ConfigureRuntimeSocket(client, kRuntimeRequestTimeout);
       HandleClient(client);
+    } catch (const std::exception& error) {
+      ReportDroppedClient(error.what());
     } catch (...) {
+      ReportDroppedClient("unknown error");
     }
     const int active = client_fd_.exchange(-1);
     if (active >= 0) {
       ::close(active);
     }
   }
+}
+
+// A client dropped before its answer was delivered (foreign UID, socket
+// errors, peer gone) is logged at most once per second, with the total count.
+void RuntimeGraphAgent::ReportDroppedClient(std::string_view reason) {
+  ++dropped_clients_;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_drop_log_ < std::chrono::seconds(1)) return;
+  last_drop_log_ = now;
+  MW_LOG(options_.logger, ibmw::common::util::kLogLevelWarn,
+         "Runtime Agent '{}' dropped a client: {} ({} dropped so far).",
+         options_.registration.runtime_id, reason, dropped_clients_);
 }
 
 void RuntimeGraphAgent::HandleClient(int client_fd) {

@@ -7,10 +7,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <set>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -363,6 +365,56 @@ TEST_F(RuntimeGraphAgentTest, SocketsAreCloseOnExec) {
   EXPECT_TRUE(RuntimeGraphAgentClient(fake.Path()).StopTap("s"));
   observer.join();
   EXPECT_EQ(during_call, expected);
+}
+
+// COMM-027: a client dropped before its answer is delivered is no longer
+// silent: it is logged as a warning, at most once per second, with a count.
+TEST_F(RuntimeGraphAgentTest, DroppedClientsAreLoggedAtMostOncePerSecond) {
+  std::mutex mutex;
+  std::vector<std::string> warnings;
+  ibmw::common::util::LoggerWrapper logger;
+  logger.get_log_level_func = [] { return ibmw::common::util::kLogLevelTrace; };
+  logger.log_func = [&](uint32_t level, uint32_t, const char*, const char*,
+                        const char* data, size_t size) {
+    if (level != ibmw::common::util::kLogLevelWarn) return;
+    const std::lock_guard lock(mutex);
+    warnings.emplace_back(data, size);
+  };
+  RuntimeGraphAgent agent({.registration = {.runtime_id = "drop-agent"},
+                           .registry_path = directory_,
+                           .logger = logger});
+  agent.Initialize();
+  agent.Start();
+  const auto& path = agent.Registration().control_socket;
+  const auto warning_count = [&] {
+    const std::lock_guard lock(mutex);
+    return warnings.size();
+  };
+  // Hangs up right after the request: the agent's answer fails with EPIPE.
+  const auto drop_client = [&] {
+    RawClient client(path);
+    client.Send(R"({"protocol_version":)" + std::to_string(kRuntimeProtocolVersion) +
+                R"(,"id":1,"method":"ListTopics"})" "\n");
+  };
+
+  drop_client();
+  for (int i = 0; i < 100 && warning_count() == 0; ++i) std::this_thread::sleep_for(20ms);
+  drop_client();
+  RuntimeGraphAgentClient client(path);
+  EXPECT_TRUE(client.ListTopics().empty());  // the agent has served the second drop
+  ASSERT_EQ(warning_count(), 1u);
+  EXPECT_EQ(warnings[0].rfind("Runtime Agent 'drop-agent' dropped a client: ", 0), 0u)
+      << warnings[0];
+  EXPECT_NE(warnings[0].find("Failed to send Runtime Agent response: Broken pipe."),
+            std::string::npos)
+      << warnings[0];
+  EXPECT_NE(warnings[0].find("(1 dropped so far)"), std::string::npos) << warnings[0];
+
+  std::this_thread::sleep_for(1100ms);
+  drop_client();
+  EXPECT_TRUE(client.ListTopics().empty());
+  ASSERT_EQ(warning_count(), 2u);
+  EXPECT_NE(warnings[1].find("(3 dropped so far)"), std::string::npos) << warnings[1];
 }
 
 }  // namespace

@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -11,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "base/log_util.h"
 #include "engine/runtime_graph/runtime_registration.h"
 #include "extension_api/ibmw_module_lifecycle.h"
 
@@ -23,6 +26,7 @@ class RuntimeGraphAgent {
   struct Options {
     RuntimeRegistration registration;
     std::filesystem::path registry_path = ibmw::extension::DefaultRuntimeRegistryPath();
+    ibmw::common::util::LoggerWrapper logger = {};
   };
 
   using StartTapHandler = ibmw::extension::RuntimeGraphV1::StartTapHandler;
@@ -67,6 +71,7 @@ class RuntimeGraphAgent {
   void HandleClient(int client_fd);
   nlohmann::json HandleRequest(const nlohmann::json& request);
   TopicAdvertisement FindTopic(const nlohmann::json& params) const;
+  void ReportDroppedClient(std::string_view reason);
 
   Options options_;
   std::filesystem::path registration_path_;
@@ -74,6 +79,9 @@ class RuntimeGraphAgent {
   std::atomic<int> server_fd_ = -1;
   std::atomic<int> client_fd_ = -1;
   std::thread server_thread_;
+  // Only touched by the serving thread.
+  uint64_t dropped_clients_ = 0;
+  std::chrono::steady_clock::time_point last_drop_log_{};
   StartTapHandler start_tap_handler_;
   StopTapHandler stop_tap_handler_;
   StartPlaybackHandler start_playback_handler_;
