@@ -292,7 +292,7 @@ def _gen_json_rpc_server_markerized_typesupport(
         decl_lines.append(
             f"  uint32_t Handle{method_name}(const {req_type}& req, {rsp_type}& rsp);")
         impl_lines.extend([
-            f"uint32_t name::Handle{method_name}(const {req_type}& req, {rsp_type}& rsp) {{",
+            f"uint32_t {name}::Handle{method_name}(const {req_type}& req, {rsp_type}& rsp) {{",
             "  (void)req;",
             "  (void)rsp;",
             f"  {_format_marker_anchor(method_marker, 'BEGIN')}",
@@ -325,7 +325,9 @@ def _gen_json_rpc_server_markerized_typesupport(
         *decl_lines,
         "  std::unique_ptr<ibmw::rpc::ServiceBase> service_;",
     ])
-    handler_impl = _macro_body(impl_lines)
+    # Plain functions, not a macro body: the // marker anchors would otherwise
+    # comment out the rest of a backslash-continued macro (GEN-001).
+    handler_impl = "\n".join(impl_lines).rstrip()
 
     inc_h = f"""{_COPYRIGHT}
 #pragma once
@@ -371,9 +373,10 @@ class {helper_name} : public ibmw::rpc::ServiceBase {{
 #define IBMW_TS_RPC_SERVER_HANDLER_IMPL(name) /* defined in inc.cc */
 """
 
-    handler_impl_define = "#define IBMW_TS_RPC_SERVER_HANDLER_IMPL(name) " + chr(92)
     template_inc_cc = f"""{_COPYRIGHT}
 #undef IBMW_TS_RPC_SERVER_HANDLER_IMPL
+
+#define IBMW_TS_RPC_SERVER_HANDLER_IMPL(name)
 
 namespace {ns} {{
 
@@ -382,10 +385,9 @@ namespace {ns} {{
 {registration_body}
 }}
 
-}}  // namespace {ns}
-
-{handler_impl_define}
 {handler_impl}
+
+}}  // namespace {ns}
 """
     if previous_inc_cc and method_markers:
         preserved = extract_marker_regions(previous_inc_cc, method_markers)
