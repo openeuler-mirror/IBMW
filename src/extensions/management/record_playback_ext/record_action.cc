@@ -1199,7 +1199,8 @@ void RecordAction::OpenNewMcapToRecord(uint64_t timestamp) {
   writing_cached_messages_ = true;
   for (auto& [topic_id, topic_runtime_info] : topic_runtime_map_) {
     if (topic_runtime_info.cache_last_msg && topic_runtime_info.last_msg.buffer_view_ptr != nullptr) {
-      MW_INFO("Write last msg in cache to mcap file: {}", topic_runtime_info.last_msg.buffer_view_ptr->JoinToString());
+      MW_DEBUG("Write last msg in cache to mcap file: topic id {}, {} bytes.", topic_id,
+               topic_runtime_info.last_msg.buffer_view_ptr->BufferSize());
       topic_runtime_info.last_msg.log_timestamp = timestamp;
       AddRecordImpl(std::move(topic_runtime_info.last_msg));
     }

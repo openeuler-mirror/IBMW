@@ -16,6 +16,7 @@
 #include <future>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +29,7 @@
 #include "engine/executor/executor_access.h"
 #include "engine/executor/thread_pool_executor.h"
 #include "mcap/reader.hpp"
+#include "record_playback_ext/global.h"
 #include "record_playback_ext/record_action.h"
 
 namespace ibmw::extensions::record_playback_extension {
@@ -427,6 +429,44 @@ TEST_F(RecordActionFreeSpaceTest, SignalRecordEndsWithoutMessages) {
   }
   EXPECT_FALSE(next_folder.empty()) << "the record did not end";
   action.Shutdown();
+}
+
+// EXT-028: at a bag split the cached last messages are written again; the log
+// names the topic and size at debug level instead of dumping the payload.
+TEST_F(RecordActionFreeSpaceTest, CachedLastMessageIsNotLoggedAtSplit) {
+  struct Capture {
+    std::mutex mutex;
+    std::vector<std::string> info_logs;
+    size_t cached_debug_logs = 0;
+  } capture;
+  const ibmw_logger_base_t logger{
+      .get_log_level = [](void*) { return IBMW_LOG_LEVEL_TRACE; },
+      .log = [](void* ctx, ibmw_log_level_t level, uint32_t, const char*, const char*, const char* data,
+                size_t size) {
+        auto* self = static_cast<Capture*>(ctx);
+        const std::string_view text(data, size);
+        std::lock_guard lock(self->mutex);
+        if (level >= IBMW_LOG_LEVEL_INFO) self->info_logs.emplace_back(text);
+        if (level == IBMW_LOG_LEVEL_DEBUG && text.find("Write last msg in cache") != std::string_view::npos)
+          ++self->cached_debug_logs;
+      },
+      .ctx = &capture};
+  g_logger.Set(ibmw::logger::LoggerRef(&logger));
+
+  RecordAction action;
+  Initialize(action, "imd", "{max_bag_size_m: 1}",
+             "{topic_meta_list: [{topic: /t, msg_type: t, serialization_type: json, cache_last_msg: true}]}");
+  const uint64_t now = ibmw::common::util::GetCurTimestampNs();
+  Add(action, now, 0);
+  Add(action, now, 0);
+  Add(action, now + 1'000'000'000, 0);  // reaches max_bag_size: split
+  Drain();
+  action.Shutdown();
+  g_logger.Set(ibmw::logger::LoggerRef());
+
+  EXPECT_EQ(McapFiles().size(), 2u);
+  EXPECT_EQ(capture.cached_debug_logs, 1u);
+  for (const auto& text : capture.info_logs) EXPECT_EQ(text.find("pppppppppppppppp"), std::string::npos) << text.size();
 }
 
 }  // namespace
