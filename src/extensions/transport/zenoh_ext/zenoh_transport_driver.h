@@ -10,6 +10,7 @@
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
 #include "zenoh.h"
+#include "zenoh_ext/key_expr.h"
 #include "zenoh_ext/util.h"
 #include "zenoh_ext/zenoh_buffer_array_allocator.h"
 #include "zenoh_ext/zenoh_bus.h"
@@ -30,7 +31,8 @@ class ZenohTransportDriver : public runtime::core::transport::TransportDriver {
   ZenohTransportDriver(
       const std::shared_ptr<ZenohBus>& zenoh_util_ptr, const std::string& limit_domain, size_t shm_init_loan_size)
       : zenoh_bus_ptr_(zenoh_util_ptr),
-        limit_domain_(limit_domain),
+        limit_domain_(NormalizeLimitDomain(limit_domain)),
+        key_suffix_(LimitDomainKeySuffix(limit_domain_)),
         shm_init_loan_size_(shm_init_loan_size) {}
 
   ~ZenohTransportDriver() override = default;
@@ -86,6 +88,7 @@ class ZenohTransportDriver : public runtime::core::transport::TransportDriver {
   std::shared_ptr<ZenohBus> zenoh_bus_ptr_;
 
   std::string limit_domain_;
+  std::string key_suffix_;
 
   std::shared_mutex z_shared_mutex_;
 

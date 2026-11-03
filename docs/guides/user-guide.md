@@ -1773,7 +1773,8 @@ through a queryable on its existing session. Arbitrary Zenoh applications and
 older IBMW extensions do not expose this metadata automatically.
 
 `--zenoh-domain` must exactly match the business YAML `limit_domain` value;
-omitting it selects the empty domain, not every domain. `--zenoh-config` accepts
+omitting it selects the empty domain, not every domain. The extension ignores
+leading and trailing `/` in `limit_domain`, so write the domain without them. `--zenoh-config` accepts
 a native Zenoh configuration for the observer (for example, peer/router
 connections); the observer must be able to reach the business sessions. With no
 configuration file it uses Zenoh defaults, including native scouting settings.

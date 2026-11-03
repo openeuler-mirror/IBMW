@@ -8,6 +8,9 @@ details remain governed by the documentation for each release.
 
 ### Changed
 
+- Zenoh: leading and trailing `/` in `limit_domain` are ignored, and an empty
+  `limit_domain` adds no key suffix. These values previously produced invalid
+  key expressions (`//`, trailing `/`) and failed registration.
 - MQTT RPC: servers only answer on topics starting with `ibmw_rpc_rsp/`;
   requests carrying any other answer topic are dropped with a rate-limited
   warning. Clients only accept an answer from the called function's answer

@@ -12,6 +12,7 @@
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
 #include "zenoh.h"
+#include "zenoh_ext/key_expr.h"
 #include "zenoh_ext/util.h"
 #include "zenoh_ext/zenoh_buffer_array_allocator.h"
 #include "zenoh_ext/zenoh_bus.h"
@@ -37,9 +38,10 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
 
  public:
   ZenohRpcDriver(
-      std::shared_ptr<ZenohBus>& zenoh_bus_ptr, std::string& limit_domain)
+      std::shared_ptr<ZenohBus>& zenoh_bus_ptr, const std::string& limit_domain)
       : zenoh_bus_ptr_(zenoh_bus_ptr),
-        limit_domain_(limit_domain) {}
+        limit_domain_(NormalizeLimitDomain(limit_domain)),
+        key_suffix_(LimitDomainKeySuffix(limit_domain_)) {}
   ~ZenohRpcDriver() = default;
 
   std::string_view Name() const noexcept override { return "zenoh"; }
@@ -83,6 +85,7 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
 
   std::shared_ptr<ZenohBus> zenoh_bus_ptr_;
   std::string limit_domain_;
+  std::string key_suffix_;
 
   std::unique_ptr<runtime::core::util::RpcClientTool<std::shared_ptr<runtime::core::service::ServiceMessageFrame>>> client_tool_ptr_;
 

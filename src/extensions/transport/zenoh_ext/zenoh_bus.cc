@@ -17,7 +17,7 @@ ZenohBus::ZenohBus() {
 
 void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_size) {
   if (initialized_) throw std::logic_error("Zenoh bus is already initialized.");
-  if (!native_cfg_path.empty() && native_cfg_path.c_str() != nullptr) {
+  if (!native_cfg_path.empty()) {
     if (zc_config_from_file(&z_config_, native_cfg_path.c_str()) != Z_OK) {
       MW_ERROR("Unable to load configuration file: {}", native_cfg_path);
       throw std::runtime_error("Unable to load Zenoh configuration: " + native_cfg_path);
@@ -139,8 +139,7 @@ void ZenohBus::RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole role,
 
 void ZenohBus::StartDiscovery(const std::string& limit_domain) {
   if (!initialized_) throw std::logic_error("Zenoh bus is not initialized.");
-  // Extension options carry the slash added by YAML decoding for wire keys.
-  discovery_.Start(z_loan(z_session_), limit_domain.starts_with('/') ? limit_domain.substr(1) : limit_domain);
+  discovery_.Start(z_loan(z_session_), limit_domain);
 }
 
 void ZenohBus::StopDiscovery() noexcept { discovery_.Stop(); }

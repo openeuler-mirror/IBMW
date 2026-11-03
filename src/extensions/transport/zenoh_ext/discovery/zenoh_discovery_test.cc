@@ -109,7 +109,7 @@ struct Business {
   ZenohTransportDriver driver;
 
   Business(const std::string& config, const std::string& domain)
-      : driver(bus, domain.empty() ? "" : '/' + domain, 1024) {
+      : driver(bus, domain, 1024) {
     bus->Initialize(config, 1024 * 1024);
     driver.Initialize(YAML::Node(YAML::NodeType::Map));
   }
@@ -188,7 +188,8 @@ TEST_F(ZenohDiscoveryTest, DiscoversSilentEndpointsFromAllInstancesAndKeepsDomai
   ASSERT_TRUE(first.Add("/only_subscriber", EndpointRole::kSubscriber));
   ASSERT_TRUE(first.Add("/_hidden", EndpointRole::kPublisher));
   first.driver.Start();
-  Business second(client_, "robot/a");
+  // Surrounding slashes name the same domain (TRANS-047).
+  Business second(client_, "/robot/a/");
   ASSERT_TRUE(second.Add("/shared", EndpointRole::kPublisher));
   second.driver.Start();
   Business other(client_, "robot/b");
@@ -214,6 +215,7 @@ TEST_F(ZenohDiscoveryTest, DiscoversSilentEndpointsFromAllInstancesAndKeepsDomai
     EXPECT_NE(endpoint.topic_name, "/other_domain");
     EXPECT_EQ(endpoint.hidden, endpoint.topic_name == "/_hidden");
     EXPECT_TRUE(endpoint.wire_topic_name.ends_with("/robot/a"));
+    EXPECT_EQ(endpoint.wire_topic_name.find("//"), std::string::npos) << endpoint.wire_topic_name;
   }
   EXPECT_EQ(instances.size(), 2u);
   EXPECT_EQ(identities.size(), 5u);
@@ -233,7 +235,10 @@ TEST_F(ZenohDiscoveryTest, HandlesEmptyDomainRestartAndFailedInitialization) {
   EXPECT_THROW(provider->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_config = directory_ / "missing"}), std::runtime_error);
   provider->Stop();
   provider->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_config = client_});
-  EXPECT_EQ(WaitFor(*provider, 1).endpoints.size(), 1u);
+  const auto found = WaitFor(*provider, 1);
+  ASSERT_EQ(found.endpoints.size(), 1u);
+  // The empty domain adds no key suffix, so the key does not end with '/'.
+  EXPECT_FALSE(found.endpoints.front().wire_topic_name.ends_with('/')) << found.endpoints.front().wire_topic_name;
   provider->Stop();
   provider->Stop();
   // Withdrawal is observable without terminating the business session.
@@ -301,6 +306,17 @@ TEST_F(ZenohDiscoveryTest, TopicObserverReceivesOncePerWireSampleAndStops) {
   sender.bus->Send(key, bytes.data(), bytes.size());
   std::this_thread::sleep_for(50ms);
   EXPECT_EQ(count.load(), stopped);
+}
+
+TEST(ZenohKeyExprTest, NormalizesLimitDomain) {
+  using ibmw::extensions::zenoh_extension::LimitDomainKeySuffix;
+  using ibmw::extensions::zenoh_extension::NormalizeLimitDomain;
+  EXPECT_EQ(NormalizeLimitDomain(""), "");
+  EXPECT_EQ(NormalizeLimitDomain("//"), "");
+  EXPECT_EQ(NormalizeLimitDomain("robot/a"), "robot/a");
+  EXPECT_EQ(NormalizeLimitDomain("/robot/a/"), "robot/a");
+  EXPECT_EQ(LimitDomainKeySuffix(""), "");
+  EXPECT_EQ(LimitDomainKeySuffix("robot"), "/robot");
 }
 
 TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding) {

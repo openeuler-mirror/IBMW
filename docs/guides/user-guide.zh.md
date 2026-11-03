@@ -1675,7 +1675,8 @@ session 上通过 queryable 提供端点元信息。普通 Zenoh 程序和旧版
 不会自动提供这些元信息。
 
 `--zenoh-domain` 必须精确匹配业务 YAML 中的 `limit_domain` 原值；省略时只查
-空域，并非全部域。`--zenoh-config` 接受查询端的 Zenoh 原生配置，例如连接
+空域，并非全部域。扩展会忽略 `limit_domain` 首尾的 `/`，配置时请直接写不带
+`/` 的域名。`--zenoh-config` 接受查询端的 Zenoh 原生配置，例如连接
 peer/router 的地址；查询 session 必须能到达业务 session。省略配置文件时
 使用 Zenoh 默认配置，包括原生 scouting 设置。UDP scouting 用于建立 session
 连接，随后通过 IBMW 元信息查询获取逻辑话题名和类型名。

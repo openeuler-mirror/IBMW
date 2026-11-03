@@ -152,7 +152,7 @@ bool ZenohRpcDriver::RegisterServiceFunc(
 
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
-                          limit_domain_;
+                          key_suffix_;
 
     auto handle = [this, &service_func_wrapper, pattern](const z_loaned_sample_t* message) {
       try {
@@ -471,7 +471,7 @@ bool ZenohRpcDriver::RegisterClientFunc(
 
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
-                          limit_domain_;
+                          key_suffix_;
     auto handle = [this](const z_loaned_sample_t* message) {
       std::shared_ptr<runtime::core::service::ServiceMessageFrame> client_call_wrapper_ptr;
       try {
@@ -552,7 +552,7 @@ bool ZenohRpcDriver::IsClientReady(std::string_view, std::string_view function) 
   try {
     if (state_.load() != State::Start) return false;
     const auto key = "req/ibmw_rpc/" +
-                     common::util::UrlEncode(rpc::GetFuncNameWithoutPrefix(function)) + limit_domain_;
+                     common::util::UrlEncode(rpc::GetFuncNameWithoutPrefix(function)) + key_suffix_;
     const auto& publishers = zenoh_bus_ptr_->GetPublisherRegisterMap();
     const auto publisher = publishers.find(key);
     if (publisher == publishers.end()) return false;
@@ -575,7 +575,7 @@ void ZenohRpcDriver::Call(
 
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
-                          limit_domain_;
+                          key_suffix_;
 
     std::string node_pub_topic = "req/" + pattern;
 

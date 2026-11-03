@@ -184,7 +184,7 @@ bool ZenohTransportDriver::RegisterSendType(
     std::string pattern = std::string("transport/") +
                           util::UrlEncode(info.topic_name) + "/" +
                           util::UrlEncode(info.msg_type) +
-                          limit_domain_;
+                          key_suffix_;
 
     if (!zenoh_bus_ptr_->RegisterPublisher(pattern, shm_enabled)) return false;
     zenoh_bus_ptr_->RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole::kPublisher,
@@ -213,7 +213,7 @@ bool ZenohTransportDriver::OnMessage(
     std::string pattern = std::string("transport/") +
                           util::UrlEncode(info.topic_name) + "/" +
                           util::UrlEncode(info.msg_type) +
-                          limit_domain_;
+                          key_suffix_;
 
     auto find_itr = message_handler_map_.find(pattern);
     if (find_itr != message_handler_map_.end()) {
@@ -293,7 +293,7 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
     std::string zenoh_pub_topic = std::string("transport/") +
                                   util::UrlEncode(info.topic_name) + "/" +
                                   util::UrlEncode(info.msg_type) +
-                                  limit_domain_;
+                                  key_suffix_;
 
     // find publisher with zenoh_pub_topic
     const auto& zenoh_pub_catalog_ptr = zenoh_bus_ptr_->GetPublisherRegisterMap();
