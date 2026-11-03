@@ -84,5 +84,25 @@ TEST_F(RuntimeDirectoryTest, AgentRejectsSymlinkLock) {
   EXPECT_EQ(content, "keep");
 }
 
+// COMM-031: the size limit counts the bytes read from the open file, so a
+// file that grows after a size check, or reports st_size 0, can not exceed it.
+TEST_F(RuntimeDirectoryTest, ReadRuntimeFileBelowBoundsTheBytesRead) {
+  const auto path = root_ / "data.json";
+  std::ofstream(path) << std::string(15, 'x');
+  {
+    const RuntimeFileDescriptor file(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    EXPECT_EQ(ReadRuntimeFileBelow(file.Get(), 16), std::string(15, 'x'));
+  }
+  {
+    const RuntimeFileDescriptor file(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    EXPECT_EQ(ReadRuntimeFileBelow(file.Get(), 15), std::nullopt);
+  }
+  const RuntimeFileDescriptor proc(::open("/proc/self/status", O_RDONLY | O_CLOEXEC));
+  struct stat status {};
+  ASSERT_EQ(::fstat(proc.Get(), &status), 0);
+  ASSERT_EQ(status.st_size, 0);
+  EXPECT_EQ(ReadRuntimeFileBelow(proc.Get(), 16), std::nullopt);
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::runtime_graph

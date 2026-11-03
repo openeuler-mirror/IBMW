@@ -5,6 +5,8 @@
 
 #include <cerrno>
 #include <filesystem>
+#include <optional>
+#include <string>
 #include <utility>
 
 #include <fcntl.h>
@@ -69,6 +71,21 @@ inline RuntimeFileDescriptor OpenRuntimeDirectory(
             "Runtime directory '{}' must be owned by the current UID with private permissions.",
             path.string());
   return directory;
+}
+
+// Reads the whole file when it holds fewer than max_size bytes. The bound is
+// on the bytes read, not on st_size, which may change or be 0 (procfs).
+inline std::optional<std::string> ReadRuntimeFileBelow(int fd, size_t max_size) {
+  std::string data;
+  char buffer[64 * 1024];
+  while (true) {
+    const ssize_t received = ::read(fd, buffer, sizeof(buffer));
+    if (received < 0 && errno == EINTR) continue;
+    if (received < 0) return std::nullopt;
+    if (received == 0) return data;
+    data.append(buffer, static_cast<size_t>(received));
+    if (data.size() >= max_size) return std::nullopt;
+  }
 }
 
 }  // namespace ibmw::runtime::core::runtime_graph
