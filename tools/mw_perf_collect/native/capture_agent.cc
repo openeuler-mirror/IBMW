@@ -1377,6 +1377,11 @@ void Octal(char*p, size_t n, uint64_t v)
 bool TarHeader(int fd, const std::string&name, uint64_t size, Deadline deadline)
 {
   std::array<char, 512>h{};
+  // The ustar name field holds 100 bytes; keep a terminating NUL.
+  if (name.empty() || name.size() > 99)
+  {
+    return false;
+  }
   memcpy(h.data(), name.data(), name.size());
   Octal(h.data() + 100, 8, 0600);
   Octal(h.data() + 108, 8, 0);
