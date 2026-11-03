@@ -14,6 +14,8 @@ set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
 
 # Set file collection
 file(GLOB_RECURSE head_files ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
+# Shared by the two TypeSupport package loaders; not part of the installed API.
+list(FILTER head_files EXCLUDE REGEX "/type_support_package_validation\\.h$")
 file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 
 # Add target
