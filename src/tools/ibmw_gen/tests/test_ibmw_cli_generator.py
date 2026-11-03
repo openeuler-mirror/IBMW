@@ -13,6 +13,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "ibmw_cli"))
 
 from ibmw_cli.generator import GeneratorBase  # noqa: E402
+from ibmw_cli.generator.project_generator import ProjectGenerator  # noqa: E402
 from jinja2 import Template  # noqa: E402
 
 
@@ -37,3 +38,19 @@ def test_leading_tilde_is_the_home_directory(tmp_path, monkeypatch):
     generator.output_dir_ = "~/proj"
     _write(generator)
     assert (tmp_path / "proj" / "sub" / "out.txt").read_text() == "x"
+
+
+# TOOL-013: a missing or empty section is reported by name, before any use.
+@pytest.mark.parametrize("section", ["deploy_modes", "modules", "pkgs"])
+@pytest.mark.parametrize("missing", [True, False])
+def test_missing_section_is_a_readable_error(tmp_path, monkeypatch, section, missing):
+    cfg = {"base_info": {"project_name": "p"}, "deploy_modes": [], "modules": [], "pkgs": []}
+    if missing:
+        del cfg[section]
+    else:
+        cfg[section] = None
+    (tmp_path / "cfg.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.chdir(tmp_path)
+    generator = ProjectGenerator(cfg_path="cfg.yaml", output_dir=str(tmp_path / "out"))
+    with pytest.raises(Exception, match=section):
+        generator.generate()

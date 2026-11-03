@@ -14,9 +14,9 @@ from ibmw_cli.generator.deploy_generator import DeployGenerator
 
 
 def check_format(cfg):
-    required_tags = ['base_info']
+    required_tags = ['base_info', 'deploy_modes', 'modules', 'pkgs']
     for required_tag in required_tags:
-        if required_tag not in cfg.keys():
+        if required_tag not in cfg.keys() or cfg[required_tag] is None:
             raise Exception(
                 "yaml configuration file is illegal, You should add required tag: " + required_tag)
 
