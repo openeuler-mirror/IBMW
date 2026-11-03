@@ -598,6 +598,8 @@ if(IBMW_BUILD_RUNTIME)
   endif()
 
   if(IBMW_BUILD_ZENOH_EXTENSION)
+    # The extension and its discovery protocol link jsoncpp::jsoncpp.
+    include(GetJsonCpp)
     if(IBMW_ZENOH_USE_PACKAGE OR TARGET zenohc::lib)
       include(GetZenoh)
     else()
