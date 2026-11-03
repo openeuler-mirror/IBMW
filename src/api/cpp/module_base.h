@@ -171,6 +171,12 @@ class Module {
                 "Stop module get unknown exception.");
           }
         },
+        .set_driver_slot = [](void* ctx, ibmw_driver_slot_t slot_id, void* driver_ptr) {
+          try {
+            static_cast<Module*>(ctx)->SetDriverSlot(slot_id, driver_ptr);
+          } catch (...) {
+          }
+        },
         .ctx = ctx};
   }
 

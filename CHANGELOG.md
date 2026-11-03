@@ -150,6 +150,11 @@ details remain governed by the documentation for each release.
   another version or a short entry before calling any callback, and a library
   exporting only the old `IbmwPkgEntry` is rejected with a request to rebuild.
   `IBMW_PKG_MAIN` emits the new entry. **All module packages must be rebuilt.**
+- `ibmw_module_base_t` gains an optional `set_driver_slot(ctx, slot_id,
+  driver_ptr)` before `ctx`, filled by `ibmw::Module` (CORE-024). Directly
+  registered modules now receive driver slots only through it; the engine no
+  longer casts their `ctx` to `ibmw::Module`, so a C module without the
+  callback is skipped instead of crashing.
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /
