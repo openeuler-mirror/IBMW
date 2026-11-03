@@ -42,6 +42,7 @@ from generators.cmake_gen import generate_cmake
 from generators._common import output_file_path
 from generators.action_gen import generate_experimental_actions
 
+# Kept equal to the repository VERSION file by tests/test_version_consistency.py.
 __version__ = "0.1.0"
 
 # ── File writing helpers ─────────────────────────────────────────────────────
