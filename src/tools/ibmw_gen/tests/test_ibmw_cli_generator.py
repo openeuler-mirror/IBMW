@@ -81,3 +81,35 @@ def test_build_script_keeps_arguments_with_spaces(tmp_path):
     subprocess.run(["bash", str(script), "-DNAME=a b"], cwd=tmp_path, env=env, check=True,
                    capture_output=True, timeout=60)
     assert "-DNAME=a b" in log.read_text().splitlines()
+
+
+# TOOL-019: the generated format.sh handles spaces and stops on a failing tool.
+def _format_env(tmp_path, clang_format_rc):
+    (tmp_path / "src" / "my dir").mkdir(parents=True)
+    (tmp_path / "src" / "my dir" / "a.cc").write_text("")
+    (tmp_path / "cmake").mkdir()
+    script = tmp_path / "format.sh"
+    script.write_text(_render("ws_format.sh.jinja2"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "files.txt"
+    _stub(bin_dir, "clang-format", f'for a in "$@"; do echo "$a" >> "{log}"; done\nexit {clang_format_rc}')
+    _stub(bin_dir, "cmake-format", "exit 0")
+    _stub(bin_dir, "autopep8", "exit 0")
+    return script, log, dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+
+def test_format_script_handles_paths_with_spaces(tmp_path):
+    script, log, env = _format_env(tmp_path, 0)
+    result = subprocess.run(["bash", str(script)], cwd=tmp_path, env=env, capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "./src/my dir/a.cc" in log.read_text().splitlines()
+
+
+def test_format_script_stops_when_a_tool_fails(tmp_path):
+    script, _, env = _format_env(tmp_path, 3)
+    result = subprocess.run(["bash", str(script)], cwd=tmp_path, env=env, capture_output=True,
+                            text=True, timeout=60)
+    assert result.returncode != 0
+    assert "clang-format done" not in result.stdout
