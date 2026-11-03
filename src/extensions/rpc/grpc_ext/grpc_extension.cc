@@ -80,6 +80,22 @@ auto WrapIbmwLoggerRef(ibmw::logger::LoggerRef logger_ref)
           }});
 }
 
+// Resolves g_logger on every call: executor threads are joined after the
+// logging subsystem stops, when g_logger has reverted to its fallback.
+auto WrapExtensionLogger() -> std::shared_ptr<ibmw::common::util::LoggerWrapper> {
+  return std::make_shared<ibmw::common::util::LoggerWrapper>(
+      ibmw::common::util::LoggerWrapper{
+          .get_log_level_func = []() -> uint32_t { return g_logger.Get().GetLogLevel(); },
+          .log_func = [](uint32_t lvl,
+                         uint32_t line,
+                         const char* file_name,
+                         const char* function_name,
+                         const char* log_data,
+                         size_t log_data_size) {
+            g_logger.Get().Log(lvl, line, file_name, function_name, log_data, log_data_size);
+          }});
+}
+
 GrpcExtension::GrpcExtension() {
   SetExtensionLogger(&g_logger);
 }
@@ -97,6 +113,7 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
   MW_REQUIRE(options_.max_concurrent_streams >= 1, "Grpc max_concurrent_streams must be at least 1.");
 
   asio_executor_ptr_ = std::make_shared<ibmw::common::net::AsioExecutor>(options_.thread_num);
+  asio_executor_ptr_->SetLogger(WrapExtensionLogger());
 
   http2_cli_pool_ptr_ = std::make_shared<client::AsioHttp2ClientPool>(asio_executor_ptr_->IO());
 

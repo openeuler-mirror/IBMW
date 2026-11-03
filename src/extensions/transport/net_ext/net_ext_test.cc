@@ -37,6 +37,7 @@
 #include "net_base/asio_endpoint_parse.h"
 #include "net_base/asio_tcp_cli.h"
 #include "net_base/asio_tcp_svr.h"
+#include "net_base/asio_tools.h"
 #include "net_base/asio_udp_cli.h"
 #include "net_base/asio_udp_svr.h"
 #include "net_base/http_media_type.h"
@@ -1117,6 +1118,28 @@ class LogCapture {
   std::string text_;
   size_t errors_ = 0;
 };
+
+// TRANS-053: exceptions on the executor threads reach the configured logger.
+TEST(NetAsioExecutorTest, ThreadExceptionGoesToConfiguredLogger) {
+  std::mutex mutex;
+  std::string text;
+  auto logger = std::make_shared<ibmw::common::util::LoggerWrapper>(ibmw::common::util::LoggerWrapper{
+      .get_log_level_func = []() -> uint32_t { return 0; },
+      .log_func = [&](uint32_t, uint32_t, const char*, const char*, const char* data, size_t size) {
+        std::lock_guard lock(mutex);
+        text.append(data, size);
+      }});
+  ibmw::common::net::AsioExecutor executor(1);
+  EXPECT_THROW(executor.SetLogger(nullptr), std::invalid_argument);
+  executor.SetLogger(logger);
+  asio::post(*executor.IO(), [] { throw std::runtime_error("boom"); });
+  executor.Start();
+  EXPECT_THROW(executor.SetLogger(logger), std::runtime_error);
+  executor.Shutdown();
+  executor.Join();
+  std::lock_guard lock(mutex);
+  EXPECT_NE(text.find("AsioExecutor thread get exception boom."), std::string::npos) << text;
+}
 
 // Sends one message whose serialized form is `view` through a started driver,
 // which stays up until `received` (when given) got it: sending is asynchronous.

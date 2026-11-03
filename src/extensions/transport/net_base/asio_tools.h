@@ -11,6 +11,8 @@
 
 #include <boost/asio.hpp>
 
+#include "base/log_util.h"
+
 namespace ibmw::common::net {
 
 /**
@@ -26,7 +28,8 @@ class AsioExecutor {
   explicit AsioExecutor(uint32_t threads_num = std::max<uint32_t>(std::thread::hardware_concurrency(), 1))
       : threads_num_(threads_num),
         io_ptr_(std::make_shared<boost::asio::io_context>(threads_num)),
-        work_guard_(io_ptr_->get_executor()) {
+        work_guard_(io_ptr_->get_executor()),
+        logger_ptr_(std::make_shared<ibmw::common::util::LoggerWrapper>()) {
   }
 
   ~AsioExecutor() {
@@ -34,12 +37,26 @@ class AsioExecutor {
       Shutdown();
       Join();
     } catch (const std::exception& e) {
-      fprintf(stderr, "AsioExecutor destruct get exception, %s\n", e.what());
+      MW_ERROR("AsioExecutor destruct get exception, {}", e.what());
     }
   }
 
   AsioExecutor(const AsioExecutor&) = delete;
   AsioExecutor& operator=(const AsioExecutor&) = delete;
+
+  /**
+   * @brief Set the logger for errors from the executor threads
+   * @note Call before Start; the logger must stay usable until Join returns
+   */
+  void SetLogger(const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr) {
+    if (state_.load() != State::kPreStart) [[unlikely]]
+      throw std::runtime_error("Method can only be called when state is 'PreStart'.");
+    if (!logger_ptr) [[unlikely]]
+      throw std::invalid_argument("Logger is null.");
+    logger_ptr_ = logger_ptr;
+  }
+
+  const ibmw::common::util::LoggerWrapper& GetLogger() const { return *logger_ptr_; }
 
   /**
    * @brief Register svr start method
@@ -95,7 +112,7 @@ class AsioExecutor {
       try {
         io_ptr_->run();
       } catch (const std::exception& e) {
-        fprintf(stderr, "AsioExecutor thread get exception %s.\n", e.what());
+        MW_ERROR("AsioExecutor thread get exception {}.", e.what());
       }
     };
 
@@ -176,6 +193,7 @@ class AsioExecutor {
   std::list<std::thread> threads_;
   std::vector<std::function<void()>> start_func_vec_;
   std::vector<std::function<void()>> stop_func_vec_;
+  std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_;
 };
 
 }  // namespace ibmw::common::net
