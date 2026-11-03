@@ -9,6 +9,7 @@
 #include <deque>
 #include <memory>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "cpp/co/sync_wait.h"
@@ -283,6 +284,15 @@ TEST(RpcHandle, SharedCallWithNullRequestOrResponseFailsWithoutCallingProvider) 
   EXPECT_EQ(future_probe.Run(std::make_shared<const int>(0), nullptr).get().Code(),
             static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_UNKNOWN));
   EXPECT_TRUE(DeferredService::pending.empty());
+}
+
+// API-054: Status only converts to bool where a condition is expected.
+static_assert(!std::is_convertible_v<Status, bool>);
+static_assert(std::is_constructible_v<bool, Status>);
+
+TEST(RpcStatus, ExplicitBoolFollowsOk) {
+  EXPECT_TRUE(Status(IBMW_RPC_STATUS_OK));
+  EXPECT_FALSE(Status(IBMW_RPC_STATUS_OK + 1));
 }
 
 }  // namespace

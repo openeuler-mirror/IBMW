@@ -170,6 +170,9 @@ details remain governed by the documentation for each release.
   reports `msg_min_size == 0`, logging one warning per subscription. The
   built-in POD, JSON, ROS 2 and DDS type supports and `ibmw_gen` output fill
   it with `sizeof(T)`; hand-written tables must set it to keep loaned capture.
+- `ibmw::rpc::Status::operator bool` is now `explicit`: `if (status)` still
+  works, but implicit use as an integer or in `bool b = status;` no longer
+  compiles.
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /
