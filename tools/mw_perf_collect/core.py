@@ -2743,11 +2743,13 @@ def run(args: argparse.Namespace) -> int:
             producer_env = {"MW_PERF_RUN_ID": manifest["run_id"],
                             "MW_PERF_ARTIFACT_SCHEMA_VERSION": "mw_perf.latency.v1"}
             try:
-                proc = subprocess.Popen(cmd, cwd=sut.get("working_directory"),
-                    env={**os.environ, **sut.get("env", {}), **producer_env, **comm_trace_controls},
-                    pass_fds=((comm_trace_dirfd,) if comm_trace_dirfd is not None else ()),
-                    start_new_session=True, stdout=(run_dir/"logs"/"sut.stdout.log").open("wb"),
-                    stderr=(run_dir/"logs"/"sut.stderr.log").open("wb")); pid = proc.pid
+                # The child keeps its own copies of the log descriptors.
+                with (run_dir/"logs"/"sut.stdout.log").open("wb") as sut_stdout, \
+                     (run_dir/"logs"/"sut.stderr.log").open("wb") as sut_stderr:
+                    proc = subprocess.Popen(cmd, cwd=sut.get("working_directory"),
+                        env={**os.environ, **sut.get("env", {}), **producer_env, **comm_trace_controls},
+                        pass_fds=((comm_trace_dirfd,) if comm_trace_dirfd is not None else ()),
+                        start_new_session=True, stdout=sut_stdout, stderr=sut_stderr); pid = proc.pid
             finally:
                 if comm_trace_dirfd is not None:
                     os.close(comm_trace_dirfd); comm_trace_dirfd = None

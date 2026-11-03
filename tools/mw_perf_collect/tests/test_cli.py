@@ -1,4 +1,4 @@
-import copy, hashlib, json, os, subprocess, sys, tempfile, unittest
+import copy, gc, hashlib, json, os, subprocess, sys, tempfile, unittest, warnings
 from unittest.mock import patch
 from pathlib import Path
 import mw_perf_collect.core as core
@@ -332,6 +332,28 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             cfg=Path(td)/"run.json"; cfg.write_text(json.dumps({"run":{"sample_seconds":.01},"sut":{"mode":"managed"}}))
             self.assertEqual(main(["run","--config",str(cfg),"--output",td,"--",sys.executable,"-c","import time; time.sleep(.1)"]),0)
+
+    def test_managed_run_closes_its_sut_log_files(self):
+        # TOOL-029: the SUT keeps its own log descriptors; the collector closes its copies.
+        def open_logs():
+            names = []
+            for fd in os.listdir("/proc/self/fd"):
+                try:
+                    names.append(os.readlink(f"/proc/self/fd/{fd}"))
+                except OSError:
+                    pass
+            return [n for n in names if n.endswith(("sut.stdout.log", "sut.stderr.log"))]
+        with tempfile.TemporaryDirectory() as td:
+            cfg=Path(td)/"run.json"; cfg.write_text(json.dumps({"run":{"sample_seconds":.05},"sut":{"mode":"managed","command":[sys.executable,"-c","import sys, time; print('out', flush=True); print('err', file=sys.stderr, flush=True); time.sleep(.3)"]}}))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always", ResourceWarning)
+                self.assertEqual(main(["run","--config",str(cfg),"--output",td]),0)
+                gc.collect()
+            self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning) and "sut." in str(w.message)], [])
+            run=next(p for p in Path(td).iterdir() if p.is_dir() and p.name != "__pycache__")
+            self.assertEqual((run/"logs/sut.stdout.log").read_text(), "out\n")
+            self.assertEqual((run/"logs/sut.stderr.log").read_text(), "err\n")
+            self.assertEqual(open_logs(), [])
 
     def test_fake_sut_archive_timeout_and_attached_not_stopped(self):
         with tempfile.TemporaryDirectory() as td:
