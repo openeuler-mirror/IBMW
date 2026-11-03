@@ -618,13 +618,13 @@ void TransportBus::RegisterDebugLogFilter() {
         if (buf_ptr) {
           auto msg_str = buf_ptr->JoinToString();
 
-          MW_INFO("Transport message handlerr handle a new msg. msg type: {}, topic name: {}, context: {}, msg: {}",
+          MW_INFO("Transport message handler handle a new msg. msg type: {}, topic name: {}, context: {}, msg: {}",
                      msg_wrapper.info.msg_type,
                      msg_wrapper.info.topic_name,
                      msg_wrapper.ctx_ref.ToString(),
                      msg_str);
         } else {
-          MW_INFO("Transport message handlerr handle a new msg. msg type: {}, topic name: {}, context: {}",
+          MW_INFO("Transport message handler handle a new msg. msg type: {}, topic name: {}, context: {}",
                      msg_wrapper.info.msg_type,
                      msg_wrapper.info.topic_name,
                      msg_wrapper.ctx_ref.ToString());

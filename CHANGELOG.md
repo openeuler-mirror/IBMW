@@ -104,6 +104,10 @@ details remain governed by the documentation for each release.
   documented default is corrected to 1024. Failed unsubscribes are logged.
 - UDP transport: a send type registered after `Start` is refused, like on TCP;
   previously it changed the publisher map while messages were being sent.
+- In-process RPC across packages: a request the service can not deserialize
+  now fails with `SVR_DESERIALIZATION_FAILED` and a response the client can
+  not deserialize with `CLI_DESERIALIZATION_FAILED`, like the other drivers;
+  the two codes were swapped.
 
 ### Added
 

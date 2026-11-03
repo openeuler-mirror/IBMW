@@ -34,9 +34,9 @@ const ibmw_type_support_base_t kTs = MakeCopyOnlyTypeSupport();
 // One in-process driver with a single same-package service "svc".
 class InProcessServiceTest : public ::testing::Test {
  protected:
-  void SetUpService(ServiceFunc func) {
+  void SetUpService(ServiceFunc func, ServiceInfo info = MakeInfo()) {
     auto wrapper = std::make_unique<ServiceFuncWrapper>();
-    wrapper->info = MakeInfo();
+    wrapper->info = std::move(info);
     wrapper->service_func = std::move(func);
     const ServiceFuncWrapper& ref = *wrapper;
     ASSERT_TRUE(catalog_.RegisterServiceFunc(std::move(wrapper)));
@@ -75,6 +75,25 @@ class InProcessServiceTest : public ::testing::Test {
   int req_ = 0;
   int rsp_ = 0;
 };
+
+// Serializes to an empty buffer; deserializing fails when the template
+// argument says so.
+template <bool kDeserializeOk>
+ibmw_type_support_base_t MakeSerializingTypeSupport() {
+  static const ibmw_string_view_t kTypes[] = {{"json", 4}};
+  ibmw_type_support_base_t ts{};
+  ts.create = [](void*) -> void* { return new int(0); };
+  ts.destroy = [](void*, void* msg) { delete static_cast<int*>(msg); };
+  ts.serialize = [](void*, ibmw_string_view_t, const void*, const ibmw_buffer_array_allocator_t*,
+                    ibmw_buffer_array_t*) { return true; };
+  ts.deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) { return kDeserializeOk; };
+  ts.serialization_types_supported_num = [](void*) -> size_t { return 1; };
+  ts.serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return kTypes; };
+  return ts;
+}
+
+const ibmw_type_support_base_t kSerializingTs = MakeSerializingTypeSupport<true>();
+const ibmw_type_support_base_t kUndeserializableTs = MakeSerializingTypeSupport<false>();
 
 // COMM-015: a throwing service handler must complete the call with an error.
 TEST_F(InProcessServiceTest, ThrowingServiceFuncReportsInternalError) {
@@ -137,6 +156,40 @@ TEST_F(InProcessServiceTest, ThrowAfterKeepingCallbackCompletesOnceAndReleasesRe
   ASSERT_TRUE(pending);
   pending->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
   EXPECT_EQ(completions, 1);
+}
+
+// COMM-040: across packages the request is deserialized by the server and
+// the response by the client; each failure is reported for its own side.
+TEST_F(InProcessServiceTest, RequestDeserializationFailureIsServerSide) {
+  bool served = false;
+  ServiceInfo service_info = MakeInfo();
+  service_info.req_type_support_ref = ibmw::util::TypeSupportRef(&kUndeserializableTs);
+  service_info.rsp_type_support_ref = ibmw::util::TypeSupportRef(&kSerializingTs);
+  SetUpService([&served](const std::shared_ptr<ServiceMessageFrame>&) { served = true; }, service_info);
+  client_info_.pkg_path = "client_pkg";
+  client_info_.req_type_support_ref = ibmw::util::TypeSupportRef(&kSerializingTs);
+  client_info_.rsp_type_support_ref = ibmw::util::TypeSupportRef(&kSerializingTs);
+  client_ctx_.SetSerializationType("json");
+  auto result = CallOnce();
+  ASSERT_TRUE(result->has_value());
+  EXPECT_EQ(**result, static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED));
+  EXPECT_FALSE(served);
+}
+
+TEST_F(InProcessServiceTest, ResponseDeserializationFailureIsClientSide) {
+  ServiceInfo service_info = MakeInfo();
+  service_info.req_type_support_ref = ibmw::util::TypeSupportRef(&kSerializingTs);
+  service_info.rsp_type_support_ref = ibmw::util::TypeSupportRef(&kSerializingTs);
+  SetUpService([](const std::shared_ptr<ServiceMessageFrame>& frame) {
+    frame->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+  }, service_info);
+  client_info_.pkg_path = "client_pkg";
+  client_info_.req_type_support_ref = ibmw::util::TypeSupportRef(&kSerializingTs);
+  client_info_.rsp_type_support_ref = ibmw::util::TypeSupportRef(&kUndeserializableTs);
+  client_ctx_.SetSerializationType("json");
+  auto result = CallOnce();
+  ASSERT_TRUE(result->has_value());
+  EXPECT_EQ(**result, static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DESERIALIZATION_FAILED));
 }
 
 // COMM-010: a server answering after the driver was shut down and destroyed

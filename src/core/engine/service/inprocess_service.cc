@@ -366,11 +366,11 @@ void InProcessServiceDriver::Call(
 
     if (!deserialize_ret) [[unlikely]] {
       // Deserialization failed
-      MW_FATAL(
-          "Rsp deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
+      MW_ERROR(
+          "Req deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
           serialization_type, service_info.pkg_path, service_info.module_name, service_info.func_name);
 
-      fail(IBMW_RPC_STATUS_CLI_DESERIALIZATION_FAILED);
+      fail(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED);
       return;
     }
 
@@ -469,10 +469,10 @@ void InProcessServiceDriver::CallbackContext::OnSerializedResult(
   if (!deserialize_ret) {
     // Deserialization failed
     MW_ERROR(
-        "Req deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
+        "Rsp deserialization failed in local service driver, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}",
         serialization_type, client_info.pkg_path, client_info.module_name, client_info.func_name);
 
-    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED));
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DESERIALIZATION_FAILED));
 
     return;
   }
