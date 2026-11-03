@@ -7,7 +7,8 @@
 // Test cases:
 //   1. No-config lifecycle: init → async-start → shutdown (no config file)
 //   2. Topological init order: verify subsystem init sequence from logs
-//   3. Shutdown reverse order: verify shutdown is exact reverse of init (via timestamps)
+//   3. Shutdown reverse order: verify shutdown is the reverse of init, with
+//      Extensions moved right before Logging (via timestamps)
 //   4. R15 init report: verify report sections present and in correct order
 //   5. Init rollback on failure: engine handles bad config gracefully
 //   6. Phase transitions: verify engine phases through lifecycle
@@ -392,9 +393,16 @@ bool test_shutdown_reverse_order() {
     std::vector<std::string> shutdown_order;
     for (const auto& e : shutdown_events) shutdown_order.push_back(e.name);
 
-    // Shutdown should be exact reverse of init.
+    // Shutdown is the reverse of init, except that Extensions stop right
+    // before Logging (they hold logger/executor handles; see
+    // Engine::ResolveInitOrder()).
     std::vector<std::string> expected_shutdown(init_order.rbegin(),
                                                init_order.rend());
+    auto ext_pos = std::find(expected_shutdown.begin(), expected_shutdown.end(), "Extensions");
+    auto log_pos = std::find(expected_shutdown.begin(), expected_shutdown.end(), "Logging");
+    if (ext_pos != expected_shutdown.end() && log_pos < ext_pos) {
+      std::rotate(log_pos, ext_pos, ext_pos + 1);
+    }
 
     for (size_t i = 0; i < expected_shutdown.size(); ++i) {
       TEST_ASSERT(shutdown_order[i] == expected_shutdown[i],
