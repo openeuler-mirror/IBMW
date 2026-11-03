@@ -1784,6 +1784,21 @@ int RunConvert(int argc, const char* const* argv) {
   return 0;
 }
 
+// While a bag plays, the main, keyboard, signal and player threads all print:
+// each line is composed first and written whole under one lock.
+void PrintPlaybackLine(std::string_view line) {
+  static std::mutex mutex;
+  std::string text;
+  text.reserve(line.size() + 1);
+  text.append(line).push_back('\n');
+  const std::lock_guard lock(mutex);
+  std::cout << text;
+}
+
+std::string PlaybackPauseMessage(const PlayerControl& control) {
+  return control.IsPaused() ? "Playback paused." : "Playback resumed.";
+}
+
 class KeyboardControlGuard {
  public:
   KeyboardControlGuard(
@@ -1819,8 +1834,7 @@ class KeyboardControlGuard {
         char input = 0;
         if (::read(STDIN_FILENO, &input, 1) == 1 && input == ' ') {
           control_.TogglePause();
-          std::cout << (control_.IsPaused() ? "Playback paused.\n"
-                                            : "Playback resumed.\n");
+          PrintPlaybackLine(PlaybackPauseMessage(control_));
         }
       }
     });
@@ -1951,8 +1965,7 @@ int RunPlay(int argc, const char* const* argv) {
       if (g_pause_toggle_requested.exchange(false)) {
         control.TogglePause();
         if (options.log_level == "debug" || options.log_level == "info") {
-          std::cout << (control.IsPaused() ? "Playback paused.\n"
-                                          : "Playback resumed.\n");
+          PrintPlaybackLine(PlaybackPauseMessage(control));
         }
       }
       if (g_stop_requested.load()) {
@@ -1966,13 +1979,14 @@ int RunPlay(int argc, const char* const* argv) {
   BagPlayer::EventCallback event_callback;
   if (options.log_level == "debug" || options.log_level == "info") {
     event_callback =
-        [](std::string_view message) { std::cout << message << '\n'; };
+        [](std::string_view message) { PrintPlaybackLine(message); };
   }
   if (options.log_level == "debug") {
-    std::cout << "Playback read-ahead queue: "
-              << options.read_ahead_queue_size
-              << ", selected topics: " << options.topics.size()
-              << ", remaps: " << options.remaps.size() << '\n';
+    std::ostringstream line;
+    line << "Playback read-ahead queue: " << options.read_ahead_queue_size
+         << ", selected topics: " << options.topics.size()
+         << ", remaps: " << options.remaps.size();
+    PrintPlaybackLine(line.str());
   }
   BagPlayer player(
       *reader,
@@ -2004,12 +2018,16 @@ int RunPlay(int argc, const char* const* argv) {
       },
       route_compatible,
       transcode);
-  std::cout << "Playing bag '" << reader->Info().bag_path.string()
-            << "' at " << options.rate << "x.\n";
+  {
+    std::ostringstream line;
+    line << "Playing bag '" << reader->Info().bag_path.string()
+         << "' at " << options.rate << "x.";
+    PrintPlaybackLine(line.str());
+  }
   if (options.start_paused &&
       (options.disable_keyboard_controls || ::isatty(STDIN_FILENO) == 0)) {
-    std::cout << "Playback starts paused: send SIGUSR2 to PID " << ::getpid()
-              << " to toggle pause.\n";
+    PrintPlaybackLine("Playback starts paused: send SIGUSR2 to PID " +
+                      std::to_string(::getpid()) + " to toggle pause.");
   }
   const uint64_t published = player.Play();
   if (options.wait_for_all_acked_seconds >= 0.0) {
@@ -2025,7 +2043,7 @@ int RunPlay(int argc, const char* const* argv) {
   if (player_engine_guard) {
     player_engine_guard->Stop();
   }
-  std::cout << "Published " << published << " message(s).\n";
+  PrintPlaybackLine("Published " + std::to_string(published) + " message(s).");
   return 0;
 }
 
