@@ -173,6 +173,11 @@ details remain governed by the documentation for each release.
 - `ibmw::rpc::Status::operator bool` is now `explicit`: `if (status)` still
   works, but implicit use as an integer or in `bool b = status;` no longer
   compiles.
+- `TransportRef::GetPublisher`/`GetSubscriber` return an empty reference when
+  the provider's table lacks an entry the C++ wrappers call unconditionally
+  (sender: `register_send_type`, `send`, `get_topic`,
+  `merge_subscribe_context_to_publish_context`, `loan`, `publish_loaned`,
+  `release_loaned`; receiver: `on_message`, `get_topic`).
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

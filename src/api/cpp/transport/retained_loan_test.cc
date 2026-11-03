@@ -211,9 +211,31 @@ TEST(RuntimeV3Abi, RejectsUndersizedSubHandleTable) {
   EXPECT_NO_THROW(Runtime runtime(&base));
 }
 
+ibmw_transport_sender_base_t UsableSender() {
+  ibmw_transport_sender_base_t t{};
+  t.struct_size = sizeof(t);
+  t.register_send_type = [](void*, const ibmw_type_support_base_t*) { return true; };
+  t.send = [](void*, ibmw_string_view_t, const ibmw_transport_context_base_t*, const void*) {};
+  t.get_topic = [](void*) { return ibmw_string_view_t{"topic", 5}; };
+  t.merge_subscribe_context_to_publish_context = [](void*, const ibmw_transport_context_base_t*,
+                                                    const ibmw_transport_context_base_t*) {};
+  t.loan = [](void*, ibmw_string_view_t, size_t, LoanMode, ibmw_loaned_sample_handle_t*) {};
+  t.publish_loaned = [](void*, ibmw_loaned_sample_handle_t*) {};
+  t.release_loaned = [](void*, ibmw_loaned_sample_handle_t*) {};
+  return t;
+}
+
+ibmw_transport_receiver_base_t UsableReceiver() {
+  ibmw_transport_receiver_base_t t{};
+  t.struct_size = sizeof(t);
+  t.on_message = [](void*, const ibmw_type_support_base_t*, ibmw_function_base_t*) { return true; };
+  t.get_topic = [](void*) { return ibmw_string_view_t{"topic", 5}; };
+  return t;
+}
+
 TEST(TransportV3Abi, UndersizedSenderOrReceiverIsNotReturned) {
-  static ibmw_transport_sender_base_t sender{};
-  static ibmw_transport_receiver_base_t receiver{};
+  static ibmw_transport_sender_base_t sender = UsableSender();
+  static ibmw_transport_receiver_base_t receiver = UsableReceiver();
   ibmw_transport_handle_base_t transport_base{};
   transport_base.struct_size = sizeof(transport_base);
   transport_base.get_sender = [](void*, ibmw_string_view_t) -> const ibmw_transport_sender_base_t* { return &sender; };
@@ -229,6 +251,43 @@ TEST(TransportV3Abi, UndersizedSenderOrReceiverIsNotReturned) {
   receiver.struct_size = sizeof(receiver);
   EXPECT_TRUE(transport.GetPublisher("topic"));
   EXPECT_TRUE(transport.GetSubscriber("topic"));
+}
+
+// API-049: a table missing an entry the wrappers call unconditionally is
+// refused when obtained, so no call can jump through a null pointer.
+TEST(TransportV3Abi, SenderOrReceiverMissingRequiredEntryIsNotReturned) {
+  static ibmw_transport_sender_base_t sender{};
+  static ibmw_transport_receiver_base_t receiver{};
+  ibmw_transport_handle_base_t transport_base{};
+  transport_base.struct_size = sizeof(transport_base);
+  transport_base.get_sender = [](void*, ibmw_string_view_t) -> const ibmw_transport_sender_base_t* { return &sender; };
+  transport_base.get_receiver = [](void*, ibmw_string_view_t) -> const ibmw_transport_receiver_base_t* { return &receiver; };
+  TransportRef transport(&transport_base);
+
+  const auto sender_without = [&](auto clear) {
+    sender = UsableSender();
+    clear(sender);
+    return static_cast<bool>(transport.GetPublisher("topic"));
+  };
+  EXPECT_TRUE(sender_without([](auto&) {}));
+  EXPECT_FALSE(sender_without([](auto& t) { t.register_send_type = nullptr; }));
+  EXPECT_FALSE(sender_without([](auto& t) { t.send = nullptr; }));
+  EXPECT_FALSE(sender_without([](auto& t) { t.get_topic = nullptr; }));
+  EXPECT_FALSE(sender_without([](auto& t) { t.merge_subscribe_context_to_publish_context = nullptr; }));
+  EXPECT_FALSE(sender_without([](auto& t) { t.loan = nullptr; }));
+  EXPECT_FALSE(sender_without([](auto& t) { t.publish_loaned = nullptr; }));
+  EXPECT_FALSE(sender_without([](auto& t) { t.release_loaned = nullptr; }));
+
+  const auto receiver_without = [&](auto clear) {
+    receiver = UsableReceiver();
+    clear(receiver);
+    return static_cast<bool>(transport.GetSubscriber("topic"));
+  };
+  EXPECT_TRUE(receiver_without([](auto&) {}));
+  EXPECT_FALSE(receiver_without([](auto& t) { t.on_message = nullptr; }));
+  EXPECT_FALSE(receiver_without([](auto& t) { t.get_topic = nullptr; }));
+  // Optional entries stay optional.
+  EXPECT_TRUE(receiver_without([](auto& t) { t.attach_loaned = nullptr; }));
 }
 
 ReceivedLoan MakeLoan(int& releases) {
