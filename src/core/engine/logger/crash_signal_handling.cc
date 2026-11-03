@@ -167,9 +167,7 @@ CrashSignalHandling::CrashSignalHandling() {
   // itself is what crashed.
   options.output_fd = STDERR_FILENO;
   selfdev_instances_.fetch_add(1);
-  loaded_ = ibmw::selfdev::crash::Install(options);
-  #else
-  loaded_ = false;
+  (void)ibmw::selfdev::crash::Install(options);
   #endif
 }
 
@@ -322,7 +320,6 @@ void CrashSignalHandling::EnsureAltStack() {
   const size_t stack_size = util::kCrashAltStackSize;
   alt_stack_.reset(static_cast<char*>(std::malloc(stack_size)));
   if (!alt_stack_) {
-    loaded_ = false;
     return;
   }
 
@@ -332,14 +329,12 @@ void CrashSignalHandling::EnsureAltStack() {
   ss.ss_flags = 0;
   if (sigaltstack(&ss, &previous_alt_stack_) < 0) {
     alt_stack_.reset();  // never installed
-    loaded_ = false;
     return;
   }
   alt_stack_thread_ = std::this_thread::get_id();
 }
 
 void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
-  loaded_ = true;
   EnsureAltStack();
 
   for (int sig : signals) {
@@ -353,7 +348,6 @@ void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
 
     struct sigaction previous;
     if (sigaction(sig, &action, &previous) < 0) {
-      loaded_ = false;
       continue;
     }
     previous_actions_.emplace_back(sig, previous);
@@ -370,7 +364,7 @@ void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
   (void)p;
 }
 
-CrashSignalHandling::CrashSignalHandling() { loaded_ = false; }
+CrashSignalHandling::CrashSignalHandling() = default;
 
 CrashSignalHandling::~CrashSignalHandling() { SetLogger(nullptr); }
 
@@ -378,9 +372,9 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t*, void*) {}
 
 void CrashSignalHandling::SigHandler(int, siginfo_t*, void*) {}
 
-void CrashSignalHandling::EnsureAltStack() { loaded_ = false; }
+void CrashSignalHandling::EnsureAltStack() {}
 
-void CrashSignalHandling::InstallHandlers(const std::vector<int>&) { loaded_ = false; }
+void CrashSignalHandling::InstallHandlers(const std::vector<int>&) {}
 
 #endif
 

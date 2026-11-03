@@ -131,9 +131,6 @@ class CrashSignalHandling {
   std::thread::id alt_stack_thread_;
   std::vector<std::pair<int, struct sigaction>> previous_actions_;
 #endif
-#if !defined(_WIN32)
-  bool loaded_{false};
-#endif
 };
 
 }  // namespace ibmw::runtime::core::logger
