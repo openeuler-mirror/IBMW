@@ -319,5 +319,35 @@ TEST(PlaybackActionLockRegression, RejectsMetadataFilesOutsideBagRoot) {
   std::filesystem::remove_all(bag);
 }
 
+// EXT-044: files that metadata.yaml lists but that are missing or are not
+// regular files are skipped; with none left, Initialize fails.
+TEST(PlaybackActionLockRegression, SkipsMissingAndNonRegularFiles) {
+  const auto bag = WriteTemporaryBag();
+  ASSERT_FALSE(bag.empty());
+  std::filesystem::create_directories(bag / "folder.mcap");
+  const auto metadata_path = bag / "metadata.yaml";
+  auto metadata = YAML::LoadFile(metadata_path.string());
+  auto files = metadata["ibmw_bagfile_information"]["files"];
+  files[0]["path"] = "missing.mcap";
+  YAML::Node folder;
+  folder["path"] = "folder.mcap";
+  folder["start_timestamp"] = files[0]["start_timestamp"];
+  files.push_back(folder);
+  std::ofstream(metadata_path) << metadata;
+  PlaybackAction action;
+  action.RegisterGetTypeSupportFunc([](std::string_view type) {
+    return type == "dummy:PlaybackMessage" ? ibmw::util::TypeSupportRef(DummyTypeSupport())
+                                           : ibmw::util::TypeSupportRef();
+  });
+  try {
+    action.Initialize(YAML::Load("{bag_path: '" + bag.string() +
+                                 "', mode: signal, executor: unused, topic_meta_list: []}"));
+    ADD_FAILURE() << "a bag without usable files was accepted";
+  } catch (const ibmw::common::util::IbmwException& e) {
+    EXPECT_NE(std::string(e.what()).find("Can not find useful bag file"), std::string::npos) << e.what();
+  }
+  std::filesystem::remove_all(bag);
+}
+
 }  // namespace
 }  // namespace ibmw::extensions::record_playback_extension

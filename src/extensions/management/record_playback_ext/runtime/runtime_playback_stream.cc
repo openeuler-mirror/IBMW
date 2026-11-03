@@ -21,6 +21,7 @@
 
 #include "base/exception.h"
 #include "record_playback_ext/runtime/runtime_protocol.h"
+#include "record_playback_ext/storage/bag_reader_util.h"
 
 namespace ibmw::extensions::record_playback_extension {
 
@@ -107,16 +108,6 @@ void RequireReceive(
           : (status == ReceiveStatus::kTruncated
                  ? "stream ended with a partial frame"
                  : "stream closed unexpectedly"));
-}
-
-std::shared_ptr<ibmw::util::BufferArrayView> MakeOwnedPayload(
-    std::vector<uint8_t> bytes) {
-  auto storage = std::make_shared<std::vector<uint8_t>>(std::move(bytes));
-  auto* view = new ibmw::util::BufferArrayView(
-      storage->data(), storage->size());
-  return std::shared_ptr<ibmw::util::BufferArrayView>(
-      view,
-      [storage](const ibmw::util::BufferArrayView* ptr) { delete ptr; });
 }
 
 bool SendMessage(

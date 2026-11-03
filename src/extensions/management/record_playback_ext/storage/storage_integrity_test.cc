@@ -9,6 +9,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,7 @@
 #include "record_playback_ext/storage/path_safety.h"
 #include "record_playback_ext/storage/sqlite_bag_reader.h"
 #include "record_playback_ext/storage/sqlite_storage.h"
+#include "yaml-cpp/yaml.h"
 
 namespace ibmw::extensions::record_playback_extension {
 namespace {
@@ -171,6 +173,37 @@ void ExpectContentRoundTrip(
   EXPECT_EQ(count, 1U);
 }
 
+// EXT-044: both readers compare each file with its metadata.yaml entry; a
+// mismatch means the bag was not closed cleanly.
+template <typename StorageType, typename ReaderType>
+void ExpectMetadataMismatchIsUnclean(const std::filesystem::path& path, std::string_view storage_id) {
+  StorageType storage;
+  storage.Open({.output_path = path, .storage_id = std::string(storage_id)});
+  const auto channel_id = storage.RegisterChannel({.topic = TestMessage(0).topic}, storage.RegisterSchema(TestSchema()));
+  storage.Write(channel_id, TestMessage(1));
+  storage.SetCloseStatus(true, {});
+  storage.Close();
+  {
+    ReaderType reader;
+    ASSERT_NO_THROW(reader.Open(path));
+    ASSERT_TRUE(reader.Info().closed_cleanly);
+  }
+  auto metadata = YAML::LoadFile((path / "metadata.yaml").string());
+  auto file = metadata["ibmw_bagfile_information"]["files"][0];
+  ASSERT_TRUE(file.IsMap());
+  file["message_count"] = 99;
+  std::ofstream(path / "metadata.yaml") << metadata;
+  ReaderType reader;
+  ASSERT_NO_THROW(reader.Open(path));
+  EXPECT_FALSE(reader.Info().closed_cleanly);
+}
+
+TEST(StorageContentRoundTripTest, MetadataMismatchIsUnclean) {
+  TemporaryDirectory temporary("ibmw-metadata-mismatch");
+  ExpectMetadataMismatchIsUnclean<McapStorage, McapBagReader>(temporary.Path() / "mcap", "mcap");
+  ExpectMetadataMismatchIsUnclean<SqliteStorage, SqliteBagReader>(temporary.Path() / "sqlite", "sqlite3");
+}
+
 TEST(BagPathSafetyTest, RejectsAbsoluteParentAndSymlinkEscapes) {
   TemporaryDirectory temporary("ibmw-bag-path-safety");
   const auto bag = temporary.Path() / "bag";
@@ -191,6 +224,26 @@ TEST(BagPathSafetyTest, RejectsAbsoluteParentAndSymlinkEscapes) {
   EXPECT_THROW(
       SafeBagFilePath(bag, "escape.mcap"),
       ibmw::common::util::IbmwException);
+}
+
+// EXT-044: a missing file is reported as absent (the playback action skips
+// it), the same cases std::filesystem::exists() treats as absent; an unsafe
+// path still throws whether or not the file exists.
+TEST(BagPathSafetyTest, FindReportsMissingFilesAndRejectsUnsafePaths) {
+  TemporaryDirectory temporary("ibmw-bag-path-find");
+  const auto bag = temporary.Path() / "bag";
+  std::filesystem::create_directories(bag);
+  std::ofstream(bag / "data.mcap") << "inside";
+  std::filesystem::create_symlink(bag / "gone.mcap", bag / "dangling.mcap");
+
+  EXPECT_EQ(FindBagFilePath(bag, "data.mcap"), std::filesystem::canonical(bag / "data.mcap"));
+  EXPECT_EQ(FindBagFilePath(bag, "missing.mcap"), std::nullopt);
+  EXPECT_EQ(FindBagFilePath(bag, "data.mcap/inner.mcap"), std::nullopt);
+  EXPECT_EQ(FindBagFilePath(bag, "dangling.mcap"), std::nullopt);
+  EXPECT_THROW(FindBagFilePath(bag, "../missing.mcap"), ibmw::common::util::IbmwException);
+  EXPECT_THROW(FindBagFilePath(bag, temporary.Path() / "missing.mcap"),
+               ibmw::common::util::IbmwException);
+  EXPECT_THROW(SafeBagFilePath(bag, "missing.mcap"), ibmw::common::util::IbmwException);
 }
 
 size_t OpenFileDescriptorCount() {

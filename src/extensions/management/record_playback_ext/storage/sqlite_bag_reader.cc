@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "record_playback_ext/storage/sqlite_bag_reader.h"
+#include "record_playback_ext/storage/bag_reader_util.h"
 #include "record_playback_ext/storage/path_safety.h"
 
 #include <algorithm>
@@ -47,15 +48,7 @@ std::shared_ptr<ibmw::util::BufferArrayView> CopyBlob(
       sqlite3_column_blob(statement, column));
   const size_t size = static_cast<size_t>(
       sqlite3_column_bytes(statement, column));
-  auto storage = std::make_shared<std::vector<uint8_t>>(size);
-  if (size != 0) {
-    std::memcpy(storage->data(), data, size);
-  }
-  auto* view = new ibmw::util::BufferArrayView(
-      storage->data(), storage->size());
-  return std::shared_ptr<ibmw::util::BufferArrayView>(
-      view,
-      [storage](const ibmw::util::BufferArrayView* ptr) { delete ptr; });
+  return MakeOwnedPayload(data, size);
 }
 
 int64_t ReadInteger(const YAML::Node& node, std::string_view name) {
@@ -186,19 +179,6 @@ std::map<std::string, std::string> ParseQos(const std::string& text, uint16_t ch
     policies.emplace(name, value.get<std::string>());
   }
   return policies;
-}
-
-bool MetadataFileMatches(
-    const YAML::Node& metadata,
-    const BagFileInfo& actual) {
-  return !metadata || !metadata.IsMap() ||
-         (metadata["size"].as<uint64_t>(actual.size) == actual.size &&
-          metadata["message_count"].as<uint64_t>(actual.message_count) ==
-              actual.message_count &&
-          metadata["start_timestamp"].as<uint64_t>(
-              actual.start_timestamp) == actual.start_timestamp &&
-          metadata["end_timestamp"].as<uint64_t>(actual.end_timestamp) ==
-              actual.end_timestamp);
 }
 
 }  // namespace

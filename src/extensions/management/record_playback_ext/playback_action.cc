@@ -162,22 +162,10 @@ void PlaybackAction::Initialize(YAML::Node options_node) {
                           "Empty bag! bag path: {}", options_.bag_path);
 
   metadata_.files.erase(std::remove_if(metadata_.files.begin(), metadata_.files.end(), [this](const auto& item) {
-                          const auto relative = std::filesystem::path(item.path);
-                          const bool has_parent = std::any_of(
-                              relative.begin(), relative.end(),
-                              [](const auto& component) { return component == ".."; });
-                          if (relative.is_absolute() || has_parent) {
-                            // Unsafe metadata is a malformed bag, not a
-                            // missing optional shard: fail closed.
-                            static_cast<void>(SafeBagFilePath(options_.bag_path, relative));
-                          }
-                          if (!std::filesystem::exists(
-                                  std::filesystem::path(options_.bag_path) / relative)) {
-                            MW_WARN("Can not find bag file '{}' in bag path '{}', this file will be ignored.", item.path, options_.bag_path);
-                            return true;
-                          }
-                          const auto path = SafeBagFilePath(options_.bag_path, relative);
-                          if (!std::filesystem::is_regular_file(path)) {
+                          // Unsafe metadata is a malformed bag, not a missing
+                          // optional shard: FindBagFilePath throws (fail closed).
+                          const auto path = FindBagFilePath(options_.bag_path, item.path);
+                          if (!path || !std::filesystem::is_regular_file(*path)) {
                             MW_WARN("Can not find bag file '{}' in bag path '{}', this file will be ignored.", item.path, options_.bag_path);
                             return true;
                           }
