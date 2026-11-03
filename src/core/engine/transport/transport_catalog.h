@@ -20,7 +20,7 @@
 #endif
 #include "base/log_util.h"
 
-namespace ibmw::runtime::core::observability { struct MetricsEntry; struct CachedMetricsGate; }
+namespace ibmw::runtime::core::observability { struct MetricsEntry; struct PodMetricsEntry; struct CachedMetricsGate; }
 namespace ibmw::runtime::core::transport {
 
 // Forward decls for cached pointers in SendTypeWrapper (Phase 7 §7.2 C2).

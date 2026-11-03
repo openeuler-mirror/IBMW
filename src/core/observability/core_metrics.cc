@@ -677,9 +677,32 @@ Registry::DriverSlot* Controller::FindLoanDriver(
   auto i = loan_drivers_.find(driver);
   return i == loan_drivers_.end() ? nullptr : i->second;
 }
+Registry::DriverSlot* Controller::FindLoanDriver(
+    const CachedMetricsGate& gate, const transport::TransportDriver* driver) noexcept {
+  for (const auto& [cached_driver, slot] : gate.loan_driver_slots)
+    if (cached_driver == driver) return slot;
+  return FindLoanDriver(driver);
+}
+void Controller::CacheLoanDriverSlots(const void* dispatcher,
+                                      const std::vector<transport::TransportDriver*>& drivers) {
+  if (!Enabled()) return;
+  std::lock_guard l(mutex_);
+  auto gate = cached_metric_gates_.find(dispatcher);
+  if (gate == cached_metric_gates_.end()) return;
+  auto& slots = gate->second->loan_driver_slots;
+  slots.clear();
+  slots.reserve(drivers.size());
+  for (auto* driver : drivers) {
+    auto i = loan_drivers_.find(driver);
+    if (i != loan_drivers_.end()) slots.emplace_back(driver, i->second);
+  }
+  if (!slots.empty()) cached_entry_dispatchers_.insert(dispatcher);
+}
 bool Controller::RegisterPod(const void* dispatcher, const void* registration,
                              std::string_view topic, std::string_view type,
-                             const transport::TransportDriver* driver) {
+                             const transport::TransportDriver* driver,
+                             PodMetricsEntry** cached_entry) {
+  if (cached_entry) *cached_entry = nullptr;
   if (!Enabled()) return true;
   std::lock_guard l(mutex_);
   if (state_ != State::kInitialized || runtime_.registry().IsFrozen()) return true;
@@ -691,7 +714,10 @@ bool Controller::RegisterPod(const void* dispatcher, const void* registration,
   if (!out->logical || !out->driver) return true;
   auto* out_ptr = out.get();
   pod_entry_storage_.push_back(std::move(out));
-  return pod.emplace(registration, out_ptr).second;
+  if (!pod.emplace(registration, out_ptr).second) return false;
+  if (cached_entry) *cached_entry = out_ptr;
+  if (cached_entry) cached_entry_dispatchers_.insert(dispatcher);
+  return true;
 }
 void Controller::UnregisterPod(const void* dispatcher, const void* registration) noexcept {
   if (!Enabled()) return;

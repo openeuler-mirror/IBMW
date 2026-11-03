@@ -38,6 +38,13 @@ void TransportDriverDispatcher::Initialize() {
 }
 
 void TransportDriverDispatcher::Start() {
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // Must precede kStart: loan paths read this cache without the controller lock.
+  if (cached_metrics_gate_ && state_.load() == State::kInit) {
+    observability::CoreMetricsController().CacheLoanDriverSlots(
+        this, transport_driver_index_vec_);
+  }
+#endif
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");

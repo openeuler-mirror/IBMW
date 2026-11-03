@@ -813,7 +813,7 @@ bool TransportDriverDispatcher::RegisterLoanedPodTopic(
     try {
       (void)observability::CoreMetricsController().RegisterPod(
           this, registration.get(), wrapper.topic_name, msg_type,
-          registration->driver);
+          registration->driver, &registration->cached_metrics);
       pending_metrics_registration = registration.get();
     } catch (...) {
       // Observability is fail-open and cannot alter POD registration.
@@ -1448,7 +1448,7 @@ LoanedSampleHandle TransportDriverDispatcher::Loan(LoanAccessInfoWrapper&& wrapp
         LoanedSampleHandle candidate{};
 #ifdef IBMW_ENABLE_CORE_METRICS
         auto* pod_metrics = metrics_guard && *metrics_guard && observability::CoreMetricsController().Enabled()
-                                ? observability::CoreMetricsController().FindPod(this, &registration)
+                                ? registration.cached_metrics
                                 : nullptr;
         if (pod_metrics) observability::CoreMetricsController().registry().AddPodLoanAttempt(pod_metrics->logical);
 #endif
@@ -1546,7 +1546,7 @@ void TransportDriverDispatcher::PublishLoaned(LoanedSampleHandle& handle) {
   // than attributed to the wrong POD/ordinary series.
   auto* metric_slot = metrics_guard && *metrics_guard && handle.mode != LoanMode::kPodOnly &&
                               observability::CoreMetricsController().Enabled()
-                          ? observability::CoreMetricsController().FindLoanDriver(source_driver) : nullptr;
+                          ? observability::CoreMetricsController().FindLoanDriver(*cached_metrics_gate_, source_driver) : nullptr;
 #endif
   source_driver->PublishLoaned(handle);
   handle = {};
@@ -1581,7 +1581,7 @@ void TransportDriverDispatcher::ReleaseLoaned(LoanedSampleHandle& handle) {
   if (cached_metrics_gate_) metrics_guard.emplace(cached_metrics_gate_);
   auto* metric_slot = metrics_guard && *metrics_guard && handle.mode != LoanMode::kPodOnly &&
                               observability::CoreMetricsController().Enabled()
-                          ? observability::CoreMetricsController().FindLoanDriver(source_driver) : nullptr;
+                          ? observability::CoreMetricsController().FindLoanDriver(*cached_metrics_gate_, source_driver) : nullptr;
 #endif
   source_driver->ReleaseLoaned(handle);
   handle = {};

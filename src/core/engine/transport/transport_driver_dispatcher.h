@@ -268,6 +268,10 @@ class TransportDriverDispatcher {
     size_t initial_size_hint;
     size_t alignment;
     TransportDriver* driver;
+#ifdef IBMW_ENABLE_CORE_METRICS
+    // Read only under an admitted CachedMetricsReadGuard.
+    observability::PodMetricsEntry* cached_metrics = nullptr;
+#endif
   };
   std::unordered_map<std::string, std::unique_ptr<PodRegistration>>
       pod_registration_map_;

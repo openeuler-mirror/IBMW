@@ -14,6 +14,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include "extension_api/ibmw_reporter_v1.h"
 
@@ -189,6 +190,10 @@ struct CachedMetricsGate {
   std::atomic_size_t state{0};
   std::mutex mutex;
   std::condition_variable drained;
+  // Written before the owning dispatcher enters kStart, then read only under an
+  // admitted CachedMetricsReadGuard.
+  std::vector<std::pair<const transport::TransportDriver*, Registry::DriverSlot*>>
+      loan_driver_slots;
 };
 class CachedMetricsReadGuard {
  public:
@@ -251,8 +256,14 @@ class Controller {
   MetricsEntry* Find(const void*, std::string_view pkg, std::string_view module,
                      std::string_view topic, std::string_view type) noexcept;
   Registry::DriverSlot* FindLoanDriver(const transport::TransportDriver*) noexcept;
+  // Lock-free for drivers cached by CacheLoanDriverSlots; others take the locked lookup.
+  Registry::DriverSlot* FindLoanDriver(const CachedMetricsGate&,
+                                       const transport::TransportDriver*) noexcept;
+  void CacheLoanDriverSlots(const void* dispatcher,
+                            const std::vector<transport::TransportDriver*>&);
   bool RegisterPod(const void* dispatcher, const void* registration, std::string_view topic,
-                   std::string_view type, const transport::TransportDriver*);
+                   std::string_view type, const transport::TransportDriver*,
+                   PodMetricsEntry** cached_entry = nullptr);
   Registry::ReporterSlot* RegisterReporterSlot(
       const ibmw_reporter_slot_descriptor_v1* descriptor) noexcept;
   bool PrepareReporterBatch(const ibmw_reporter_slot_descriptor_v1* descriptors, size_t count,

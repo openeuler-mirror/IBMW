@@ -4,10 +4,14 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <mutex>
 #include <sstream>
+#include <thread>
 #include <unordered_set>
 
 #include "cpp/transport/transport_handle.h"
@@ -192,6 +196,9 @@ TEST(PodMetricsIntegration, RealDispatcherWorkloadWritesFinalSnapshot) {
   EXPECT_EQ(driver.release_calls, 1);
   EXPECT_EQ(driver.publish_calls, 0);
 
+  // Cached POD entries stay readable until the dispatcher drains its readers.
+  EXPECT_FALSE(metrics.FinalizeSnapshot(&dispatcher));
+  dispatcher.Shutdown();
   ASSERT_TRUE(metrics.FinalizeSnapshot(&dispatcher));
   std::ifstream input(metrics_path);
   ASSERT_TRUE(input.is_open()) << metrics_path;
@@ -203,6 +210,76 @@ TEST(PodMetricsIntegration, RealDispatcherWorkloadWritesFinalSnapshot) {
   EXPECT_NE(jsonl.find("\"loan_attempted\":2"), std::string::npos);
   EXPECT_NE(jsonl.find("\"loan_succeeded\":1"), std::string::npos);
   EXPECT_NE(jsonl.find("\"loan_failed\":1"), std::string::npos);
+}
+
+// Parks the caller inside Controller::RegisterPod, which holds the controller
+// mutex while it reads the driver name.
+class NameBlockingPodDriver final : public FakePodDriver {
+ public:
+  std::string_view Name() const noexcept override {
+    std::call_once(entered_once, [this] { entered.set_value(); });
+    released.wait();
+    return "name-blocking";
+  }
+  mutable std::once_flag entered_once;
+  mutable std::promise<void> entered;
+  std::shared_future<void> released;
+};
+
+TEST(PodRegistrationMetrics, PodLoanDoesNotTakeTheControllerMutex) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  ibmw::common::util::LoggerWrapper logger;
+  std::unordered_set<std::string> passed_keys;
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  FakePodDriver driver;
+  auto& metrics = observability::CoreMetricsController();
+
+  metrics.Initialize(&dispatcher);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"fake-pod"}}});
+  dispatcher.RegisterTransportDriver(
+      &driver,
+      TransportDriverCapabilitiesV1{
+          .loaned_pod_registration_v1 =
+              static_cast<LoanedPodRegistrationCapabilityV1*>(&driver)});
+  dispatcher.Initialize();
+  SenderAccess access("metrics-pkg", "metrics-module", "metrics-camera",
+                      logger, dispatcher, passed_keys);
+  ibmw::transport::SenderRef sender(access.NativeHandle());
+  ASSERT_TRUE(sender.RegisterLoanedPodTopic("MetricsFrame", 128, 64));
+  dispatcher.Start();
+
+  std::promise<void> release;
+  NameBlockingPodDriver blocker;
+  blocker.released = release.get_future().share();
+  int other_dispatcher = 0;
+  int other_registration = 0;
+  std::thread holder([&] {
+    (void)metrics.RegisterPod(&other_dispatcher, &other_registration, "other",
+                              "Frame", &blocker);
+  });
+  blocker.entered.get_future().wait();
+
+  auto loan_task = std::async(std::launch::async, [&] {
+    auto loan = sender.Loan("MetricsFrame", 96);
+    const bool loaned = loan.user_payload_ptr != nullptr;
+    if (loaned) sender.ReleaseLoaned(loan);
+    return loaned;
+  });
+  const auto status = loan_task.wait_for(std::chrono::seconds(10));
+  release.set_value();
+  holder.join();
+  EXPECT_EQ(status, std::future_status::ready)
+      << "Loan blocked on the controller mutex";
+  EXPECT_TRUE(loan_task.get());
+
+  const auto json = metrics.registry().SnapshotJsonl();
+  EXPECT_NE(json.find("\"loan_attempted\":1"), std::string::npos);
+  EXPECT_NE(json.find("\"loan_succeeded\":1"), std::string::npos);
+  dispatcher.Shutdown();
+  EXPECT_TRUE(metrics.FinalizeSnapshot(&dispatcher));
+  unsetenv("IBMW_CORE_METRICS");
 }
 #endif
 
