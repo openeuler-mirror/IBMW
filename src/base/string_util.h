@@ -398,7 +398,7 @@ inline std::string& ReplaceString(std::string& str,
 inline bool IsAlnumStr(std::string_view str) {
   if (str.length() == 0) return false;
   for (const auto& c : str) {
-    if (!isalnum(c)) return false;
+    if (!isalnum(static_cast<unsigned char>(c))) return false;
   }
   return true;
 }
@@ -655,8 +655,10 @@ inline std::string ReplaceEnvVars(std::string_view input) {
   return result;
 }
 
-inline char CharToLower(char c) { return static_cast<char>(tolower(c)); }
-inline char CharToUpper(char c) { return static_cast<char>(toupper(c)); }
+// The <cctype> functions need the value as unsigned char: a UTF-8 byte is a
+// negative char, which is undefined behavior for them.
+inline char CharToLower(char c) { return static_cast<char>(tolower(static_cast<unsigned char>(c))); }
+inline char CharToUpper(char c) { return static_cast<char>(toupper(static_cast<unsigned char>(c))); }
 
 inline std::string& StrToLower(std::string& str) {
   std::transform(str.begin(), str.end(), str.begin(), CharToLower);
@@ -685,7 +687,7 @@ inline std::string StrToUpper(std::string_view str) {
 inline bool CheckIEqual(std::string_view str1, std::string_view str2) {
   if (str1.size() != str2.size()) return false;
   return std::equal(str1.begin(), str1.end(), str2.begin(),
-                    [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+                    [](char a, char b) { return CharToLower(a) == CharToLower(b); });
 }
 
 inline std::string& StrToTitleCase(std::string& str) {
@@ -716,7 +718,7 @@ inline bool StartsWith(std::string_view str,
 
   if (ignore_case) {
     for (size_t i = 0; i < pattern_len; ++i) {
-      if (tolower(pattern[i]) != tolower(str[i])) return false;
+      if (CharToLower(pattern[i]) != CharToLower(str[i])) return false;
     }
     return true;
   }
@@ -736,7 +738,7 @@ inline bool EndsWith(std::string_view str,
   const size_t& begin_pos = str_len - pattern_len;
   if (ignore_case) {
     for (size_t i = 0; i < pattern_len; ++i) {
-      if (tolower(pattern[i]) != tolower(str[begin_pos + i])) return false;
+      if (CharToLower(pattern[i]) != CharToLower(str[begin_pos + i])) return false;
     }
     return true;
   }
