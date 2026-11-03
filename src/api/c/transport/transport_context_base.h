@@ -89,6 +89,14 @@ typedef struct {
    */
   ibmw_string_view_array_t (*get_meta_key_vals)(void* ctx);
 
+
+  /**
+   * @brief Atomically marks the context used. Returns true if this call
+   * marked it, false if it was already used. Required since core ABI 3; a
+   * context whose table leaves it null is rejected as already used.
+   *
+   */
+  bool (*try_set_used)(void* ctx);
 } ibmw_transport_context_base_ops_t;
 
 /**

@@ -155,6 +155,13 @@ details remain governed by the documentation for each release.
   registered modules now receive driver slots only through it; the engine no
   longer casts their `ctx` to `ibmw::Module`, so a C module without the
   callback is skipped instead of crashing.
+- Transport and RPC context ops tables gain a required `try_set_used`, and
+  `Context` keeps its used flag in a `std::atomic<bool>` (COMM-020). Publish,
+  async publish and RPC call claim a caller's context with one atomic
+  exchange, so two threads can no longer both send with the same context. A
+  context table without `try_set_used` is rejected as already used. Publishing
+  with a caller's context costs about +3.5 ns (measured, ~2%); publishing
+  without one is unchanged.
 
 ### Added
 - `AsyncAccessBase`, `FutureAccessBase` and the generated `AsyncAccess` /

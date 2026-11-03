@@ -118,5 +118,31 @@ TEST_F(SendTypeRegistrationTest, LastPublisherOfTopicRefusedLeavesNoTopicEntry) 
   EXPECT_TRUE(catalog_.GetSendTypeWrapperMap().empty());
 }
 
+// COMM-020: a caller's context is claimed once; a table that cannot claim
+// it atomically is rejected; calls without a context always send.
+TEST_F(SendTypeRegistrationTest, CallerContextIsClaimedOnce) {
+  auto good = Sender("good");
+  ASSERT_TRUE(good.RegisterSendType(&kTs));
+  dispatcher_.Start();
+  int msg = 0;
+
+  ibmw::transport::Context ctx;
+  good.Send("T", ibmw::transport::ContextRef(ctx.NativeHandle()), &msg);
+  good.Send("T", ibmw::transport::ContextRef(ctx.NativeHandle()), &msg);
+  EXPECT_EQ(a_.sends, 1);
+
+  ibmw_transport_context_base_ops_t ops = *ctx.NativeHandle()->ops;
+  ops.try_set_used = nullptr;
+  ibmw::transport::Context fresh;
+  const ibmw_transport_context_base_t no_claim{.ops = &ops, .ctx = &fresh};
+  good.Send("T", ibmw::transport::ContextRef(&no_claim), &msg);
+  EXPECT_EQ(a_.sends, 1);
+
+  good.Send("T", ibmw::transport::ContextRef(), &msg);
+  good.Send("T", ibmw::transport::ContextRef(), &msg);
+  EXPECT_EQ(a_.sends, 3);
+  dispatcher_.Shutdown();
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::transport

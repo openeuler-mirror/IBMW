@@ -872,11 +872,13 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
     return;
   }
 
-  // Check ctx
+  // Check ctx. The stack default_ctx is fresh and private to this call; a
+  // caller's ctx is claimed atomically so concurrent sends cannot both pass.
   const bool invalid_context =
-      ctx_ref.GetType() !=
-          ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
-      ctx_ref.CheckUsed();
+      wrapper.ctx_ptr != nullptr &&
+      (ctx_ref.GetType() !=
+           ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
+       !ctx_ref.TrySetUsed());
 #ifdef IBMW_ENABLE_CORE_METRICS
   {
     std::optional<observability::CachedMetricsReadGuard> metrics_guard;
@@ -896,8 +898,7 @@ void TransportDriverDispatcher::Send(SendAccessInfoWrapper&& wrapper) {
     MW_WARN("Publish context has been used!");
     return;
   }
-
-  ctx_ref.SetUsed();
+  if (wrapper.ctx_ptr == nullptr) default_ctx.SetUsed();
 
   // set publish sequence into context (Phase 7 §7.2 C2: cached counter
   // pointer skips per-message map lookup; pointer was populated at
@@ -1275,11 +1276,11 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
 
   auto ctx_ref = publish_msg_wrapper_ptr->ctx_ref;
 
-  // Check ctx
+  // Check ctx; claimed atomically so concurrent sends cannot both pass.
   const bool invalid_context =
       ctx_ref.GetType() !=
           ibmw_transport_context_type_t::IBMW_TRANSPORT_PUBLISHER_CONTEXT ||
-      ctx_ref.CheckUsed();
+      !ctx_ref.TrySetUsed();
 #ifdef IBMW_ENABLE_CORE_METRICS
   {
     std::optional<observability::CachedMetricsReadGuard> metrics_guard;
@@ -1305,8 +1306,6 @@ void TransportDriverDispatcher::Send(MessageFrame&& wrapper) {
     MW_WARN("Publish context has been used!");
     return;
   }
-
-  ctx_ref.SetUsed();
 
   // set publish sequence into context if available
   auto it = pub_topic_seq_map_.find(publish_msg_wrapper_ptr->info.topic_name);

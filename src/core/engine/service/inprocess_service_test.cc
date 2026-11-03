@@ -306,6 +306,19 @@ TEST_P(HoldingDispatcherTest, AnsweredCallReportsOnlyTheAnswer) {
   EXPECT_EQ(codes_[0], static_cast<uint32_t>(IBMW_RPC_STATUS_OK));
 }
 
+// COMM-020: a client context is claimed once per call.
+TEST_P(HoldingDispatcherTest, ReusedContextIsRejected) {
+  Call();
+  ASSERT_TRUE(driver_->held);
+  CallResultCallback(*driver_->held, ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+  driver_->held.reset();
+
+  Call();
+  EXPECT_FALSE(driver_->held);
+  ASSERT_EQ(codes_.size(), 2u);
+  EXPECT_EQ(codes_[1], static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_INVALID_CONTEXT));
+}
+
 INSTANTIATE_TEST_SUITE_P(Filters, HoldingDispatcherTest, ::testing::Values("", "debug_log"));
 
 }  // namespace

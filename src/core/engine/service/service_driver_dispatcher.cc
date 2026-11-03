@@ -316,14 +316,12 @@ void ServiceDriverDispatcher::CallImpl(
     return;
   }
 
-  // Check ctx
+  // Check ctx; claimed atomically so concurrent calls cannot both pass.
   if (ctx_ref.GetType() != ibmw_rpc_context_type_t::IBMW_RPC_CLIENT_CONTEXT ||
-      ctx_ref.CheckUsed()) {
+      !ctx_ref.TrySetUsed()) {
     completion_ptr->Complete(IBMW_RPC_STATUS_CLI_INVALID_CONTEXT);
     return;
   }
-
-  ctx_ref.SetUsed();
 
   // set request id into context if available
   auto it = request_id_map_.find(func_name);

@@ -6,6 +6,7 @@
 #include "base/ibmw_config.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <string>
 #include <string_view>
@@ -78,11 +79,13 @@ class Context {
 
   const ibmw_transport_context_base_t* NativeHandle() const { return &base_; }
 
-  bool CheckUsed() const { return used_; }
-  void SetUsed() { used_ = true; }
+  bool CheckUsed() const { return used_.load(std::memory_order_acquire); }
+  void SetUsed() { used_.store(true, std::memory_order_release); }
+  // True if this call marked the context used (COMM-020).
+  bool TrySetUsed() { return !used_.exchange(true, std::memory_order_acq_rel); }
 
   void Reset() {
-    used_ = false;
+    used_.store(false, std::memory_order_release);
 
     meta_data_map_.clear();
     meta_views_.Clear();
@@ -182,10 +185,10 @@ class Context {
   static const ibmw_transport_context_base_ops_t* GenOpsBase() {
     static constexpr ibmw_transport_context_base_ops_t kOps{
         .check_used = [](void* ctx) -> bool {
-          return static_cast<Context*>(ctx)->used_;
+          return static_cast<Context*>(ctx)->CheckUsed();
         },
         .set_used = [](void* ctx) {
-          static_cast<Context*>(ctx)->used_ = true;  //
+          static_cast<Context*>(ctx)->SetUsed();
         },
         .get_type = [](void* ctx) -> ibmw_transport_context_type_t {
           return static_cast<Context*>(ctx)->type_;
@@ -203,6 +206,9 @@ class Context {
         },
         .get_meta_key_vals = [](void* ctx) -> ibmw_string_view_array_t {
           return static_cast<const Context*>(ctx)->meta_views_.KeyVals();
+        },
+        .try_set_used = [](void* ctx) -> bool {
+          return static_cast<Context*>(ctx)->TrySetUsed();
         }};
 
     return &kOps;
@@ -219,7 +225,7 @@ class Context {
   // Arrays returned by the get_meta_keys/get_meta_key_vals ops (API-026).
   ibmw::util::MetaViews meta_views_;
 
-  bool used_ = false;
+  std::atomic<bool> used_{false};
 
   const ibmw_transport_context_type_t type_;
   const ibmw_transport_context_base_t base_;
@@ -252,6 +258,13 @@ class ContextRef {
   void SetUsed() {
     MW_ASSERT(base_ptr_ && base_ptr_->ops, "Reference is null.");
     base_ptr_->ops->set_used(base_ptr_->ctx);
+  }
+
+  // True if this call marked the context used (COMM-020). A table without
+  // try_set_used cannot claim the context atomically and is rejected.
+  bool TrySetUsed() {
+    MW_ASSERT(base_ptr_ && base_ptr_->ops, "Reference is null.");
+    return base_ptr_->ops->try_set_used != nullptr && base_ptr_->ops->try_set_used(base_ptr_->ctx);
   }
 
   ibmw_transport_context_type_t GetType() const {

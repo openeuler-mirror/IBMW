@@ -111,5 +111,46 @@ TEST(RpcContext, MetaArraysTrackChanges) {
   check(ctx, 1);
 }
 
+
+// COMM-020: of several concurrent claims on one context exactly one wins.
+TEST(RpcContextUsed, TrySetUsedHasExactlyOneWinner) {
+  constexpr int kThreads = 4;
+  for (int round = 0; round < 500; ++round) {
+    Context ctx;
+    ContextRef ref(ctx);
+    std::atomic<int> start{0};
+    std::atomic<int> winners{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+      threads.emplace_back([&] {
+        ++start;
+        while (start.load() < kThreads) {
+        }
+        if (ref.TrySetUsed()) ++winners;
+      });
+    }
+    for (auto& th : threads) th.join();
+    ASSERT_EQ(winners.load(), 1) << "round " << round;
+    EXPECT_TRUE(ctx.CheckUsed());
+  }
+}
+
+TEST(RpcContextUsed, TrySetUsedAfterResetAndWithoutOp) {
+  Context ctx;
+  ContextRef ref(ctx);
+  EXPECT_TRUE(ref.TrySetUsed());
+  EXPECT_FALSE(ref.TrySetUsed());
+  ctx.Reset();
+  EXPECT_TRUE(ref.TrySetUsed());
+
+  // A table without try_set_used cannot claim the context.
+  ibmw_rpc_context_base_ops_t ops = *ctx.NativeHandle()->ops;
+  ops.try_set_used = nullptr;
+  ctx.Reset();
+  const ibmw_service_context_base_t base{.ops = &ops, .ctx = &ctx};
+  EXPECT_FALSE(ContextRef(&base).TrySetUsed());
+  EXPECT_FALSE(ctx.CheckUsed());
+}
+
 }  // namespace
 }  // namespace ibmw::rpc
