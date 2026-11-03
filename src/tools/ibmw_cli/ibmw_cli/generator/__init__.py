@@ -48,7 +48,7 @@ class GeneratorBase:
             output_path = template_info['output_path'].render(name=name)
 
         if platform.system().lower() == "linux":
-            output_dir = self.output_dir_.replace('~', str(os.path.expanduser("~")))
+            output_dir = os.path.expanduser(self.output_dir_)
         else:
             output_dir = self.output_dir_
         output_path = os.path.join(output_dir, output_path)
