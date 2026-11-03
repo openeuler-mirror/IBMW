@@ -352,6 +352,8 @@ apps: []
         self.assertIn("namespace ibmw::demo {", inc_cc)
         self.assertIn("owner_->HandleAdd(req, rsp);", inc_cc)
         self.assertIn("#define IBMW_TS_RPC_SERVER_HANDLER_IMPL(name) \\", inc_cc)
+        # TOOL-046: an unedited handler reports itself as unimplemented.
+        self.assertIn("return IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED;", inc_cc)
 
     def test_json_rpc_server_method_scoped_marker_contract(self):
         mod = {

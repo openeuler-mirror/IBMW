@@ -99,7 +99,10 @@ def test_marker_protocol_round_trip_preserves_user_region_during_regen() -> None
     preserved_regions = _extract_marker_regions(canonical_old_output, [marker])
     merged_output = _preserve_marker_regions(canonical_fresh_output, preserved_regions)
 
-    expected_region = user_customization + "  MW_INFO(\"Add called\");\n  // TODO: implement handler logic\n"
+    expected_region = user_customization + (
+        "  MW_INFO(\"Add called\");\n"
+        "  // TODO: implement handler logic, then remove this default return.\n"
+        "  return ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED);\n")
 
     assert user_customization in old_output
     assert preserved_regions == {marker: expected_region}
