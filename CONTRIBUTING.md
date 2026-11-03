@@ -61,6 +61,19 @@ bash scripts/install_git_hooks.sh
 
 Hook output supplements review; it does not replace the required commands.
 
+Before asking for a merge, run the local gate. It builds, runs the unit tests,
+checks release hygiene and docs governance on the committed tree, and validates
+every commit message on the branch, one step after another:
+
+```bash
+bash scripts/ci_check.sh --base <target-branch>   # add --skip-build for policy checks only
+```
+
+Build and test parallelism defaults to 10 and 8 jobs (`IBMW_CI_JOBS`,
+`IBMW_CI_TEST_JOBS`). `.editorconfig` and `.clang-format` (clang-format 18)
+describe the existing style; apply them to the lines you change, for example
+with `git clang-format`, not to whole files.
+
 ## 3. Commit and history policy
 
 Use focused commits. Types should match actual repository history; common types

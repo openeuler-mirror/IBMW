@@ -1,0 +1,6 @@
+# clang-format 18. Matches the existing C++ style (HYG-044); use it for new or
+# changed lines (e.g. git clang-format), not to reformat the whole tree.
+BasedOnStyle: Google
+ColumnLimit: 100
+# Include order is grouped by hand (own header, std, third party, project).
+SortIncludes: Never
