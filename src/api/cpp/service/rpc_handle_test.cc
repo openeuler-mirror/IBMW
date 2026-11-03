@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include <deque>
+#include <thread>
+#include <vector>
 
 #include "cpp/co/sync_wait.h"
 #include "cpp/executor/executor.h"
@@ -108,6 +110,29 @@ struct InlineExecutor {
       .ctx = &dispatched};
 };
 
+// Runs every dispatched task on a new thread, after Dispatch returns, like a
+// real executor resuming the caller later.
+struct ThreadExecutor {
+  static void Dispatch(void* ctx, ibmw_function_base_t* task) {
+    static_cast<ThreadExecutor*>(ctx)->threads.emplace_back([t = ibmw::executor::Task{task}]() mutable { t(); });
+  }
+  ~ThreadExecutor() {
+    for (auto& thread : threads) thread.join();
+  }
+
+  std::vector<std::thread> threads;
+  ibmw_executor_base_t base{
+      .type = &InlineExecutor::Type,
+      .name = &InlineExecutor::Type,
+      .is_thread_safe = &InlineExecutor::True,
+      .is_in_current_executor = &InlineExecutor::True,
+      .supports_timed_dispatch = &InlineExecutor::False,
+      .dispatch = &Dispatch,
+      .now = &InlineExecutor::Now,
+      .dispatch_at_ns = &InlineExecutor::DispatchAt,
+      .ctx = this};
+};
+
 struct CoProbe : CoAccessBase {
   using CoAccessBase::CoAccessBase;
   ibmw::co::Task<Status> Run() {
@@ -137,6 +162,16 @@ TEST(RpcHandle, CoCallResumesWhenCallbackIsDropped) {
   EXPECT_EQ(RunCo(CoService::Mode::kDrop, &exe.base).Code(),
             static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
   EXPECT_EQ(exe.dispatched, 1);
+}
+
+// The context Call creates for a caller without one lives until Call ends
+// (a braced awaitable temporary released it twice under GCC 11; seen by ASan).
+TEST(RpcHandle, CoCallResumedOnAnotherThread) {
+  ThreadExecutor exe;
+  EXPECT_EQ(RunCo(CoService::Mode::kAnswer, &exe.base).Code(), 5u);
+  EXPECT_EQ(RunCo(CoService::Mode::kDrop, &exe.base).Code(),
+            static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  EXPECT_EQ(exe.threads.size(), 2u);
 }
 
 TEST(RpcHandle, CoCallOffExecutorFailsWithoutThrowing) {
