@@ -3,7 +3,6 @@
 
 #include <charconv>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -28,14 +27,8 @@ namespace {
 using Fibonacci = example_interfaces::action::Fibonacci;
 using GoalHandleFibonacci = rclcpp_action::ServerGoalHandle<Fibonacci>;
 
-volatile std::sig_atomic_t g_should_stop = 0;
-
 constexpr int32_t kMaxFibonacciOrder = 47;
 constexpr int32_t kMaxConcurrentGoals = 4;
-
-void HandleSignal(int) {
-  g_should_stop = 1;
-}
 
 struct Options {
   std::string action_name = "/fibonacci";
@@ -270,20 +263,15 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  std::signal(SIGINT, HandleSignal);
-  std::signal(SIGTERM, HandleSignal);
-
-  rclcpp::init(argc, argv);
+  // rclcpp's SIGINT/SIGTERM handlers shut the context down, which wakes and
+  // ends spin(); no flag polling or spin_some()/sleep loop is needed.
+  rclcpp::init(argc, argv, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::All);
   auto server = std::make_shared<FibonacciActionServer>(*options);
   server->PrintReady();
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(server);
-
-  while (rclcpp::ok() && g_should_stop == 0) {
-    executor.spin_some();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  executor.spin();
 
   server->Stop();
   rclcpp::shutdown();
