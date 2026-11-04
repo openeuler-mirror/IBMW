@@ -1312,6 +1312,15 @@ ibmw:
         cfg_file_path: <string>        # Path to module config file
 ```
 
+The runtime resolves library paths (`packages[].path`, `extensions.items[].path`,
+`runtime_graph.type_support_pkgs`) relative to the current working directory,
+so prefer absolute paths. A path containing `/` is
+only loaded when the library file (after resolving symlinks) and its directory
+are owned by the current user or root and are not writable by others; a
+world-writable directory is accepted only with the sticky bit (like `/tmp`).
+Group write is allowed. Bare names (`libfoo.so`) use the system loader search
+path unchanged.
+
 ---
 
 ### Extension-Specific Options

@@ -1250,6 +1250,11 @@ ibmw:
         cfg_file_path: <string>        # Module 配置文件路径
 ```
 
+库路径（`packages[].path`、`extensions.items[].path`、`runtime_graph.type_support_pkgs`）在运行时中按当前工作目录解析相对路径，
+建议使用绝对路径。包含 `/` 的路径只有在库文件（解析符号链接后）及其所在目录属于当前用户或 root、且其他用户不可写时
+才会加载；所有人可写的目录只有设置了粘滞位（如 `/tmp`）才被接受。允许组可写。不含 `/` 的库名（`libfoo.so`）
+仍按系统加载器搜索路径加载。
+
 ---
 
 ### Extension 专属选项

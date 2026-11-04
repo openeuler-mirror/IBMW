@@ -11,6 +11,8 @@
 #include <utility>
 
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
   #include <link.h>
 #endif
@@ -39,6 +41,8 @@ class DynamicLib {
   bool Load(const std::string& lib_name) {
     Unload();
     lib_name_ = lib_name;
+    LoadError() = UntrustedReason(lib_name_);
+    if (!LoadError().empty()) return false;
 
 #if defined(IBMW_ENABLE_DLOPEN_DEEPBIND) && defined(RTLD_DEEPBIND)
     handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
@@ -103,12 +107,44 @@ class DynamicLib {
   const std::string& GetLibFullPath() const { return lib_full_path_; }
 
   static std::string GetErr() {
+    if (!LoadError().empty()) return std::exchange(LoadError(), std::string());
     // dlerror() returns NULL when no error is pending (or it was already read).
     const char* err = dlerror();
     return err != nullptr ? std::string(err) : std::string("no dynamic library error pending");
   }
 
  private:
+  // CORE-017: a library given by path (anything with a '/') must not be
+  // replaceable by other users. The file and its directory (after resolving
+  // symlinks) must be owned by the effective user or root and not writable by
+  // others; a sticky directory such as /tmp may be. Group write is allowed.
+  // Bare names keep the loader search path. Two stat() calls per load; this is
+  // a check at load time, not a race-free guarantee.
+  static std::string UntrustedReason(const std::string& lib_name) {
+    if (lib_name.find('/') == std::string::npos) return {};
+    std::error_code ec;
+    const auto file = std::filesystem::canonical(lib_name, ec);
+    struct stat status {};
+    if (ec || ::stat(file.c_str(), &status) != 0) return {};  // dlopen reports it
+    const auto trusted_owner = [](const struct stat& st) { return st.st_uid == ::geteuid() || st.st_uid == 0; };
+    if (!trusted_owner(status) || (status.st_mode & S_IWOTH) != 0) {
+      return "Refusing to load '" + file.string() +
+             "': the library must be owned by the current user or root and not writable by others.";
+    }
+    const auto directory = file.parent_path();
+    if (::stat(directory.c_str(), &status) != 0) return {};
+    if (!trusted_owner(status) || ((status.st_mode & S_IWOTH) != 0 && (status.st_mode & S_ISVTX) == 0)) {
+      return "Refusing to load '" + file.string() + "': directory '" + directory.string() +
+             "' must be owned by the current user or root and not writable by others.";
+    }
+    return {};
+  }
+
+  static std::string& LoadError() {
+    thread_local std::string error;
+    return error;
+  }
+
   DynlibHandle handle_ = nullptr;
   std::string lib_name_;
   std::string lib_full_path_;
