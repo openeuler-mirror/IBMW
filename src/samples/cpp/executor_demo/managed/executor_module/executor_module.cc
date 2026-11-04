@@ -24,7 +24,15 @@ bool ExecutorModule::Run() {
 }
 void ExecutorModule::Stop() {
   run_flag_ = false;
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  // Wait until the pending TimeScheduleDemo callback has run and seen
+  // !run_flag_, so no task referencing this module is left queued. The chain
+  // period is 1 s; the deadline only guards against a lost callback.
+  constexpr auto kChainStopTimeout = std::chrono::seconds(3);
+  std::unique_lock<std::mutex> lock(chain_mutex_);
+  if (!chain_cv_.wait_for(lock, kChainStopTimeout, [this] { return !chain_pending_; })) {
+    MW_ERROR("Time schedule chain did not stop within {} s.", kChainStopTimeout.count());
+    return;
+  }
   MW_INFO("Stop succeeded.");
 }
 void ExecutorModule::SimpleExecuteDemo() {
@@ -33,7 +41,11 @@ void ExecutorModule::SimpleExecuteDemo() {
 void ExecutorModule::ThreadSafeDemo() {
   uint32_t n = 0;
   for (uint32_t ii = 0; ii < 10000; ++ii) { thread_safe_executor_.Dispatch([&n]() { n++; }); }
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  // The strand runs tasks in dispatch order, so once this latch-tracked
+  // marker has run every n++ above has run too (and happens-before the read).
+  ibmw::util::DynamicLatch n_latch;
+  thread_safe_executor_.TryDispatch(n_latch, []() {});
+  n_latch.CloseAndWait();
   MW_INFO("Value of n is {}", n);
   uint32_t m = 0;
   for (uint32_t ii = 0; ii < 10000; ++ii) { thread_safe_executor_.TryDispatch(latch_, [&m]() { m++; }); }
@@ -41,8 +53,17 @@ void ExecutorModule::ThreadSafeDemo() {
   MW_INFO("Value of m is {}", m);
 }
 void ExecutorModule::TimeScheduleDemo() {
-  if (!run_flag_) return;
+  if (!run_flag_) {
+    std::lock_guard<std::mutex> lock(chain_mutex_);
+    chain_pending_ = false;
+    chain_cv_.notify_all();
+    return;
+  }
   MW_INFO("Loop count : {}", loop_count_++);
+  {
+    std::lock_guard<std::mutex> lock(chain_mutex_);
+    chain_pending_ = true;
+  }
   time_schedule_executor_.DispatchAfter(std::chrono::seconds(1), std::bind(&ExecutorModule::TimeScheduleDemo, this));
 }
 }
