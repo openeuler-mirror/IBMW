@@ -8,6 +8,11 @@ details remain governed by the documentation for each release.
 
 ### Changed
 
+- Configuration: `${ENV}` references are expanded after the YAML is parsed,
+  inside keys and values only. An environment value can no longer add YAML
+  structure (for example extra `packages`/`extensions` entries). Unquoted
+  `${ENV}` inside flow collections (`[...]`, `{...}`) is now a YAML syntax
+  error and must be quoted.
 - Net/gRPC servers: the listen address is no longer probed by a trial bind in
   `Initialize`; `Start` binds and reports a failure (the gRPC server used to
   lose it in its accept coroutine). A failed `Start` can be retried.

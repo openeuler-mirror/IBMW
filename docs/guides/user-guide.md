@@ -1036,7 +1036,10 @@ class MultiDriverModule : public ibmw::Module {
 All IBMW configuration lives under the `ibmw:` top-level key. Module-specific
 configuration uses separate top-level keys matching the module name.
 
-Environment variables are supported: `${MY_VAR}` is substituted before parsing.
+Environment variables are supported: after the YAML is parsed, `${MY_VAR}` in a
+key or value is replaced with the variable's value (empty when unset). The value
+is inserted as plain text inside that one scalar and is never parsed as YAML.
+Inside flow collections (`[...]`, `{...}`) quote it, e.g. `["${MY_VAR}", b]`.
 
 ### Top-Level Structure
 

@@ -3,6 +3,10 @@
 
 #include "engine/yaml_tools.h"
 
+#include <vector>
+
+#include "base/string_util.h"
+
 namespace ibmw::runtime::core::util {
 
 size_t LevenshteinDistance(const std::string& s1, const std::string& s2) {
@@ -98,6 +102,41 @@ std::string CheckYamlNodes(
   }
 
   return msg.str();
+}
+
+namespace {
+
+void ReplaceEnvVarsInNode(YAML::Node node, std::vector<YAML::Node>& replaced) {
+  switch (node.Type()) {
+    case YAML::NodeType::Scalar: {
+      if (node.Scalar().find("${") == std::string::npos) return;
+      // An alias shares the node: expand it once, inserted values are not expanded again.
+      for (const auto& done : replaced) {
+        if (done.is(node)) return;
+      }
+      node = ibmw::common::util::ReplaceEnvVars(node.Scalar());
+      replaced.push_back(node);
+      break;
+    }
+    case YAML::NodeType::Sequence:
+      for (auto child : node) ReplaceEnvVarsInNode(child, replaced);
+      break;
+    case YAML::NodeType::Map:
+      for (auto it = node.begin(); it != node.end(); ++it) {
+        ReplaceEnvVarsInNode(it->first, replaced);
+        ReplaceEnvVarsInNode(it->second, replaced);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+}  // namespace
+
+void ReplaceEnvVarsInScalars(YAML::Node node) {
+  std::vector<YAML::Node> replaced;
+  ReplaceEnvVarsInNode(node, replaced);
 }
 
 }  // namespace ibmw::runtime::core::util

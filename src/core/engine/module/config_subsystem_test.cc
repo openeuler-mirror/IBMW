@@ -98,5 +98,50 @@ TEST_F(ConfigSubsystemTempCfgTest, DoesNotFollowPlantedSymlink) {
   EXPECT_NE(ReadAll(file).find("key: 1"), std::string::npos);
 }
 
+// CORE-020: ${ENV} is expanded after parsing, inside scalars only, so an
+// environment value cannot inject keys into the configuration.
+TEST_F(ConfigSubsystemTempCfgTest, EnvVarsExpandInsideScalarsOnly) {
+  const auto file = dir_ / "env.yaml";
+  {
+    std::ofstream(file) << "ibmw:\n"
+                           "  config:\n"
+                           "    temp_cfg_path: " << (dir_ / "tmp").string() << "\n"
+                           "env_mod:\n"
+                           "  path: ${IBMW_T020_INJECT}\n"
+                           "  inline: pre-${IBMW_T020_PLAIN}-post\n"
+                           "  port: ${IBMW_T020_PORT}\n"
+                           "  ${IBMW_T020_KEY}: keyed\n"
+                           "  flow: [\"${IBMW_T020_PLAIN}\", b]\n"
+                           "  block:\n"
+                           "    - ${IBMW_T020_PLAIN}\n"
+                           "  anchor: &a ${IBMW_T020_NESTED}\n"
+                           "  alias: *a\n";
+  }
+  ::setenv("IBMW_T020_INJECT", "x\n  injected: 1", 1);
+  ::setenv("IBMW_T020_PLAIN", "abc", 1);
+  ::setenv("IBMW_T020_PORT", "8080", 1);
+  ::setenv("IBMW_T020_KEY", "dyn", 1);
+  ::setenv("IBMW_T020_NESTED", "${IBMW_T020_PLAIN}", 1);
+  ConfigSubsystem cfg;
+  cfg.SetLogger(std::make_shared<ibmw::common::util::LoggerWrapper>());
+  cfg.Initialize(file);
+  for (const char* name : {"IBMW_T020_INJECT", "IBMW_T020_PLAIN", "IBMW_T020_PORT", "IBMW_T020_KEY",
+                           "IBMW_T020_NESTED"}) {
+    ::unsetenv(name);
+  }
+
+  const auto mod = cfg.GetUserRootOptionsNode()["env_mod"];
+  EXPECT_EQ(mod["path"].as<std::string>(), "x\n  injected: 1");
+  EXPECT_FALSE(mod["injected"]);
+  EXPECT_EQ(mod["inline"].as<std::string>(), "pre-abc-post");
+  EXPECT_EQ(mod["port"].as<int>(), 8080);
+  EXPECT_EQ(mod["dyn"].as<std::string>(), "keyed");
+  EXPECT_EQ(mod["flow"][0].as<std::string>(), "abc");
+  EXPECT_EQ(mod["block"][0].as<std::string>(), "abc");
+  // Inserted values are not expanded again, also through an alias.
+  EXPECT_EQ(mod["anchor"].as<std::string>(), "${IBMW_T020_PLAIN}");
+  EXPECT_EQ(mod["alias"].as<std::string>(), "${IBMW_T020_PLAIN}");
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::configurator

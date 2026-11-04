@@ -86,7 +86,8 @@ void ConfigSubsystem::Initialize(
     MW_REQUIRE(file_stream, "Can not open cfg file '{}'.", cfg_file_path_.string());
     std::stringstream file_data;
     file_data << file_stream.rdbuf();
-    root = YAML::Load(ibmw::common::util::ReplaceEnvVars(file_data.str()));
+    root = YAML::Load(file_data.str());
+    util::ReplaceEnvVarsInScalars(root);
   }
   InitializeRoot(std::move(root));
 }
