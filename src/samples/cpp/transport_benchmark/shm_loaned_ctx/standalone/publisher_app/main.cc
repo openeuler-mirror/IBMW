@@ -7,8 +7,11 @@
 // engine.Initialize() -- the shm extension registers it as "iceoryx"
 // (driver_name option) -- and injected as a plain TransportDriver*.
 
+#include <chrono>
 #include <csignal>
+#include <future>
 #include <iostream>
+#include <thread>
 
 #include "cpp/core.h"
 #include "engine/engine.h"
@@ -17,14 +20,10 @@
 
 using namespace ibmw::runtime::core;
 
-Engine* g_engine_ptr = nullptr;
+volatile sig_atomic_t g_shutdown_requested = 0;
 
 void SignalHandler(int sig) {
-  if (g_engine_ptr && (sig == SIGINT || sig == SIGTERM)) {
-    g_engine_ptr->Shutdown();
-    return;
-  }
-  raise(sig);
+  if (sig == SIGINT || sig == SIGTERM) g_shutdown_requested = 1;
 }
 
 int main(int argc, char** argv) {
@@ -38,7 +37,6 @@ int main(int argc, char** argv) {
 
   try {
     Engine engine;
-    g_engine_ptr = &engine;
 
     ibmw::samples::transport_benchmark::shm_loaned_ctx::PublisherModule pub;
     engine.GetModuleBus().RegisterModule(pub.NativeHandle());
@@ -60,9 +58,16 @@ int main(int argc, char** argv) {
     }
     pub.SetDriver(driver);
 
-    engine.Start();
+    // Shutdown (and the final Core Metrics snapshot) runs on the main thread,
+    // never in the signal handler. The loop also ends when the engine stops on
+    // its own; the Shutdown() below is then a no-op.
+    auto stopped = engine.AsyncStart();
+    while (!g_shutdown_requested &&
+           stopped.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     engine.Shutdown();
-    g_engine_ptr = nullptr;
+    stopped.get();
   } catch (const std::exception& e) {
     std::cerr << "shm_loaned_ctx publisher exception: " << e.what() << "\n";
     return -1;

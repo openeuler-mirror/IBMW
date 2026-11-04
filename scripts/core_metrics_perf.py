@@ -30,10 +30,27 @@ REGISTERED_BUILD_TARGETS = ("iox_loaned_ctx_publisher_app","iox_loaned_ctx_subsc
                             "core_metrics_reporter_hot_bench","iox-roudi","ibmw_extensions_iceoryx_ext")
 VERDICT_EXIT_CODES = {"PASS":0,"FAIL":1,"INCONCLUSIVE":2}
 PROTOCOL="core-metrics-lossless-v2"
+# Lane label and schema ids written into plan, summary and calibration
+# artifacts; read at call time so a lane wrapper can rebind them.
+PROTOCOL_LABEL="lossless-v2"
+PLAN_SCHEMA="ibmw-core-metrics-lossless-plan-v2"
+E2E_SUMMARY_SCHEMA="ibmw-core-metrics-lossless-v2-e2e-summary-v1"
+DIAGNOSTIC_SCHEMA="ibmw-core-metrics-lossless-v2-conservation-diagnostic-v1"
 CONTRACT_DIRECTORY=Path(__file__).resolve().parent/"contracts"
 PROTOCOL_CONTRACT=CONTRACT_DIRECTORY/"core-metrics-lossless-v2.json"
 DEPENDENCY_CONTRACT=CONTRACT_DIRECTORY/"core-metrics-dependencies-v1.json"
+PROTOCOL_CONTRACT_ARCHIVED="scripts/contracts/core-metrics-lossless-v2.json"
+DEPENDENCY_CONTRACT_ARCHIVED="scripts/contracts/core-metrics-dependencies-v1.json"
 BWRAP=Path("/usr/bin/bwrap")
+# Lane identity. core_metrics_shm_perf.py rebinds these on its own module
+# instance; the values below are the registered iceoryx lane.
+BROKER_BINARY="iox-roudi"
+E2E_PUBLISHER_APP="iox_loaned_ctx_publisher_app"
+E2E_SUBSCRIBER_APP="iox_loaned_ctx_subscriber_app"
+DIRECT_COUNTER_KIND="direct_iceoryx_loan"
+COUNTER_MODULE="IoxLoanedCtxPublisherModule"
+COUNTER_TOPIC="iox_bench_ctx_topic"
+COUNTER_DRIVER="iceoryx"
 
 class InvalidTrial(RuntimeError): pass
 
@@ -314,7 +331,7 @@ def verify_dependency_snapshot(out,expected_manifest_sha=None,expected_aggregate
     if expected_manifest_sha and manifest_sha!=expected_manifest_sha:raise ValueError("dependency manifest raw digest mismatch")
     manifest=json.loads(manifest_path.read_text())
     if manifest.get("schema")!="ibmw-dependency-snapshot-v2":raise ValueError("unsupported dependency manifest")
-    archived_root=out/SOURCE_DIRECTORY;contract_path=archived_root/"scripts/contracts/core-metrics-dependencies-v1.json" if archived_root.is_dir() else out/DEPENDENCY_CONTRACT_COPY
+    archived_root=out/SOURCE_DIRECTORY;contract_path=archived_root/DEPENDENCY_CONTRACT_ARCHIVED if archived_root.is_dir() else out/DEPENDENCY_CONTRACT_COPY
     trusted,contract_sha=load_dependency_contract(archived_root if archived_root.is_dir() else None,contract_path)
     if manifest.get("contract_sha256")!=contract_sha:raise ValueError("dependency contract binding mismatch")
     components=manifest.get("components")
@@ -344,7 +361,7 @@ def counter_conservation(path):
     lines=Path(path).read_bytes().splitlines()
     if len(lines)!=64 or any(not line.strip() for line in lines):raise ValueError("metrics JSONL cardinality mismatch")
     values={metric:0 for metric in COUNTER_METRICS};seen=set();structural_seen=set();seq=[];kind_counts={}
-    allowed={"logical_publish","logical_loan","driver_send","source_driver_loan","direct_iceoryx_loan"}
+    allowed={"logical_publish","logical_loan","driver_send","source_driver_loan",DIRECT_COUNTER_KIND}
     for raw in lines:
         item=strict_json_bytes(raw,"metrics")
         if not isinstance(item,dict) or item.get("schema")!="ibmw.core_metrics.v1" or item.get("complete") is not True:raise ValueError("invalid metrics envelope")
@@ -354,14 +371,14 @@ def counter_conservation(path):
         kind_counts[kind]=kind_counts.get(kind,0)+1
         cumulative=item.get("cumulative")
         if not isinstance(cumulative,dict):raise ValueError("invalid cumulative metrics object")
-        if kind=="direct_iceoryx_loan":
+        if kind==DIRECT_COUNTER_KIND:
             if set(item)!={"schema","snapshot_seq","kind","metric","topic","type","driver","value","cumulative","complete"}:raise ValueError("unknown direct counter field")
             if set(cumulative)!={"metric","topic","type","driver","value"}:raise ValueError("unknown cumulative direct counter field")
             metric=item["metric"];dimension=(metric,item["topic"],item["type"],item["driver"])
-            if metric not in COUNTER_METRICS or item["topic"]!="iox_bench_ctx_topic" or item["type"] not in COUNTER_TYPES or item["driver"]!="iceoryx":raise ValueError("unknown direct counter dimension")
+            if metric not in COUNTER_METRICS or item["topic"]!=COUNTER_TOPIC or item["type"] not in COUNTER_TYPES or item["driver"]!=COUNTER_DRIVER:raise ValueError("unknown direct counter dimension")
             if dimension in seen:raise ValueError("duplicate direct counter dimension")
             seen.add(dimension);value=_nonnegative_integer(item["value"],metric)
-            if cumulative!={"metric":metric,"topic":item["topic"],"type":item["type"],"driver":"iceoryx","value":value}:raise ValueError("direct cumulative counter mismatch")
+            if cumulative!={"metric":metric,"topic":item["topic"],"type":item["type"],"driver":COUNTER_DRIVER,"value":value}:raise ValueError("direct cumulative counter mismatch")
             values[metric]+=value
         else:
             if set(item)!={"schema","snapshot_seq","kind","cumulative","complete"}:raise ValueError(f"unknown {kind} counter field")
@@ -371,14 +388,14 @@ def counter_conservation(path):
             for field in numeric:_nonnegative_integer(cumulative[field],f"{kind}.{field}")
             if kind=="source_driver_loan":dimension=(kind,cumulative["driver"])
             else:
-                if cumulative["pkg"]!="core" or cumulative["module"]!="IoxLoanedCtxPublisherModule" or cumulative["topic"]!="iox_bench_ctx_topic" or cumulative["type"] not in COUNTER_TYPES:raise ValueError(f"unknown {kind} dimension")
-                if kind=="driver_send" and cumulative["driver"]!="iceoryx":raise ValueError("unknown driver_send driver")
+                if cumulative["pkg"]!="core" or cumulative["module"]!=COUNTER_MODULE or cumulative["topic"]!=COUNTER_TOPIC or cumulative["type"] not in COUNTER_TYPES:raise ValueError(f"unknown {kind} dimension")
+                if kind=="driver_send" and cumulative["driver"]!=COUNTER_DRIVER:raise ValueError("unknown driver_send driver")
                 dimension=(kind,cumulative["type"])
             if dimension in structural_seen:raise ValueError(f"duplicate {kind} dimension")
             structural_seen.add(dimension)
-    if seq!=list(range(1,65)) or kind_counts!={"logical_publish":7,"logical_loan":7,"driver_send":7,"source_driver_loan":1,"direct_iceoryx_loan":42}:raise ValueError("metrics sequence/kind cardinality mismatch")
-    expected={(metric,"iox_bench_ctx_topic",type_name,"iceoryx") for type_name in COUNTER_TYPES for metric in COUNTER_METRICS}
-    expected_structural={(kind,type_name) for kind in ("logical_publish","logical_loan","driver_send") for type_name in COUNTER_TYPES}|{("source_driver_loan","iceoryx")}
+    if seq!=list(range(1,65)) or kind_counts!={"logical_publish":7,"logical_loan":7,"driver_send":7,"source_driver_loan":1,DIRECT_COUNTER_KIND:42}:raise ValueError("metrics sequence/kind cardinality mismatch")
+    expected={(metric,COUNTER_TOPIC,type_name,COUNTER_DRIVER) for type_name in COUNTER_TYPES for metric in COUNTER_METRICS}
+    expected_structural={(kind,type_name) for kind in ("logical_publish","logical_loan","driver_send") for type_name in COUNTER_TYPES}|{("source_driver_loan",COUNTER_DRIVER)}
     if seen!=expected or structural_seen!=expected_structural:raise ValueError("counter dimensions incomplete")
     a=values["logical_attempt"];s=values["logical_success"]
     valid=(a>0 and a==s+values["logical_fail"]
@@ -617,7 +634,8 @@ def _seal_artifact_names(mode,micro=False):
         names+=["bench-output.json"]
         if mode=="counters":names.append("metrics/metrics.jsonl")
     else:
-        names += ["observations.json","status.json","publisher-status.json","latency.csv","publisher.yaml","subscriber.yaml","publisher.log","subscriber.log","roudi.log"]
+        names += ["observations.json","status.json","publisher-status.json","latency.csv","publisher.yaml","subscriber.yaml","publisher.log","subscriber.log"]
+        if BROKER_BINARY:names.append("roudi.log")
         if mode=="counters":names.append("metrics/metrics.jsonl")
     return sorted(names)
 def _seal_artifacts(trial,mode,micro=False):
@@ -661,19 +679,20 @@ def run_trial(mode,build_dir,trial,hz,measured,quality=True,warmup=10,cooldown=5
     begin_ns=time.monotonic_ns()+STARTUP_GUARD_SEC*1_000_000_000;end_ns=begin_ns+measured*1_000_000_000
     publisher_yaml_sha256=yaml(trial/"publisher.yaml",True,hz,warmup,measured,cooldown,publisher_status_path=pub_status,measure_begin_ns=begin_ns,measure_end_ns=end_ns)
     subscriber_yaml_sha256=yaml(trial/"subscriber.yaml",False,hz,warmup,measured,cooldown,lat,status,measure_begin_ns=begin_ns,measure_end_ns=end_ns)
-    logs={n:open(trial/f"{n}.log","w") for n in ("roudi","subscriber","publisher")}; prefix=lambda cpu:["taskset","-c",str(cpu)]
+    logs={n:open(trial/f"{n}.log","w") for n in (("roudi","subscriber","publisher") if BROKER_BINARY else ("subscriber","publisher"))}; prefix=lambda cpu:["taskset","-c",str(cpu)]
     base=clean_env({"IBMW_CORE_METRICS":"off"}); ps=[]
     try:
-        r=subprocess.Popen(prefix(CPUS[0])+[str(build_dir/"iox-roudi")],cwd=build_dir,env=base,stdout=logs["roudi"],stderr=subprocess.STDOUT);ps=[r];time.sleep(1)
-        s=subprocess.Popen(prefix(CPUS[1])+[str(subscriber_build_dir/"iox_loaned_ctx_subscriber_app"),str(trial/"subscriber.yaml")],cwd=subscriber_build_dir,env=base,stdout=logs["subscriber"],stderr=subprocess.STDOUT);ps.insert(0,s)
+        r=None
+        if BROKER_BINARY:r=subprocess.Popen(prefix(CPUS[0])+[str(build_dir/BROKER_BINARY)],cwd=build_dir,env=base,stdout=logs["roudi"],stderr=subprocess.STDOUT);ps=[r];time.sleep(1)
+        s=subprocess.Popen(prefix(CPUS[1])+[str(subscriber_build_dir/E2E_SUBSCRIBER_APP),str(trial/"subscriber.yaml")],cwd=subscriber_build_dir,env=base,stdout=logs["subscriber"],stderr=subprocess.STDOUT);ps.insert(0,s)
         if not wait_ready(trial/"subscriber.log","PERF_SUBSCRIBER_RUNNING",s):raise InvalidTrial("subscriber not running")
         subscriber_ready_ns=time.monotonic_ns()
         env=clean_env({"IBMW_CORE_METRICS":"counters" if mode=="counters" else "off","IBMW_OBSERVABILITY_OUTPUT_DIR":str(metrics)})
-        p=subprocess.Popen(prefix(CPUS[2])+[str(build_dir/"iox_loaned_ctx_publisher_app"),str(trial/"publisher.yaml")],cwd=build_dir,env=env,stdout=logs["publisher"],stderr=subprocess.STDOUT);ps.insert(0,p)
+        p=subprocess.Popen(prefix(CPUS[2])+[str(build_dir/E2E_PUBLISHER_APP),str(trial/"publisher.yaml")],cwd=build_dir,env=env,stdout=logs["publisher"],stderr=subprocess.STDOUT);ps.insert(0,p)
         if not wait_ready(trial/"publisher.log","PERF_PUBLISHER_RUNNING",p):raise InvalidTrial("publisher not running")
         publisher_ready_ns=time.monotonic_ns();send_begin_ns=begin_ns-warmup*1_000_000_000
         if max(subscriber_ready_ns,publisher_ready_ns)>=send_begin_ns:raise InvalidTrial("readiness missed fixed publish start")
-        procs={"publisher":p,"subscriber":s,"roudi":r}; affin={k:thread_affinity(v.pid,CPUS[i]) for i,(k,v) in enumerate((("roudi",r),("subscriber",s),("publisher",p)))}
+        procs={"publisher":p,"subscriber":s,"roudi":r} if r else {"publisher":p,"subscriber":s}; affin={k:thread_affinity(v.pid,CPUS[i]) for i,(k,v) in enumerate((("roudi",r),("subscriber",s),("publisher",p))) if v}
         if not all(x[0] for x in affin.values()):raise InvalidTrial(f"critical thread affinity escaped: {affin}")
         time.sleep(max(0,(begin_ns-time.monotonic_ns())/1_000_000_000));start_sample_ns=time.monotonic_ns();start={k:proc_ticks(v.pid) for k,v in procs.items()}
         if any(v is None for v in start.values()):raise InvalidTrial("initial proc ticks unreadable")
@@ -700,7 +719,7 @@ def run_trial(mode,build_dir,trial,hz,measured,quality=True,warmup=10,cooldown=5
         except subprocess.TimeoutExpired:raise InvalidTrial("publisher did not complete controlled shutdown")
         if p.returncode!=0:raise InvalidTrial(f"publisher exited {p.returncode}")
         terminate(ps,True);ps=[]
-        if not totals:raise InvalidTrial("no valid simultaneous three-process PSS samples")
+        if not totals:raise InvalidTrial(f"no valid simultaneous {'three' if BROKER_BINARY else 'two'}-process PSS samples")
         if not status.exists() or not pub_status.exists() or not lat.exists():raise InvalidTrial("missing correctness/latency artifact")
         st=json.loads(status.read_text());pst=json.loads(pub_status.read_text());reconciliation=reconcile_status(pst,st,begin_ns,end_ns);rows=list(csv.DictReader(lat.open()))
         if not rows:raise InvalidTrial("empty latency artifact")
@@ -784,7 +803,7 @@ def reporter_hot_value(path):
     lines=Path(path).read_bytes().splitlines()
     if len(lines)!=1:raise ValueError("Reporter metrics cardinality mismatch")
     item=strict_json_bytes(lines[0],"Reporter metrics");keys={"schema","snapshot_seq","kind","metric","topic","type","driver","value","cumulative","complete"}
-    if not isinstance(item,dict) or set(item)!=keys or item.get("schema")!="ibmw.core_metrics.v1" or item.get("snapshot_seq")!=1 or item.get("kind")!="direct_iceoryx_loan" or item.get("metric")!="hot_hook" or item.get("topic")!="" or item.get("type")!="" or item.get("driver")!="" or item.get("complete") is not True:raise ValueError("invalid Reporter metrics record")
+    if not isinstance(item,dict) or set(item)!=keys or item.get("schema")!="ibmw.core_metrics.v1" or item.get("snapshot_seq")!=1 or item.get("kind")!=DIRECT_COUNTER_KIND or item.get("metric")!="hot_hook" or item.get("topic")!="" or item.get("type")!="" or item.get("driver")!="" or item.get("complete") is not True:raise ValueError("invalid Reporter metrics record")
     value=_nonnegative_integer(item["value"],"hot_hook");expected={"metric":"hot_hook","topic":"","type":"","driver":"","value":value}
     if item.get("cumulative")!=expected:raise ValueError("Reporter cumulative counter mismatch")
     return [value]
@@ -931,7 +950,7 @@ def e2e_only_summary(e2e,load):
     means={}
     if complete:
         means={mode:{key:statistics.mean(r[key] for r in e2e if r["mode"]==mode) for key in ("throughput","p50_us","p99_us","cpu_cores","pss_median_kib","bottleneck_utilization")} for mode in MODES}
-    return {"schema":"ibmw-core-metrics-lossless-v2-e2e-summary-v1","scope":"e2e-only","protocol":PROTOCOL,"purpose":"formal lossless-v2 E2E gate rerun","verdict":verdict,"e2e_verdict":verdict,"micro_verdict":"NOT_APPLICABLE","quality_valid":quality,"complete_e2e":complete,"complete_micro":False,"e2e_count":len(e2e),"micro_count":0,"micro_trial_count":0,"duplicate_count":globals().get("_RESUME_DUPLICATE_COUNT",0),"frozen_load":load,"yaml_sha256":sorted({r[k] for r in e2e for k in ("publisher_yaml_sha256","subscriber_yaml_sha256") if k in r}),"e2e_comparisons":cmp,"micro_comparisons":{},"mode_means":means}
+    return {"schema":E2E_SUMMARY_SCHEMA,"scope":"e2e-only","protocol":PROTOCOL,"purpose":f"formal {PROTOCOL_LABEL} E2E gate rerun","verdict":verdict,"e2e_verdict":verdict,"micro_verdict":"NOT_APPLICABLE","quality_valid":quality,"complete_e2e":complete,"complete_micro":False,"e2e_count":len(e2e),"micro_count":0,"micro_trial_count":0,"duplicate_count":globals().get("_RESUME_DUPLICATE_COUNT",0),"frozen_load":load,"yaml_sha256":sorted({r[k] for r in e2e for k in ("publisher_yaml_sha256","subscriber_yaml_sha256") if k in r}),"e2e_comparisons":cmp,"micro_comparisons":{},"mode_means":means}
 def lossless_v2_summary(e2e,micro,load):
     epairs,ecmp,everdict=comparisons(e2e,(('cpu_cores','cpu'),('throughput','throughput'),('p50_us','p50'),('p99_us','p99')),True) if e2e else ([],{},"INCONCLUSIVE")
     mpairs,mcmp,mverdict=comparisons(micro,(('ns_per_op','micro'),),False) if micro else ([],{},"INCONCLUSIVE")
@@ -951,7 +970,7 @@ def summary_label(summary):
     if summary.get("scope")=="e2e-only":return "# Core Metrics lossless v2 E2E: "+summary["verdict"]
     return "# Core Metrics lossless v2: "+summary["verdict"]
 def write_summary(out,summary):
-    out=Path(out);summary=dict(summary);_,contract_sha=protocol_contract(out/SOURCE_DIRECTORY/"scripts/contracts/core-metrics-lossless-v2.json" if (out/SOURCE_DIRECTORY).is_dir() else None);summary.update(delivery_profile=LOSSLESS_PROFILE,protocol=PROTOCOL,protocol_contract_sha256=contract_sha,frozen_load=FROZEN_LOAD,batch=BATCH_SIZE)
+    out=Path(out);summary=dict(summary);_,contract_sha=protocol_contract(out/SOURCE_DIRECTORY/PROTOCOL_CONTRACT_ARCHIVED if (out/SOURCE_DIRECTORY).is_dir() else None);summary.update(delivery_profile=LOSSLESS_PROFILE,protocol=PROTOCOL,protocol_contract_sha256=contract_sha,frozen_load=FROZEN_LOAD,batch=BATCH_SIZE)
     if (out/"plan.json").is_file():summary["plan_sha256"]=sha(out/"plan.json")
     write_json(out/"summary.json",summary)
     (out/"summary.md").write_text(summary_label(summary)+"\n\n```json\n"+json.dumps(summary,indent=2)+"\n```\n")
@@ -973,7 +992,7 @@ def registered_plan(contract_sha=None):
     if contract_sha is None:_,contract_sha=protocol_contract()
     orders=list(itertools.permutations(MODES))*4;random.Random(SEED).shuffle(orders)
     micro_orders=list(itertools.permutations(MODES))*5;random.Random(SEED).shuffle(micro_orders)
-    return {"schema":"ibmw-core-metrics-lossless-plan-v2","protocol":PROTOCOL,"protocol_contract_sha256":contract_sha,"seed":SEED,"cpus":list(CPUS),"startup_guard_sec":STARTUP_GUARD_SEC,"window_clock":"CLOCK_MONOTONIC shared [begin,end)","orders":[list(x) for x in orders],"micro":{"scope":"actual Reporter query/stable binding/null branch/atomic ABI indirect add; live LoanSerializedSample IPC remains E2E","warmup_ops":2000000,"measured_ops":20000000,"blocks":30,"orders":[list(x) for x in micro_orders]},"capacity":{"probes":3,"probe_sec":15,"confirmation_sec":20,"confirmation_range":[.70,.85],"formal_range":[.65,.90],"candidates":list(CAPACITY_CANDIDATES),"candidate_source":"fixed before lossless-v2 from separate batch-size and pacing-window design smokes","pacing_policy":"absolute batch schedule; batch 128; skip missed slots; no schedule rebase; no catch-up burst","unpaced_policy":"saturation_diagnostic_only"}}
+    return {"schema":PLAN_SCHEMA,"protocol":PROTOCOL,"protocol_contract_sha256":contract_sha,"seed":SEED,"cpus":list(CPUS),"startup_guard_sec":STARTUP_GUARD_SEC,"window_clock":"CLOCK_MONOTONIC shared [begin,end)","orders":[list(x) for x in orders],"micro":{"scope":"actual Reporter query/stable binding/null branch/atomic ABI indirect add; live LoanSerializedSample IPC remains E2E","warmup_ops":2000000,"measured_ops":20000000,"blocks":30,"orders":[list(x) for x in micro_orders]},"capacity":{"probes":3,"probe_sec":15,"confirmation_sec":20,"confirmation_range":[.70,.85],"formal_range":[.65,.90],"candidates":list(CAPACITY_CANDIDATES),"candidate_source":f"fixed before {PROTOCOL_LABEL} from separate batch-size and pacing-window design smokes","pacing_policy":"absolute batch schedule; batch 128; skip missed slots; no schedule rebase; no catch-up burst","unpaced_policy":"saturation_diagnostic_only"}}
 def execution_scope(out,expected=None,create=False,dependency_binding=None):
     path=Path(out)/"execution-scope.json"
     if create:
@@ -990,7 +1009,7 @@ def execution_scope(out,expected=None,create=False,dependency_binding=None):
         raise ValueError("execution scope mismatch")
     return {**value,"sha256":sha(path)}
 def execution_binding(out,dependency_binding=None,create=False):
-    out=Path(out);path=out/"execution-binding.json";_,contract_sha=protocol_contract(out/SOURCE_DIRECTORY/"scripts/contracts/core-metrics-lossless-v2.json" if (out/SOURCE_DIRECTORY).is_dir() else None)
+    out=Path(out);path=out/"execution-binding.json";_,contract_sha=protocol_contract(out/SOURCE_DIRECTORY/PROTOCOL_CONTRACT_ARCHIVED if (out/SOURCE_DIRECTORY).is_dir() else None)
     expected={"schema":"ibmw-core-metrics-execution-binding-v1","protocol":PROTOCOL,"protocol_contract_sha256":contract_sha,"dependency_snapshot":{key:dependency_binding[key] for key in ("manifest_sha256","aggregate_sha256")} if dependency_binding else None,"sandbox":{"program":"/usr/bin/bwrap","network":"unshare-net","root":"read-only","writable":"build-directory-only","tmp":"tmpfs","die_with_parent":True,"new_session":True}}
     if create:write_json(path,expected)
     if not path.is_file() or strict_json_bytes(path.read_bytes(),"execution binding")!=expected:raise ValueError("execution binding mismatch")
@@ -1019,7 +1038,7 @@ def _verify_plan(out):
     if not plan.is_file() or not sidecar.is_file():raise FileNotFoundError("missing preregistered plan evidence")
     digest=sha(plan)
     if sidecar.read_text()!=digest+"  plan.json\n":raise ValueError("plan digest sidecar mismatch")
-    value=strict_json_bytes(plan.read_bytes(),"plan");archived=out/SOURCE_DIRECTORY/"scripts/contracts/core-metrics-lossless-v2.json";_,contract_sha=protocol_contract(archived if archived.is_file() else None)
+    value=strict_json_bytes(plan.read_bytes(),"plan");archived=out/SOURCE_DIRECTORY/PROTOCOL_CONTRACT_ARCHIVED;_,contract_sha=protocol_contract(archived if archived.is_file() else None)
     if value!=registered_plan(contract_sha):raise ValueError("preregistered plan semantics mismatch")
     return digest
 def verify_provenance(out,topo=None,scope="full"):
@@ -1099,16 +1118,16 @@ def _main():
             for position,mode in enumerate(MODES):
                 result=run_trial(mode,builds["out" if mode=="out" else "instrumented"],out/"diagnostic"/f"{position}-{mode}",FROZEN_LOAD,5,False,2,1)
                 result.update(position=position,diagnostic_only=True,acceptance_eligible=False);results.append(result);raw.write(json.dumps(result)+"\n");raw.flush()
-        summary={"schema":"ibmw-core-metrics-lossless-v2-conservation-diagnostic-v1","protocol":PROTOCOL,"protocol_contract_sha256":plan["protocol_contract_sha256"],"verdict":"DIAGNOSTIC_ONLY","diagnostic_only":True,"acceptance_eligible":False,"trial_count":len(results),"all_conserved":all(r["reconciliation"]["valid"] for r in results),"yaml_sha256":sorted({r[k] for r in results for k in ("publisher_yaml_sha256","subscriber_yaml_sha256")})}
+        summary={"schema":DIAGNOSTIC_SCHEMA,"protocol":PROTOCOL,"protocol_contract_sha256":plan["protocol_contract_sha256"],"verdict":"DIAGNOSTIC_ONLY","diagnostic_only":True,"acceptance_eligible":False,"trial_count":len(results),"all_conserved":all(r["reconciliation"]["valid"] for r in results),"yaml_sha256":sorted({r[k] for r in results for k in ("publisher_yaml_sha256","subscriber_yaml_sha256")})}
         write_summary(out,summary);print(json.dumps(summary,indent=2));return 0 if summary["all_conserved"] else 1
     if a.resume:
         try:
             calibration=json.loads((out/"calibration.json").read_text())
             if calibration.get("protocol")!=PROTOCOL or calibration.get("protocol_contract_sha256")!=plan["protocol_contract_sha256"]:raise ValueError("resume calibration protocol binding mismatch")
             load=calibration.get("frozen_load")
-            if load is not None and load!=FROZEN_LOAD:raise ValueError("resume frozen load differs from 448000")
+            if load is not None and load!=FROZEN_LOAD:raise ValueError(f"resume frozen load differs from {FROZEN_LOAD}")
             if load is None and a.e2e_only:
-                summary=e2e_only_summary([],load);summary.update(reason="lossless-v2 paced confirmation failed",calibration=calibration)
+                summary=e2e_only_summary([],load);summary.update(reason=f"{PROTOCOL_LABEL} paced confirmation failed",calibration=calibration)
                 write_summary(out,summary);print(json.dumps(summary,indent=2));return verdict_exit_code(summary["verdict"])
             if load is None:raise ValueError("resume requires a valid frozen calibration")
             for mode in MODES:
@@ -1131,14 +1150,14 @@ def _main():
         except InvalidTrial as e:r={"valid":False,"error":str(e)}
         r["candidate"]=candidate;confirmations.append(r)
         if confirmation_is_strictly_valid(r):load=candidate;break
-    calibration={"protocol":PROTOCOL,"protocol_contract_sha256":plan["protocol_contract_sha256"],"unpaced_diagnostics":probes,"candidate_confirmations":confirmations,"frozen_load":load,"frozen_load_source":"lossless-v2 trusted contract and paced confirmation" if load is not None else None};write_json(out/"calibration.json",calibration)
+    calibration={"protocol":PROTOCOL,"protocol_contract_sha256":plan["protocol_contract_sha256"],"unpaced_diagnostics":probes,"candidate_confirmations":confirmations,"frozen_load":load,"frozen_load_source":f"{PROTOCOL_LABEL} trusted contract and paced confirmation" if load is not None else None};write_json(out/"calibration.json",calibration)
     if load is None:
         if a.e2e_only:
-            summary=e2e_only_summary([],load);summary.update(reason="lossless-v2 paced confirmation failed",calibration=calibration)
+            summary=e2e_only_summary([],load);summary.update(reason=f"{PROTOCOL_LABEL} paced confirmation failed",calibration=calibration)
             write_summary(out,summary);print(json.dumps(summary,indent=2));return verdict_exit_code(summary["verdict"])
         micro,mpairs,mcmp,mverdict=run_micro_lane(out,builds,micro_orders)
         e2e_verdict="INCONCLUSIVE";final,exit_code=no_load_outcome(mverdict)
-        summary={"verdict":final,"e2e_verdict":e2e_verdict,"e2e_reason":"lossless-v2 paced confirmation failed","micro_verdict":mverdict,"reason":"lossless-v2 paced confirmation failed","calibration":calibration,"e2e_comparisons":{},"micro_comparisons":mcmp,"complete_micro":len(mpairs)==30}
+        summary={"verdict":final,"e2e_verdict":e2e_verdict,"e2e_reason":f"{PROTOCOL_LABEL} paced confirmation failed","micro_verdict":mverdict,"reason":f"{PROTOCOL_LABEL} paced confirmation failed","calibration":calibration,"e2e_comparisons":{},"micro_comparisons":mcmp,"complete_micro":len(mpairs)==30}
         write_summary(out,summary);print(json.dumps(summary,indent=2));return exit_code
     for mode in MODES:run_trial(mode,builds["out" if mode=="out" else "instrumented"],out/"priming"/mode,load,5,False,2,1)
     e2e=[]

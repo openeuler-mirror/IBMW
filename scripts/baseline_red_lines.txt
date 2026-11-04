@@ -42,15 +42,13 @@ R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/
 R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.cc:53:  raw_pub_ = ibmw::extensions::shm_extension::CreateShmRawPodPublisher(
 R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::shm_extension::ShmTransportDriver* d) {
 R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:50:  ibmw::extensions::shm_extension::ShmTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.h:55:    std::unique_ptr<ibmw::extensions::shm_extension::ShmCtxMetaTypedPublisher<PlainT>> typed_pub;
-R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.cc:23:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
-R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.cc:77:      ibmw::extensions::shm_extension::CreateShmCtxMetaTypedPublisher<ALIAS>(  \
+R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.h:56:    std::unique_ptr<ibmw::extensions::shm_extension::ShmCtxMetaTypedPublisher<PlainT>> typed_pub;
+R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.cc:25:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
+R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.cc:79:      ibmw::extensions::shm_extension::CreateShmCtxMetaTypedPublisher<ALIAS>(  \
 R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:61:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
 R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:81:        ibmw::extensions::iceoryx_extension::IoxCtxMetaTypedPublisher<PlainT>>
 R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:86:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.cc:108:    slot.typed_pub = ibmw::extensions::iceoryx_extension::                     \
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:48:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:58:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
 R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:58:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:59:  std::shared_ptr<ibmw::extensions::iceoryx_extension::IoxRawPodPublisher>
@@ -99,8 +97,6 @@ R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module
 R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:50:  ibmw::extensions::shm_extension::ShmTransportDriver* driver_{nullptr};
 R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:61:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
 R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:86:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:48:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:58:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
 R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:58:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {

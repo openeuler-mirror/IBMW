@@ -9,9 +9,10 @@
 //
 // The receive side is the standard OnMessage<T> stack (iox_send's subscriber
 // module), so this lane and shm_send differ only in the publish path.
-// Pacing is the same as iox_loaned_ctx (absolute schedule, batch_size); the
-// shared measurement window / publisher status file of iox_loaned_ctx is not
-// carried over, the matrix does not use it.
+// Pacing is the same as iox_loaned_ctx (absolute schedule, batch_size). The
+// shared measurement window and publisher status file of iox_loaned_ctx are
+// active only when bench_options sets measure_begin_monotonic_ns /
+// publisher_status_path (the shm core_metrics gate); the matrix sets neither.
 
 #pragma once
 
@@ -65,6 +66,11 @@ class PublisherModule : public ibmw::Module {
   BenchOptions opts_;
   std::atomic<bool> running_{false};
   std::thread thread_;
+  uint64_t measured_attempts_{0}, measured_success_{0}, measured_fail_{0};
+  uint32_t first_attempt_seq_{0}, last_attempt_seq_{0};
+  uint32_t first_success_seq_{0}, last_success_seq_{0};
+  bool have_attempt_{false}, have_success_{false};
+  bool completed_send_window_{false};
 };
 
 }  // namespace ibmw::samples::transport_benchmark::shm_loaned_ctx

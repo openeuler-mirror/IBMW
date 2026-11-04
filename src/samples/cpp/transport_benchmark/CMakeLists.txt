@@ -45,6 +45,23 @@ endif()
 add_subdirectory(bench_payload)
 add_subdirectory(bench_common)
 
+# Reporter V1 hot-hook benchmark of the Core Metrics gates (iceoryx and shm); it
+# links no transport. Build the compile-out baseline and the fully enabled
+# Reporter lane. A Core Metrics build without Reporter V1 has no Reporter hot
+# path to benchmark.
+if((IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) AND
+   (NOT IBMW_ENABLE_CORE_METRICS OR IBMW_ENABLE_REPORTER_V1))
+  add_executable(core_metrics_reporter_hot_bench
+    iox_loaned_ctx/standalone/reporter_hot_bench/main.cc)
+  target_link_libraries(core_metrics_reporter_hot_bench PRIVATE
+    ibmw::core::engine ibmw::core::extension_api ibmw::core::reporter_host_abi)
+  set_target_properties(core_metrics_reporter_hot_bench PROPERTIES ENABLE_EXPORTS ON)
+  if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+    target_link_options(core_metrics_reporter_hot_bench PRIVATE
+      "LINKER:--export-dynamic")
+  endif()
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
   add_subdirectory(iox_loaned_ctx)
   return()
