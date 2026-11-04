@@ -179,6 +179,9 @@ start_runtime() {
     done
     fail_case "Runtime Agent '$runtime_id' did not register"
   fi
+  # Settle time for transport matching with the player started next. Kept as
+  # a sleep: the match happens with that later process, and the subscriber
+  # logs no per-transport "matched" line that could be waited on here.
   sleep 0.5
 }
 
@@ -376,12 +379,27 @@ CURRENT_CASE=startup
 if [[ "$ICEORYX_BUILT" == 1 ]] && ! pgrep -x iox-roudi >/dev/null 2>&1; then
   "$ROUDI_BIN" >"$RUN_DIR/iox-roudi.log" 2>&1 &
   ROUDI_PID=$!
-  sleep 1
+  wait_for_log "$RUN_DIR/iox-roudi.log" "RouDi is ready for clients" "$ROUDI_PID" || {
+    tail -n 20 "$RUN_DIR/iox-roudi.log" >&2
+    fail_case "iox-roudi did not become ready"
+  }
 fi
 if ! ss -ltn "( sport = :$MQTT_PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
   mosquitto -p "$MQTT_PORT" -v >"$RUN_DIR/mosquitto.log" 2>&1 &
   MOSQUITTO_PID=$!
-  sleep 1
+  mqtt_listening=0
+  for _ in {1..100}; do
+    kill -0 "$MOSQUITTO_PID" 2>/dev/null || break
+    if ss -ltn "( sport = :$MQTT_PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
+      mqtt_listening=1
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$mqtt_listening" == 1 ]] || {
+    tail -n 20 "$RUN_DIR/mosquitto.log" >&2
+    fail_case "Mosquitto did not listen on port $MQTT_PORT"
+  }
 fi
 mosquitto_pub -h 127.0.0.1 -p "$MQTT_PORT" -t /ibmw_play_smoke/startup -m ready -q 1 ||
   fail_case "MQTT broker is unavailable"
