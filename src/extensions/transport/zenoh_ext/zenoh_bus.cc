@@ -3,10 +3,26 @@
 
 #include "zenoh_ext/zenoh_bus.h"
 
-#include <utility>
+#include <chrono>
+#include <future>
 #include <stdexcept>
+#include <utility>
 
 namespace ibmw::extensions::zenoh_extension {
+
+namespace {
+
+// Set while a subscriber callback runs on this thread. Zenoh may then hold
+// other callbacks of the same sample on this thread, so none can be awaited.
+thread_local bool in_bus_callback = false;
+
+// A registered subscriber's callback; zenoh owns it and signals when it drops it.
+struct SubscriberCallback {
+  ZenohBus::MsgHandleFunc handle;
+  std::promise<void> released;
+};
+
+}  // namespace
 
 ZenohBus::ZenohBus() {
   z_internal_null(&z_session_);
@@ -40,18 +56,22 @@ void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_si
 void ZenohBus::Shutdown() {
   StopServiceDiscovery();
   StopDiscovery();
+  // Subscribers first: a running callback may still publish.
+  std::unordered_map<std::string, ZenohSubCtx> subs;
+  {
+    std::lock_guard lock(z_catalog_mutex_);
+    subs.swap(z_sub_catalog_);
+  }
+  for (auto &ptr : subs) {
+    DropSubscriber(ptr.first, ptr.second);
+  }
+
   for (auto &ptr : z_pub_catalog_) {
     z_drop(z_move(ptr.second->z_pub));
   }
 
-  for (auto &ptr : z_sub_catalog_) {
-    z_drop(z_move(ptr.second));
-  }
-
   if (initialized_) z_close(z_loan_mut(z_session_), nullptr);
-  msg_handle_vec_.clear();
   z_pub_catalog_.clear();
-  z_sub_catalog_.clear();
 
   z_drop(z_move(z_session_));
   z_drop(z_move(z_config_));
@@ -105,7 +125,11 @@ bool ZenohBus::CreateSubscriber(const std::string& keyexpr, MsgHandleFunc handle
   if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
   z_owned_closure_sample_t closure;
   z_closure(&closure,
-            [](z_loaned_sample_t* sample, void* context) { (*static_cast<MsgHandleFunc*>(context))(sample); },
+            [](z_loaned_sample_t* sample, void* context) {
+              const bool outer = std::exchange(in_bus_callback, true);  // local puts nest callbacks
+              (*static_cast<MsgHandleFunc*>(context))(sample);
+              in_bus_callback = outer;
+            },
             [](void* context) { delete static_cast<MsgHandleFunc*>(context); },
             new MsgHandleFunc(std::move(handle)));
   return z_declare_subscriber(z_loan(z_session_), &subscriber, z_loan(key), z_move(closure), nullptr) >= 0;
@@ -122,27 +146,62 @@ bool ZenohBus::RegisterSubscriber(const std::string &keyexpr, MsgHandleFunc hand
   z_view_keyexpr_t key;
   if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
   z_owned_closure_sample_t z_callback;
-  auto function_ptr = std::make_shared<MsgHandleFunc>(std::move(handle));
+  auto* callback = new SubscriberCallback{.handle = std::move(handle), .released = {}};
+  std::future<void> released = callback->released.get_future();
   z_closure(
       &z_callback,
-      [](z_loaned_sample_t *sample, void *arg) { (*reinterpret_cast<MsgHandleFunc *>(arg))(sample); },
-
-      nullptr,
-
-      function_ptr.get());
+      [](z_loaned_sample_t *sample, void *arg) {
+        const bool outer = std::exchange(in_bus_callback, true);  // local puts nest callbacks
+        static_cast<SubscriberCallback *>(arg)->handle(sample);
+        in_bus_callback = outer;
+      },
+      [](void *arg) {
+        // The handler is destroyed before the waiter resumes.
+        auto* owned = static_cast<SubscriberCallback *>(arg);
+        auto promise = std::move(owned->released);
+        delete owned;
+        promise.set_value();
+      },
+      callback);
 
   z_owned_subscriber_t z_sub;
 
+  // On failure zenoh still owns the closure and drops it, which deletes the callback.
   if (z_declare_subscriber(z_loan(z_session_), &z_sub, z_loan(key), z_move(z_callback), nullptr) < 0) {
     MW_ERROR("Unable to declare Subscriber!");
     return false;
   }
 
-  z_sub_catalog_.emplace(keyexpr, z_sub);
-  msg_handle_vec_.emplace_back(std::move(function_ptr));
+  z_sub_catalog_.emplace(keyexpr, ZenohSubCtx{z_sub, std::move(released)});
 
   MW_TRACE("Subscriber with keyexpr: {} registered successfully.", keyexpr.c_str());
   return true;
+}
+
+bool ZenohBus::UnregisterSubscriber(const std::string &keyexpr) {
+  ZenohSubCtx sub;
+  {
+    std::lock_guard lock(z_catalog_mutex_);
+    auto iter = z_sub_catalog_.find(keyexpr);
+    if (iter == z_sub_catalog_.end()) return false;
+    sub = std::move(iter->second);
+    z_sub_catalog_.erase(iter);
+  }
+  DropSubscriber(keyexpr, sub);
+  return true;
+}
+
+void ZenohBus::DropSubscriber(const std::string &keyexpr, ZenohSubCtx &sub) {
+  z_drop(z_move(sub.z_sub));
+  // Callbacks already running keep zenoh's reference to the callback.
+  if (in_bus_callback) [[unlikely]] {
+    MW_WARN("Subscriber {} is removed from a zenoh callback; its running callbacks are not awaited.", keyexpr);
+    return;
+  }
+  // Not given up: the callback would then run into whatever it uses.
+  while (sub.released.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    MW_WARN("Subscriber {} waits for a running zenoh callback.", keyexpr);
+  }
 }
 
 void ZenohBus::RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole role,

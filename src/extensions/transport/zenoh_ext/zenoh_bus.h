@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <future>
+#include <string>
+#include <unordered_map>
+
 #include "json/json.h"
 #include "zenoh.h"
 #include "zenoh_ext/global.h"
@@ -15,6 +19,10 @@ class ZenohBus {
   struct ZenohPubCtx {
     z_owned_publisher_t z_pub;
     bool shm_enabled;
+  };
+  struct ZenohSubCtx {
+    z_owned_subscriber_t z_sub;
+    std::future<void> released;  // ready once zenoh dropped the callback
   };
 
  public:
@@ -34,6 +42,11 @@ class ZenohBus {
                         z_owned_subscriber_t& subscriber);
   // Registration is refused after Freeze(); CreateSubscriber is not.
   bool RegisterSubscriber(const std::string& keyexpr, MsgHandleFunc handle);
+  // Undeclares a registered subscriber and waits until zenoh released its
+  // callback, so whatever the callback uses may be destroyed afterwards. Called
+  // from inside a bus callback it cannot wait for that callback: it logs and
+  // returns without waiting.
+  bool UnregisterSubscriber(const std::string& keyexpr);
   bool RegisterPublisher(const std::string& keyexpr, bool shm_enabled);
 
   // Ends registration; the drivers call it when they start. Sends read the
@@ -92,10 +105,11 @@ class ZenohBus {
     z_drop(z_move(out_config_string));
   }
 
-  std::unordered_map<std::string, std::shared_ptr<ZenohPubCtx>> z_pub_catalog_;
-  std::unordered_map<std::string, z_owned_subscriber_t> z_sub_catalog_;
+  // Undeclares the subscriber and waits for its callback to be released.
+  static void DropSubscriber(const std::string& keyexpr, ZenohSubCtx& sub);
 
-  std::vector<std::shared_ptr<MsgHandleFunc>> msg_handle_vec_;
+  std::unordered_map<std::string, std::shared_ptr<ZenohPubCtx>> z_pub_catalog_;
+  std::unordered_map<std::string, ZenohSubCtx> z_sub_catalog_;
 
   z_owned_session_t z_session_;
   z_owned_config_t z_config_;

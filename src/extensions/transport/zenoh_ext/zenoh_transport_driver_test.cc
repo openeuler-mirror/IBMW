@@ -3,7 +3,8 @@
 
 // TRANS-045: shm loans that turn out too small go back to the pool, loan sizes
 // are bounded by the pool, and a message the pool cannot hold is sent over the
-// network. One isolated session (no scouting, loopback only) carries both sides.
+// network. Shutdown removes the driver's subscribers. One isolated session (no
+// scouting, loopback only) carries both sides.
 
 #include <gtest/gtest.h>
 
@@ -83,6 +84,9 @@ class ZenohTransportDriverTest : public ::testing::Test {
     wrapper_.info.msg_type = "test:Blob";
     wrapper_.info.msg_type_support_ref = ibmw::util::TypeSupportRef(BlobTypeSupport());
     ASSERT_TRUE(driver_->RegisterSendType(wrapper_));
+    handler_.info = wrapper_.info;
+    handler_.info.topic_name = "/in";
+    ASSERT_TRUE(driver_->OnMessage(handler_));
     driver_->Start();
 
     z_owned_subscriber_t sub;
@@ -159,6 +163,7 @@ class ZenohTransportDriverTest : public ::testing::Test {
   std::shared_ptr<ZenohBus> bus_;
   std::unique_ptr<ZenohTransportDriver> driver_;
   runtime::core::transport::SendTypeWrapper wrapper_;
+  runtime::core::transport::MessageHandlerWrapper handler_;  // the driver keeps its address
   std::vector<z_owned_subscriber_t> subs_;
   std::mutex mutex_;
   std::vector<Sample> seen_;
@@ -230,6 +235,12 @@ TEST_F(ZenohTransportDriverTest, LoanGrowsAfterEarlierSends) {
 // TRANS-046: once the driver started, the bus takes no more registrations.
 TEST_F(ZenohTransportDriverTest, StartFreezesTheBus) {
   EXPECT_FALSE(bus_->RegisterPublisher("transport/late", false));
+}
+
+// Shutdown removes the driver's subscribers: none runs into it afterwards.
+TEST_F(ZenohTransportDriverTest, ShutdownRemovesItsSubscribers) {
+  driver_->Shutdown();
+  EXPECT_FALSE(bus_->UnregisterSubscriber("transport/%2Fin/test%3ABlob"));
 }
 
 // Grow doubles a loan up to the pool, Need takes what fits the pool, and

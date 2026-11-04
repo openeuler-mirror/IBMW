@@ -3,19 +3,25 @@
 
 // TRANS-046: the publisher catalog changes only before the bus is frozen, the
 // shared put options are set once, and RPC node registration reports failure.
+// Removing a subscriber waits for its running callbacks.
 // One isolated session (no scouting, loopback only).
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 
 #include "zenoh_ext/zenoh_bus.h"
 
 namespace ibmw::extensions::zenoh_extension {
 namespace {
+
+using namespace std::chrono_literals;
 
 class ZenohBusTest : public ::testing::Test {
  protected:
@@ -35,6 +41,11 @@ class ZenohBusTest : public ::testing::Test {
   }
 
   static void Ignore(const z_loaned_sample_t*) {}
+
+  void Put(const std::string& keyexpr) {
+    char byte = 0;
+    bus_.Send(keyexpr, &byte, 1);
+  }
 
   std::filesystem::path directory_;
   ZenohBus bus_;
@@ -84,6 +95,88 @@ TEST_F(ZenohBusTest, RpcNodeRegistrationReportsFailure) {
   EXPECT_FALSE(bus_.RegisterRpcNode("test/f", Ignore, "peer", false));
   EXPECT_FALSE(bus_.RegisterRpcNode("test//f", Ignore, "client", false));  // not a key expression
   EXPECT_TRUE(bus_.GetPublisherRegisterMap().empty());  // nothing reads it concurrently here
+}
+
+// Unregistering returns only once the running callback returned; no callback
+// runs afterwards.
+TEST_F(ZenohBusTest, UnregisterWaitsForTheRunningCallback) {
+  std::atomic<int> calls = 0;
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  ASSERT_TRUE(bus_.RegisterSubscriber("test/u", [&](const z_loaned_sample_t*) {
+    if (++calls == 1) {
+      entered.set_value();
+      released.wait();
+    }
+  }));
+  ASSERT_TRUE(bus_.RegisterPublisher("test/u", false));
+  bus_.Freeze();
+  // A local subscriber runs in the put: the first one blocks its thread.
+  auto first = std::async(std::launch::async, [&] { Put("test/u"); });
+  ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+  auto unregister = std::async(std::launch::async, [&] { return bus_.UnregisterSubscriber("test/u"); });
+  EXPECT_EQ(unregister.wait_for(200ms), std::future_status::timeout);
+  release.set_value();
+  ASSERT_EQ(unregister.wait_for(5s), std::future_status::ready);
+  EXPECT_TRUE(unregister.get());
+  first.get();
+  Put("test/u");  // a local subscriber would run in the put
+  EXPECT_EQ(calls.load(), 1);
+  EXPECT_FALSE(bus_.UnregisterSubscriber("test/u"));
+}
+
+// A callback that removes subscribers (shutdown from a handler) is not waited
+// for, which would never end.
+TEST_F(ZenohBusTest, UnregisterFromACallbackDoesNotWaitForIt) {
+  std::promise<bool> removed;
+  ASSERT_TRUE(bus_.RegisterSubscriber("test/u", [&](const z_loaned_sample_t*) {
+    removed.set_value(bus_.UnregisterSubscriber("test/u"));
+  }));
+  ASSERT_TRUE(bus_.RegisterPublisher("test/u", false));
+  bus_.Freeze();
+  auto result = removed.get_future();
+  Put("test/u");
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  EXPECT_TRUE(result.get());
+}
+
+// The same after the callback's own put ran another callback on its thread.
+TEST_F(ZenohBusTest, UnregisterFromACallbackAfterANestedOneDoesNotWait) {
+  std::promise<bool> removed;
+  ASSERT_TRUE(bus_.RegisterSubscriber("test/inner", Ignore));
+  ASSERT_TRUE(bus_.RegisterSubscriber("test/outer", [&](const z_loaned_sample_t*) {
+    Put("test/inner");
+    removed.set_value(bus_.UnregisterSubscriber("test/outer"));
+  }));
+  ASSERT_TRUE(bus_.RegisterPublisher("test/outer", false));
+  ASSERT_TRUE(bus_.RegisterPublisher("test/inner", false));
+  bus_.Freeze();
+  auto result = removed.get_future();
+  auto put = std::async(std::launch::async, [&] { Put("test/outer"); });
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  EXPECT_TRUE(result.get());
+}
+
+// Shutdown, too, waits for a running callback.
+TEST_F(ZenohBusTest, ShutdownWaitsForTheRunningCallback) {
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  ASSERT_TRUE(bus_.RegisterSubscriber("test/u", [&](const z_loaned_sample_t*) {
+    entered.set_value();
+    released.wait();
+  }));
+  ASSERT_TRUE(bus_.RegisterPublisher("test/u", false));
+  bus_.Freeze();
+  auto put = std::async(std::launch::async, [&] { Put("test/u"); });
+  ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+  auto shutdown = std::async(std::launch::async, [&] { bus_.Shutdown(); });
+  EXPECT_EQ(shutdown.wait_for(200ms), std::future_status::timeout);
+  release.set_value();
+  ASSERT_EQ(shutdown.wait_for(5s), std::future_status::ready);
+}
+
+TEST_F(ZenohBusTest, UnregisterOfAnUnknownSubscriberFails) {
+  EXPECT_FALSE(bus_.UnregisterSubscriber("test/none"));
 }
 
 }  // namespace

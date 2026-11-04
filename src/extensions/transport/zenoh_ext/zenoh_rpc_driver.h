@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <string>
+#include <unordered_set>
+
 #include "cpp/service/rpc_status.h"
 #include "cpp/util/type_support.h"
 #include "engine/service/service_driver.h"
@@ -88,6 +91,7 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
   std::unique_ptr<runtime::core::util::RpcClientTool<std::shared_ptr<runtime::core::service::ServiceMessageFrame>>> client_tool_ptr_;
 
   ShmLoanSizes shm_loan_sizes_;
+  std::unordered_set<std::string> sub_keyexprs_;  // bus subscribers of the handlers, removed by Shutdown
 
   uint64_t shm_init_loan_size_ = 1024;
 };

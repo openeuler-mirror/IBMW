@@ -5,7 +5,8 @@
 // function, and a client completes a call only with an answer on that key.
 // TRANS-045: shm loans that turn out too small go back to the pool.
 // TRANS-046: a function has one server, clients share its answer key; servers
-// answer only after Start, which freezes the bus.
+// answer only after Start, which freezes the bus. Shutdown waits for the
+// handlers and removes their subscribers.
 // One isolated session (no scouting, loopback only) carries both sides.
 
 #include <gtest/gtest.h>
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -421,6 +423,33 @@ TEST_F(ZenohRpcDriverTest, RegistrationOnAFrozenBusFails) {
 TEST_F(ZenohRpcDriverTest, StartFreezesTheBus) {
   NewDriver().Start();
   EXPECT_FALSE(bus_->RegisterPublisher("req/late", false));
+}
+
+// Shutdown removes the driver's subscribers and waits for a request being
+// served, so the driver may be destroyed right after it.
+TEST_F(ZenohRpcDriverTest, ShutdownWaitsForTheHandlersAndRemovesThem) {
+  auto& driver = NewDriver();
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  const runtime::core::service::ServiceFuncWrapper service{.info = infos_[0], .service_func = [&](const auto&) {
+    entered.set_value();
+    released.wait();
+  }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  ASSERT_TRUE(driver.RegisterClientFunc({.info = infos_[1]}));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  // The local server runs in the put: it blocks the putting thread.
+  auto request = std::async(std::launch::async, [&] { Put("req/" + a, Request(a, 1, "1")); });
+  ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+  auto shutdown = std::async(std::launch::async, [&] { driver.Shutdown(); });
+  EXPECT_EQ(shutdown.wait_for(200ms), std::future_status::timeout);
+  release.set_value();
+  ASSERT_EQ(shutdown.wait_for(5s), std::future_status::ready);
+  request.get();
+  EXPECT_FALSE(bus_->UnregisterSubscriber("req/" + a));
+  EXPECT_FALSE(bus_->UnregisterSubscriber("rsp/" + Pattern("/test/b")));
 }
 
 // Requests of 600 KiB outgrow the 1 KiB loan: each smaller loan goes back

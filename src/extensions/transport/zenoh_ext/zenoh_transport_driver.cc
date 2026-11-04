@@ -72,6 +72,8 @@ void ZenohTransportDriver::Shutdown() {
     for (const auto& [handle, subscriber] : native_subscribers_) handles.push_back(handle);
   }
   for (const auto handle : handles) DetachSerializedSubscriber({handle});
+  // The handlers use this driver: none may run once it is destroyed.
+  for (const auto& [pattern, tool] : message_handler_map_) zenoh_bus_ptr_->UnregisterSubscriber(pattern);
 }
 
 runtime::core::transport::SerializedTransportOperationsV2

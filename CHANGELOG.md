@@ -57,6 +57,10 @@ details remain governed by the documentation for each release.
   that arrive before it starts. RPC registration reports failures; a second
   server of a function is accepted with a warning and, as before, never
   called over zenoh.
+- Zenoh: the transport and RPC drivers remove their subscribers on shutdown
+  and wait for callbacks already running, so a late message no longer runs
+  into a destroyed driver. A callback that is still running after 5 s is
+  logged and waited for.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

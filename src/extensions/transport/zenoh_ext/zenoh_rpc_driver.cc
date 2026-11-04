@@ -115,6 +115,12 @@ void ZenohRpcDriver::Shutdown() {
     return;
 
   zenoh_bus_ptr_->StopServiceDiscovery();
+  // The handlers use this driver and its client tool: none may run once they are destroyed.
+  // Servers go first: one waiting for an answer still gets it.
+  for (const std::string_view prefix : {"req/", "rsp/"}) {
+    for (const auto& keyexpr : sub_keyexprs_)
+      if (keyexpr.starts_with(prefix)) zenoh_bus_ptr_->UnregisterSubscriber(keyexpr);
+  }
   client_tool_ptr_.reset();
 }
 
@@ -423,6 +429,7 @@ bool ZenohRpcDriver::RegisterServiceFunc(
     if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled)) return false;
     zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
                                  info.rsp_type_support_ref.TypeName());
+    sub_keyexprs_.insert("req/" + pattern);
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
@@ -538,6 +545,7 @@ bool ZenohRpcDriver::RegisterClientFunc(
 
     shm_loan_sizes_.Set("req/" + pattern, shm_init_loan_size_);
     if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "client", shm_enabled)) return false;
+    sub_keyexprs_.insert("rsp/" + pattern);
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
     return false;
