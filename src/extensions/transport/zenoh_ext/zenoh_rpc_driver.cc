@@ -354,8 +354,8 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                     buffer_array_cache_ptr = nullptr;
                   }
 
-                  // write info pkg length on loaned shm
-                  util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len);
+                  // write the frame length (header + msg) on loaned shm, like the non-shm path
+                  util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len + msg_size);
 
                   z_owned_bytes_t z_payload;
                   if (loan_result.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
@@ -747,8 +747,8 @@ void ZenohRpcDriver::Call(
           buffer_array_cache_ptr = nullptr;
         }
 
-        // write info pkg length on loaned shm
-        util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len);
+        // write the frame length (header + msg) on loaned shm, like the non-shm path
+        util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len + msg_size);
 
         z_owned_bytes_t z_payload;
         if (loan_result.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
