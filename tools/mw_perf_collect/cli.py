@@ -259,9 +259,11 @@ def _is_metric_qualification(path: Path) -> bool:
     except (OSError, ValueError, json.JSONDecodeError):
         return False
 
-def _comparison_audit():
-    return _schema_audit({"comparison_result": ("result.schema.v1.json", "comparison_result"),
-                          "comparison_plan": ("comparison-plan.schema.v1.json", "comparison_plan")},
+def _comparison_audit(version=1, result_version=None):
+    """Audit the plan schema and the run schema the compared lane set uses."""
+    result_version = version if result_version is None else result_version
+    return _schema_audit({"comparison_result": (f"result.schema.v{result_version}.json", "comparison_result"),
+                          "comparison_plan": (f"comparison-plan.schema.v{version}.json", "comparison_plan")},
                          validation_mode="comparison")
 
 def main(argv=None):
@@ -404,6 +406,12 @@ def main(argv=None):
         plan=load_config(a.plan)
         if not isinstance(plan, dict):
             raise ValueError("PLAN_MUST_BE_OBJECT")
+        schema = plan.get("schema")
+        # A formal plan version this tool does not know must not fall through
+        # to the legacy ``runs`` prototype below.
+        if (isinstance(schema, str) and schema.startswith("mw_perf.comparison-plan.")
+                and schema not in ("mw_perf.comparison-plan.v1", "mw_perf.comparison-plan.v2")):
+            raise ValueError("PLAN_SCHEMA_UNSUPPORTED")
     except Exception as exc:
         output = Path(a.output)
         output.mkdir(parents=True, exist_ok=True)
@@ -416,6 +424,8 @@ def main(argv=None):
         return EXIT_INVALID
     if plan.get("schema") == "mw_perf.comparison-plan.v1":
         return _compare_plan_v1(plan, a.output, a.valid_blocks)
+    if plan.get("schema") == "mw_perf.comparison-plan.v2":
+        return _compare_plan_v2(plan, a.output, a.valid_blocks)
     rows=[]; failures=list(_resource_integrity_errors()); expected_contract=None; expected_profile=None; blocks={}
     plan_validation_profile=plan.get("validation_profile", "standard")
     if plan_validation_profile not in ("standard", "p0a"): failures.append("VALIDATION_PROFILE_INVALID")
@@ -425,6 +435,9 @@ def main(argv=None):
             if _is_metric_qualification(path):
                 raise ValueError("METRIC_QUALIFICATION_NOT_COMPARABLE")
             m=strict_json_loads((path/"manifest.json").read_bytes())
+            # The legacy prototype predates lane sets; only v1 metadata (A/B/C) may use it.
+            if "comparison_schema" in m and m["comparison_schema"] != "mw_perf.comparison-metadata.v1":
+                raise ValueError("COMPARISON_METADATA_VERSION_UNSUPPORTED")
             validation_path = path/"validation.json"
             if not validation_path.exists(): raise ValueError("VALIDATION_MISSING")
             v=strict_json_loads(validation_path.read_bytes())
@@ -470,11 +483,34 @@ def _comparison_value(manifest, field):
     return None
 
 
+_LANE_LABELS = {"A": "abc_ros2_4KB", "B": "abc_dds_4KB", "C": "iox_send_4KB", "S": "shm_send_4KB"}
+
+
+def _latency_label(manifest):
+    artifacts = manifest.get("artifacts")
+    latency = artifacts.get("latency") if isinstance(artifacts, dict) else None
+    return latency.get("label") if isinstance(latency, dict) else None
+
+
 def _compare_plan_v1(plan, output, valid_blocks=None):
     """Validate formal A/B/C block membership and comparability metadata only."""
+    return _compare_lane_plan(plan, output, valid_blocks, ("A", "B", "C"), 1)
+
+
+def _compare_plan_v2(plan, output, valid_blocks=None):
+    """Apply the v1 checks to the lane set the plan declares."""
+    declared = plan.get("lanes")
+    lanes = tuple(declared) if declared in (["A", "B", "C"], ["A", "B", "S"]) else ()
+    return _compare_lane_plan(plan, output, valid_blocks, lanes, 2)
+
+
+def _compare_lane_plan(plan, output, valid_blocks, lanes, version):
+    """Validate that every block holds exactly ``lanes``; empty means undeclared."""
     reasons = list(_resource_integrity_errors())
+    if not lanes:
+        reasons.append("PLAN_LANES_INVALID")
     try:
-        schema = strict_json_loads((Path(__file__).parent / "schemas/comparison-plan.schema.v1.json").read_bytes())
+        schema = strict_json_loads((Path(__file__).parent / f"schemas/comparison-plan.schema.v{version}.json").read_bytes())
         reasons.extend(f"PLAN_SCHEMA:{error}" for error in _schema_errors(plan, schema))
     except (OSError, ValueError, json.JSONDecodeError):
         reasons.append("PLAN_SCHEMA_UNAVAILABLE")
@@ -496,14 +532,14 @@ def _compare_plan_v1(plan, output, valid_blocks=None):
     seen_run_ids = {}
     for index, block in enumerate(plan.get("blocks", []) if isinstance(plan.get("blocks"), list) else []):
         block_id = block.get("block_id", str(index + 1)) if isinstance(block, dict) else str(index + 1)
-        block_reasons = []
+        block_reasons = [] if lanes else ["PLAN_LANES_INVALID"]
         if not isinstance(block, dict) or not isinstance(block.get("runs"), list):
             block_results.append({"block_id": block_id, "valid": False,
                                   "reasons": ["BLOCK_RUNS_MISSING"]})
             continue
         by_lane = {}
         for entry in block["runs"]:
-            if not isinstance(entry, dict) or entry.get("lane") not in ("A", "B", "C"):
+            if not isinstance(entry, dict) or entry.get("lane") not in lanes:
                 block_reasons.append("LANE_INVALID")
                 continue
             lane = entry["lane"]
@@ -511,11 +547,11 @@ def _compare_plan_v1(plan, output, valid_blocks=None):
                 block_reasons.append(f"LANE_DUPLICATE:{lane}")
             else:
                 by_lane[lane] = entry
-        missing = sorted(set("ABC") - set(by_lane))
+        missing = sorted(set(lanes) - set(by_lane))
         if missing:
             block_reasons.append("LANES_MISSING:" + ",".join(missing))
-        if len(by_lane) != 3 or len(block["runs"]) != 3:
-            block_reasons.append("LANES_NOT_EXACTLY_ABC")
+        if lanes and (len(by_lane) != len(lanes) or len(block["runs"]) != len(lanes)):
+            block_reasons.append("LANES_NOT_EXACTLY_" + "".join(lanes))
         if isinstance(expected["order"], list) and [entry.get("lane") for entry in block["runs"]
                 if isinstance(entry, dict)] != expected["order"]:
             block_reasons.append("ORDER_SEQUENCE_MISMATCH")
@@ -573,6 +609,8 @@ def _compare_plan_v1(plan, output, valid_blocks=None):
                         f"RUN_ID_DUPLICATE:{seen_run_ids[run_id][1]}")
                 else:
                     seen_run_ids[run_id] = (block_reasons, lane)
+                if version > 1 and _latency_label(manifest) != _LANE_LABELS[lane]:
+                    block_reasons.append(f"LABEL_MISMATCH:{lane}")
                 manifests[lane] = manifest
             except (OSError, ValueError, json.JSONDecodeError, TypeError):
                 block_reasons.append(f"RUN_INVALID:{lane}")
@@ -592,7 +630,9 @@ def _compare_plan_v1(plan, output, valid_blocks=None):
         block_results.append({"block_id": block_id, "valid": not block_reasons,
                               "reasons": block_reasons,
                               "lanes": {lane: {"path": by_lane[lane].get("path"),
-                                               "run_id": manifests[lane].get("run_id")}
+                                               "run_id": manifests[lane].get("run_id"),
+                                               **({"label": _latency_label(manifests[lane])}
+                                                  if version > 1 else {})}
                                         for lane in by_lane if lane in manifests}})
     for block in block_results:
         block["reasons"] = sorted(set(block["reasons"]))
@@ -602,14 +642,16 @@ def _compare_plan_v1(plan, output, valid_blocks=None):
     valid_block_ids = [b["block_id"] for b in block_results if b["valid"]]
     if valid_blocks is not None and (valid_blocks < 0 or len(valid_block_ids) < valid_blocks):
         all_reasons = sorted(set(all_reasons + ["INSUFFICIENT_VALID_BLOCKS"]))
-    result = {"schema": "mw_perf.comparison-result.v1", "schema_version": 1,
+    result = {"schema": f"mw_perf.comparison-result.v{version}", "schema_version": version,
+              **({"lanes": list(lanes), "order": expected["order"]} if version > 1 else {}),
               "valid_for_comparison": bool(block_results) and not all_reasons
               and all(block["valid"] for block in block_results),
               "valid_blocks": valid_block_ids,
               "invalid_blocks": [b for b in block_results if not b["valid"]],
               "failure_codes": all_reasons,
               "note": "P0 gate only; no aggregate statistics or winner conclusion",
-              "blocks": block_results, "schema_audit": _comparison_audit()}
+              "blocks": block_results,
+              "schema_audit": _comparison_audit(version, 2 if "S" in lanes else 1)}
     Path(output).mkdir(parents=True, exist_ok=True)
     (Path(output) / "comparison.json").write_text(json.dumps(result, indent=2) + "\n")
     return 0 if result["valid_for_comparison"] else EXIT_INVALID

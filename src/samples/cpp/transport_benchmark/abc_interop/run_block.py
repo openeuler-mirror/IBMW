@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run one isolated steady-state A, B, C, or S benchmark lane."""
-import argparse, csv, hashlib, json, math, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, threading, time
+import argparse, csv, hashlib, json, math, os, pathlib, re, shutil, signal, subprocess, sys, tempfile, time, traceback
 
 CSV_SCHEMA = ("label", "count", "min_us", "avg_us", "stddev_us", "p50_us", "p90_us", "p99_us", "p999_us", "max_us")
 LANE_LABELS = {"A": "abc_ros2_4KB", "B": "abc_dds_4KB", "C": "iox_send_4KB", "S": "shm_send_4KB"}
@@ -60,21 +60,40 @@ def configure_shm_run(env, root, lane_domain):
     env.pop("IBMW_SHM_GROUP",None); env["IBMW_SHM_ROOT"]=str(root); env["IBMW_SHM_DOMAIN"]=domain
     return domain
 
-def stop_shm_run(procs, root, warnings):
-    """Stop live S endpoints, then remove the private root even if interrupted."""
+def stop_shm_run(procs, root, errors):
+    """Stop live S endpoints, then remove the private root even if interrupted.
+
+    All endpoints share one 5 s TERM budget so the whole stop fits well inside
+    the collector's 10 s stop timeout.  A root that cannot be removed is an
+    error: the run left state behind.
+    """
     try:
         for proc in procs.values():
             if proc.poll() is None: proc.terminate()
+        deadline=time.monotonic()+5
         for proc in procs.values():
-            try: proc.wait(timeout=5)
+            try: proc.wait(timeout=max(0,deadline-time.monotonic()))
             except subprocess.TimeoutExpired: proc.kill(); proc.wait()
     finally:
         try: shutil.rmtree(root)
         except FileNotFoundError: pass
-        except OSError as e: warnings.append(f"shm_root_cleanup_failed: {e}")
+        except OSError as e: errors.append(f"shm_root_cleanup_failed: {e}")
 
-def _raise_keyboard_interrupt(*_):
-    raise KeyboardInterrupt
+class _StopFlag:
+    """Stop request set from signal handlers.
+
+    threading.Event must not be used here: its lock is not reentrant, and the
+    collector's second TERM can re-enter the handler inside Event.set(), which
+    deadlocks the main thread until the collector escalates to SIGKILL.
+    """
+    def __init__(self): self.requested=False
+    def set(self): self.requested=True
+    def is_set(self): return self.requested
+    def wait(self,timeout):
+        """Sleep up to timeout, returning early once a stop is requested."""
+        deadline=time.monotonic()+timeout
+        while not self.requested and time.monotonic()<deadline: time.sleep(min(.05,max(0,deadline-time.monotonic())))
+        return self.requested
 
 def validate_status_schema(status):
     errors = []
@@ -202,16 +221,29 @@ def _finish(code, collector_managed, stop_event):
 
 def main():
     p=argparse.ArgumentParser(); p.add_argument("lane",choices=tuple(LANE_LABELS)); p.add_argument("--build",required=True,type=pathlib.Path); p.add_argument("--work",required=True,type=pathlib.Path); p.add_argument("--domain",type=int,default=45); p.add_argument("--roudi",type=pathlib.Path,help="RouDi executable for lane C (overrides IBMW_ROUDI_BIN and CMake metadata)"); p.add_argument("--collector-managed",action="store_true"); a=p.parse_args()
-    if a.lane=="S" and a.collector_managed: p.error("--collector-managed does not support lane S: mw_perf_collect schemas accept only A, B and C")
     a.build=a.build.resolve(); a.work=a.work.resolve(); a.work.mkdir(parents=True,exist_ok=True)
-    stop_event=threading.Event()
-    if a.collector_managed:
-        if not os.environ.get("MW_PERF_RUN_ID"): p.error("--collector-managed requires MW_PERF_RUN_ID")
-        signal.signal(signal.SIGTERM,lambda *_: stop_event.set())
+    stop_event=_StopFlag()
+    if a.collector_managed and not os.environ.get("MW_PERF_RUN_ID"): p.error("--collector-managed requires MW_PERF_RUN_ID")
+    # TERM only records the request; it never raises.  S aborts at the safe
+    # points below, so a TERM cannot land inside Popen (orphaning an endpoint)
+    # or inside the result write of a finished run.
+    if a.collector_managed or a.lane=="S": signal.signal(signal.SIGTERM,lambda *_: stop_event.set())
     for x in a.work.iterdir(): shutil.rmtree(x) if x.is_dir() else x.unlink()
-    started=time.time_ns(); csv_path=a.work/"latency.csv"; status_path=a.work/"subscriber.status.json"; env=clean_env(); procs={}; logs=[]; warnings=[]; timed_out=None; shutdown_signal=None; shm_root=None; shm_domain=None
-    if a.lane=="S": signal.signal(signal.SIGTERM,_raise_keyboard_interrupt)
+    started=time.time_ns(); csv_path=a.work/"latency.csv"; status_path=a.work/"subscriber.status.json"; env=clean_env(); procs={}; logs=[]; warnings=[]; cleanup_errors=[]; timed_out=None; shutdown_signal=None; shm_root=None; shm_domain=None
+    def stop_point():
+        """S safe point: a recorded TERM aborts a run that has not completed."""
+        if a.lane=="S" and stop_event.is_set(): raise KeyboardInterrupt
+    def pause(seconds):
+        if a.lane=="S": stop_event.wait(seconds); stop_point()
+        else: time.sleep(seconds)
+    def wait_endpoint(proc,timeout):
+        if a.lane!="S": return proc.wait(timeout=timeout)
+        deadline=time.monotonic()+timeout
+        while proc.poll() is None:
+            if time.monotonic()>=deadline: raise subprocess.TimeoutExpired(proc.args,timeout)
+            pause(.05)
     try:
+        stop_point()
         if a.lane in "AB":
             exe=a.build/("ibmw_abc_ros2_endpoint" if a.lane=="A" else "ibmw_abc_dds_endpoint"); base=[str(exe),"--hz","100","--warmup-messages","50","--message-count","3000"]
             if a.lane=="A": env["ROS_DOMAIN_ID"]=str(a.domain); subcfg=pubcfg=[]
@@ -223,23 +255,36 @@ def main():
                 except subprocess.TimeoutExpired: timed_out=name; procs[name].kill(); procs[name].wait()
         else:
             sub=a.work/"subscriber.yaml"; pub=a.work/"publisher.yaml"; publisher_status_path=a.work/"publisher.status.json"; commands=send_lane_commands(a.lane,a.build,sub,pub,a.roudi); patch_send_lane_configs(a.lane,a.build,sub,pub,csv_path,status_path,publisher_status_path)
-            if a.lane=="S": shm_root=tempfile.mkdtemp(prefix="ibS.",dir="/tmp"); shm_domain=configure_shm_run(env,shm_root,a.domain)
+            if a.lane=="S":
+                # Hold TERM/INT until the root is recorded: SIGINT's default
+                # KeyboardInterrupt pending here is raised on unblock, where every
+                # cleanup path can see the root.  shm-root.txt records it for
+                # anyone cleaning up after a SIGKILL.
+                mask=signal.pthread_sigmask(signal.SIG_BLOCK,())
+                try:
+                    signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGTERM,signal.SIGINT})
+                    shm_root=tempfile.mkdtemp(prefix="ibS.",dir="/tmp")
+                    (a.work/"shm-root.txt").write_text(shm_root+"\n")
+                finally: signal.pthread_sigmask(signal.SIG_SETMASK,mask)
+                stop_point(); shm_domain=configure_shm_run(env,shm_root,a.domain)
             for name,exe,args in commands:
-                f=(a.work/f"{name}.log").open("w"); logs.append(f); procs[name]=subprocess.Popen([str(exe),*args],cwd=a.build,env=env,stdout=f,stderr=subprocess.STDOUT); time.sleep(1 if name!="subscriber" else 2)
+                f=(a.work/f"{name}.log").open("w"); logs.append(f); procs[name]=subprocess.Popen([str(exe),*args],cwd=a.build,env=env,stdout=f,stderr=subprocess.STDOUT); stop_point(); pause(1 if name!="subscriber" else 2)
             deadline=time.monotonic()+45
             while time.monotonic()<deadline:
                 try:
                     pp=a.work/"publisher.status.json"; ps=json.loads(pp.read_text()); ok,_=validate_publisher_status_schema(ps); fresh,_=freshness_ok((pp,),started)
                     if ok and fresh and ps.get("valid") is True and ps.get("completion") is True and ps.get("attempted_measured")==3000: break
                 except (OSError,json.JSONDecodeError): pass
-                time.sleep(.25)
+                pause(.25)
             else: timed_out="publisher"
             for proc in procs.values():
                 if proc.poll() is None: proc.send_signal(signal.SIGINT); shutdown_signal="SIGINT"
             for name,proc in procs.items():
-                try: proc.wait(timeout=30)
+                try: wait_endpoint(proc,30)
                 except subprocess.TimeoutExpired: timed_out=timed_out or name; proc.kill(); proc.wait()
-            if shm_root: stop_shm_run(procs,shm_root,warnings)
+            # Every endpoint has exited: the run is complete, and a TERM from here
+            # on is not checked again, so it leaves the finished result alone.
+            if shm_root: stop_shm_run(procs,shm_root,cleanup_errors)
         try: status=json.loads(status_path.read_text()) if status_path.exists() else None
         except (OSError,json.JSONDecodeError): status=None
         csv_result=validate_latency_csv(csv_path,a.lane); exits={n:p.returncode for n,p in procs.items()}; artifacts=[csv_path,status_path]; pp=a.work/"publisher.status.json"; publisher_status=None
@@ -247,23 +292,42 @@ def main():
             artifacts.append(pp)
             try: publisher_status=json.loads(pp.read_text())
             except (OSError,json.JSONDecodeError): pass
-        valid,errors=validate_result_gate(a.lane,status,csv_result,exits,started,artifacts,timed_out,publisher_status); result={"lane":a.lane,"domain":a.domain,"run_started_ns":started,"valid":valid,"status":status,"csv_validation":csv_result,"process_exit_codes":exits,"validation_errors":errors,"validation_warnings":warnings};
+        valid,errors=validate_result_gate(a.lane,status,csv_result,exits,started,artifacts,timed_out,publisher_status); errors+=cleanup_errors; valid=valid and not cleanup_errors; result={"lane":a.lane,"domain":a.domain,"run_started_ns":started,"valid":valid,"status":status,"csv_validation":csv_result,"process_exit_codes":exits,"validation_errors":errors,"validation_warnings":warnings};
         if a.lane in SEND_LANES: result["publisher_status"]=publisher_status
         if shm_domain: result["shm_domain"]=shm_domain
         if shutdown_signal: result["shutdown_signal"]=shutdown_signal
         write_result(a.work,result,a.collector_managed); return _finish(0 if valid else 1,a.collector_managed,stop_event)
     except KeyboardInterrupt:
-        if shm_root: stop_shm_run(procs,shm_root,warnings)
-        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":["runner_keyboard_interrupt"],"validation_warnings":warnings,**({"shm_domain":shm_domain} if shm_domain else {})},a.collector_managed); return _finish(130,a.collector_managed,stop_event)
+        if shm_root: stop_shm_run(procs,shm_root,cleanup_errors)
+        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":["runner_keyboard_interrupt",*cleanup_errors],"validation_warnings":warnings,**({"shm_domain":shm_domain} if shm_domain else {})},a.collector_managed); return _finish(130,a.collector_managed,stop_event)
     except (OSError,subprocess.SubprocessError,TypeError,ValueError) as e:
-        if shm_root: stop_shm_run(procs,shm_root,warnings)
-        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":[f"runner_error: {e}"],"validation_warnings":warnings,**({"shm_domain":shm_domain} if shm_domain else {})},a.collector_managed); return _finish(1,a.collector_managed,stop_event)
+        if shm_root: stop_shm_run(procs,shm_root,cleanup_errors)
+        write_result(a.work,{"lane":a.lane,"run_started_ns":started,"valid":False,"validation_errors":[f"runner_error: {e}",*cleanup_errors],"validation_warnings":warnings,**({"shm_domain":shm_domain} if shm_domain else {})},a.collector_managed); return _finish(1,a.collector_managed,stop_event)
     finally:
         try:
-            if shm_root: stop_shm_run(procs,shm_root,warnings)
+            if shm_root: stop_shm_run(procs,shm_root,cleanup_errors)
         finally:
             for proc in procs.values():
                 if proc.poll() is None: proc.terminate()
             for stream in logs: stream.close()
 
-if __name__=="__main__": sys.exit(main())
+if __name__=="__main__":
+    # Always leave through os._exit, skipping interpreter teardown: finalisation
+    # restores SIGTERM's default action, so a late collector TERM would turn a
+    # clean exit into -15.  Unexpected exceptions and broken pipes exit 1.
+    code=1
+    try: code=main()
+    except SystemExit as e:
+        code=e.code if isinstance(e.code,int) else 0 if e.code is None else 1
+        if isinstance(e.code,str):
+            try: print(e.code,file=sys.stderr)
+            except (OSError,ValueError): pass
+    except KeyboardInterrupt: code=130
+    except BaseException:
+        try: traceback.print_exc()
+        except (OSError,ValueError): pass
+    finally:
+        for stream in (sys.stdout,sys.stderr):
+            try: stream.flush()
+            except (OSError,ValueError): pass
+        os._exit(code)

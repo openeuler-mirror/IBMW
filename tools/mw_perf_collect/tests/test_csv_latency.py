@@ -53,6 +53,30 @@ def test_config_schema_requires_versioned_csv_and_managed_resources():
     assert _schema_errors(value, schema)
 
 
+def test_config_schema_binds_lane_set_to_metadata_version():
+    schema = json.loads((Path(__file__).parents[1] / "schemas/config.schema.v1.json").read_text())
+    def config(metadata, lane, order, artifact_lane=None):
+        latency = {**_config(Path("/tmp")), "lane": artifact_lane or lane}
+        return {"sut": {"mode": "managed", "command": ["/bin/true"]},
+            "collectors": {"process": {"include_descendants": True}, "network": {"interfaces": ["lo"]}},
+            "comparison": {"schema": f"mw_perf.comparison-metadata.{metadata}", "contract": "c",
+                "profile": "p", "workload": "w", "resource_scope": "r", "order": order,
+                "lane": lane, "block": "b", "sequence_index": 0},
+            "artifacts": {"latency": latency}}
+    assert not _schema_errors(config("v2", "S", ["S", "A", "B"]), schema)
+    assert not _schema_errors(config("v2", "A", ["A", "B", "S"]), schema)
+    assert not _schema_errors(config("v1", "C", ["C", "A", "B"]), schema)
+    assert _schema_errors(config("v1", "S", ["A", "B", "C"]), schema)
+    assert _schema_errors(config("v1", "A", ["A", "B", "S"]), schema)
+    assert _schema_errors(config("v2", "C", ["A", "B", "S"]), schema)
+    assert _schema_errors(config("v2", "S", ["A", "B", "C"]), schema)
+    assert _schema_errors(config("v1", "A", ["A", "B", "C"], artifact_lane="S"), schema)
+    assert _schema_errors(config("v2", "A", ["A", "B", "S"], artifact_lane="C"), schema)
+    without_comparison = config("v1", "A", ["A", "B", "C"], artifact_lane="S")
+    del without_comparison["comparison"]
+    assert _schema_errors(without_comparison, schema)
+
+
 def test_archive_rejects_stale_hash_and_identity(tmp_path):
     config = _config(tmp_path); _write_sources(tmp_path)
     baseline = snapshot(config)
@@ -120,5 +144,48 @@ while True: time.sleep(.01)
     assert manifest["artifacts"]["latency"]["status"] == "supported"
     assert core.validate_dir(run_dir)["valid_for_comparison"] is True
     manifest["comparison_schema"] = "mw_perf.comparison-metadata.v0"
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    assert core.validate_dir(run_dir)["valid_for_comparison"] is False
+
+
+def test_generic_managed_s_lane_lifecycle_is_formally_comparable(tmp_path):
+    csv_path, result_path = tmp_path / "source.csv", tmp_path / "result.json"
+    script = """import hashlib,json,os,signal,sys,time
+csv_path,result_path=sys.argv[1:]
+def stop(*_):
+ data=b'label,count,min_us,avg_us,stddev_us,p50_us,p90_us,p99_us,p999_us,max_us\\nshm_send_4KB,3000,1,2,1,1,2,3,4,5\\n'
+ open(csv_path,'wb').write(data)
+ stat=open('/proc/self/stat').read(); ticks=int(stat[stat.rfind(')')+2:].split()[19])
+ identity={'schema':'ibmw.abc.collector-managed.v1','run_id':os.environ['MW_PERF_RUN_ID'],'producer_pid':os.getpid(),'producer_start_time_ticks':ticks,'lane':'S','complete':True,'latency_csv_sha256':hashlib.sha256(data).hexdigest()}
+ open(result_path,'w').write(json.dumps({'lane':'S','valid':True,'collector_managed':identity}))
+ sys.exit(0)
+signal.signal(signal.SIGTERM,stop)
+while True: time.sleep(.01)
+"""
+    artifact = {"schema": "mw_perf.latency.csv.v1", "format": "LatencyStats CSV",
+                "path": str(csv_path), "result_path": str(result_path), "required": True,
+                "lane": "S", "expected_label": "shm_send_4KB", "expected_count": 3000}
+    config = {"sut": {"mode": "managed", "command": [sys.executable, "-c", script,
+                str(csv_path), str(result_path)]}, "run": {"sample_seconds": .05},
+        "collectors": {"process": {"include_descendants": True, "interval_ms": 10},
+                       "network": {"interfaces": ["lo"]}},
+        "scenario_contract": {"scenario": "abc"},
+        "comparison": {"schema": "mw_perf.comparison-metadata.v2", "contract": "c",
+            "profile": "p", "workload": "w", "resource_scope": "r",
+            "order": ["A", "B", "S"], "lane": "S", "block": "b", "sequence_index": 2},
+        "artifacts": {"latency": artifact}}
+    config_path = tmp_path / "config.json"; config_path.write_text(json.dumps(config))
+    args = core.argparse.Namespace(config=str(config_path), adapter="generic", command=[],
+                                   override_command=False, output=str(tmp_path / "runs"))
+    assert core.run(args) == core.EXIT_OK
+    run_dir = next((tmp_path / "runs").iterdir())
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["comparison_lane"] == "S"
+    assert manifest["comparison_schema"] == "mw_perf.comparison-metadata.v2"
+    assert manifest["artifacts"]["latency"]["provenance"]["lane"] == "S"
+    validation = core.validate_dir(run_dir)
+    assert validation["valid_for_comparison"] is True
+    assert validation["schema_audit"]["schemas"]["result"]["schema_file"] == "schemas/result.schema.v2.json"
+    manifest["comparison_lane"] = "A"
     (run_dir / "manifest.json").write_text(json.dumps(manifest))
     assert core.validate_dir(run_dir)["valid_for_comparison"] is False

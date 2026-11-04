@@ -17,6 +17,9 @@ import sys
 
 UNSUPPORTED = "unsupported: not declared by abc runner"
 LANES = ("A", "B", "C", "S")
+# Formal outputs need one of these exact lane sets.  S takes the v2 contract
+# because the v1 plan and metadata stay A/B/C only.
+FORMAL_LANE_SETS = (("A", "B", "C"), ("A", "B", "S"))
 LANE_SEMANTIC_WARNINGS = {"C": "C is not DDS-equivalent and is reported separately",
                           "S": "S is not DDS-equivalent and is reported separately"}
 
@@ -63,7 +66,8 @@ def _parser():
                         help="comma-separated lane order; default A,B,C, or A,B,S for a "
                              "build with shm_send and without iox_send")
     parser.add_argument("--comparison-plan", type=pathlib.Path,
-                        help="also emit a formal comparison-plan.v1")
+                        help="also emit a formal comparison plan: v1 for lanes A,B,C, "
+                             "v2 for lanes A,B,S")
     parser.add_argument("--collector-managed", action="store_true",
                         help="run each lane under mw_perf_collect managed lifecycle")
     parser.add_argument("--contract", help="comparison contract identifier or JSON value")
@@ -149,7 +153,8 @@ def _managed_config(runner, build, source_work, lane, domain, roudi, metadata,
         "scenario_contract": {"scenario": "ibmw-abc-4kb-v1",
                               "message_count": 3000, "payload_bytes": 4096,
                               "hz": 100, "warmup_messages": 50},
-        "comparison": {"schema": "mw_perf.comparison-metadata.v1", **metadata,
+        "comparison": {"schema": "mw_perf.comparison-metadata.v2" if "S" in order
+                                 else "mw_perf.comparison-metadata.v1", **metadata,
                        "order": order, "order_policy": order_policy,
                        "order_seed": order_seed, "lane": lane, "block": block_id,
                        "sequence_index": sequence_index},
@@ -157,7 +162,7 @@ def _managed_config(runner, build, source_work, lane, domain, roudi, metadata,
             "format": "LatencyStats CSV", "path": str(source_work / "latency.csv"),
             "result_path": str(source_work / "result.json"), "required": True,
             "lane": lane, "expected_label": {"A": "abc_ros2_4KB", "B": "abc_dds_4KB",
-                                                "C": "iox_send_4KB"}[lane],
+                                                "C": "iox_send_4KB", "S": "shm_send_4KB"}[lane],
             "expected_count": 3000}},
     }
 
@@ -203,9 +208,14 @@ def main(argv=None):
     if a.order_seed < 0:
         _parser().error("--order-seed must be >= 0")
     order = a.lanes or _default_order(a.build)
-    if (a.collector_managed or a.comparison_plan) and set(order) != set("ABC"):
-        _parser().error("--collector-managed and --comparison-plan require exactly lanes A, B and C: "
-                        "mw_perf_collect comparison schemas do not accept lane order " + ",".join(order))
+    if a.collector_managed or a.comparison_plan:
+        if {"C", "S"} <= set(order):
+            _parser().error("--collector-managed and --comparison-plan cannot mix lanes C and S: "
+                            "they do not interoperate and no comparison plan holds both")
+        if tuple(sorted(order)) not in FORMAL_LANE_SETS:
+            _parser().error("--collector-managed and --comparison-plan require exactly lanes A, B, C "
+                            "or A, B, S: mw_perf_collect comparison plans do not accept lane order "
+                            + ",".join(order))
     a.output.mkdir(parents=True, exist_ok=True)
     metadata = {name: _declared(value) for name, value in (
         ("contract", a.contract), ("profile", a.profile),
@@ -272,8 +282,10 @@ def main(argv=None):
             {"lane": lane, "path": str(canonical_runs.get((block, lane),
                 output_root / f"block-{block}" / lane))}
             for lane in order]} for block in range(1, a.blocks + 1)]
-        plan = {"schema": "mw_perf.comparison-plan.v1", "schema_version": 1,
-                "contract": metadata["contract"], "profile": metadata["profile"],
+        version = {"schema": "mw_perf.comparison-plan.v2", "schema_version": 2,
+                   "lanes": sorted(order)} if "S" in order else {
+                   "schema": "mw_perf.comparison-plan.v1", "schema_version": 1}
+        plan = {**version, "contract": metadata["contract"], "profile": metadata["profile"],
                 "workload": metadata["workload"], "resource_scope": metadata["resource_scope"],
                 "order": order, "order_policy": a.order_policy,
                 "order_seed": a.order_seed, "blocks": blocks}

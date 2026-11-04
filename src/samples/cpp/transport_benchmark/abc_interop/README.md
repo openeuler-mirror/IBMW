@@ -96,9 +96,29 @@ for the 63-byte service directory limit) and sets a unique `IBMW_SHM_DOMAIN`
 (`abcS<domain>.<suffix>`, recorded as `shm_domain` in `result.json`). An inherited
 `IBMW_SHM_GROUP` is dropped. On every path, including errors, SIGINT, and SIGTERM,
 the runner stops the endpoints and removes the root before writing `result.json`;
-a failed removal is reported in `validation_warnings`. Only SIGKILL of the runner,
-such as the matrix subprocess bound expiring, can leave the root behind. Runs share
-nothing with other shm users of the host, and no file is created in `/dev/shm`.
+a root that cannot be removed is a `shm_root_cleanup_failed` validation error and
+makes the run invalid. The path is also written to `shm-root.txt` in the work
+directory as soon as the root exists, so it can be found after a SIGKILL.
+SIGTERM and SIGINT are blocked while the root is created and recorded, so a
+signal at that moment is handled after the path is known and the root is still
+removed.
+
+In lane S, SIGTERM never raises inside the runner: the handler only records the
+request, and the runner checks it after creating the root, after starting each
+endpoint, and while it sleeps, polls, or waits for the endpoints to exit. A
+SIGTERM before the endpoints have exited aborts the run (exit code 130,
+`runner_keyboard_interrupt`); every endpoint already started is stopped,
+including one whose start the signal interrupted. A SIGTERM after that is
+ignored, so it cannot replace a finished result. SIGINT keeps Python's default
+KeyboardInterrupt and gives the same result.
+
+A root can be left behind only if the runner is killed with SIGKILL (for
+example when the matrix subprocess bound expires), if the removal fails (the run
+is then invalid), or if a SIGINT sent to the runner alone lands while an
+endpoint is starting: that endpoint is not recorded, keeps running, and may
+recreate its directory under the root. A terminal Ctrl-C reaches the endpoints
+too, so they exit on their own. Runs share nothing with other shm users of the
+host, and no file is created in `/dev/shm`.
 
 Capability warning: like C, S is a shared-memory transport with no DDS
 protocol-level reliability/discovery semantic; results must not be described as
@@ -155,19 +175,42 @@ iceoryx off it defaults to A,B,S instead; without those cache entries, the same
 choice follows from `shm_send_publisher_app` being present and
 `iox_send_publisher_app` absent. `--lanes` sets any other order, for example
 `--lanes S` or `--lanes A,B,C,S`. S lanes are real runs with summaries and bridge
-files, but `--collector-managed` and `--comparison-plan` require exactly lanes A,
-B, and C: the `mw_perf_collect` comparison schemas and formal compare accept no
-other lane, so such requests are rejected before any lane starts or output is
-created. `run_block.py S --collector-managed` is rejected the same way.
+files. `--collector-managed` and `--comparison-plan` require exactly lanes A, B, C
+or exactly lanes A, B, S, in any order, because a formal plan holds only those two
+sets. A request with both C and S, or with an incomplete set such as `--lanes S`,
+is rejected with exit code 2 before any lane starts or output is created.
+
+`run_block.py S --collector-managed` is accepted; earlier versions rejected it
+with exit code 2. It works like the other lanes. The runner writes
+`result.json` after it has stopped the endpoints and removed the private shm root,
+then waits for the collector's SIGTERM. A SIGTERM that arrives during the run
+(the collector signals the group and then each process) aborts it at the next
+check: the endpoints stop, the root is removed, and the result is written as
+invalid with `runner_keyboard_interrupt`. Repeated SIGTERMs, including a burst
+after the result is written, only set a lock-free flag, so the runner still exits
+with its own result code and is not killed with SIGKILL. The cases above that can leave a `/tmp/ibS.*`
+directory behind still apply.
+
+The time budget differs from lanes A, B and C. The collector samples for 40 s,
+then sends SIGTERM and allows `stop_timeout_seconds` (10 s) before SIGKILL. A, B
+and C only record that SIGTERM and keep running, so they effectively have 50 s
+to finish. S aborts on it, so an S run must write its result within the 40 s
+sample window (a 3000-message run at 100 Hz takes about 35 s here) or it is
+invalid. The shared 40 s and 10 s values are unchanged so that A, B, C configs
+and results stay identical.
 
 For lane C, CMake writes the resolved source-built or package-provided RouDi
 target location to `<build>/ibmw_abc_roudi_path.txt`. `run_block.py` and
 `run_matrix.py` use it automatically. Use `--roudi /path/to/iox-roudi` (or set
 `IBMW_ROUDI_BIN`) to override that location explicitly.
 
-`run_matrix.py --comparison-plan PLAN.json` also emits a formal
-`mw_perf.comparison-plan.v1` and a bridge `manifest.json`/`validation.json` in
-each lane directory. Supply comparison declarations with `--contract`,
+`run_matrix.py --comparison-plan PLAN.json` also emits a formal comparison plan
+and a bridge `manifest.json`/`validation.json` in each lane directory. Lanes A, B,
+C emit `mw_perf.comparison-plan.v1`. Lanes A, B, S emit
+`mw_perf.comparison-plan.v2` with `"lanes": ["A", "B", "S"]`, and their
+collector-managed runs carry `mw_perf.comparison-metadata.v2`. All three lanes of
+such a block use v2 metadata, so A and B runs from an A, B, C matrix cannot be
+reused in it. Supply comparison declarations with `--contract`,
 `--profile`, `--workload`, and `--resource-scope`; JSON values are accepted.
 The fixed lane sequence is accompanied by `--order-policy` and `--order-seed`.
 This bridge does not run a collector lifecycle or claim resource/provenance

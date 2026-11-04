@@ -1,7 +1,7 @@
 """Common standard-library collection lifecycle for the MVP CLI."""
 from __future__ import annotations
 
-import argparse, fnmatch, hashlib, json, math, os, re, signal, stat, subprocess, sys, time, uuid
+import argparse, fnmatch, hashlib, itertools, json, math, os, re, signal, stat, subprocess, sys, time, uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,8 @@ _RESOURCE_SHA256 = {
     "contracts/p0a-evidence-contract.v9.json": "4ecef870afdc652853f40bc3d2716d66a6a3304849741a7cb03eef7033fbce11",
     "contracts/p0a-ohos-remote-contract.v1.json": "618c7e8e17473f19c41871a7e45d58894ab76d9ff28c1df0a7543d1cb78eb427",
     "schemas/comparison-plan.schema.v1.json": "b3c3fe804c3c7ef9897837abc4f756d9c79301eaf293ef00598799ffa7ffeb69",
-    "schemas/config.schema.v1.json": "ec6299a21ea2a402d10ae2b2249997a8960d27b1511a07fb5312c1a685ad3bcc",
+    "schemas/comparison-plan.schema.v2.json": "e5e8d0cce5fcba412b7ea7c0a73c969f8ee61d78959fbe0673feebfd08e4f931",
+    "schemas/config.schema.v1.json": "4bb18d5200b7252affab460dab86488e84e71406d916d95f28b69df885aaeef8",
     "schemas/evidence-campaign-seal.schema.v1.json": "ae0e9c184c79dad0e3d7d931da94f5ef56a131ca1844d45776cbd814040daba4",
     "schemas/evidence-campaign-seal.v2.schema.json": "a3d2b74aa563e9441558f4131fc018e740b5c4774aea7a2812670aadd76dee60",
     "schemas/evidence-campaign-validation.schema.v1.json": "555cdb0213ccf2cf8665ddabc4725479410df447b01d88340282b7d26cbf4d1b",
@@ -43,6 +44,7 @@ _RESOURCE_SHA256 = {
     "schemas/metric-qualification.schema.v1.json": "f0309ec5aa2a5495516459f4aab14de5618573805778eda9523864a40f77480a",
     "schemas/p0a-evidence-manifest.schema.v1.json": "66cd0f6aba140056cad8717c9b02268dddf56f4433c16140dd231cd22b2317d6",
     "schemas/result.schema.v1.json": "4895699463484942340973dc6bf370b9c6a1c03dda3848b72fdfb4cc0156d16f",
+    "schemas/result.schema.v2.json": "2f643c4d931f4e6c752f31dcb914f8fb99865995d3e804440fdb560fb65da74b",
     "schemas/rollback-build-plan.schema.v1.json": "feb47456d8513d385912b077f9285c4582bf7f4d1e2fc1c23883e8b999558e35",
     "schemas/rollback-evidence-manifest.schema.v1.json": "0bc71a2ef9f222f5a224ed3f60d73f64b02f077eb09e996242654d77fd6a4c3d",
     "schemas/rollback-formal.schema.v2.json": "df576ed0d139de424747a9fa6c821d195b6a4d46d83359aeee109eabbd59ef24",
@@ -72,6 +74,14 @@ _RESOURCE_SHA256 = {
     "schemas/p0a-ohos-remote-resolution-declarations.schema.v1.json": "a4d4040bc7c04b01bda14945e8fea5f09b7499c0e4e647063bfb0cc986513f75",
     "schemas/trace-quality-ohos-remote.schema.v1.json": "f0f06bb2d53da119113a1a52ee91d724899151641393ad82f7f7ecf33c231c1a",
 }
+
+# A metadata version fixes the lane set of the run.  The archived validation of
+# every v1 run records the SHA-256 of result.schema.v1.json, so that file and
+# the A/B/C set stay frozen and the S lane set gets its own version instead.
+_COMPARISON_METADATA_LANES = {"mw_perf.comparison-metadata.v1": ("A", "B", "C"),
+                              "mw_perf.comparison-metadata.v2": ("A", "B", "S")}
+_MANIFEST_SCHEMA_BY_METADATA = {"mw_perf.comparison-metadata.v2": "result.schema.v2.json"}
+
 
 def _resource_integrity_errors() -> list[str]:
     root = Path(__file__).parent
@@ -1065,12 +1075,14 @@ def validate_dir(path: Path, profile: str | None = None, config: dict[str, Any] 
         return isinstance(item, str) and bool(item) or isinstance(item, dict) and bool(item)
     block = m.get("comparison_block_id")
     sequence = m.get("sequence_index")
+    comparison_schema = m.get("comparison_schema")
+    comparison_lanes = (_COMPARISON_METADATA_LANES.get(comparison_schema)
+                        if isinstance(comparison_schema, str) else None)
     comparison_metadata_ok = (not formal_comparison or
-        m.get("comparison_schema") == "mw_perf.comparison-metadata.v1"
+        comparison_lanes is not None
         and all(declared(m.get(name)) for name in ("contract", "profile", "workload", "resource_scope"))
-        and m.get("order") in (["A", "B", "C"], ["A", "C", "B"], ["B", "A", "C"],
-                               ["B", "C", "A"], ["C", "A", "B"], ["C", "B", "A"])
-        and m.get("comparison_lane") in ("A", "B", "C")
+        and m.get("order") in [list(order) for order in itertools.permutations(comparison_lanes)]
+        and m.get("comparison_lane") in comparison_lanes
         and (isinstance(block, str) and bool(block) or isinstance(block, int) and not isinstance(block, bool))
         and isinstance(sequence, int) and not isinstance(sequence, bool) and sequence >= 0)
     resources = m.get("resource_collection")
@@ -1157,7 +1169,9 @@ def validate_dir(path: Path, profile: str | None = None, config: dict[str, Any] 
               "rules": rules, "failure_codes": failures,
               "schema_audit": _schema_audit({
                   "validation": ("validation.schema.v1.json", "validation"),
-                  "result": ("result.schema.v1.json", "manifest/result"),
+                  "result": (_MANIFEST_SCHEMA_BY_METADATA.get(
+                      comparison_schema if isinstance(comparison_schema, str) else None,
+                      "result.schema.v1.json"), "manifest/result"),
               }, validation_mode=profile)}
     if archived_latency_contract_blocked:
         result["failure_codes"].append("LATENCY_ARTIFACT_DIAGNOSTIC_ONLY")
