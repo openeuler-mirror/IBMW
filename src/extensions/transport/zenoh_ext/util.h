@@ -3,10 +3,95 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <unordered_map>
+
 #include "engine/transport/message_frame.h"
 #include "engine/service/service_message_frame.h"
+#include "zenoh.h"
 
 namespace ibmw::extensions::zenoh_extension {
+
+// A loaned shm buffer. It is dropped unless it is published, also when a
+// loan turned out too small or the send failed; the next collection of the
+// pool reclaims it.
+class ShmLoan {
+ public:
+  ShmLoan() { z_internal_null(&buf_); }
+  ~ShmLoan() { Reset(); }
+  ShmLoan(const ShmLoan&) = delete;
+  ShmLoan& operator=(const ShmLoan&) = delete;
+
+  // Loans `size` bytes, nullptr if the pool cannot. Only when the pool is
+  // short, released loans are collected (alloc_gc_defrag collects only when
+  // the pool is out of memory, not when it is fragmented) and it is compacted.
+  unsigned char* Alloc(const z_loaned_shm_provider_t* provider, size_t size, z_alloc_alignment_t alignment) {
+    Reset();
+    z_buf_layout_alloc_result_t result;
+    z_shm_provider_alloc(&result, provider, size, alignment);
+    if (result.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
+      z_shm_provider_garbage_collect(provider);
+      z_shm_provider_alloc_gc_defrag(&result, provider, size, alignment);
+    }
+    if (result.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) return nullptr;
+    buf_ = result.buf;
+    return z_shm_mut_data_mut(z_loan_mut(buf_));
+  }
+
+  // Hands the buffer over to `payload`.
+  void MoveTo(z_owned_bytes_t* payload) { z_bytes_from_shm_mut(payload, z_move(buf_)); }
+
+  void Reset() { z_drop(z_move(buf_)); }
+
+ private:
+  z_owned_shm_mut_t buf_;
+};
+
+// Shm loan size per key, learned from messages that did not fit. Sizes only
+// grow and stay within the pool: a message the pool cannot hold is sent over
+// the network, and its key keeps loaning the whole pool.
+class ShmLoanSizes {
+ public:
+  void Set(const std::string& key, uint64_t size) {
+    std::unique_lock lock(mutex_);
+    sizes_[key] = size;
+  }
+
+  uint64_t Get(const std::string& key, uint64_t fallback) const {
+    std::shared_lock lock(mutex_);
+    auto itr = sizes_.find(key);
+    return itr == sizes_.end() ? fallback : itr->second;
+  }
+
+  // `need` bytes are needed; false if the pool cannot hold them.
+  bool Need(const std::string& key, uint64_t need, uint64_t pool_size) {
+    if (need > pool_size) return false;
+    Raise(key, need);
+    return true;
+  }
+
+  // A loan of `size` was too small: double it, at most to the pool size;
+  // false if it already was the whole pool.
+  bool Grow(const std::string& key, uint64_t size, uint64_t pool_size) {
+    if (size >= pool_size) return false;
+    Raise(key, size > pool_size / 2 ? pool_size : std::max<uint64_t>(size * 2, 1));
+    return true;
+  }
+
+ private:
+  void Raise(const std::string& key, uint64_t size) {
+    std::unique_lock lock(mutex_);
+    auto& cur = sizes_[key];
+    cur = std::max(cur, size);
+  }
+
+  mutable std::shared_mutex mutex_;
+  std::unordered_map<std::string, uint64_t> sizes_;
+};
 
 inline std::pair<std::shared_ptr<ibmw::util::BufferArrayView>, size_t> SerializeMsgSupportedZenoh(
     runtime::core::transport::MessageFrame& msg_wrapper, std::string_view serialization_type, ibmw::util::BufferArrayAllocatorRef allocator) {

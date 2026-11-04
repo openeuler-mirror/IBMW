@@ -90,14 +90,12 @@ class ZenohTransportDriver : public runtime::core::transport::TransportDriver {
   std::string limit_domain_;
   std::string key_suffix_;
 
-  std::shared_mutex z_shared_mutex_;
-
   std::unordered_map<
       std::string,
       std::unique_ptr<ibmw::runtime::core::transport::MessageHandlerTool>>
       message_handler_map_;
 
-  std::unordered_map<std::string, uint64_t> z_pub_shm_size_map_;
+  ShmLoanSizes shm_loan_sizes_;
 
   uint64_t shm_init_loan_size_;
 };

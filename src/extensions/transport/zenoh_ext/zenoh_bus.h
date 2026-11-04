@@ -57,6 +57,8 @@ class ZenohBus {
   z_alloc_alignment_t alignment_ = {0};
   z_publisher_put_options_t z_pub_options_;
 
+  size_t ShmPoolSize() const noexcept { return shm_pool_size_; }
+
   const std::unordered_map<std::string, std::shared_ptr<ZenohPubCtx>>& GetPublisherRegisterMap() const {
     return z_pub_catalog_;
   }

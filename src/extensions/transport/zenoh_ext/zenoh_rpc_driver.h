@@ -81,15 +81,13 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
 
   std::atomic_uint32_t req_id_{runtime::core::util::RandomReqIdStart()};
 
-  std::shared_mutex z_shared_mutex_;
-
   std::shared_ptr<ZenohBus> zenoh_bus_ptr_;
   std::string limit_domain_;
   std::string key_suffix_;
 
   std::unique_ptr<runtime::core::util::RpcClientTool<std::shared_ptr<runtime::core::service::ServiceMessageFrame>>> client_tool_ptr_;
 
-  std::unordered_map<std::string, uint64_t> z_node_shm_size_map_;
+  ShmLoanSizes shm_loan_sizes_;
 
   uint64_t shm_init_loan_size_ = 1024;
 };

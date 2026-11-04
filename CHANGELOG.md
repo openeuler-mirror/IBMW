@@ -40,6 +40,14 @@ details remain governed by the documentation for each release.
   requests naming another answer key are dropped with a rate-limited warning.
   Clients only accept an answer from the called function's answer key, and
   request ids start at a random value. The wire format is unchanged.
+- Zenoh with `shm_enabled: true` (publishers and RPC): a shared-memory loan
+  that turns out too small is returned to the pool. Previously each such loan
+  leaked, the pool drained and all later messages went over the network.
+  Loan sizes now stay within the pool: a message larger than the pool is sent
+  over the network, and its topic then loans the whole pool briefly on each
+  send. An already serialized message no longer loops forever when its loan
+  has to grow. The pool is defragmented only when a loan fails, not after
+  every publish.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

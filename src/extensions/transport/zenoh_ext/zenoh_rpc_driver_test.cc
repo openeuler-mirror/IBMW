@@ -3,6 +3,7 @@
 
 // TRANS-005: a zenoh RPC server answers only on the answer key of the called
 // function, and a client completes a call only with an answer on that key.
+// TRANS-045: shm loans that turn out too small go back to the pool.
 // One isolated session (no scouting, loopback only) carries both sides.
 
 #include <gtest/gtest.h>
@@ -57,6 +58,41 @@ const ibmw_type_support_base_t* JsonIntTypeSupport() {
   return &ts;
 }
 
+// "json" std::string: its bytes.
+const ibmw_type_support_base_t* JsonBlobTypeSupport() {
+  static const ibmw_string_view_t kTypes[] = {{.str = "json", .len = 4}};
+  static const ibmw_type_support_base_t ts{
+      .type_name = [](void*) { return ibmw::util::ToIbmwStringView("test:Blob"); },
+      .create = [](void*) -> void* { return new std::string(); },
+      .destroy = [](void*, void* msg) { delete static_cast<std::string*>(msg); },
+      .copy = [](void*, const void* from, void* to) {
+        *static_cast<std::string*>(to) = *static_cast<const std::string*>(from);
+      },
+      .move = [](void*, void* from, void* to) {
+        *static_cast<std::string*>(to) = std::move(*static_cast<std::string*>(from));
+      },
+      .serialize = [](void*, ibmw_string_view_t, const void* msg, const ibmw_buffer_array_allocator_t* allocator,
+                      ibmw_buffer_array_t* buffer_array) {
+        const auto& text = *static_cast<const std::string*>(msg);
+        auto buf = allocator->allocate(allocator->ctx, buffer_array, text.size());
+        if (buf.data == nullptr) return false;
+        memcpy(buf.data, text.data(), text.size());
+        return true;
+      },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t buffers, void* msg) {
+        auto& text = *static_cast<std::string*>(msg);
+        text.clear();
+        for (size_t i = 0; i < buffers.len; ++i)
+          text.append(static_cast<const char*>(buffers.data[i].data), buffers.data[i].len);
+        return true;
+      },
+      .serialization_types_supported_num = [](void*) -> size_t { return 1; },
+      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return kTypes; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .ctx = nullptr};
+  return &ts;
+}
+
 // Key of a function as both drivers build it (empty limit domain).
 std::string Pattern(const std::string& func) { return "ibmw_rpc/" + common::util::UrlEncode(func); }
 
@@ -96,16 +132,24 @@ class ZenohRpcDriverTest : public ::testing::Test {
   // Subscriptions go first: no callback runs into a destroyed driver.
   void TearDown() override {
     for (auto& sub : subs_) z_drop(z_move(sub));
-    bus_->Shutdown();
+    if (bus_) bus_->Shutdown();
     if (driver_) driver_->Shutdown();
     driver_.reset();
     std::filesystem::remove_all(directory_);
   }
 
-  ZenohRpcDriver& NewDriver() {
+  ZenohRpcDriver& NewDriver(const std::string& options = "") {
     driver_ = std::make_unique<ZenohRpcDriver>(bus_, "");
-    driver_->Initialize(YAML::Node());
+    driver_->Initialize(options.empty() ? YAML::Node() : YAML::Load(options));
     return *driver_;
+  }
+
+  // infos_[0] with std::string request and response.
+  runtime::core::service::ServiceInfo BlobInfo() const {
+    auto info = infos_[0];
+    info.req_type_support_ref = ibmw::util::TypeSupportRef(JsonBlobTypeSupport());
+    info.rsp_type_support_ref = ibmw::util::TypeSupportRef(JsonBlobTypeSupport());
+    return info;
   }
 
   // Collects (key, payload) of every sample on `keyexpr`.
@@ -116,7 +160,10 @@ class ZenohRpcDriverTest : public ::testing::Test {
       z_keyexpr_as_view_string(z_sample_keyexpr(sample), &key);
       z_owned_slice_t slice;
       z_bytes_to_slice(z_sample_payload(sample), &slice);
+      const z_loaned_shm_t* shm = nullptr;
+      const bool is_shm = z_bytes_to_loaned_shm(z_sample_payload(sample), &shm) == Z_OK;
       std::lock_guard lock(mutex_);
+      shm_.push_back(is_shm);
       seen_.emplace_back(std::string(z_string_data(z_loan(key)), z_string_len(z_loan(key))),
                          std::string(reinterpret_cast<const char*>(z_slice_data(z_loan(slice))),
                                      z_slice_len(z_loan(slice))));
@@ -128,6 +175,16 @@ class ZenohRpcDriverTest : public ::testing::Test {
   void Put(const std::string& keyexpr, std::vector<char> frame) {
     ASSERT_TRUE(bus_->RegisterPublisher(keyexpr, false));
     bus_->Send(keyexpr, frame.data(), frame.size());
+  }
+
+  // `payload` is a frame whose body of `size` bytes ends with `last`.
+  static void ExpectFrame(const std::string& payload, size_t size, char last) {
+    ASSERT_GE(payload.size(), 4u);
+    const uint32_t frame_len = common::util::GetUint32FromBuf(payload.data());
+    EXPECT_GT(frame_len, size);
+    EXPECT_LT(frame_len, size + 256);
+    ASSERT_LE(4 + size_t{frame_len}, payload.size());
+    EXPECT_EQ(payload[4 + frame_len - 1], last);
   }
 
   // Waits until `count` samples were seen; returns a copy of them.
@@ -151,6 +208,7 @@ class ZenohRpcDriverTest : public ::testing::Test {
   std::vector<z_owned_subscriber_t> subs_;
   std::mutex mutex_;
   std::vector<std::pair<std::string, std::string>> seen_;
+  std::vector<bool> shm_;  // per seen_ entry: delivered through shm
   ibmw::rpc::Context ctx_;
 };
 
@@ -228,6 +286,112 @@ TEST_F(ZenohRpcDriverTest, ClientCompletesCallOnlyWithAnswerOnItsKey) {
   while (completed().empty() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
   ASSERT_EQ(completed(), std::vector<uint32_t>{IBMW_RPC_STATUS_OK});
   EXPECT_EQ(rsp, 5);
+}
+
+// Requests of 600 KiB outgrow the 1 KiB loan: each smaller loan goes back
+// to the 1 MiB pool, so this and the next requests still go through shm.
+TEST_F(ZenohRpcDriverTest, ClientLoansThatWereTooSmallGoBackToThePool) {
+  auto& driver = NewDriver("{clients: [{func_name: /test/a, shm_enabled: true}]}");
+  ASSERT_TRUE(driver.RegisterClientFunc({.info = BlobInfo()}));
+  driver.Start();
+  Watch("req/" + Pattern("/test/a"));
+
+  auto req = std::make_shared<std::string>(600 * 1024, 'x');
+  req->back() = 'z';
+  auto rsp = std::make_shared<std::string>();
+  for (size_t round = 0; round < 3; ++round) {
+    auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+        runtime::core::service::ServiceMessageFrame{
+            .info = BlobInfo(), .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+    frame->callback = [req, rsp](ibmw::rpc::Status) {};
+    driver.Call(frame);
+    const auto seen = WaitSeen(round + 1);
+    ASSERT_EQ(seen.size(), round + 1);
+    ExpectFrame(seen[round].second, 600 * 1024, 'z');
+    std::lock_guard lock(mutex_);
+    EXPECT_TRUE(shm_[round]) << round;
+  }
+}
+
+// An already serialized request gets a loan of its size once, and the call
+// is sent (a resized loan used to be retried without ever fitting it).
+TEST_F(ZenohRpcDriverTest, ClientCachedRequestGetsALoanOfItsSize) {
+  auto& driver = NewDriver("{clients: [{func_name: /test/a, shm_enabled: true}]}");
+  ASSERT_TRUE(driver.RegisterClientFunc({.info = BlobInfo()}));
+  driver.Start();
+  Watch("req/" + Pattern("/test/a"));
+
+  auto req = std::make_shared<std::string>(600 * 1024, 'x');
+  req->back() = 'z';
+  auto rsp = std::make_shared<std::string>();
+  for (size_t round = 0; round < 3; ++round) {
+    auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+        runtime::core::service::ServiceMessageFrame{
+            .info = BlobInfo(), .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+    frame->req_serialization_cache["json"] = std::make_shared<ibmw::util::BufferArrayView>(req->data(), req->size());
+    frame->callback = [req, rsp](ibmw::rpc::Status) {};
+    driver.Call(frame);
+    const auto seen = WaitSeen(round + 1);
+    ASSERT_EQ(seen.size(), round + 1);
+    ExpectFrame(seen[round].second, 600 * 1024, 'z');
+    std::lock_guard lock(mutex_);
+    EXPECT_TRUE(shm_[round]) << round;
+  }
+}
+
+// The same for answers of 600 KiB.
+TEST_F(ZenohRpcDriverTest, ServerLoansThatWereTooSmallGoBackToThePool) {
+  auto& driver = NewDriver("{servers: [{func_name: /test/a, shm_enabled: true}]}");
+  // The driver keeps a reference to the wrapper.
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = BlobInfo(), .service_func = [](const auto& frame) {
+        *static_cast<std::string*>(frame->rsp_ptr) = std::string(600 * 1024 - 1, 'y') + 'w';
+        frame->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+      }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  driver.Start();
+  const std::string a = Pattern("/test/a");
+  Watch("rsp/" + a);
+
+  for (size_t round = 0; round < 3; ++round) {
+    Put("req/" + a, Frame(std::string(1, static_cast<char>(a.size())) + a + std::string(3, '\0') +
+                              static_cast<char>(round + 1) + std::string(1, '\0'),
+                          "q"));
+    const auto seen = WaitSeen(round + 1);
+    ASSERT_EQ(seen.size(), round + 1);
+    ExpectFrame(seen[round].second, 600 * 1024, 'w');
+    std::lock_guard lock(mutex_);
+    EXPECT_TRUE(shm_[round]) << round;
+  }
+}
+
+// The same for an already serialized answer.
+TEST_F(ZenohRpcDriverTest, ServerCachedAnswerGetsALoanOfItsSize) {
+  auto& driver = NewDriver("{servers: [{func_name: /test/a, shm_enabled: true}]}");
+  auto answer = std::make_shared<std::string>(600 * 1024, 'y');
+  answer->back() = 'w';
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = BlobInfo(), .service_func = [answer](const auto& frame) {
+        *static_cast<std::string*>(frame->rsp_ptr) = *answer;
+        frame->rsp_serialization_cache["json"] =
+            std::make_shared<ibmw::util::BufferArrayView>(answer->data(), answer->size());
+        frame->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+      }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  driver.Start();
+  const std::string a = Pattern("/test/a");
+  Watch("rsp/" + a);
+
+  for (size_t round = 0; round < 3; ++round) {
+    Put("req/" + a, Frame(std::string(1, static_cast<char>(a.size())) + a + std::string(3, '\0') +
+                              static_cast<char>(round + 1) + std::string(1, '\0'),
+                          "q"));
+    const auto seen = WaitSeen(round + 1);
+    ASSERT_EQ(seen.size(), round + 1);
+    ExpectFrame(seen[round].second, 600 * 1024, 'w');
+    std::lock_guard lock(mutex_);
+    EXPECT_TRUE(shm_[round]) << round;
+  }
 }
 
 }  // namespace
