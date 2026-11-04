@@ -187,6 +187,13 @@ class ZenohRpcDriverTest : public ::testing::Test {
     EXPECT_EQ(payload[4 + frame_len - 1], last);
   }
 
+  // Answers a call. The frame's callback holds the frame: it is released first.
+  static void Answer(const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& frame) {
+    auto callback = std::move(frame->callback);
+    frame->callback = nullptr;
+    callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+  }
+
   // Waits until `count` samples were seen; returns a copy of them.
   std::vector<std::pair<std::string, std::string>> WaitSeen(size_t count) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
@@ -224,7 +231,7 @@ TEST_F(ZenohRpcDriverTest, ServerAnswersOnlyOnTheKeyOfTheCalledFunction) {
                           served.push_back(*static_cast<const int*>(frame->req_ptr));
                           *static_cast<int*>(frame->rsp_ptr) = 100;
                           lock.unlock();
-                          frame->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+                          Answer(frame);
                         }});
   }
   for (const auto& service : services) ASSERT_TRUE(driver.RegisterServiceFunc(service));
@@ -292,7 +299,9 @@ TEST_F(ZenohRpcDriverTest, ClientCompletesCallOnlyWithAnswerOnItsKey) {
 // to the 1 MiB pool, so this and the next requests still go through shm.
 TEST_F(ZenohRpcDriverTest, ClientLoansThatWereTooSmallGoBackToThePool) {
   auto& driver = NewDriver("{clients: [{func_name: /test/a, shm_enabled: true}]}");
-  ASSERT_TRUE(driver.RegisterClientFunc({.info = BlobInfo()}));
+  // Frames keep a reference to this info.
+  const runtime::core::service::ClientFuncWrapper client{.info = BlobInfo()};
+  ASSERT_TRUE(driver.RegisterClientFunc(client));
   driver.Start();
   Watch("req/" + Pattern("/test/a"));
 
@@ -302,7 +311,7 @@ TEST_F(ZenohRpcDriverTest, ClientLoansThatWereTooSmallGoBackToThePool) {
   for (size_t round = 0; round < 3; ++round) {
     auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
         runtime::core::service::ServiceMessageFrame{
-            .info = BlobInfo(), .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+            .info = client.info, .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
     frame->callback = [req, rsp](ibmw::rpc::Status) {};
     driver.Call(frame);
     const auto seen = WaitSeen(round + 1);
@@ -317,7 +326,9 @@ TEST_F(ZenohRpcDriverTest, ClientLoansThatWereTooSmallGoBackToThePool) {
 // is sent (a resized loan used to be retried without ever fitting it).
 TEST_F(ZenohRpcDriverTest, ClientCachedRequestGetsALoanOfItsSize) {
   auto& driver = NewDriver("{clients: [{func_name: /test/a, shm_enabled: true}]}");
-  ASSERT_TRUE(driver.RegisterClientFunc({.info = BlobInfo()}));
+  // Frames keep a reference to this info.
+  const runtime::core::service::ClientFuncWrapper client{.info = BlobInfo()};
+  ASSERT_TRUE(driver.RegisterClientFunc(client));
   driver.Start();
   Watch("req/" + Pattern("/test/a"));
 
@@ -327,7 +338,7 @@ TEST_F(ZenohRpcDriverTest, ClientCachedRequestGetsALoanOfItsSize) {
   for (size_t round = 0; round < 3; ++round) {
     auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
         runtime::core::service::ServiceMessageFrame{
-            .info = BlobInfo(), .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+            .info = client.info, .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
     frame->req_serialization_cache["json"] = std::make_shared<ibmw::util::BufferArrayView>(req->data(), req->size());
     frame->callback = [req, rsp](ibmw::rpc::Status) {};
     driver.Call(frame);
@@ -339,6 +350,36 @@ TEST_F(ZenohRpcDriverTest, ClientCachedRequestGetsALoanOfItsSize) {
   }
 }
 
+// A request serialized into several buffers is copied buffer by buffer.
+TEST_F(ZenohRpcDriverTest, ClientCachedRequestInSeveralBuffersIsCopiedWhole) {
+  auto& driver = NewDriver("{clients: [{func_name: /test/a, shm_enabled: true}]}");
+  // Frames keep a reference to this info.
+  const runtime::core::service::ClientFuncWrapper client{.info = BlobInfo()};
+  ASSERT_TRUE(driver.RegisterClientFunc(client));
+  driver.Start();
+  Watch("req/" + Pattern("/test/a"));
+
+  auto req =
+      std::make_shared<std::string>(std::string(200, 'a') + std::string(200, 'b') + std::string(199, 'c') + 'z');
+  auto rsp = std::make_shared<std::string>();
+  auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+      runtime::core::service::ServiceMessageFrame{
+          .info = client.info, .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+  frame->req_serialization_cache["json"] = std::make_shared<ibmw::util::BufferArrayView>(
+      std::vector<ibmw_buffer_view_t>{{.data = req->data(), .len = 200},
+                                      {.data = req->data() + 200, .len = 200},
+                                      {.data = req->data() + 400, .len = 200}});
+  frame->callback = [req, rsp](ibmw::rpc::Status) {};
+  driver.Call(frame);
+  const auto seen = WaitSeen(1);
+  ASSERT_EQ(seen.size(), 1u);
+  ExpectFrame(seen[0].second, 600, 'z');
+  const uint32_t frame_len = common::util::GetUint32FromBuf(seen[0].second.data());
+  EXPECT_EQ(seen[0].second.substr(4 + frame_len - 600, 600), *req);
+  std::lock_guard lock(mutex_);
+  EXPECT_TRUE(shm_[0]);
+}
+
 // The same for answers of 600 KiB.
 TEST_F(ZenohRpcDriverTest, ServerLoansThatWereTooSmallGoBackToThePool) {
   auto& driver = NewDriver("{servers: [{func_name: /test/a, shm_enabled: true}]}");
@@ -346,7 +387,7 @@ TEST_F(ZenohRpcDriverTest, ServerLoansThatWereTooSmallGoBackToThePool) {
   const runtime::core::service::ServiceFuncWrapper service{
       .info = BlobInfo(), .service_func = [](const auto& frame) {
         *static_cast<std::string*>(frame->rsp_ptr) = std::string(600 * 1024 - 1, 'y') + 'w';
-        frame->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+        Answer(frame);
       }};
   ASSERT_TRUE(driver.RegisterServiceFunc(service));
   driver.Start();
@@ -375,7 +416,7 @@ TEST_F(ZenohRpcDriverTest, ServerCachedAnswerGetsALoanOfItsSize) {
         *static_cast<std::string*>(frame->rsp_ptr) = *answer;
         frame->rsp_serialization_cache["json"] =
             std::make_shared<ibmw::util::BufferArrayView>(answer->data(), answer->size());
-        frame->callback(ibmw::rpc::Status(IBMW_RPC_STATUS_OK));
+        Answer(frame);
       }};
   ASSERT_TRUE(driver.RegisterServiceFunc(service));
   driver.Start();
@@ -392,6 +433,37 @@ TEST_F(ZenohRpcDriverTest, ServerCachedAnswerGetsALoanOfItsSize) {
     std::lock_guard lock(mutex_);
     EXPECT_TRUE(shm_[round]) << round;
   }
+}
+
+// The same for an answer serialized into several buffers.
+TEST_F(ZenohRpcDriverTest, ServerCachedAnswerInSeveralBuffersIsCopiedWhole) {
+  auto& driver = NewDriver("{servers: [{func_name: /test/a, shm_enabled: true}]}");
+  auto answer =
+      std::make_shared<std::string>(std::string(200, 'd') + std::string(200, 'e') + std::string(199, 'f') + 'w');
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = BlobInfo(), .service_func = [answer](const auto& frame) {
+        *static_cast<std::string*>(frame->rsp_ptr) = *answer;
+        frame->rsp_serialization_cache["json"] = std::make_shared<ibmw::util::BufferArrayView>(
+            std::vector<ibmw_buffer_view_t>{{.data = answer->data(), .len = 200},
+                                            {.data = answer->data() + 200, .len = 200},
+                                            {.data = answer->data() + 400, .len = 200}});
+        Answer(frame);
+      }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  driver.Start();
+  const std::string a = Pattern("/test/a");
+  Watch("rsp/" + a);
+
+  Put("req/" + a, Frame(std::string(1, static_cast<char>(a.size())) + a + std::string(3, '\0') + '\1' +
+                            std::string(1, '\0'),
+                        "q"));
+  const auto seen = WaitSeen(1);
+  ASSERT_EQ(seen.size(), 1u);
+  ExpectFrame(seen[0].second, 600, 'w');
+  const uint32_t frame_len = common::util::GetUint32FromBuf(seen[0].second.data());
+  EXPECT_EQ(seen[0].second.substr(4 + frame_len - 600, 600), *answer);
+  std::lock_guard lock(mutex_);
+  EXPECT_TRUE(shm_[0]);
 }
 
 }  // namespace

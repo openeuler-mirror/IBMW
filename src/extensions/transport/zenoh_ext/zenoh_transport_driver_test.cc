@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -63,6 +64,7 @@ class ZenohTransportDriverTest : public ::testing::Test {
     bool shm;
     uint32_t frame_len;  // the length prefix
     char last;           // last byte of the frame
+    std::string tail;    // last bytes of the frame, up to 4 KiB
   };
 
   void SetUp() override {
@@ -92,9 +94,12 @@ class ZenohTransportDriverTest : public ::testing::Test {
       const auto* data = reinterpret_cast<const char*>(z_slice_data(z_loan(slice)));
       const size_t len = z_slice_len(z_loan(slice));
       const uint32_t frame_len = len < 4 ? 0 : common::util::GetUint32FromBuf(data);
-      const char last = frame_len == 0 || 4 + size_t{frame_len} > len ? '\0' : data[4 + frame_len - 1];
+      const bool whole = frame_len != 0 && 4 + size_t{frame_len} <= len;
+      const char last = whole ? data[4 + frame_len - 1] : '\0';
+      const size_t tail = whole ? std::min<size_t>(frame_len, 4096) : 0;
       std::lock_guard lock(mutex_);
-      seen_.push_back({len, z_bytes_to_loaned_shm(payload, &shm) == Z_OK, frame_len, last});
+      seen_.push_back({len, z_bytes_to_loaned_shm(payload, &shm) == Z_OK, frame_len, last,
+                       whole ? std::string(data + 4 + frame_len - tail, tail) : std::string()});
       z_drop(z_move(slice));
     }, sub));
     subs_.push_back(sub);
@@ -109,14 +114,23 @@ class ZenohTransportDriverTest : public ::testing::Test {
     std::filesystem::remove_all(directory_);
   }
 
-  // Sends a message of `size` bytes (already serialized if `cached`) and
-  // returns how it arrived.
-  Sample SendBlob(size_t size, bool cached = false) {
+  // Sends a message of `size` bytes (already serialized in `cached` buffers
+  // if not 0, buffer i filled with 'a' + i) and returns how it arrived. The
+  // message ends with 'z'.
+  Sample SendBlob(size_t size, size_t cached = 0) {
     std::string blob(size, 'x');
-    blob.back() = 'z';
     ibmw::transport::Context ctx;
     runtime::core::transport::MessageFrame frame{.info = wrapper_.info, .msg_ptr = &blob, .ctx_ref = ctx};
-    if (cached) frame.serialization_cache["raw"] = std::make_shared<ibmw::util::BufferArrayView>(blob.data(), size);
+    if (cached) {
+      std::vector<ibmw_buffer_view_t> views;
+      for (size_t i = 0; i < cached; ++i) {
+        const size_t begin = size * i / cached, end = size * (i + 1) / cached;
+        if (cached > 1) std::fill(blob.begin() + begin, blob.begin() + end, static_cast<char>('a' + i));
+        views.push_back({.data = blob.data() + begin, .len = end - begin});
+      }
+      frame.serialization_cache["raw"] = std::make_shared<ibmw::util::BufferArrayView>(views);
+    }
+    blob.back() = 'z';
     size_t before;
     {
       std::lock_guard lock(mutex_);
@@ -131,7 +145,7 @@ class ZenohTransportDriverTest : public ::testing::Test {
       }
       std::this_thread::sleep_for(1ms);
     }
-    return {0, false, 0, '\0'};
+    return {0, false, 0, '\0', {}};
   }
 
   // The frame carries a message of `size` bytes (SendBlob's) after a short header.
@@ -164,7 +178,7 @@ TEST_F(ZenohTransportDriverTest, LoansThatWereTooSmallGoBackToThePool) {
 // completes (a resized loan used to be retried without ever fitting it).
 TEST_F(ZenohTransportDriverTest, CachedMessageGetsALoanOfItsSize) {
   for (int round = 0; round < 3; ++round) {
-    const auto sample = SendBlob(600 * 1024, true);
+    const auto sample = SendBlob(600 * 1024, 1);
     ExpectFrame(sample, 600 * 1024);
     EXPECT_TRUE(sample.shm) << round;
   }
@@ -184,12 +198,22 @@ TEST_F(ZenohTransportDriverTest, MessageLargerThanThePoolIsSentOverTheNetwork) {
 
 // The same for an already serialized message.
 TEST_F(ZenohTransportDriverTest, CachedMessageLargerThanThePoolIsSentOverTheNetwork) {
-  const auto big = SendBlob(2 * kPool, true);
+  const auto big = SendBlob(2 * kPool, 1);
   ExpectFrame(big, 2 * kPool);
   EXPECT_FALSE(big.shm);
   const auto next = SendBlob(100);
   ExpectFrame(next, 100);
   EXPECT_TRUE(next.shm);
+}
+
+// A message serialized into several buffers is copied buffer by buffer.
+TEST_F(ZenohTransportDriverTest, CachedMessageInSeveralBuffersIsCopiedWhole) {
+  const auto sample = SendBlob(600, 3);
+  ExpectFrame(sample, 600);
+  EXPECT_TRUE(sample.shm);
+  ASSERT_GE(sample.tail.size(), 600u);
+  EXPECT_EQ(sample.tail.substr(sample.tail.size() - 600),
+            std::string(200, 'a') + std::string(200, 'b') + std::string(199, 'c') + 'z');
 }
 
 // A loan that has to grow after an earlier shm send finds the pool split by

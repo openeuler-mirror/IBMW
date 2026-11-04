@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -153,6 +154,17 @@ inline std::pair<std::shared_ptr<ibmw::util::BufferArrayView>, size_t> Serialize
   MW_ASSERT(serialize_ret, "Serialize failed.");
 
   return {nullptr, buffer_array_ptr->BufferSize()};
+}
+
+// Copies the buffers of an already serialized message to `dst`, one after the
+// other; `dst` must hold BufferSize() bytes.
+inline void CopyBuffers(const ibmw::util::BufferArrayView& buffers, unsigned char* dst) {
+  for (size_t ii = 0; ii < buffers.Size(); ++ii) {
+    const auto& buffer = buffers.Data()[ii];
+    if (buffer.len == 0) continue;  // memcpy from a null pointer is undefined even for 0 bytes
+    std::memcpy(dst, buffer.data, buffer.len);
+    dst += buffer.len;
+  }
 }
 
 }  // namespace ibmw::extensions::zenoh_extension

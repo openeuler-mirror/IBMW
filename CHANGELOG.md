@@ -48,6 +48,9 @@ details remain governed by the documentation for each release.
   send. An already serialized message no longer loops forever when its loan
   has to grow. The pool is defragmented only when a loan fails, not after
   every publish.
+- Zenoh with `shm_enabled: true` (publishers and RPC): a message whose
+  serialization cache holds several buffers is copied whole into shared
+  memory. Previously the copy read past the cache and crashed or sent garbage.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

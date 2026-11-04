@@ -338,11 +338,7 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                 if (is_shm_pool_size_enough) {
                   // if has cache, the copy it to shm to replace the serialization
                   if (buffer_array_cache_ptr != nullptr) {
-                    unsigned char* strat_pos = z_pub_loaned_shm_ptr + 4 + header_len;
-                    for (size_t ii = 0; ii < buffer_array_cache_ptr->Size(); ++ii) {
-                      std::memcpy(strat_pos, buffer_array_cache_ptr.get()[ii].Data()->data, buffer_array_cache_ptr.get()[ii].Data()->len);
-                      strat_pos += buffer_array_cache_ptr.get()[ii].Data()->len;
-                    }
+                    CopyBuffers(*buffer_array_cache_ptr, z_pub_loaned_shm_ptr + 4 + header_len);
 
                     buffer_array_cache_ptr = nullptr;
                   }
@@ -722,11 +718,7 @@ void ZenohRpcDriver::Call(
       if (is_shm_pool_size_enough) {
         // if has cache, the copy it to shm to replace the serialization
         if (buffer_array_cache_ptr != nullptr) {
-          unsigned char* strat_pos = z_pub_loaned_shm_ptr + 4 + header_len;
-          for (size_t ii = 0; ii < buffer_array_cache_ptr->Size(); ++ii) {
-            std::memcpy(strat_pos, buffer_array_cache_ptr.get()[ii].Data()->data, buffer_array_cache_ptr.get()[ii].Data()->len);
-            strat_pos += buffer_array_cache_ptr.get()[ii].Data()->len;
-          }
+          CopyBuffers(*buffer_array_cache_ptr, z_pub_loaned_shm_ptr + 4 + header_len);
 
           buffer_array_cache_ptr = nullptr;
         }
