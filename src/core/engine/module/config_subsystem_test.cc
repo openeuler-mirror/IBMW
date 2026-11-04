@@ -115,18 +115,25 @@ TEST_F(ConfigSubsystemTempCfgTest, EnvVarsExpandInsideScalarsOnly) {
                            "  block:\n"
                            "    - ${IBMW_T020_PLAIN}\n"
                            "  anchor: &a ${IBMW_T020_NESTED}\n"
-                           "  alias: *a\n";
+                           "  alias: *a\n"
+                           "  unset: ${IBMW_T020_UNSET}\n"
+                           "  quoted_unset: \"${IBMW_T020_UNSET}\"\n"
+                           "  null_value: ${IBMW_T020_NULL}\n"
+                           "  unset_item:\n"
+                           "    - ${IBMW_T020_UNSET}\n";
   }
   ::setenv("IBMW_T020_INJECT", "x\n  injected: 1", 1);
   ::setenv("IBMW_T020_PLAIN", "abc", 1);
   ::setenv("IBMW_T020_PORT", "8080", 1);
   ::setenv("IBMW_T020_KEY", "dyn", 1);
   ::setenv("IBMW_T020_NESTED", "${IBMW_T020_PLAIN}", 1);
+  ::setenv("IBMW_T020_NULL", "null", 1);
+  ::unsetenv("IBMW_T020_UNSET");
   ConfigSubsystem cfg;
   cfg.SetLogger(std::make_shared<ibmw::common::util::LoggerWrapper>());
   cfg.Initialize(file);
   for (const char* name : {"IBMW_T020_INJECT", "IBMW_T020_PLAIN", "IBMW_T020_PORT", "IBMW_T020_KEY",
-                           "IBMW_T020_NESTED"}) {
+                           "IBMW_T020_NESTED", "IBMW_T020_NULL"}) {
     ::unsetenv(name);
   }
 
@@ -141,6 +148,12 @@ TEST_F(ConfigSubsystemTempCfgTest, EnvVarsExpandInsideScalarsOnly) {
   // Inserted values are not expanded again, also through an alias.
   EXPECT_EQ(mod["anchor"].as<std::string>(), "${IBMW_T020_PLAIN}");
   EXPECT_EQ(mod["alias"].as<std::string>(), "${IBMW_T020_PLAIN}");
+  // Unquoted values that expand to a YAML null stay Null, quoted ones are "".
+  EXPECT_TRUE(mod["unset"].IsNull());
+  EXPECT_TRUE(mod["null_value"].IsNull());
+  EXPECT_TRUE(mod["unset_item"][0].IsNull());
+  ASSERT_TRUE(mod["quoted_unset"].IsScalar());
+  EXPECT_EQ(mod["quoted_unset"].as<std::string>(), "");
 }
 
 }  // namespace

@@ -1038,7 +1038,9 @@ configuration uses separate top-level keys matching the module name.
 
 Environment variables are supported: after the YAML is parsed, `${MY_VAR}` in a
 key or value is replaced with the variable's value (empty when unset). The value
-is inserted as plain text inside that one scalar and is never parsed as YAML.
+is inserted as plain text inside that one scalar and is never parsed as YAML
+(a value such as `[a, b]` stays a string). An unquoted value that expands to
+empty, `~` or `null` is null; a quoted one (`"${MY_VAR}"`) is a string.
 Inside flow collections (`[...]`, `{...}`) quote it, e.g. `["${MY_VAR}", b]`.
 
 ### Top-Level Structure

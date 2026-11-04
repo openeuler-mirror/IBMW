@@ -114,7 +114,15 @@ void ReplaceEnvVarsInNode(YAML::Node node, std::vector<YAML::Node>& replaced) {
       for (const auto& done : replaced) {
         if (done.is(node)) return;
       }
-      node = ibmw::common::util::ReplaceEnvVars(node.Scalar());
+      // A plain (unquoted) scalar that expands to "", "~" or "null" is Null,
+      // as it was when the text was substituted before parsing.
+      const bool plain = node.Tag() == "?";
+      auto value = ibmw::common::util::ReplaceEnvVars(node.Scalar());
+      if (plain && YAML::IsNullString(value)) {
+        node = YAML::Null;
+      } else {
+        node = value;
+      }
       replaced.push_back(node);
       break;
     }
