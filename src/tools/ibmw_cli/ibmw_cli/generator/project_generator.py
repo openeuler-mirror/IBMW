@@ -128,4 +128,4 @@ class ProjectGenerator(GeneratorBase):
             # the process working directory is left unchanged.
             format_script = os.path.join(output_dir, 'format.sh')
             if os.path.isfile(format_script):
-                subprocess.run(['sh', 'format.sh'], cwd=output_dir, check=True)
+                subprocess.run(['bash', 'format.sh'], cwd=output_dir, check=True)

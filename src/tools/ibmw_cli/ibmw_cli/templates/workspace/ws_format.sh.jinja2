@@ -2,16 +2,29 @@
 #!/bin/bash
 set -euo pipefail
 
+# A formatter that is not installed is skipped, so generation still succeeds.
+have() {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  echo "$1 not found, skipped"
+  return 1
+}
+
 # clang-format, version v15 is required
-find ./src -regex '.*\.cc\|.*\.h' -and -not -regex '.*\.pb\.cc\|.*\.pb\.h' -print0 | xargs -0 -r clang-format -i --style=file
-echo "clang-format done"
+if have clang-format; then
+  find ./src -regex '.*\.cc\|.*\.h' -and -not -regex '.*\.pb\.cc\|.*\.pb\.h' -print0 | xargs -0 -r clang-format -i --style=file
+  echo "clang-format done"
+fi
 
 # cmake-format, apt install cmake-format
-{ find . -maxdepth 1 -name "CMakeLists.txt" -print0; find ./src -name "CMakeLists.txt" -print0; } | xargs -0 -r cmake-format -c ./.cmake-format.py -i
-{ find ./cmake -name "*.cmake" -print0; find ./src -name "*.cmake" -print0; } | xargs -0 -r cmake-format -c ./.cmake-format.py -i
-echo "cmake-format done"
+if have cmake-format; then
+  { find . -maxdepth 1 -name "CMakeLists.txt" -print0; find ./src -name "CMakeLists.txt" -print0; } | xargs -0 -r cmake-format -c ./.cmake-format.py -i
+  { find ./cmake -name "*.cmake" -print0; find ./src -name "*.cmake" -print0; } | xargs -0 -r cmake-format -c ./.cmake-format.py -i
+  echo "cmake-format done"
+fi
 
 # autopep8, apt install python3-autopep8
-{ find . -maxdepth 1 -name "*.py" -print0; find ./src -name "*.py" -print0; } | xargs -0 -r autopep8 -i --global-config ./.pycodestyle
-echo "python format done"
+if have autopep8; then
+  { find . -maxdepth 1 -name "*.py" -print0; find ./src -name "*.py" -print0; } | xargs -0 -r autopep8 -i --global-config ./.pycodestyle
+  echo "python format done"
+fi
 {# blank line #}
