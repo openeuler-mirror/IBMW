@@ -1314,12 +1314,15 @@ ibmw:
 
 The runtime resolves library paths (`packages[].path`, `extensions.items[].path`,
 `runtime_graph.type_support_pkgs`) relative to the current working directory,
-so prefer absolute paths. A path containing `/` is
-only loaded when the library file (after resolving symlinks) and its directory
-are owned by the current user or root and are not writable by others; a
-world-writable directory is accepted only with the sticky bit (like `/tmp`).
-Group write is allowed. Bare names (`libfoo.so`) use the system loader search
-path unchanged.
+so prefer absolute paths. Every library given by a path containing `/`
+(module packages, extensions, CLI providers, TypeSupport packages, including
+`ibmw topic`/`ibmw bag` `--type-support`) is only loaded when the library file
+(after resolving symlinks) and its directory are owned by the current user or
+root and are not writable by others; a world-writable directory is accepted only
+with the sticky bit (like `/tmp`). Group write is allowed. Parent directories
+further up are not checked. The resolved path is what gets loaded, so `$ORIGIN`
+in a symlinked library's RUNPATH refers to the target's directory. Bare names
+(`libfoo.so`) use the system loader search path unchanged.
 
 ---
 

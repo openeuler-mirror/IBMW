@@ -1,6 +1,11 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -128,6 +133,33 @@ TEST(TypeSupportPkgLoader, ExtensionLoaderMatchesRuntimeLoader) {
     // what() carries the source location, which is the shared header for both.
     EXPECT_EQ(extension_error, runtime_error) << path;
   }
+}
+
+// CORE-017: both loaders refuse a package that other users could replace.
+TEST(TypeSupportPkgLoader, BothLoadersRefuseLibraryWritableByOthers) {
+  std::string pattern = (std::filesystem::temp_directory_path() / "ibmw_tsdir_XXXXXX").string();
+  ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
+  const std::filesystem::path dir = pattern;
+  const auto lib = dir / "libts.so";
+  std::filesystem::copy_file(TYPE_SUPPORT_V1_FIXTURE_PATH, lib);
+  ASSERT_EQ(::chmod(lib.c_str(), 0646), 0);
+  const auto refused = [](auto&& load) {
+    try {
+      load();
+    } catch (const ibmw::common::util::IbmwException& e) {
+      return std::string(e.what()).find("Refusing to load") != std::string::npos;
+    }
+    return false;
+  };
+  EXPECT_TRUE(refused([&] { TypeSupportPkgLoader().TryLoadTypeSupportPkg(lib.string()); }));
+  EXPECT_TRUE(refused([&] { ibmw::extension::TypeSupportPackageLoader().TryLoad(lib.string()); }));
+  ASSERT_EQ(::chmod(lib.c_str(), 0644), 0);
+  {
+    ibmw::extension::TypeSupportPackageLoader loader;
+    EXPECT_TRUE(loader.TryLoad(lib.string()));
+    loader.Unload();
+  }
+  std::filesystem::remove_all(dir);
 }
 
 }  // namespace

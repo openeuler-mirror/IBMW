@@ -19,6 +19,36 @@
 
 namespace ibmw::common::util {
 
+// CORE-017: a library given by path (anything with a '/') must not be
+// replaceable by other users. The file and its directory (after resolving
+// symlinks) must be owned by the effective user or root and not writable by
+// others; a sticky directory such as /tmp may be. Group write is allowed.
+// Ancestor directories are not checked. Bare names keep the loader search path.
+// Returns the refusal reason, or an empty string and sets dlopen_name to the
+// checked (resolved) path, so a symlink re-pointed after the check is not
+// followed. One canonical() and two stat() calls per load.
+inline std::string CheckLibraryTrust(const std::string& lib_name, std::string& dlopen_name) {
+  dlopen_name = lib_name;
+  if (lib_name.find('/') == std::string::npos) return {};
+  std::error_code ec;
+  const auto file = std::filesystem::canonical(lib_name, ec);
+  struct stat status {};
+  if (ec || ::stat(file.c_str(), &status) != 0) return {};  // dlopen reports it
+  const auto trusted_owner = [](const struct stat& st) { return st.st_uid == ::geteuid() || st.st_uid == 0; };
+  if (!trusted_owner(status) || (status.st_mode & S_IWOTH) != 0) {
+    return "Refusing to load '" + file.string() +
+           "': the library must be owned by the current user or root and not writable by others.";
+  }
+  const auto directory = file.parent_path();
+  if (::stat(directory.c_str(), &status) != 0 || !trusted_owner(status) ||
+      ((status.st_mode & S_IWOTH) != 0 && (status.st_mode & S_ISVTX) == 0)) {
+    return "Refusing to load '" + file.string() + "': directory '" + directory.string() +
+           "' must be owned by the current user or root and not writable by others.";
+  }
+  dlopen_name = file.string();
+  return {};
+}
+
 class DynamicLib {
  public:
   typedef void* SymbolType;
@@ -41,13 +71,17 @@ class DynamicLib {
   bool Load(const std::string& lib_name) {
     Unload();
     lib_name_ = lib_name;
-    LoadError() = UntrustedReason(lib_name_);
-    if (!LoadError().empty()) return false;
+    std::string dlopen_name;
+    LoadError() = CheckLibraryTrust(lib_name_, dlopen_name);
+    if (!LoadError().empty()) {
+      (void)dlerror();  // GetErr() must not report an older error next time
+      return false;
+    }
 
 #if defined(IBMW_ENABLE_DLOPEN_DEEPBIND) && defined(RTLD_DEEPBIND)
-    handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
+    handle_ = dlopen(dlopen_name.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
 #else
-    handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL);
+    handle_ = dlopen(dlopen_name.c_str(), RTLD_NOW | RTLD_LOCAL);
 #endif
 
     if (nullptr == handle_) return false;
@@ -114,32 +148,6 @@ class DynamicLib {
   }
 
  private:
-  // CORE-017: a library given by path (anything with a '/') must not be
-  // replaceable by other users. The file and its directory (after resolving
-  // symlinks) must be owned by the effective user or root and not writable by
-  // others; a sticky directory such as /tmp may be. Group write is allowed.
-  // Bare names keep the loader search path. Two stat() calls per load; this is
-  // a check at load time, not a race-free guarantee.
-  static std::string UntrustedReason(const std::string& lib_name) {
-    if (lib_name.find('/') == std::string::npos) return {};
-    std::error_code ec;
-    const auto file = std::filesystem::canonical(lib_name, ec);
-    struct stat status {};
-    if (ec || ::stat(file.c_str(), &status) != 0) return {};  // dlopen reports it
-    const auto trusted_owner = [](const struct stat& st) { return st.st_uid == ::geteuid() || st.st_uid == 0; };
-    if (!trusted_owner(status) || (status.st_mode & S_IWOTH) != 0) {
-      return "Refusing to load '" + file.string() +
-             "': the library must be owned by the current user or root and not writable by others.";
-    }
-    const auto directory = file.parent_path();
-    if (::stat(directory.c_str(), &status) != 0) return {};
-    if (!trusted_owner(status) || ((status.st_mode & S_IWOTH) != 0 && (status.st_mode & S_ISVTX) == 0)) {
-      return "Refusing to load '" + file.string() + "': directory '" + directory.string() +
-             "' must be owned by the current user or root and not writable by others.";
-    }
-    return {};
-  }
-
   static std::string& LoadError() {
     thread_local std::string error;
     return error;

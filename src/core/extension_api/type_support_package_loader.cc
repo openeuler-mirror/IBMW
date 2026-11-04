@@ -9,6 +9,7 @@
 
 #include "base/exception.h"
 #include "base/ibmw_config.h"
+#include "engine/dynamic_lib.h"
 #include "extension_api/type_support_package_validation.h"
 
 namespace ibmw::extension {
@@ -44,8 +45,12 @@ void TypeSupportPackageLoader::Load(std::string_view path) {
 }
 
 bool TypeSupportPackageLoader::TryLoad(std::string_view path) {
-  std::unique_ptr<void, DlCloser> candidate(
-      ::dlopen(std::string(path).c_str(), kDlopenFlags));
+  // CORE-017: same trust rule as DynamicLib. A refused library is an error,
+  // not "not a TypeSupport package".
+  std::string dlopen_name;
+  const auto untrusted = ibmw::common::util::CheckLibraryTrust(std::string(path), dlopen_name);
+  MW_ASSERT(untrusted.empty(), "{}", untrusted);
+  std::unique_ptr<void, DlCloser> candidate(::dlopen(dlopen_name.c_str(), kDlopenFlags));
   if (!candidate) {
     return false;
   }

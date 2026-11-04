@@ -83,8 +83,44 @@ TEST_F(DynamicLibTrustTest, ChecksTheSymlinkTarget) {
   std::filesystem::create_symlink(lib_, link);
   DynamicLib lib;
   EXPECT_FALSE(lib.Load(link.string()));
-  EXPECT_NE(DynamicLib::GetErr().find(lib_.string()), std::string::npos);
+  EXPECT_NE(DynamicLib::GetErr().find(std::filesystem::canonical(lib_).string()), std::string::npos);
   std::filesystem::remove(link);
+}
+
+// The checked path is the one dlopen gets, so re-pointing a symlink after the
+// check does not change what is loaded.
+TEST_F(DynamicLibTrustTest, LoadsTheCheckedPath) {
+  const auto link = std::filesystem::temp_directory_path() / (dir_.filename().string() + "_link.so");
+  std::filesystem::create_symlink(lib_, link);
+  std::string dlopen_name;
+  EXPECT_EQ(CheckLibraryTrust(link.string(), dlopen_name), "");
+  EXPECT_EQ(dlopen_name, std::filesystem::canonical(lib_).string());
+  std::filesystem::remove(link);
+}
+
+TEST_F(DynamicLibTrustTest, ChecksRelativePaths) {
+  const auto cwd = std::filesystem::current_path();
+  std::filesystem::current_path(dir_);
+  DynamicLib lib;
+  EXPECT_TRUE(lib.Load("./libfixture.so")) << DynamicLib::GetErr();
+  Chmod(lib_, 0646);
+  EXPECT_FALSE(lib.Load("./libfixture.so"));
+  std::filesystem::current_path(cwd);
+  EXPECT_NE(DynamicLib::GetErr().find("Refusing to load"), std::string::npos);
+}
+
+// A refusal neither leaks into a later GetErr() nor leaves an older dlerror()
+// to be reported after the next successful load.
+TEST_F(DynamicLibTrustTest, ErrorsDoNotOutliveTheirLoad) {
+  DynamicLib lib;
+  EXPECT_FALSE(lib.Load("/path/that/does/not/exist/libibmw_missing.so"));
+  Chmod(lib_, 0646);
+  EXPECT_FALSE(lib.Load(lib_.string()));
+  EXPECT_NE(DynamicLib::GetErr().find("Refusing to load"), std::string::npos);
+  EXPECT_EQ(DynamicLib::GetErr(), "no dynamic library error pending");
+  Chmod(lib_, 0644);
+  EXPECT_TRUE(lib.Load(lib_.string()));
+  EXPECT_EQ(DynamicLib::GetErr(), "no dynamic library error pending");
 }
 
 TEST_F(DynamicLibTrustTest, RefusesLibraryOwnedByAnotherUser) {
@@ -97,7 +133,11 @@ TEST_F(DynamicLibTrustTest, RefusesLibraryOwnedByAnotherUser) {
 
 TEST(DynamicLib, BareNamesUseTheLoaderSearchPath) {
   DynamicLib lib;
+#if defined(__GLIBC__)
   EXPECT_TRUE(lib.Load("libc.so.6")) << DynamicLib::GetErr();
+#else
+  EXPECT_TRUE(lib.Load("libc.so")) << DynamicLib::GetErr();  // musl (OHOS)
+#endif
 }
 
 }  // namespace

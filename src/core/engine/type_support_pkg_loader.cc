@@ -15,11 +15,15 @@ namespace package_check = ibmw::extension::type_support_package;
 void TypeSupportPkgLoader::LoadTypeSupportPkg(std::string_view path) {
   MW_ASSERT(
       TryLoadTypeSupportPkg(path),
-      "Library '{}' is not a TypeSupport package.", path);
+      "Library '{}' is not a TypeSupport package: {}", path, ibmw::common::util::DynamicLib::GetErr());
 }
 
 bool TypeSupportPkgLoader::TryLoadTypeSupportPkg(std::string_view path) {
   std::string candidate_path(path);
+  // CORE-017: a refused library is an error, like in the extension loader.
+  std::string dlopen_name;
+  const auto untrusted = ibmw::common::util::CheckLibraryTrust(candidate_path, dlopen_name);
+  MW_ASSERT(untrusted.empty(), "{}", untrusted);
   ibmw::common::util::DynamicLib candidate;
   if (!candidate.Load(candidate_path)) {
     return false;

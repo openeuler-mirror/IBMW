@@ -8,12 +8,13 @@ details remain governed by the documentation for each release.
 
 ### Changed
 
-- Library loading: a module package, extension or configured TypeSupport
-  package (`runtime_graph.type_support_pkgs`) given by
-  path is refused when the file (after resolving symlinks) or its directory is
-  owned by another non-root user or writable by others (a sticky directory such
-  as `/tmp` is accepted; group write is allowed). Relative paths still resolve
-  against the working directory; prefer absolute paths.
+- Library loading: a module package, extension, CLI provider or TypeSupport
+  package (`runtime_graph.type_support_pkgs`, `--type-support`) given by path is
+  refused when the file (after resolving symlinks) or its directory is owned by
+  another non-root user or writable by others (a sticky directory such as `/tmp`
+  is accepted; group write is allowed). The resolved path is the one loaded, so
+  `$ORIGIN` in a symlinked library's RUNPATH now means the target's directory.
+  Relative paths still resolve as before; prefer absolute paths.
 - Configuration: `${ENV}` references are expanded after the YAML is parsed,
   inside keys and values only. An environment value can no longer add YAML
   structure (for example extra `packages`/`extensions` entries). Unquoted

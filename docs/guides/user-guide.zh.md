@@ -1251,9 +1251,10 @@ ibmw:
 ```
 
 库路径（`packages[].path`、`extensions.items[].path`、`runtime_graph.type_support_pkgs`）在运行时中按当前工作目录解析相对路径，
-建议使用绝对路径。包含 `/` 的路径只有在库文件（解析符号链接后）及其所在目录属于当前用户或 root、且其他用户不可写时
-才会加载；所有人可写的目录只有设置了粘滞位（如 `/tmp`）才被接受。允许组可写。不含 `/` 的库名（`libfoo.so`）
-仍按系统加载器搜索路径加载。
+建议使用绝对路径。所有以包含 `/` 的路径给出的库（Module 包、Extension、CLI provider、TypeSupport 包，包括
+`ibmw topic`/`ibmw bag` 的 `--type-support`），只有在库文件（解析符号链接后）及其所在目录属于当前用户或 root、
+且其他用户不可写时才会加载；所有人可写的目录只有设置了粘滞位（如 `/tmp`）才被接受。允许组可写。不检查更上层的目录。
+实际加载的是解析后的路径，因此符号链接库 RUNPATH 中的 `$ORIGIN` 指向链接目标所在目录。不含 `/` 的库名（`libfoo.so`）仍按系统加载器搜索路径加载。
 
 ---
 
