@@ -1,7 +1,8 @@
-# A/B/C 4 KiB interop benchmark
+# A/B/C/S 4 KiB interop benchmark
 
 This is a deliberately small endpoint and does not change existing business
-code or ABI.
+code or ABI. Lane S gives the benchmark a shared-memory lane that needs neither
+iceoryx nor RouDi.
 
 ## A: native ROS 2 Humble
 
@@ -75,6 +76,37 @@ loaned API. Capability warning: iceoryx provides shared-memory transport, but
 there is no DDS protocol-level reliability/discovery semantic; results must
 not be described as DDS reliable delivery.
 
+## S: self-developed shm ordinary `Send()`
+
+`shm_send_publisher_app` and `shm_send_subscriber_app` are the C lane's sources
+built by `../shm_send`, reused when `IBMW_BUILD_SHM_EXTENSION=ON`. `run_block.py`
+patches temporary copies of `cfg/shm_send/*.yaml` with the same 4 KiB contract as
+C (`payload_bytes: 4096`, 100 Hz, 50 warmup, 3000 measured, `start_delay_ms: 2000`,
+`/mw_perf/payload_4kb`) and the label `shm_send_4KB`. The plugin is
+`libibmw_shm_transport.so` with `driver_name: iceoryx`, so the messaging section
+is the in-place replacement of C's. There is no RouDi process and `--roudi` is
+ignored:
+
+```sh
+python3 run_block.py S --build <build> --work /tmp/abc-s
+```
+
+Every S run creates a private `IBMW_SHM_ROOT` (`/tmp/ibS.XXXXXXXX`, short enough
+for the 63-byte service directory limit) and sets a unique `IBMW_SHM_DOMAIN`
+(`abcS<domain>.<suffix>`, recorded as `shm_domain` in `result.json`). An inherited
+`IBMW_SHM_GROUP` is dropped. On every path, including errors, SIGINT, and SIGTERM,
+the runner stops the endpoints and removes the root before writing `result.json`;
+a failed removal is reported in `validation_warnings`. Only SIGKILL of the runner,
+such as the matrix subprocess bound expiring, can leave the root behind. Runs share
+nothing with other shm users of the host, and no file is created in `/dev/shm`.
+
+Capability warning: like C, S is a shared-memory transport with no DDS
+protocol-level reliability/discovery semantic; results must not be described as
+DDS reliable delivery. The shm driver reflects the real `publish()` result, but
+`Send()` has no result: a failed publish is only logged and counted by the driver,
+so the publisher still reports attempted counts and the loss appears as subscriber
+`missing`, which fails the gate. S and C do not interoperate.
+
 ## Gates and smoke
 
 The manually assembled OHOS test bundle must include executable
@@ -87,6 +119,8 @@ received/unique and all five error counters; missing, null, or non-object
 statuses are rejected. C additionally requires its independent publisher-only
 status schema: boolean `completion`/`valid` and nonnegative integer
 `attempted_total`/`attempted_measured`; it does not fabricate subscriber fields.
+S is gated exactly as C, except that only its publisher and subscriber are
+required processes.
 Every artifact used by a gate (CSV and subscriber or publisher status) must have
 `mtime_ns >= run_started_ns`. A/B processes must
 exit zero. C processes may exit zero or from the runner's intentional SIGINT;
@@ -105,9 +139,26 @@ lanes have a 120-second subprocess bound; summaries include `valid_runs` and
 
 The parent benchmark gate remains `IBMW_BUILD_BENCHMARKS`; A additionally
 requires `WITH_ROS2` (`IBMW_BUILD_WITH_ROS2`), B requires `IBMW_BUILD_ROS2_TYPES`
-and `IBMW_BUILD_DDS_EXTENSION`, and C requires `IBMW_BUILD_ICEORYX_EXTENSION`.
+and `IBMW_BUILD_DDS_EXTENSION`, C requires `IBMW_BUILD_ICEORYX_EXTENSION`, and S requires
+`IBMW_BUILD_SHM_EXTENSION`.
 `cmake --build <build> --target ibmw_abc_smoke` checks target wiring without
-starting middleware. `extension_v2_fixture.cc` is untouched.
+starting middleware; `ibmw_abc_shm_endpoint` is the S part of it.
+`extension_v2_fixture.cc` is untouched.
+
+`ibmw_abc_matrix` needs A, B, and one ordinary `Send()` lane. With iceoryx built
+it requires A, B, C, and RouDi, whether or not shm is also built. With iceoryx off
+and shm on it requires A, B, and S, and nothing resolves RouDi. CMake reports which
+form applies in its `A/B/C` or `A/B/S benchmark matrix target` status message.
+
+`run_matrix.py` runs A,B,C by default. When `<build>/CMakeCache.txt` has shm on and
+iceoryx off it defaults to A,B,S instead; without those cache entries, the same
+choice follows from `shm_send_publisher_app` being present and
+`iox_send_publisher_app` absent. `--lanes` sets any other order, for example
+`--lanes S` or `--lanes A,B,C,S`. S lanes are real runs with summaries and bridge
+files, but `--collector-managed` and `--comparison-plan` require exactly lanes A,
+B, and C: the `mw_perf_collect` comparison schemas and formal compare accept no
+other lane, so such requests are rejected before any lane starts or output is
+created. `run_block.py S --collector-managed` is rejected the same way.
 
 For lane C, CMake writes the resolved source-built or package-provided RouDi
 target location to `<build>/ibmw_abc_roudi_path.txt`. `run_block.py` and
@@ -124,6 +175,10 @@ evidence: those capabilities and omitted declarations are marked unsupported,
 and its validation is intentionally invalid for comparison. Formal compare
 therefore accepts the plan shape but fails closed until each lane directory is
 replaced by a genuinely collected and validated run carrying matching metadata.
+
+The OHOS scripts (`run_ohos_lane.sh`, `run_ohos_matrix.sh`) only run lanes A and
+B. Lane S is not supported there: the OHOS benchmark tree does not build the
+`shm_*` lanes.
 
 Each OHOS lane also records CPU evidence: `cpu-uptime-start.txt`,
 `cpu-uptime-end.txt`, `pub-proc-stat-start.txt`, `sub-proc-stat-start.txt`,

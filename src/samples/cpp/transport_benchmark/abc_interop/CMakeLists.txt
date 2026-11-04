@@ -1,4 +1,4 @@
-# Minimal A/B/C benchmark endpoint.
+# Minimal A/B/C/S benchmark endpoint.
 
 set(ABC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(ABC_SMOKE_DEPENDENCIES)
@@ -96,6 +96,16 @@ if(IBMW_BUILD_ICEORYX_EXTENSION AND TARGET iox_send_publisher_app AND
   list(APPEND ABC_SMOKE_LANES "C=iox_send_publisher_app+iox_send_subscriber_app")
 endif()
 
+# S is C on the self-developed shm transport: ../shm_send builds the iox_send
+# sources against libibmw_shm_transport.so and needs no RouDi.
+if(IBMW_BUILD_SHM_EXTENSION AND TARGET shm_send_publisher_app AND
+   TARGET shm_send_subscriber_app)
+  add_custom_target(ibmw_abc_shm_endpoint DEPENDS
+    shm_send_publisher_app shm_send_subscriber_app ibmw_extensions_shm_ext)
+  list(APPEND ABC_SMOKE_DEPENDENCIES ibmw_abc_shm_endpoint)
+  list(APPEND ABC_SMOKE_LANES "S=shm_send_publisher_app+shm_send_subscriber_app")
+endif()
+
 if(ABC_SMOKE_DEPENDENCIES)
   string(JOIN "; " ABC_SMOKE_OUTPUT ${ABC_SMOKE_LANES})
   add_custom_target(ibmw_abc_smoke
@@ -104,10 +114,21 @@ if(ABC_SMOKE_DEPENDENCIES)
     VERBATIM)
 endif()
 
+# Without iceoryx the matrix is A/B/S: S takes C's place and nothing needs RouDi.
+if(IBMW_BUILD_SHM_EXTENSION AND NOT IBMW_BUILD_ICEORYX_EXTENSION)
+  set(ABC_MATRIX_LANES "A/B/S")
+  set(ABC_MATRIX_SEND_ENDPOINT ibmw_abc_shm_endpoint)
+  set(ABC_MATRIX_SEND_SAMPLE shm_send)
+else()
+  set(ABC_MATRIX_LANES "A/B/C")
+  set(ABC_MATRIX_SEND_ENDPOINT ibmw_abc_iox_endpoint)
+  set(ABC_MATRIX_SEND_SAMPLE iox_send)
+endif()
+
 set(ABC_MATRIX_TARGET_DEPENDENCIES
   ibmw_abc_ros2_endpoint
   ibmw_abc_dds_endpoint
-  ibmw_abc_iox_endpoint)
+  ${ABC_MATRIX_SEND_ENDPOINT})
 set(ABC_MATRIX_MISSING_TARGETS)
 foreach(ABC_MATRIX_DEPENDENCY IN LISTS ABC_MATRIX_TARGET_DEPENDENCIES)
   if(NOT TARGET ${ABC_MATRIX_DEPENDENCY})
@@ -115,39 +136,44 @@ foreach(ABC_MATRIX_DEPENDENCY IN LISTS ABC_MATRIX_TARGET_DEPENDENCIES)
   endif()
 endforeach()
 
-include(IbmwIceoryxRouDi)
-ibmw_resolve_iceoryx_roudi_target(ABC_MATRIX_ROUDI_TARGET)
-if(NOT ABC_MATRIX_ROUDI_TARGET)
-  list(APPEND ABC_MATRIX_MISSING_TARGETS
-    "iox-roudi or iceoryx_posh::iox-roudi")
-else()
-  get_target_property(ABC_MATRIX_ROUDI_IMPORTED
-    ${ABC_MATRIX_ROUDI_TARGET} IMPORTED)
-  if(NOT ABC_MATRIX_ROUDI_IMPORTED)
-    list(APPEND ABC_MATRIX_TARGET_DEPENDENCIES ${ABC_MATRIX_ROUDI_TARGET})
+set(ABC_MATRIX_ROUDI_COMMAND)
+if(ABC_MATRIX_LANES STREQUAL "A/B/C")
+  include(IbmwIceoryxRouDi)
+  ibmw_resolve_iceoryx_roudi_target(ABC_MATRIX_ROUDI_TARGET)
+  if(NOT ABC_MATRIX_ROUDI_TARGET)
+    list(APPEND ABC_MATRIX_MISSING_TARGETS
+      "iox-roudi or iceoryx_posh::iox-roudi")
+  else()
+    get_target_property(ABC_MATRIX_ROUDI_IMPORTED
+      ${ABC_MATRIX_ROUDI_TARGET} IMPORTED)
+    if(NOT ABC_MATRIX_ROUDI_IMPORTED)
+      list(APPEND ABC_MATRIX_TARGET_DEPENDENCIES ${ABC_MATRIX_ROUDI_TARGET})
+    endif()
+    ibmw_generate_iceoryx_roudi_path(
+      "${CMAKE_BINARY_DIR}/ibmw_abc_roudi_path.txt")
+    set(ABC_MATRIX_ROUDI_COMMAND
+      COMMAND ${CMAKE_COMMAND} -E echo
+        "RouDi executable: $<TARGET_FILE:${ABC_MATRIX_ROUDI_TARGET}>")
   endif()
-  ibmw_generate_iceoryx_roudi_path(
-    "${CMAKE_BINARY_DIR}/ibmw_abc_roudi_path.txt")
 endif()
 
 if(NOT ABC_MATRIX_MISSING_TARGETS)
   add_custom_target(ibmw_abc_matrix
     COMMAND ${CMAKE_COMMAND} -E echo
       "ABC matrix is runnable with src/samples/cpp/transport_benchmark/abc_interop/run_block.py"
-    COMMAND ${CMAKE_COMMAND} -E echo
-      "RouDi executable: $<TARGET_FILE:${ABC_MATRIX_ROUDI_TARGET}>"
+    ${ABC_MATRIX_ROUDI_COMMAND}
     DEPENDS
       ${ABC_MATRIX_TARGET_DEPENDENCIES}
       ${ABC_DIR}/run_block.py
       ${ABC_DIR}/config/publisher.yaml
       ${ABC_DIR}/config/subscriber.yaml
-      ${ABC_DIR}/../iox_send/config/linux/bin/cfg/iox_send/publisher.yaml
-      ${ABC_DIR}/../iox_send/config/linux/bin/cfg/iox_send/subscriber.yaml
+      ${ABC_DIR}/../${ABC_MATRIX_SEND_SAMPLE}/config/linux/bin/cfg/${ABC_MATRIX_SEND_SAMPLE}/publisher.yaml
+      ${ABC_DIR}/../${ABC_MATRIX_SEND_SAMPLE}/config/linux/bin/cfg/${ABC_MATRIX_SEND_SAMPLE}/subscriber.yaml
     VERBATIM)
-  message(STATUS "A/B/C benchmark matrix target available: ibmw_abc_matrix")
+  message(STATUS "${ABC_MATRIX_LANES} benchmark matrix target available: ibmw_abc_matrix")
 else()
   string(JOIN ", " ABC_MATRIX_MISSING_OUTPUT ${ABC_MATRIX_MISSING_TARGETS})
   message(STATUS
-    "A/B/C benchmark matrix target unavailable; missing targets: ${ABC_MATRIX_MISSING_OUTPUT}. "
+    "${ABC_MATRIX_LANES} benchmark matrix target unavailable; missing targets: ${ABC_MATRIX_MISSING_OUTPUT}. "
     "ibmw_abc_smoke remains available for configured lanes.")
 endif()

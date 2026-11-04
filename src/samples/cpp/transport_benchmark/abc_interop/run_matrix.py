@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the A/B/C matrix and optionally emit a comparison-plan bridge.
+"""Run the A/B/C (or A/B/S) matrix and optionally emit a comparison-plan bridge.
 
 This runner does not own collector lifecycle or resource observation.  The
 metadata it emits is therefore deliberately invalid for comparison until a
@@ -10,15 +10,47 @@ import argparse
 import json
 import pathlib
 import os
+import re
 import subprocess
 import sys
 
 
 UNSUPPORTED = "unsupported: not declared by abc runner"
+LANES = ("A", "B", "C", "S")
+LANE_SEMANTIC_WARNINGS = {"C": "C is not DDS-equivalent and is reported separately",
+                          "S": "S is not DDS-equivalent and is reported separately"}
 
 
 def _metadata(value):
     return value if value is not None else {"status": "unsupported", "reason": UNSUPPORTED}
+
+
+def _lanes(value):
+    order = value.split(",")
+    if any(lane not in LANES for lane in order) or len(set(order)) != len(order):
+        raise argparse.ArgumentTypeError(
+            f"expected unique comma-separated lanes from {','.join(LANES)}: {value}")
+    return order
+
+
+def _cached_transports(build):
+    """Return the CMakeCache transport switches, or None when they are not known."""
+    try:
+        text = (build / "CMakeCache.txt").read_text(errors="replace")
+    except OSError:
+        return None
+    switches = {match[1]: match[2].strip().upper() in ("ON", "TRUE", "1", "YES", "Y")
+                for match in re.finditer(r"(?m)^IBMW_BUILD_(ICEORYX|SHM)_EXTENSION:[^=]*=(.*)$", text)}
+    return switches if len(switches) == 2 else None
+
+
+def _default_order(build):
+    """A,B,C unless the build has shm and no iceoryx, where S replaces C."""
+    switches = _cached_transports(build)
+    if switches is None:
+        switches = {"SHM": (build / "shm_send_publisher_app").is_file(),
+                    "ICEORYX": (build / "iox_send_publisher_app").is_file()}
+    return ["A", "B", "S"] if switches["SHM"] and not switches["ICEORYX"] else ["A", "B", "C"]
 
 
 def _parser():
@@ -27,6 +59,9 @@ def _parser():
     parser.add_argument("--build", required=True, type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("abc-results"))
     parser.add_argument("--roudi", type=pathlib.Path, help="RouDi executable for lane C")
+    parser.add_argument("--lanes", type=_lanes,
+                        help="comma-separated lane order; default A,B,C, or A,B,S for a "
+                             "build with shm_send and without iox_send")
     parser.add_argument("--comparison-plan", type=pathlib.Path,
                         help="also emit a formal comparison-plan.v1")
     parser.add_argument("--collector-managed", action="store_true",
@@ -167,11 +202,14 @@ def main(argv=None):
         _parser().error("--blocks must be >= 1")
     if a.order_seed < 0:
         _parser().error("--order-seed must be >= 0")
+    order = a.lanes or _default_order(a.build)
+    if (a.collector_managed or a.comparison_plan) and set(order) != set("ABC"):
+        _parser().error("--collector-managed and --comparison-plan require exactly lanes A, B and C: "
+                        "mw_perf_collect comparison schemas do not accept lane order " + ",".join(order))
     a.output.mkdir(parents=True, exist_ok=True)
     metadata = {name: _declared(value) for name, value in (
         ("contract", a.contract), ("profile", a.profile),
         ("workload", a.workload), ("resource_scope", a.resource_scope))}
-    order = ["A", "B", "C"]
     results = []
     runner = pathlib.Path(__file__).with_name("run_block.py")
     if a.collector_managed:
@@ -184,7 +222,7 @@ def main(argv=None):
         block_id = f"abc-block-{block}"
         for offset, lane in enumerate(order):
             work = a.output / f"block-{block}" / lane
-            domain = 80 + block * 3 + offset
+            domain = 80 + block * max(3, len(order)) + offset
             if a.collector_managed:
                 source_work = work / "lane-output"
                 config = _managed_config(runner, a.build.resolve(), source_work, lane, domain,
@@ -222,8 +260,10 @@ def main(argv=None):
     valid_runs = sum(r.get("valid") is True and r.get("returncode") == 0 for r in results)
     summary = {"blocks": a.blocks, "valid": bool(results) and valid_runs == len(results),
                "valid_runs": valid_runs, "invalid_runs": len(results) - valid_runs,
-               "runs": results,
-               "semantic_warning": "C is not DDS-equivalent and is reported separately"}
+               "runs": results}
+    semantic_warnings = [LANE_SEMANTIC_WARNINGS[lane] for lane in order if lane in LANE_SEMANTIC_WARNINGS]
+    if semantic_warnings:
+        summary["semantic_warning"] = "; ".join(semantic_warnings)
     (a.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     plan_path = a.comparison_plan or (a.output / "comparison-plan.json" if a.collector_managed else None)
     if plan_path:
