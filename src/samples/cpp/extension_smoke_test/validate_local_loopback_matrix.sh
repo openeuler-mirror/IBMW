@@ -802,7 +802,7 @@ EOF
 
 # Zenoh RPC with and without shared memory: the SHM path writes its own length
 # prefix, so both request and response bodies must round-trip (R-OQ2).
-if [ -f "$BUILD_DIR/libibmw_zenoh_transport.so" ] || [ -f "$BUILD_DIR/lib/libibmw_zenoh_transport.so" ]; then
+if [ -f "$BUILD_DIR/libibmw_zenoh_transport.so" ] && [ -f "$BUILD_DIR/libcontext_pkg.so" ]; then
   for shm_enabled in false true; do
     run_case \
       "zenoh_rpc_shm_${shm_enabled}" \
@@ -811,7 +811,7 @@ if [ -f "$BUILD_DIR/libibmw_zenoh_transport.so" ] || [ -f "$BUILD_DIR/lib/libibm
       "RPC call succeeded, response: echo hello world"
   done
 else
-  echo "SKIP: zenoh RPC cases (libibmw_zenoh_transport.so not built)"
+  echo "SKIP: zenoh RPC cases (libibmw_zenoh_transport.so or libcontext_pkg.so not in $BUILD_DIR)"
 fi
 
 echo "PASS: local loopback strict matrix"
