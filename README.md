@@ -90,6 +90,8 @@ set -u
 
 # Recommended rcl-free build: DDS transport plus build-time ROS2 message types.
 # Do not enable deprecated IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION here.
+# The full preset includes the self-developed shm transport, which needs a
+# Linux kernel; on other hosts add -DIBMW_BUILD_SHM_EXTENSION=OFF.
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
                     -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
                     -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF

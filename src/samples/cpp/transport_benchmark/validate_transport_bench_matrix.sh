@@ -42,18 +42,41 @@ ALL_SAMPLES=(
   net_send_tcp
 )
 
-if [[ "$#" -gt 0 ]]; then
-  SAMPLES=("$@")
-else
-  SAMPLES=("${ALL_SAMPLES[@]}")
-fi
-
 if [[ ! -d "${BUILD_DIR}" ]]; then
   echo "FAIL: build dir not found: ${BUILD_DIR}" >&2
   exit 2
 fi
 
 cd "${BUILD_DIR}"
+
+# Explicitly requested lanes must exist. The default list keeps only the lanes
+# this build has (iox_* need iceoryx, shm_* the self-developed shm transport),
+# so a shm-only or iceoryx-only build runs what it has.
+if [[ "$#" -gt 0 ]]; then
+  SAMPLES=("$@")
+else
+  SAMPLES=()
+  for sample in "${ALL_SAMPLES[@]}"; do
+    if [[ -x "./start_${sample}.sh" ]]; then
+      SAMPLES+=("${sample}")
+    else
+      echo "[matrix] skip ${sample}: ./start_${sample}.sh not built"
+    fi
+  done
+  if [[ "${#SAMPLES[@]}" -eq 0 ]]; then
+    echo "FAIL: no benchmark lane built in ${BUILD_DIR}" >&2
+    exit 2
+  fi
+fi
+
+# RouDi and the iceoryx files in /dev/shm and /tmp are touched only when an
+# iceoryx lane runs; other lanes leave a RouDi on the host alone.
+RUN_IOX=0
+for sample in "${SAMPLES[@]}"; do
+  if [[ "${sample}" == iox_* ]]; then
+    RUN_IOX=1
+  fi
+done
 
 backup_files=()
 
@@ -173,13 +196,19 @@ clean_runtime_state() {
   # iceoryx lock from the previous lane can make the next iceoryx lane publish
   # into the wrong runtime and produce zero samples (or trip a publisher crash).
   # Keep this cleanup local to the benchmark process names used by this matrix.
-  ps -eo pid=,comm= | awk '$2 ~ /^(iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|shm_send_|iox_loan_v2_|shm_loan_v2_|shm_loaned_ctx_|shm_loaned_pod_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_)/ {print $1}' | xargs -r kill -TERM 2>/dev/null || true
+  local procs='shm_send_|shm_loan_v2_|shm_loaned_ctx_|shm_loaned_pod_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_'
+  if [[ "${RUN_IOX}" -eq 1 ]]; then
+    procs="iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|iox_loan_v2_|${procs}"
+  fi
+  ps -eo pid=,comm= | awk -v re="^(${procs})" '$2 ~ re {print $1}' | xargs -r kill -TERM 2>/dev/null || true
   sleep 1
-  ps -eo pid=,comm= | awk '$2 ~ /^(iox-roudi|iox_loaned_pod_|iox_loaned_ctx_|iox_send_|shm_send_|iox_loan_v2_|shm_loan_v2_|shm_loaned_ctx_|shm_loaned_pod_|dds_loaned_|dds_send_shm_|dds_send_tcp_|net_send_tcp_)/ {print $1}' | xargs -r kill -9 2>/dev/null || true
+  ps -eo pid=,comm= | awk -v re="^(${procs})" '$2 ~ re {print $1}' | xargs -r kill -9 2>/dev/null || true
   rm -rf /dev/shm/fastdds_* /dev/shm/fast_datasharing_* \
-         /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* \
-         /dev/shm/iceoryx_* /dev/shm/iox_* /dev/shm/iox-* \
-         /tmp/iox* /tmp/iceoryx_* 2>/dev/null || true
+         /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true
+  if [[ "${RUN_IOX}" -eq 1 ]]; then
+    rm -rf /dev/shm/iceoryx_* /dev/shm/iox_* /dev/shm/iox-* \
+           /tmp/iox* /tmp/iceoryx_* 2>/dev/null || true
+  fi
   sleep 1
 }
 

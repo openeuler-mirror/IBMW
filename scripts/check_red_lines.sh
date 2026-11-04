@@ -265,7 +265,7 @@ grep_user_facing "R2" "$R2_PAT"
 # 6. R3 — 用户类成员/方法红线
 #─────────────────────────────────────────────
 emit_rule "R3" "HIGH" "user-facing 类不得持 *TransportDriver* 成员"
-R3_PAT='(IceoryxTransportDriver|DdsTransportDriver|FastDdsDriver|Ros2TransportDriver|JsonTransportDriver)[[:space:]]*\*'
+R3_PAT='(IceoryxTransportDriver|ShmTransportDriver|DdsTransportDriver|FastDdsDriver|Ros2TransportDriver|JsonTransportDriver)[[:space:]]*\*'
 grep_user_facing "R3" "$R3_PAT"
 
 #─────────────────────────────────────────────
@@ -273,7 +273,7 @@ grep_user_facing "R3" "$R3_PAT"
 #─────────────────────────────────────────────
 emit_rule "R4" "HIGH" "user-facing 不得 override SetDriver(driver_name) 做字符串匹配"
 # 启发式：在 user-facing 文件里出现 SetDriver 形参带 driver_name + 字符串字面量比较
-R4_PAT='SetDriver[[:space:]]*\([^)]*driver_name|driver_name[[:space:]]*==[[:space:]]*"(iceoryx|dds|ros2|json|mqtt|net|zenoh)"'
+R4_PAT='SetDriver[[:space:]]*\([^)]*driver_name|driver_name[[:space:]]*==[[:space:]]*"(iceoryx|shm|dds|ros2|json|mqtt|net|zenoh)"'
 grep_user_facing "R4" "$R4_PAT"
 
 #─────────────────────────────────────────────
@@ -320,7 +320,7 @@ for f in "$API_DIR/pkg/"*.h "$API_DIR/pkg/"*.cc "$API_DIR/c/"*.h; do
 done
 
 # (d) user-facing 不应出现 driver_name 字面 dispatch
-R7_USER_PAT='driver_name[[:space:]]*==[[:space:]]*"(iceoryx|dds|ros2|json|mqtt|net|zenoh|local|tcp|http|udp)"'
+R7_USER_PAT='driver_name[[:space:]]*==[[:space:]]*"(iceoryx|shm|dds|ros2|json|mqtt|net|zenoh|local|tcp|http|udp)"'
 grep_user_facing "R7" "$R7_USER_PAT"
 
 #─────────────────────────────────────────────
@@ -334,9 +334,9 @@ grep_user_facing "R9" "$R9_PAT"
 # 11. R11 — Publisher / Subscriber 模板单一化（strict）
 #─────────────────────────────────────────────
 emit_rule "R11" "HIGH" "yaml 不得按 transport 分裂 module_type（strict）"
-# 禁字段：module_type: dds_publisher / iceoryx_publisher / ros2_publisher / json_publisher
+# 禁字段：module_type: dds_publisher / iceoryx_publisher / shm_publisher / ros2_publisher / json_publisher
 # 允许：publisher / subscriber / loaned_publisher / loaned_subscriber / direct_<transport>_*
-R11_PAT='^[[:space:]]*module_type[[:space:]]*:[[:space:]]*(dds|iceoryx|ros2|json)_(publisher|subscriber|loaned_publisher|loaned_subscriber)[[:space:]]*$'
+R11_PAT='^[[:space:]]*module_type[[:space:]]*:[[:space:]]*(dds|iceoryx|shm|ros2|json)_(publisher|subscriber|loaned_publisher|loaned_subscriber)[[:space:]]*$'
 # R11 strict：命中直接计入 $VIOLATIONS_RAW，与 R1-R9 共用 strict / baseline 判定
 find "$SAMPLES_DIR" -type f \( -name '*.ibmw.yaml' -o -name '*.ibmw.yml' \) -print0 \
   | xargs -0 grep -nHE --no-messages "$R11_PAT" 2>/dev/null \

@@ -453,21 +453,22 @@ fi
 # These compile-only assertion samples prove that publisher_for<T>() and
 # subscriber_for<T>() are reachable from a user TU through the public
 # cpp/transport/transport_factory.h facade alone (no R1/R2 escapes).
-# The 2 _fail samples are gated behind -DIBMW_BUILD_R8_FAIL_SAMPLES=ON and
+# The _fail samples are gated behind -DIBMW_BUILD_R8_FAIL_SAMPLES=ON and
 # are intentionally NOT registered here -- they are exercised only by the
 # Gate 9 dual-build matrix (plan §5 #18 / #19, BLK4 K-4').
-if [ -x "./r8_validation_direct_iceoryx_publisher_ok" ]; then
-    run_test "app: r8_validation_direct_iceoryx_publisher_ok" \
-        ./r8_validation_direct_iceoryx_publisher_ok
-else
-    skip_test "app: r8_validation_direct_iceoryx_publisher_ok (missing)"
-fi
-if [ -x "./r8_validation_direct_iceoryx_subscriber_ok" ]; then
-    run_test "app: r8_validation_direct_iceoryx_subscriber_ok" \
-        ./r8_validation_direct_iceoryx_subscriber_ok
-else
-    skip_test "app: r8_validation_direct_iceoryx_subscriber_ok (missing)"
-fi
+# The direct_iceoryx_* pair is built with iceoryx, the direct_shm_* pair with
+# the self-developed shm transport.
+for r8_sample in \
+    r8_validation_direct_iceoryx_publisher_ok \
+    r8_validation_direct_iceoryx_subscriber_ok \
+    r8_validation_direct_shm_publisher_ok \
+    r8_validation_direct_shm_subscriber_ok; do
+    if [ -x "./$r8_sample" ]; then
+        run_test "app: $r8_sample" "./$r8_sample"
+    else
+        skip_test "app: $r8_sample (missing)"
+    fi
+done
 
 ###############################################################################
 # Section 7: DDS Standalone Apps

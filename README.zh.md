@@ -127,6 +127,7 @@ set -u
 
 # 推荐的 rcl-free 构建：DDS transport + 构建期 ROS2 消息类型。
 # 此处不要启用已废弃的 IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION。
+# full 预设包含自研 shm 传输，需要 Linux 内核；其他系统加 -DIBMW_BUILD_SHM_EXTENSION=OFF。
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
                     -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
                     -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF

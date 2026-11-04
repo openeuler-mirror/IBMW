@@ -3,20 +3,24 @@
 #
 # run_dual_build_matrix.sh — IBMW dual-build matrix harness.
 #
-# Drives a 7-entry transport-flag matrix to verify that the build, the
+# Drives a transport-flag matrix to verify that the build, the
 # unit tests, and the smoke subset all survive when each transport
 # extension is individually disabled, plus an all-off entry that
-# exercises the framework + local-transport-only path.
+# exercises the framework + local-transport-only path. Two more entries
+# cover the self-developed shm transport (off in BASE_FLAGS): shm_only
+# (shm replaces iceoryx) and shm_both (shm next to iceoryx).
 #
 # Scope: build + ctest + smoke per entry, driven by
 # scripts/dual_build_matrix.yaml.
 #
-# Entries (7) — see scripts/dual_build_matrix.yaml for the canonical
+# Entries — see scripts/dual_build_matrix.yaml for the canonical
 # definition (cmake_flags / ctest_exclude / smoke_excludes / excluded_samples):
-#   dds_off, ros2_off, iceoryx_off, zenoh_off, mqtt_off, net_off, all_off.
+#   dds_off, ros2_off, iceoryx_off, zenoh_off, mqtt_off, net_off, all_off,
+#   shm_only, shm_both, plus the r8_iceoryx_* / r8_shm_* / r12 validation
+#   entries.
 #
 # Usage:
-#   bash scripts/run_dual_build_matrix.sh                     # all 7 entries
+#   bash scripts/run_dual_build_matrix.sh                     # all entries
 #   bash scripts/run_dual_build_matrix.sh dds_off net_off     # subset
 #   bash scripts/run_dual_build_matrix.sh --strict ...        # fail on any per-entry FAIL
 #   bash scripts/run_dual_build_matrix.sh --skip-ctest ...    # build + smoke only
@@ -192,19 +196,28 @@ declare -A FEATURES_RC
 declare -A CTEST_RC
 declare -A SMOKE_RC
 
+# Columns, in order: DDS ROS2 ICEORYX ZENOH MQTT NET SELFDEV_SHM (the names
+# array in verify_features_h). SELFDEV_SHM is 0 unless the entry turns
+# IBMW_BUILD_SHM_EXTENSION on.
 declare -A EXPECT_FEATURES
-EXPECT_FEATURES[dds_off]="0 1 1 1 1 1"
-EXPECT_FEATURES[ros2_off]="1 0 1 1 1 1"
-EXPECT_FEATURES[iceoryx_off]="1 1 0 1 1 1"
-EXPECT_FEATURES[zenoh_off]="1 1 1 0 1 1"
-EXPECT_FEATURES[mqtt_off]="1 1 1 1 0 1"
-EXPECT_FEATURES[net_off]="1 1 1 1 1 0"
-EXPECT_FEATURES[all_off]="0 0 0 0 0 0"
-EXPECT_FEATURES[r8_iceoryx_publisher_ok]="1 1 1 1 1 1"
-EXPECT_FEATURES[r8_iceoryx_subscriber_ok]="1 1 1 1 1 1"
-EXPECT_FEATURES[r8_iceoryx_mixed_api_fail]="1 1 1 1 1 1"
-EXPECT_FEATURES[r8_iceoryx_no_anchor_fail]="1 1 1 1 1 1"
-EXPECT_FEATURES[r12_runtime_use_fail]="1 1 1 1 1 1"
+EXPECT_FEATURES[dds_off]="0 1 1 1 1 1 0"
+EXPECT_FEATURES[ros2_off]="1 0 1 1 1 1 0"
+EXPECT_FEATURES[iceoryx_off]="1 1 0 1 1 1 0"
+EXPECT_FEATURES[zenoh_off]="1 1 1 0 1 1 0"
+EXPECT_FEATURES[mqtt_off]="1 1 1 1 0 1 0"
+EXPECT_FEATURES[net_off]="1 1 1 1 1 0 0"
+EXPECT_FEATURES[all_off]="0 0 0 0 0 0 0"
+EXPECT_FEATURES[shm_only]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[shm_both]="1 1 1 1 1 1 1"
+EXPECT_FEATURES[r8_iceoryx_publisher_ok]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_iceoryx_subscriber_ok]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_iceoryx_mixed_api_fail]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_iceoryx_no_anchor_fail]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_shm_publisher_ok]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r8_shm_subscriber_ok]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r8_shm_mixed_api_fail]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r8_shm_no_anchor_fail]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r12_runtime_use_fail]="1 1 1 1 1 1 0"
 
 verify_features_h() {
   local entry="$1" build_dir="$2"
@@ -217,7 +230,7 @@ verify_features_h() {
     return 2
   fi
   local expected=(${EXPECT_FEATURES[$entry]})
-  local names=(DDS ROS2 ICEORYX ZENOH MQTT NET)
+  local names=(DDS ROS2 ICEORYX ZENOH MQTT NET SELFDEV_SHM)
   local i mismatch=0
   for i in "${!names[@]}"; do
     local n="${names[$i]}" want="${expected[$i]}"
@@ -347,7 +360,7 @@ run_entry() {
     return
   fi
 
-  # Entries declaring extra_targets (e.g. r8_iceoryx_*) skip the
+  # Entries declaring extra_targets (e.g. r8_iceoryx_*, r8_shm_*) skip the
   # monolithic build because their default-include neighbours (R8.2 mixed-API
   # _fail samples) trigger unconditional static_assert at TU compile time and
   # would tank the full-tree build. The extra_targets loop below builds only

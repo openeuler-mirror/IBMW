@@ -40,10 +40,11 @@ endif()
 # dds_types provides IDL-based type registration (IBMW_DDS_TYPE_NAME) and
 # FastCDR serialization helpers used by both the DDS extension and the
 # Iceoryx extension (Iceoryx pubsub demos register IDL-generated types
-# through this header-only interface library). The benchmark payloads use it
-# too, including in shm-only builds.
+# through this header-only interface library). The shm extension is the
+# iceoryx replacement, so code ported from iceoryx_ext keeps registering its
+# IDL types the same way. The benchmark payloads use it too.
 if(IBMW_BUILD_DDS_EXTENSION OR IBMW_BUILD_ICEORYX_EXTENSION OR
-   IBMW_BUILD_BENCHMARKS)
+   IBMW_BUILD_SHM_EXTENSION OR IBMW_BUILD_BENCHMARKS)
   add_subdirectory(transport/dds_types)
 endif()
 

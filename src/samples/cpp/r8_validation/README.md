@@ -33,7 +33,15 @@ detected.
 | `direct_iceoryx_mixed_api_fail/` | gated by `IBMW_BUILD_R8_FAIL_SAMPLES` | **Fails to compile** with `IbmwR82SlotMixCheck<>` static_assert | R8.2 detector trips when both APIs appear in the same TU |
 | `direct_iceoryx_no_anchor_fail/` | gated by `IBMW_BUILD_R8_FAIL_SAMPLES` | Compiles, but `check_red_lines.sh` reports +1 R1 hit | R1 escape-hatch convention is enforced by the scanner, not by the compiler |
 
-The two `_fail` samples are *expected fails* — they exist to keep the
+The self-developed shm transport has the same four samples as
+`direct_shm_publisher_ok/`, `direct_shm_subscriber_ok/`,
+`direct_shm_mixed_api_fail/` and `direct_shm_no_anchor_fail/`. They build when
+`IBMW_BUILD_SHM_EXTENSION=ON` (the `direct_iceoryx_*` ones need
+`IBMW_BUILD_ICEORYX_EXTENSION=ON`), use `shm_ext/iox_style_publisher.h` and
+`shm_ext/shm_transport_driver.h` instead of the iceoryx_ext headers, and are
+expected to pass or fail for the same reasons.
+
+The `_fail` samples are *expected fails* — they exist to keep the
 detectors honest. They are **not** wired into the default build, so a
 developer running `cmake --preset full` never sees a build break from them.
 
@@ -49,6 +57,13 @@ cmake -B build_r8_fail \
   -DIBMW_BUILD_ICEORYX_EXTENSION=ON \
   -DIBMW_BUILD_R8_FAIL_SAMPLES=ON
 cmake --build build_r8_fail -j$(nproc)   # mixed_api_fail breaks here as designed
+
+# shm variants (no iceoryx)
+cmake -B build_r8_shm_fail \
+  -DIBMW_BUILD_EXAMPLES=ON -DIBMW_BUILD_BENCHMARKS=ON \
+  -DIBMW_BUILD_SHM_EXTENSION=ON \
+  -DIBMW_BUILD_R8_FAIL_SAMPLES=ON
+cmake --build build_r8_shm_fail --target r8_validation_direct_shm_mixed_api_fail   # fails as designed
 ```
 
 ## Why this directory exists

@@ -53,7 +53,7 @@
     {
       "name": "full",
       "displayName": "Full — all buildable extensions + examples",
-      "description": "Builds everything that can be built without special system dependencies (excludes zenoh, opentelemetry). Includes the iceoryx shared-memory transport, which extends configure/build time noticeably.",
+      "description": "Builds everything that can be built without special system dependencies (excludes zenoh, opentelemetry). Includes the iceoryx shared-memory transport, which extends configure/build time noticeably, and the self-developed shm transport alongside it (driver name shm, so the two do not clash).",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -71,6 +71,7 @@
         "IBMW_BUILD_RECORD_PLAYBACK_EXTENSION": "ON",
         "IBMW_BUILD_DDS_EXTENSION": "ON",
         "IBMW_BUILD_ICEORYX_EXTENSION": "ON",
+        "IBMW_BUILD_SHM_EXTENSION": "ON",
         "IBMW_BUILD_ROS2_TYPES": "ON"
       }
     },

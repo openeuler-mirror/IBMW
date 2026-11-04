@@ -101,8 +101,9 @@ unset(_IBMW_ROS2_SAMPLE_DEFAULT)
 # IbmwR82SlotMixCheck<> static_assert; no_anchor_fail produces a fresh R1
 # violation). Gated OFF so default CI keeps building clean. The Gate 9
 # dual-build matrix opts in via -DIBMW_BUILD_R8_FAIL_SAMPLES=ON and asserts
-# expected build failures.
-cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deliberate-fail samples (used by Gate 9 dual-build matrix)." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+# expected build failures. Each shared-memory transport (iceoryx, shm) brings
+# its own pair of fail samples.
+cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deliberate-fail samples (used by Gate 9 dual-build matrix)." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION" OFF)
 
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
@@ -280,9 +281,11 @@ endif()
 include(NamespaceTool)
 
 # The benchmark payloads are CDR-serialized (bench_payload links dds_types).
+# dds_types is also built for iceoryx and its replacement, the shm extension
+# (src/extensions/CMakeLists.txt).
 if(IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_DDS_EXTENSION OR
    IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION OR
-   IBMW_BUILD_BENCHMARKS)
+   IBMW_BUILD_SHM_EXTENSION OR IBMW_BUILD_BENCHMARKS)
   # Resolve the explicitly selected DDS provider before loading code-generation
   # helpers. Those helpers must never perform an independent provider search.
   include(GetFastDDS)

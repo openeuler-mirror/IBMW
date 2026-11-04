@@ -35,6 +35,25 @@ if [ -f "$BUILD/play_smoke_required" ]; then
   PLAY_SMOKE_REQUIRED=1
 fi
 
+# Shared-memory transports in this build. iceoryx-only artifacts (iox-roudi,
+# libibmw_iceoryx_transport.so, iceoryx record/play configs) are required only
+# when iceoryx is built; the self-developed shm plugin when shm is built.
+# Without a CMakeCache.txt iceoryx is assumed built (the previous behaviour).
+build_option_on() {
+  grep -qiE "^$1:BOOL=(ON|YES|Y|TRUE|1)$" "$BUILD/CMakeCache.txt" 2>/dev/null
+}
+ICEORYX_BUILT=0
+if [ ! -f "$BUILD/CMakeCache.txt" ]; then
+  echo "stage: $BUILD/CMakeCache.txt not found; assuming iceoryx is built" >&2
+  ICEORYX_BUILT=1
+elif build_option_on IBMW_BUILD_ICEORYX_EXTENSION; then
+  ICEORYX_BUILT=1
+fi
+SHM_BUILT=0
+if build_option_on IBMW_BUILD_SHM_EXTENSION; then
+  SHM_BUILT=1
+fi
+
 copy_required() {
   src="$1"
   dst="$2"
@@ -42,13 +61,15 @@ copy_required() {
   cp -a "$src" "$dst"
 }
 
-# 1) ibmw + iox-roudi binary
+# 1) ibmw + iox-roudi binary (iox-roudi only when iceoryx is built)
 cp "$BUILD/ibmw" "$STAGE/bin/" 2>/dev/null || true
 cp "$BUILD/ibmw" "$STAGE/" 2>/dev/null || true
 chmod +x "$STAGE/ibmw" "$STAGE/bin/ibmw" 2>/dev/null || true
-find "$BUILD" -name "iox-roudi" -executable -type f 2>/dev/null | head -1 | xargs -I{} cp {} "$STAGE/bin/" || true
-find "$BUILD" -name "iox-roudi" -executable -type f 2>/dev/null | head -1 | xargs -I{} cp {} "$STAGE/" || true
-chmod +x "$STAGE/iox-roudi" 2>/dev/null || true
+if [ "$ICEORYX_BUILT" -eq 1 ]; then
+  find "$BUILD" -name "iox-roudi" -executable -type f 2>/dev/null | head -1 | xargs -I{} cp {} "$STAGE/bin/" || true
+  find "$BUILD" -name "iox-roudi" -executable -type f 2>/dev/null | head -1 | xargs -I{} cp {} "$STAGE/" || true
+  chmod +x "$STAGE/iox-roudi" 2>/dev/null || true
+fi
 
 # 2) all *_app executables
 find "$BUILD" -maxdepth 4 -name "*_app" -executable -type f | while read f; do
@@ -61,6 +82,8 @@ done
 find "$BUILD" -maxdepth 6 \
   \( -name "r8_validation_direct_iceoryx_publisher_ok" \
      -o -name "r8_validation_direct_iceoryx_subscriber_ok" \
+     -o -name "r8_validation_direct_shm_publisher_ok" \
+     -o -name "r8_validation_direct_shm_subscriber_ok" \
      -o -name "ibmw_fibonacci_action_ros2_server" \
      -o -name "ibmw_fibonacci_action_dds_client" \
      -o -name "ibmw_fibonacci_action_dds_server" \
@@ -93,6 +116,13 @@ done
 for so in "$STAGE/lib/"*.so*; do
   [ -e "$so" ] && ln -sf "lib/$(basename "$so")" "$STAGE/$(basename "$so")" 2>/dev/null || true
 done
+
+if [ "$SHM_BUILT" -eq 1 ]; then
+  [ -f "$STAGE/lib/libibmw_shm_transport.so" ] || {
+    echo "stage: required shm transport library missing: libibmw_shm_transport.so" >&2
+    exit 1
+  }
+fi
 
 # Use the manifest generated for this layout, with paths relative to $STAGE.
 copy_required "$BUILD/cli-stage.yaml" "$STAGE/cli.yaml"
@@ -128,8 +158,14 @@ else
 fi
 
 if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
+  record_iceoryx_cfgs=""
+  record_iceoryx_libs=""
+  if [ "$ICEORYX_BUILT" -eq 1 ]; then
+    record_iceoryx_cfgs="record_smoke_iceoryx.yaml"
+    record_iceoryx_libs="libibmw_iceoryx_transport.so"
+  fi
   for cfg in \
-    record_smoke_local.yaml record_smoke_dds.yaml record_smoke_iceoryx.yaml \
+    record_smoke_local.yaml record_smoke_dds.yaml $record_iceoryx_cfgs \
     record_smoke_mqtt.yaml record_smoke_zenoh.yaml record_smoke_ros2.yaml \
     record_smoke_tcp.yaml record_smoke_udp.yaml record_smoke_http.yaml \
     record_smoke_features.yaml record_smoke_json.yaml \
@@ -144,7 +180,7 @@ if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
   for artifact in \
     librecord_smoke_pkg.so librecord_smoke_ts.so libcommon_dds_ts.so \
     libibmw_record_playback.so libibmw_dds_transport.so \
-    libibmw_iceoryx_transport.so libibmw_mqtt_transport.so \
+    $record_iceoryx_libs libibmw_mqtt_transport.so \
     libibmw_zenoh_transport.so libibmw_ros2_transport.so \
     libibmw_net_transport.so; do
     [ -f "$STAGE/lib/$artifact" ] || {
@@ -156,10 +192,12 @@ if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
     echo "stage: required record smoke binary missing: ibmw" >&2
     exit 1
   }
-  [ -x "$STAGE/iox-roudi" ] || [ -x "$STAGE/bin/iox-roudi" ] || {
-    echo "stage: required record smoke binary missing: iox-roudi" >&2
-    exit 1
-  }
+  if [ "$ICEORYX_BUILT" -eq 1 ]; then
+    [ -x "$STAGE/iox-roudi" ] || [ -x "$STAGE/bin/iox-roudi" ] || {
+      echo "stage: required record smoke binary missing: iox-roudi" >&2
+      exit 1
+    }
+  fi
 fi
 
 if [ "$INFO_SMOKE_REQUIRED" -eq 1 ]; then
@@ -257,13 +295,19 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
       exit 1
     }
   done
+  play_iceoryx_cfgs=""
+  play_iceoryx_libs=""
+  if [ "$ICEORYX_BUILT" -eq 1 ]; then
+    play_iceoryx_cfgs="play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml"
+    play_iceoryx_libs="libibmw_iceoryx_transport.so"
+  fi
   for cfg in \
     play_smoke_local_subscriber.yaml play_smoke_local_player.yaml \
     play_smoke_local_player_alt.yaml play_smoke_json_subscriber.yaml \
     play_smoke_json_player.yaml play_smoke_mcap_reader.yaml \
     play_smoke_sqlite_reader.yaml \
     play_smoke_dds_subscriber.yaml play_smoke_dds_player.yaml \
-    play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml \
+    $play_iceoryx_cfgs \
     play_smoke_mqtt_subscriber.yaml play_smoke_mqtt_player.yaml \
     play_smoke_zenoh_subscriber.yaml play_smoke_zenoh_player.yaml \
     play_smoke_ros2_subscriber.yaml play_smoke_ros2_player.yaml \
@@ -278,7 +322,7 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
   for artifact in \
     libplay_smoke_pkg.so libplay_smoke_ts.so \
     libibmw_record_playback.so libibmw_dds_transport.so \
-    libibmw_iceoryx_transport.so libibmw_mqtt_transport.so \
+    $play_iceoryx_libs libibmw_mqtt_transport.so \
     libibmw_zenoh_transport.so libibmw_ros2_transport.so \
     libibmw_net_transport.so; do
     [ -f "$STAGE/lib/$artifact" ] || {
@@ -290,10 +334,12 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
     echo "stage: required play smoke binary missing: ibmw" >&2
     exit 1
   }
-  [ -x "$STAGE/iox-roudi" ] || [ -x "$STAGE/bin/iox-roudi" ] || {
-    echo "stage: required play smoke binary missing: iox-roudi" >&2
-    exit 1
-  }
+  if [ "$ICEORYX_BUILT" -eq 1 ]; then
+    [ -x "$STAGE/iox-roudi" ] || [ -x "$STAGE/bin/iox-roudi" ] || {
+      echo "stage: required play smoke binary missing: iox-roudi" >&2
+      exit 1
+    }
+  fi
 fi
 chmod +x "$STAGE/validate_transport_bench_matrix.sh" \
   "$STAGE/validate_dds_loaned_e2e.sh" \
@@ -305,10 +351,15 @@ chmod +x "$STAGE/validate_transport_bench_matrix.sh" \
   "$STAGE/validate_local_loopback_matrix.sh" \
   "$STAGE/validate_dds_cdr_executor_matrix.sh" 2>/dev/null || true
 
+# Lanes that are not built (e.g. iox_* without iceoryx, shm_* without shm)
+# have no start script and are skipped.
 for bench_sample in \
   iox_loaned_pod \
   iox_loaned_ctx \
   iox_send \
+  shm_loaned_pod \
+  shm_loaned_ctx \
+  shm_send \
   dds_loaned \
   dds_send_shm \
   dds_send_tcp \
