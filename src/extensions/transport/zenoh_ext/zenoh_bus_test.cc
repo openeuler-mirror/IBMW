@@ -175,6 +175,19 @@ TEST_F(ZenohBusTest, ShutdownWaitsForTheRunningCallback) {
   ASSERT_EQ(shutdown.wait_for(5s), std::future_status::ready);
 }
 
+// Only the string's bytes are read: here a view of "1" in "12".
+TEST(ZenohBusConfigTest, PrettyConfigReadsOnlyTheStringBytes) {
+  z_view_string_t text;
+  ASSERT_EQ(z_view_string_from_substr(&text, "12", 1), Z_OK);
+  EXPECT_EQ(ZenohBus::PrettyConfig(z_loan(text)), "1");
+  ASSERT_EQ(z_view_string_from_str(&text, R"({"mode":"peer"})"), Z_OK);
+  EXPECT_EQ(ZenohBus::PrettyConfig(z_loan(text)), "{\n    \"mode\" : \"peer\"\n}");
+  ASSERT_EQ(z_view_string_from_str(&text, "x"), Z_OK);
+  EXPECT_EQ(ZenohBus::PrettyConfig(z_loan(text)), "null");
+  z_view_string_empty(&text);
+  EXPECT_EQ(ZenohBus::PrettyConfig(z_loan(text)), "null");
+}
+
 TEST_F(ZenohBusTest, UnregisterOfAnUnknownSubscriberFails) {
   EXPECT_FALSE(bus_.UnregisterSubscriber("test/none"));
 }

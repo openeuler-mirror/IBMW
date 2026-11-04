@@ -3,11 +3,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <functional>
 #include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 
-#include "json/json.h"
 #include "zenoh.h"
 #include "zenoh_ext/global.h"
 #include "discovery/zenoh_discovery_responder.h"
@@ -81,6 +83,9 @@ class ZenohBus {
 
   size_t ShmPoolSize() const noexcept { return shm_pool_size_; }
 
+  // Indents what can be parsed of a JSON text ("null" if nothing); a zenoh string has no ending NUL.
+  static std::string PrettyConfig(const z_loaned_string_t* text);
+
   // Read without the lock: only from a driver in state Start, see Freeze().
   const std::unordered_map<std::string, std::shared_ptr<ZenohPubCtx>>& GetPublisherRegisterMap() const {
     return z_pub_catalog_;
@@ -89,19 +94,11 @@ class ZenohBus {
  private:
   static void PrintZenohCgf(z_owned_config_t z_config) {
     z_owned_string_t out_config_string;
-    zc_config_to_string(z_loan(z_config), &out_config_string);
-
-    Json::CharReaderBuilder reader_builder;
-    Json::Value json_data;
-
-    std::istringstream s(z_string_data(z_loan(out_config_string)));
-    Json::parseFromStream(reader_builder, s, &json_data, nullptr);
-    Json::StreamWriterBuilder writer_builder;
-    writer_builder["indentation"] = "    ";
-    std::string pretty_json = Json::writeString(writer_builder, json_data);
-
-    MW_INFO("Using custom zenoh native configuration: {}", pretty_json);
-
+    if (zc_config_to_string(z_loan(z_config), &out_config_string) != Z_OK) {
+      MW_WARN("Unable to print the zenoh native configuration.");
+      return;
+    }
+    MW_INFO("Using custom zenoh native configuration: {}", PrettyConfig(z_loan(out_config_string)));
     z_drop(z_move(out_config_string));
   }
 

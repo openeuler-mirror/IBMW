@@ -18,6 +18,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <gtest/gtest.h>
+#include <json/json.h>
 
 namespace ibmw::discovery {
 namespace {

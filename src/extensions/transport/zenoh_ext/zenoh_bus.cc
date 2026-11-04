@@ -5,8 +5,11 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <stdexcept>
 #include <utility>
+
+#include "json/json.h"
 
 namespace ibmw::extensions::zenoh_extension {
 
@@ -51,6 +54,16 @@ void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_si
 
   shm_pool_size_ = shm_pool_size;
   initialized_ = true;
+}
+
+std::string ZenohBus::PrettyConfig(const z_loaned_string_t *text) {
+  const char *begin = z_string_data(text);
+  Json::Value json_data;
+  std::unique_ptr<Json::CharReader> reader(Json::CharReaderBuilder().newCharReader());
+  reader->parse(begin, begin + z_string_len(text), &json_data, nullptr);
+  Json::StreamWriterBuilder writer_builder;
+  writer_builder["indentation"] = "    ";
+  return Json::writeString(writer_builder, json_data);
 }
 
 void ZenohBus::Shutdown() {
