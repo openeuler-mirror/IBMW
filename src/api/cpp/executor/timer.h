@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 
 #include "cpp/executor/executor.h"
@@ -49,6 +50,10 @@ class TimerBase {
   // executor thread.
   std::atomic<std::chrono::system_clock::time_point> next_call_time_{};
   std::atomic<bool> cancelled_{true};
+  // Bumped by every Reset(); only the chain started by the latest Reset() runs.
+  // Planned times cannot tell chains apart: a Reset() on the old chain's next
+  // tick (e.g. a paused simulated clock) plans the same time point.
+  std::atomic<uint64_t> generation_{0};
 };
 
 template <typename TaskType>
@@ -68,9 +73,10 @@ class Timer : public TimerBase, public std::enable_shared_from_this<Timer<TaskTy
   void Reset() override {
     const auto next = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
         executor_.Now() + period_);
+    const uint64_t generation = generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
     next_call_time_.store(next, std::memory_order_release);
     cancelled_.store(false, std::memory_order_release);
-    ExecuteLoop(next);
+    ExecuteLoop(next, generation);
   }
 
   void ExecuteTask() override {
@@ -86,17 +92,17 @@ class Timer : public TimerBase, public std::enable_shared_from_this<Timer<TaskTy
  private:
   // The loop only holds a weak reference: once the last user handle is gone the
   // Timer is destroyed (~Timer cancels) instead of rescheduling itself forever.
-  void ExecuteLoop(std::chrono::system_clock::time_point planned_time) {
+  void ExecuteLoop(std::chrono::system_clock::time_point planned_time, uint64_t generation) {
     auto weak_this = this->weak_from_this();
     MW_ASSERT(!weak_this.expired(), "Timer must be owned by a std::shared_ptr (use CreateTimer).");
-    executor_.DispatchAt(planned_time, [weak_this = std::move(weak_this), planned_time]() {
+    executor_.DispatchAt(planned_time, [weak_this = std::move(weak_this), planned_time, generation]() {
       auto shared_this = weak_this.lock();
       if (!shared_this || shared_this->IsCancelled()) {
         return;
       }
 
       // Skip current execution if timer was reset or restarted
-      if (planned_time != shared_this->NextCallTime()) {
+      if (generation != shared_this->generation_.load(std::memory_order_acquire)) {
         return;
       }
 
@@ -118,13 +124,15 @@ class Timer : public TimerBase, public std::enable_shared_from_this<Timer<TaskTy
         }
       }
 
-      // A concurrent Reset() owns the schedule from here on; do not start a second chain.
-      auto expected = planned_time;
-      if (!shared_this->next_call_time_.compare_exchange_strong(expected, next, std::memory_order_acq_rel)) {
+      // A Reset() during the task owns the schedule from here on; do not start a second chain.
+      if (generation != shared_this->generation_.load(std::memory_order_acquire)) {
         return;
       }
+      // Fails only when a concurrent Reset() already stored its own time; keep that value.
+      auto expected = planned_time;
+      shared_this->next_call_time_.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
 
-      shared_this->ExecuteLoop(next);
+      shared_this->ExecuteLoop(next, generation);
     });
   }
 

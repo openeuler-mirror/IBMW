@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <thread>
+#include <utility>
 
 #include "cpp/executor/timer.h"
 
@@ -84,6 +85,38 @@ TEST(ExecutorTimer, ResetInsideCallbackKeepsSingleChain) {
     exe.RunQueued();
     EXPECT_LE(exe.tasks.size(), 1u) << "Reset() inside the callback started a second loop";
   }
+  timer->Cancel();
+  exe.RunQueued();
+  EXPECT_TRUE(exe.tasks.empty());
+}
+
+// R-N4: Reset() on the old chain's next tick plans the same time point as the
+// old chain. On a multi-threaded executor both dispatches can run at once; the
+// old chain must not run that tick as well.
+TEST(ExecutorTimer, ResetOnOldChainsTickRunsTaskOnce) {
+  QueueExecutor exe;
+  int calls = 0;
+  std::function<void()> run_other;  // the other dispatch, run while a task is in progress
+  auto timer = CreateTimer(ExecutorHandle(&exe.base), std::chrono::milliseconds(1),
+                           std::function<void()>([&] {
+                             ++calls;
+                             if (run_other) std::exchange(run_other, nullptr)();
+                           }));
+  exe.RunQueued();
+  ASSERT_EQ(calls, 1);
+  timer->Reset();  // the clock has not moved: same planned time as the old chain
+  ASSERT_EQ(exe.tasks.size(), 2u);
+  Task old_chain = std::move(exe.tasks.front());
+  exe.tasks.pop_front();
+  Task new_chain = std::move(exe.tasks.front());
+  exe.tasks.pop_front();
+  run_other = [&new_chain] { new_chain(); };
+  old_chain();
+  if (run_other) std::exchange(run_other, nullptr)();
+  EXPECT_EQ(calls, 2) << "the tick ran on both the old and the new chain";
+  EXPECT_EQ(exe.tasks.size(), 1u) << "exactly one chain must continue";
+  exe.RunQueued();
+  EXPECT_EQ(calls, 3);
   timer->Cancel();
   exe.RunQueued();
   EXPECT_TRUE(exe.tasks.empty());
