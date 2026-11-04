@@ -19,11 +19,6 @@ FetchContent_Declare(
 
 FetchContent_GetProperties(googletest)
 if(NOT googletest_POPULATED)
-  if(WIN32)
-    set(gtest_force_shared_crt
-        ON
-        CACHE BOOL "")
-  endif()
   set(INSTALL_GTEST
       OFF
       CACHE BOOL "")

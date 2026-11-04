@@ -22,20 +22,6 @@ deploy_template_infos = [
         'output_path': "./src/install/linux/bin",
         'output_file': Template("start_{{ name }}.sh"),
     },
-    {
-        'template_name': 'win_cfg_yaml',
-        'template_package': 'templates.install',
-        'template_file': 'win_cfg_template.yaml.jinja2',
-        'output_path': "./src/install/win/bin/cfg",
-        'output_file': Template("{{ name }}_cfg.yaml"),
-    },
-    {
-        'template_name': 'win_start_shell',
-        'template_package': 'templates.install',
-        'template_file': 'start_template.bat.jinja2',
-        'output_path': "./src/install/win/bin",
-        'output_file': Template("start_{{ name }}.bat"),
-    },
 ]
 
 
