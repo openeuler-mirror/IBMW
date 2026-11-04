@@ -4,7 +4,10 @@ IBMW LoanedMessage API 与零拷贝消息发布的端到端验证 Demo。
 
 ## 特性
 
-- Plain 类型（`geometry_msgs::msg::Point`）通过 `loan_sample` 实现零拷贝发布
+- 在 ROS2 兼容 DDS 通道上用 LoanedMessage 发布 `geometry_msgs::msg::Point`。
+  ROS2 消息类型按设计注册为 non-plain，因此 AUTO 走堆内存 fallback（由
+  `DataWriter::write` 拷贝发送）。真正的 `loan_sample` 零拷贝通道（原生 plain
+  DDS 类型）见 [transport benchmark](../transport_benchmark/README.md) 中的 `dds_loaned/`。
 - Non-Plain 类型（`std_msgs::msg::String`）的自动 fallback 验证
 - 三种配置模式测试（AUTO / STRICT / COMPAT）
 - 零拷贝统计输出
@@ -54,7 +57,7 @@ source /opt/ros/humble/setup.bash
 |-----|------|
 | loaned_message_app | 完整测试：Plain + NonPlain 发布 + 订阅 |
 | config_test_app | 6 种配置模式测试场景 |
-| plain_pub_only_app | Plain 类型零拷贝发布 |
+| plain_pub_only_app | Point 发布（ROS2 类型，AUTO 堆内存 fallback） |
 | nonplain_pub_only_app | Non-Plain 类型 fallback 验证 |
 | sub_only_app | 订阅端 |
 
@@ -80,10 +83,10 @@ source /opt/ros/humble/setup.bash
 
 ## 期望输出
 
-Plain 类型（零拷贝）：
+Point（ROS2 类型，AUTO 堆内存 fallback）：
 ```
-[SEND] Point[0] x=1.00, y=2.00, z=3.00, is_zero_copy=true, is_plain=true, ptr=0x7f...
-[RECV] Point[1] x=1.00, y=2.00, z=3.00, valid=YES, ptr=0x7f...  (相同地址 = 零拷贝)
+[SEND] Point[0] x=1.00, y=2.00, z=3.00, is_zero_copy=false, is_plain=false, ptr=0x7f...
+[RECV] Point[1] x=1.10, y=2.20, z=3.30, valid=YES, ptr=0x7f...
 ```
 
 Non-Plain 类型（fallback）：
