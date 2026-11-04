@@ -12,11 +12,7 @@ extern "C" {
 #define IBMW_REPORTER_ABI_VERSION_V1 UINT32_C(1)
 #define IBMW_REPORTER_V1_RESERVED_COUNT 8u
 
-#if defined(_WIN32)
-#define IBMW_REPORTER_EXPORT __declspec(dllexport)
-#else
 #define IBMW_REPORTER_EXPORT __attribute__((visibility("default")))
-#endif
 
 typedef struct ibmw_reporter_string_view_v1 {
   const char* data;

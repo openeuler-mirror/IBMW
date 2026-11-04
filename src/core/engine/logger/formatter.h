@@ -245,12 +245,12 @@ class LogFormatter {
   // format file name (short)
   static void FormatFileShort(const LogDataWrapper& data, std::string& buffer) {
     if constexpr (sizeof(folder_seps) == 2) {
-      // Linux
+      // One separator (the default "/").
       const char* rv = std::strrchr(data.file_name, folder_seps[0]);
       const char* short_name = (rv != nullptr) ? rv + 1 : data.file_name;
       buffer.append(short_name);
     } else {
-      // Windows
+      // Several separators: FOLDER_SEPS was overridden.
       if (data.file_name == nullptr) [[unlikely]] {
         return;
       }

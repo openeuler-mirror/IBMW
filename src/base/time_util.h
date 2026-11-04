@@ -129,21 +129,13 @@ inline time_t GetCurTimeT() {
 
 inline struct tm TimeT2TmLocal(time_t t) {
   struct tm st;
-#if defined(_WIN32)
-  localtime_s(&st, &t);
-#else
   localtime_r(&t, &st);
-#endif
   return st;
 }
 
 inline struct tm TimeT2TmGm(time_t t) {
   struct tm st;
-#if defined(_WIN32)
-  gmtime_s(&st, &t);
-#else
   gmtime_r(&t, &st);
-#endif
   return st;
 }
 
@@ -199,13 +191,8 @@ inline int32_t GetLocalTimeZone() {
   time_t now = GetCurTimeT();
   struct tm gt, lt;
 
-#if defined(_WIN32)
-  gmtime_s(&gt, &now);
-  localtime_s(&lt, &now);
-#else
   gmtime_r(&now, &gt);
   localtime_r(&now, &lt);
-#endif
 
   time_t gmt = mktime(&gt);
   time_t lmt = mktime(&lt);

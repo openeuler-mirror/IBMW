@@ -15,13 +15,9 @@
 #include "iceoryx_posh/mepoo/chunk_header.hpp"
 #include <limits>
 #include "extension_api/ibmw_reporter_v1.h"
-#if !defined(_WIN32)
 #include <dlfcn.h>
-#endif
 
-#if defined(_MSC_VER)
-#define IBMW_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
 #define IBMW_NOINLINE __attribute__((noinline))
 #else
 #define IBMW_NOINLINE
@@ -103,9 +99,6 @@ IceoryxTransportDriver::~IceoryxTransportDriver() {
 
 namespace {
 const ibmw_reporter_v1* QueryHostReporter() noexcept {
-#if defined(_WIN32)
-  return nullptr;
-#else
   void* host = dlopen(nullptr, RTLD_NOW | RTLD_LOCAL);
   if (!host) return nullptr;
   using Query = const ibmw_reporter_v1* (*)(void);
@@ -113,7 +106,6 @@ const ibmw_reporter_v1* QueryHostReporter() noexcept {
   const ibmw_reporter_v1* api = query ? query() : nullptr;
   dlclose(host);
   return api;
-#endif
 }
 }  // namespace
 #ifdef IBMW_ENABLE_REPORTER_V1

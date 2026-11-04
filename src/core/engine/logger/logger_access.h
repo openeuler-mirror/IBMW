@@ -56,9 +56,7 @@ class LoggerAccess {
     // tables with lvl, so they are dropped here (CORE-038).
     if (lvl >= lvl_.load(std::memory_order_relaxed) &&
         static_cast<uint32_t>(lvl) < IBMW_LOG_LEVEL_OFF) {
-#if defined(_WIN32)
-      thread_local size_t tid(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-#elif defined(__GLIBC__)
+#if defined(__GLIBC__)
       thread_local size_t tid(gettid());
 #else
       thread_local size_t tid(std::hash<std::thread::id>{}(std::this_thread::get_id()));

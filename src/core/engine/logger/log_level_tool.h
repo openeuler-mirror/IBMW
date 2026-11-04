@@ -28,13 +28,8 @@ class LogLevelTool {
       if (lvl_name.size() != kLvlNameArray[ii].size()) {
         continue;
       }
-#if defined(_WIN32)
-      if (_strnicmp(lvl_name.data(), kLvlNameArray[ii].data(), lvl_name.size()) == 0)
-        return static_cast<ibmw_log_level_t>(ii);
-#else
       if (strncasecmp(lvl_name.data(), kLvlNameArray[ii].data(), lvl_name.size()) == 0)
         return static_cast<ibmw_log_level_t>(ii);
-#endif
     }
     return std::nullopt;
   }

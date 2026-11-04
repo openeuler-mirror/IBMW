@@ -10,14 +10,7 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
-  #include <windows.h>
-#else
-  #include <signal.h>  // siginfo_t
-#endif
+#include <signal.h>  // siginfo_t
 
 #include "base/ibmw_config.h"
 #include "base/log_util.h"
@@ -84,11 +77,7 @@ class CrashSignalHandling {
   static void RefreshModules();
 
  private:
-#if defined(_WIN32)
-  static void PrintStacktrace(CONTEXT* ctx, int skip_frames);
-  static LONG WINAPI UnhandledExceptionFilter(EXCEPTION_POINTERS* info);
-  static void AbortHandler(int);
-#elif defined(IBMW_SELFDEV_CRASH_HANDLER)
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
   // Receives the demangled report from ibmw::selfdev::crash and logs it.
   static void ReportToLog(const char* report, size_t len, void* user_data);
 #else
@@ -119,10 +108,7 @@ class CrashSignalHandling {
   inline static std::atomic<const CrashFlushHook*> crash_flush_hook_{nullptr};
   // Crash handlers between loading the hook and returning from it.
   inline static std::atomic<int> crash_flush_readers_{0};
-#if defined(_WIN32)
-  LPTOP_LEVEL_EXCEPTION_FILTER previous_filter_ = nullptr;
-  void (*previous_abort_handler_)(int) = SIG_DFL;
-#elif defined(IBMW_SELFDEV_CRASH_HANDLER)
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
   // The selfdev handler is process-wide: the last instance uninstalls it.
   inline static std::atomic<int> selfdev_instances_{0};
 #else

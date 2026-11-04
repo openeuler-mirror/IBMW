@@ -10,26 +10,17 @@
 #include <string>
 #include <utility>
 
-#if defined(_WIN32)
-  #include <windows.h>
-#else
-  #include <dlfcn.h>
-  #if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
-    #include <link.h>
-  #endif
+#include <dlfcn.h>
+#if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
+  #include <link.h>
 #endif
 
 namespace ibmw::common::util {
 
 class DynamicLib {
  public:
-#if defined(_WIN32)
-  typedef FARPROC SymbolType;
-  typedef HINSTANCE DynlibHandle;
-#else
   typedef void* SymbolType;
   typedef void* DynlibHandle;
-#endif
 
  public:
   DynamicLib() = default;
@@ -49,24 +40,15 @@ class DynamicLib {
     Unload();
     lib_name_ = lib_name;
 
-#if defined(_WIN32)
-    handle_ = LoadLibraryEx(lib_name_.c_str(), NULL, 0);
-
-    if (nullptr == handle_) return false;
-
-    TCHAR buf[MAX_PATH];
-    DWORD re = GetModuleFileName(handle_, buf, MAX_PATH);
-    if (re != 0) lib_full_path_ = std::string(buf);
-#else
-  #if defined(IBMW_ENABLE_DLOPEN_DEEPBIND) && defined(RTLD_DEEPBIND)
+#if defined(IBMW_ENABLE_DLOPEN_DEEPBIND) && defined(RTLD_DEEPBIND)
     handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
-  #else
+#else
     handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL);
-  #endif
+#endif
 
     if (nullptr == handle_) return false;
 
-  #if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
+#if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
     // RTLD_DI_* are enumerators on glibc, so test for the libc, not the macro.
     // l_name is the path the loader actually opened (after search-path
     // resolution). Never throw here: dlopen has already succeeded.
@@ -78,13 +60,12 @@ class DynamicLib {
       auto full_path = std::filesystem::canonical(std::filesystem::path(lm->l_name), ec);
       lib_full_path_ = ec ? std::string(lm->l_name) : full_path.string();
     }
-  #else
+#else
     try {
       lib_full_path_ = std::filesystem::absolute(lib_name_).string();
     } catch (...) {
       lib_full_path_ = lib_name_;
     }
-  #endif
 #endif
 
     return true;
@@ -94,11 +75,7 @@ class DynamicLib {
     if (nullptr == handle_) return;
 
     bool ret = false;
-#if defined(_WIN32)
-    ret = FreeLibrary(handle_);
-#else
     ret = (0 == dlclose(handle_));
-#endif
 
     if (!ret) {
       return;
@@ -118,11 +95,7 @@ class DynamicLib {
     if (nullptr == handle_)
       throw std::runtime_error("DynamicLib does not load any lib.");
 
-#if defined(_WIN32)
-    return GetProcAddress(handle_, symbol_name.c_str());
-#else
     return dlsym(handle_, symbol_name.c_str());
-#endif
   }
 
   const std::string& GetLibName() const { return lib_name_; }
@@ -130,23 +103,9 @@ class DynamicLib {
   const std::string& GetLibFullPath() const { return lib_full_path_; }
 
   static std::string GetErr() {
-#if defined(_WIN32)
-    LPTSTR lp_msg_buf;
-    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                  NULL,
-                  GetLastError(),
-                  MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                  (LPTSTR)&lp_msg_buf,
-                  0,
-                  NULL);
-    std::string ret(lp_msg_buf);
-    LocalFree(lp_msg_buf);
-    return ret;
-#else
     // dlerror() returns NULL when no error is pending (or it was already read).
     const char* err = dlerror();
     return err != nullptr ? std::string(err) : std::string("no dynamic library error pending");
-#endif
   }
 
  private:

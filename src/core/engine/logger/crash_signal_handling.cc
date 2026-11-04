@@ -27,130 +27,15 @@
 #include "backward.hpp"
 #endif
 
-#if defined(_WIN32)
-  #include <windows.h>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <sstream>
-
-#else
-  #include <signal.h>
-  #include <ucontext.h>
-  #include <unistd.h>
-  #include <cstdlib>
-  #include <cstring>
-#endif
+#include <signal.h>
+#include <ucontext.h>
+#include <unistd.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace ibmw::runtime::core::logger {
 
-#if defined(_WIN32) && defined(IBMW_SELFDEV_CRASH_HANDLER)
-
-// Addresses only: symbolize offline from the module map. Not verified on
-// Windows yet (see st/selfdev_process/crash_handler/功能设计.md).
-void CrashSignalHandling::PrintStacktrace(CONTEXT* ctx, int skip_frames) {
-  (void)ctx;
-  void* frames[ibmw::selfdev::crash::kMaxFrames];
-  size_t count = ibmw::selfdev::crash::CaptureStack(frames, 64, static_cast<size_t>(skip_frames) + 1);
-  std::string out(count * 32 + 1, '\0');
-  out.resize(ibmw::selfdev::crash::FormatStack(out.data(), out.size(), frames, count, false, false));
-  MW_ERROR("CRASH SIGNAL HANDLING STACKTRACE:\n{}", out);
-}
-
-LONG WINAPI CrashSignalHandling::UnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
-  if (info && info->ExceptionRecord) {
-    MW_ERROR("CRASH SIGNAL HANDLING EXCEPTION CODE: 0x{:08X}", static_cast<uint32_t>(info->ExceptionRecord->ExceptionCode));
-  } else {
-    MW_ERROR("CRASH SIGNAL HANDLING: unhandled exception (no exception record)");
-  }
-  PrintStacktrace(info ? info->ContextRecord : nullptr, 0);
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-
-void CrashSignalHandling::AbortHandler(int) {
-  MW_ERROR("CRASH SIGNAL HANDLING: SIGABRT");
-  PrintStacktrace(nullptr, 0);
-  std::abort();
-}
-
-CrashSignalHandling::CrashSignalHandling() {
-  previous_filter_ = ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
-  const auto previous_abort = std::signal(SIGABRT, &AbortHandler);
-  previous_abort_handler_ = previous_abort == SIG_ERR ? SIG_DFL : previous_abort;
-}
-
-CrashSignalHandling::~CrashSignalHandling() {
-  const auto current_filter = ::SetUnhandledExceptionFilter(previous_filter_);
-  if (current_filter != &UnhandledExceptionFilter) ::SetUnhandledExceptionFilter(current_filter);
-  const auto current_abort = std::signal(SIGABRT, previous_abort_handler_);
-  if (current_abort != &AbortHandler && current_abort != SIG_ERR) std::signal(SIGABRT, current_abort);
-  SetLogger(nullptr);
-}
-
-#elif defined(_WIN32)
-
-void CrashSignalHandling::PrintStacktrace(CONTEXT* ctx, int skip_frames) {
-  backward::Printer printer;
-
-  backward::StackTrace st;
-  st.set_machine_type(printer.resolver().machine_type());
-
-  HANDLE real_thd = nullptr;
-  DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                  GetCurrentProcess(), &real_thd, 0, FALSE,
-                  DUPLICATE_SAME_ACCESS);
-  if (real_thd) st.set_thread_handle(real_thd);
-
-  st.load_here(32 + skip_frames, ctx);
-  st.skip_n_firsts(skip_frames);
-
-  printer.address = true;
-  std::stringstream ss;
-  printer.print(st, ss);
-
-  MW_ERROR("CRASH SIGNAL HANDLING STACKTRACE:\n{}", ss.str());
-
-  if (real_thd) CloseHandle(real_thd);
-}
-
-LONG WINAPI CrashSignalHandling::UnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
-  if (info && info->ExceptionRecord) {
-    MW_ERROR("CRASH SIGNAL HANDLING EXCEPTION CODE: 0x{:08X}", static_cast<uint32_t>(info->ExceptionRecord->ExceptionCode));
-  } else {
-    MW_ERROR("CRASH SIGNAL HANDLING: unhandled exception (no exception record)");
-  }
-
-  if (info && info->ContextRecord) {
-    PrintStacktrace(info->ContextRecord, 0);
-  }
-
-  // Let other handlers / default Windows error reporting continue.
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-
-void CrashSignalHandling::AbortHandler(int) {
-  CONTEXT ctx;
-  RtlCaptureContext(&ctx);
-  MW_ERROR("CRASH SIGNAL HANDLING: SIGABRT");
-  PrintStacktrace(&ctx, 0);
-  std::abort();
-}
-
-CrashSignalHandling::CrashSignalHandling() {
-  previous_filter_ = ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
-  const auto previous_abort = std::signal(SIGABRT, &AbortHandler);
-  previous_abort_handler_ = previous_abort == SIG_ERR ? SIG_DFL : previous_abort;
-}
-
-CrashSignalHandling::~CrashSignalHandling() {
-  const auto current_filter = ::SetUnhandledExceptionFilter(previous_filter_);
-  // Somebody installed a filter after us: keep theirs.
-  if (current_filter != &UnhandledExceptionFilter) ::SetUnhandledExceptionFilter(current_filter);
-  const auto current_abort = std::signal(SIGABRT, previous_abort_handler_);
-  if (current_abort != &AbortHandler && current_abort != SIG_ERR) std::signal(SIGABRT, current_abort);
-  SetLogger(nullptr);
-}
-
-#elif defined(IBMW_SELFDEV_CRASH_HANDLER)
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
 
 void CrashSignalHandling::ReportToLog(const char* report, size_t len, void*) {
   MW_ERROR("Crash signal handling stacktrace: \n{}", std::string_view(report, len));
@@ -379,7 +264,7 @@ void CrashSignalHandling::InstallHandlers(const std::vector<int>&) {}
 #endif
 
 void CrashSignalHandling::RefreshModules() {
-#if defined(IBMW_SELFDEV_CRASH_HANDLER) && !defined(_WIN32) && IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+#if defined(IBMW_SELFDEV_CRASH_HANDLER) && IBMW_CRASH_SIGNAL_HANDLING_ENABLED
   ibmw::selfdev::crash::RefreshModules();
 #endif
 }
