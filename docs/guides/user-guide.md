@@ -261,6 +261,73 @@ results from working sources. An older HTTP/gRPC server without the directory
 method reports an error; an older MQTT/Zenoh runtime simply does not reply to
 metadata queries.
 
+### Calling Services
+
+`ibmw service call <service> <type> '<request>' [options]` creates a temporary RPC
+client, sends one request, prints a JSON response, and exits. The request is one
+JSON/YAML object. Type loading, text conversion, and lifecycle handling live in
+the service command independently of the topic commands.
+
+```bash
+ibmw service call 'json:/my_project.ComputeService/Compute' \
+  'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' \
+  '{value: 21}' --http 127.0.0.1:50080 \
+  --type-support ./libmy_project_typesupport.so --timeout 5
+
+ibmw service call 'dds:/my_project.EchoService/Echo' \
+  'dds:my_project::Request -> dds:my_project::Response' \
+  '{value: 21}' --dds --domain 10 --type-support ./libmy_project_typesupport.so
+
+ibmw service call /add_two_ints example_interfaces/srv/AddTwoInts \
+  '{a: 19, b: 23}' --ros2 --ros-domain 10
+```
+
+Select exactly one backend: `--dds`, `--ros2`, `--zenoh`, `--mqtt <broker-uri>`,
+`--http <host:port>`, or `--grpc <host:port>`. HTTP and gRPC also accept
+`http://host:port`; HTTPS is not provided. gRPC method names follow the existing
+driver's `cdr:`, `dds:`, or `ros2:` prefix convention. Override the selected
+extension with `--transport-library <path>`. Explicit calls allow hidden names;
+`--include-hidden-services` is also accepted.
+
+Except for native ROS 2, quote the `request_type -> response_type` pair and
+provide one or more `--type-support <library>` packages. Both types must support
+JSON text conversion; the request is validated before transports are started.
+DDS additionally requires native DDS TypeSupport and CDR. Use canonical IBMW
+type names from the package, not unverified discovery wire names. DDS defaults
+to IBMW RPC topic naming. Add `--ros2-compatible` for ROS 2 wire naming, use the
+actual wire service name, and provide DDS types matching the peer's type names
+and layouts. This DDS path does not require rcl and does not generate TypeSupport
+from a `.srv` name. Native `--ros2` instead accepts `pkg/srv/Type`, requires
+`IBMW_BUILD_ROS2_EXTENSION=ON`, `libibmw_service_call_ros2.so`, and the installed
+C++ service typesupport and introspection libraries from a sourced ROS environment.
+It does not use `--type-support`.
+
+Use the corresponding `--domain`, `--dds-domain`, `--ros-domain`,
+`--zenoh-domain`, and `--zenoh-config` options for connection settings. MQTT
+supports `--mqtt-client-id`, `--mqtt-server-id`, and `--mqtt-qos`. TLS brokers
+(`ssl://` or `mqtts://`) require `--mqtt-truststore` and optionally a matching
+`--mqtt-client-cert`/`--mqtt-client-key` pair. HTTP/gRPC/MQTT/Zenoh accept
+`--serialization` for a format supported by both types; otherwise the request's
+default format is preferred.
+
+`--discovery-timeout` bounds client readiness waiting (default 2 seconds), while
+`--timeout` bounds response waiting after sending (default 5 seconds). Initialization
+and cleanup add overhead. DDS checks request/reply endpoint matches, native ROS 2
+checks client service readiness, MQTT waits for connection and subscription
+acknowledgments, and Zenoh waits for a matching request subscriber. Readiness does
+not guarantee business-call success. Requests are
+never automatically retried; a response timeout or Ctrl+C does not prove that the
+server did not execute the request.
+
+Success exits 0 and writes only the JSON response to stdout; errors exit 1 with
+diagnostics on stderr. Error status follows the selected driver's mapping; the
+HTTP driver does not preserve the original server status for non-200 responses.
+SIGINT/SIGTERM exit 130/143. Registry is a discovery source
+and `local` is an in-process driver: call does not forward another process's
+local-only service through its registry control socket. Select an enabled network
+driver and supply its endpoint/domain explicitly; the command does not automatically
+choose among same-named service instances.
+
 ### Listing Local Modules
 
 `ibmw module list` uses RuntimeRegistry to list modules registered by live local runtimes

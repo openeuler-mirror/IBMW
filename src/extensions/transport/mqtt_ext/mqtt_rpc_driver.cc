@@ -492,6 +492,22 @@ bool MqttRpcDriver::RegisterClientFunc(
   }
 }
 
+bool MqttRpcDriver::IsClientReady(std::string_view, std::string_view function) const noexcept {
+  try {
+    const auto name = rpc::GetFuncNameWithoutPrefix(function);
+    if (state_.load() != State::kStart || !MQTTAsync_isConnected(client_) ||
+        !client_cfg_info_map_.contains(name)) return false;
+    const auto subscriptions = std::atomic_load(&subscriptions_);
+    if (!subscriptions) return false;
+    const auto topic = "ibmw_rpc_rsp/" + common::util::UrlEncode(client_id_) + "/" +
+                       common::util::UrlEncode(name);
+    const auto subscription = subscriptions->find(topic);
+    // Completion publishes the failure flag; read it after pending reaches zero.
+    return subscription != subscriptions->end() && subscription->second->pending.load() == 0 &&
+           !subscription->second->failed.load();
+  } catch (...) { return false; }
+}
+
 void MqttRpcDriver::Call(
     const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
   try {
@@ -661,10 +677,38 @@ void MqttRpcDriver::RegisterGetExecutorFunc(
 }
 
 void MqttRpcDriver::SubscribeMqttTopic() {
+  // Each reconnect owns a distinct batch. Late callbacks cannot mark a newer
+  // connection ready, and callbacks never dereference a destroyed RPC driver.
+  const auto batch = std::make_shared<SubscriptionBatch>();
+  // Build the immutable topic map before publishing it to readiness readers.
+  for (const auto& sub_info : sub_info_vec_) {
+    auto& status = (*batch)[sub_info.topic];
+    if (!status) status = std::make_shared<SubscriptionStatus>();
+    status->pending.fetch_add(1);
+  }
+  std::atomic_store(&subscriptions_, batch);
   for (auto sub_info : sub_info_vec_) {
     // todo:Replace with MQTTClient_subscribeMany
-    int rc = MQTTAsync_subscribe(client_, sub_info.topic.data(), sub_info.qos, NULL);
+    MQTTAsync_responseOptions response = MQTTAsync_responseOptions_initializer;
+    using Context = std::shared_ptr<SubscriptionStatus>;
+    const auto& status = batch->at(sub_info.topic);
+    response.context = new Context(status);
+    response.onSuccess = [](void* context, MQTTAsync_successData* data) {
+      const std::unique_ptr<Context> owner(static_cast<Context*>(context));
+      if (!data || data->alt.qos == 128) (*owner)->failed.store(true);
+      (*owner)->pending.fetch_sub(1);
+    };
+    response.onFailure = [](void* context, MQTTAsync_failureData*) {
+      const std::unique_ptr<Context> owner(static_cast<Context*>(context));
+      (*owner)->failed.store(true);
+      (*owner)->pending.fetch_sub(1);
+    };
+    // A failure only blocks calls that need this subscription.
+    int rc = MQTTAsync_subscribe(client_, sub_info.topic.data(), sub_info.qos, &response);
     if (rc != MQTTASYNC_SUCCESS) {
+      delete static_cast<Context*>(response.context);
+      status->failed.store(true);
+      status->pending.fetch_sub(1);
       MW_ERROR("Failed to subscribe mqtt, topic: {} return code: {}", sub_info.topic, rc);
     }
   }

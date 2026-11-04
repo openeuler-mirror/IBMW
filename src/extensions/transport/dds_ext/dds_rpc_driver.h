@@ -24,6 +24,7 @@
 #endif
 
 #include "engine/service/service_driver.h"
+#include "extension_api/ibmw_service_client_readiness.h"
 #include "engine/service/service_driver_tools.h"
 #include "engine/rpc_client_tool.h"
 #include "cpp/executor/executor.h"
@@ -51,7 +52,8 @@ inline bool DdsRpcWriteSucceeded(dds_rpc_return::ReturnCode_t ret) {
   return ret == kDdsRpcReturnOk;
 }
 
-class DdsRpcDriver : public runtime::core::service::ServiceDriver {
+class DdsRpcDriver : public runtime::core::service::ServiceDriver,
+                      public ibmw::extension::ServiceClientReadinessV1 {
  public:
   struct Options {
     bool ros2_compatible = true;
@@ -67,6 +69,7 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver {
   void Initialize(YAML::Node options_node) override;
   void Start() override;
   void Shutdown() override;
+  bool IsClientReady(std::string_view module, std::string_view function) const noexcept override;
 
   std::list<std::pair<std::string, std::string>> GenInitializationReport() const noexcept override;
 

@@ -5,6 +5,7 @@
 
 #include "cpp/executor/executor.h"
 #include "engine/service/service_driver.h"
+#include "extension_api/ibmw_service_client_readiness.h"
 #include "engine/service/service_driver_tools.h"
 #include "rclcpp/rclcpp.hpp"
 #include "ros2_ext/global.h"
@@ -14,7 +15,8 @@
 
 namespace ibmw::extensions::ros2_extension {
 
-class Ros2RpcDriver : public runtime::core::service::ServiceDriver {
+class Ros2RpcDriver : public runtime::core::service::ServiceDriver,
+                      public ibmw::extension::ServiceClientReadinessV1 {
  public:
   struct Options {
     struct QosOptions {
@@ -100,6 +102,7 @@ class Ros2RpcDriver : public runtime::core::service::ServiceDriver {
   void Initialize(YAML::Node options_node) override;
   void Start() override;
   void Shutdown() override;
+  bool IsClientReady(std::string_view module, std::string_view function) const noexcept override;
 
   std::list<std::pair<std::string, std::string>> GenInitializationReport() const noexcept override;
 

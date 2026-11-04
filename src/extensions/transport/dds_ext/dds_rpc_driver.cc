@@ -433,6 +433,18 @@ bool DdsRpcDriver::RegisterClientFunc(
 // Call (client side)
 // ============================================================================
 
+bool DdsRpcDriver::IsClientReady(std::string_view module, std::string_view function) const noexcept {
+  try {
+    const auto it = client_endpoints_.find(std::string(module) + ":" + std::string(function));
+    if (it == client_endpoints_.end() || state_.load() != State::kStart) return false;
+    eprosima::fastdds::dds::PublicationMatchedStatus requests;
+    eprosima::fastdds::dds::SubscriptionMatchedStatus responses;
+    return it->second->writer->get_publication_matched_status(requests) == kDdsRpcReturnOk &&
+           it->second->reader->get_subscription_matched_status(responses) == kDdsRpcReturnOk &&
+           requests.current_count > 0 && responses.current_count > 0;
+  } catch (...) { return false; }
+}
+
 void DdsRpcDriver::Call(
     const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
   try {

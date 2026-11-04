@@ -510,6 +510,19 @@ bool Ros2RpcDriver::RegisterClientFunc(
   }
 }
 
+bool Ros2RpcDriver::IsClientReady(std::string_view module, std::string_view function) const noexcept {
+  try {
+    const auto key = std::string(module) + ":" + std::string(function);
+    if (state_.load() != State::kStart) return false;
+    if (CheckRosFunc(function)) {
+      const auto it = ros2_adapter_client_map_.find(key);
+      return it != ros2_adapter_client_map_.end() && it->second->service_is_ready();
+    }
+    const auto it = ros2_adapter_wrapper_client_map_.find(key);
+    return it != ros2_adapter_wrapper_client_map_.end() && it->second->service_is_ready();
+  } catch (...) { return false; }
+}
+
 void Ros2RpcDriver::Call(
     const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
   try {

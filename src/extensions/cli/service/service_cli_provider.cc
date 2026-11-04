@@ -8,7 +8,7 @@
 namespace {
 
 constexpr char kServiceCommandName[] = "service";
-constexpr char kServiceCommandDescription[] = "Inspect local and network services";
+constexpr char kServiceCommandDescription[] = "Inspect and call services";
 
 const ibmw_cli_command_v1_t kCliCommands[] = {{
     .name = {kServiceCommandName, sizeof(kServiceCommandName) - 1},

@@ -4,12 +4,13 @@
 set(service_cli_sources
     service_command.cc service_cli_provider.cc
     discovery_options.cc discovery_query.cc
-    list_command.cc type_command.cc find_command.cc)
+    list_command.cc type_command.cc find_command.cc
+    call_command.cc call_options.cc call_type_support.cc)
 
 add_library(ibmw_service_cli_provider SHARED ${service_cli_sources})
-# Discovery observers do not initialize an Engine or load business transports.
+# Only call initializes an Engine; discovery commands keep their observer path.
 target_link_libraries(ibmw_service_cli_provider
-  PRIVATE ibmw::cli::command ibmw::core::extension_support)
+  PRIVATE ibmw::cli::command ibmw::core::engine)
 set_target_properties(ibmw_service_cli_provider PROPERTIES OUTPUT_NAME "ibmw_service_cli")
 add_werror(ibmw_service_cli_provider)
 
@@ -38,6 +39,15 @@ if(IBMW_BUILD_DDS_EXTENSION)
 endif()
 if(IBMW_BUILD_ROS2_EXTENSION)
   add_service_discovery(ros2 rclcpp::rclcpp)
+  add_library(ibmw_service_call_ros2 SHARED call_ros2_types.cc)
+  target_link_libraries(ibmw_service_call_ros2 PRIVATE ibmw::cli::command
+    ibmw::core::extension_support rclcpp::rclcpp
+    rosidl_typesupport_introspection_cpp::rosidl_typesupport_introspection_cpp)
+  add_werror(ibmw_service_call_ros2)
+  add_dependencies(ibmw_service_cli_provider ibmw_service_call_ros2)
+  if(IBMW_INSTALL)
+    install(TARGETS ibmw_service_call_ros2 LIBRARY DESTINATION bin)
+  endif()
 endif()
 if(IBMW_BUILD_NET_EXTENSION)
   add_service_discovery(http ibmw::extensions::net_base)
@@ -67,13 +77,75 @@ if(IBMW_BUILD_ZENOH_EXTENSION)
 endif()
 
 if(IBMW_BUILD_TESTS)
-  add_executable(ibmw_service_cli_test service_command_test.cc ${service_cli_sources})
+  add_library(ibmw_service_call_types_fixture SHARED test/call_type_support_fixture.cc)
+  target_link_libraries(ibmw_service_call_types_fixture PRIVATE ibmw::core::extension_support)
+  add_executable(ibmw_service_call_server_fixture test/call_server_fixture.cc)
+  target_link_libraries(ibmw_service_call_server_fixture PRIVATE ibmw::core::engine)
+  add_werror(ibmw_service_call_types_fixture)
+  add_werror(ibmw_service_call_server_fixture)
+  add_executable(ibmw_service_cli_test service_command_test.cc call_command_test.cc ${service_cli_sources})
   target_link_libraries(ibmw_service_cli_test
     PRIVATE ibmw::cli::command ibmw::core::engine GTest::gtest_main)
   add_werror(ibmw_service_cli_test)
-  add_dependencies(ibmw_service_cli_test ibmw_core_main)
+  add_dependencies(ibmw_service_cli_test ibmw_core_main ibmw_service_call_types_fixture)
   target_compile_definitions(ibmw_service_cli_test PRIVATE
-    IBMW_SERVICE_TEST_CLI="$<TARGET_FILE:ibmw_core_main>")
+    IBMW_SERVICE_TEST_CLI="$<TARGET_FILE:ibmw_core_main>"
+    SERVICE_CALL_TYPES="$<TARGET_FILE:ibmw_service_call_types_fixture>")
   add_test(NAME ibmw_service_cli_test COMMAND ibmw_service_cli_test)
   set_tests_properties(ibmw_service_cli_test PROPERTIES TIMEOUT 30)
+
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  set(call_test_backends)
+  if(IBMW_BUILD_NET_EXTENSION)
+    list(APPEND call_test_backends http)
+    add_dependencies(ibmw_service_cli_test ibmw_extensions_net_ext)
+  endif()
+  if(IBMW_BUILD_DDS_EXTENSION AND IBMW_BUILD_PROTOCOLS)
+    list(APPEND call_test_backends dds)
+    add_dependencies(ibmw_service_cli_test ibmw_dds_extension ibmw_schema_common_ts)
+    if(IBMW_BUILD_GRPC_EXTENSION)
+      list(APPEND call_test_backends grpc)
+      add_dependencies(ibmw_service_cli_test ibmw_extensions_grpc_ext)
+    endif()
+  endif()
+  if(IBMW_BUILD_MQTT_EXTENSION)
+    find_program(IBMW_SERVICE_TEST_MOSQUITTO mosquitto)
+    if(IBMW_SERVICE_TEST_MOSQUITTO)
+      list(APPEND call_test_backends mqtt)
+      add_dependencies(ibmw_service_cli_test ibmw_extensions_mqtt_ext)
+    endif()
+  endif()
+  if(IBMW_BUILD_ZENOH_EXTENSION)
+    list(APPEND call_test_backends zenoh)
+    add_dependencies(ibmw_service_cli_test ibmw_extensions_zenoh_ext)
+  endif()
+  if(IBMW_BUILD_ROS2_EXTENSION)
+    list(APPEND call_test_backends ros2)
+    add_dependencies(ibmw_service_cli_test ibmw_extensions_ros2_ext)
+    if(IBMW_BUILD_DDS_EXTENSION)
+      find_package(example_interfaces REQUIRED)
+      add_library(ibmw_service_call_ros2_dds_types_fixture SHARED test/call_ros2_dds_types_fixture.cc)
+      target_link_libraries(ibmw_service_call_ros2_dds_types_fixture PRIVATE ibmw::api::ros2_type_support
+        example_interfaces::example_interfaces__rosidl_generator_cpp
+        example_interfaces::example_interfaces__rosidl_typesupport_fastrtps_cpp
+        example_interfaces::example_interfaces__rosidl_typesupport_introspection_cpp)
+      add_werror(ibmw_service_call_ros2_dds_types_fixture)
+      add_dependencies(ibmw_service_cli_test ibmw_service_call_ros2_dds_types_fixture)
+      list(APPEND call_test_backends dds_ros2)
+    endif()
+  endif()
+  add_dependencies(ibmw_service_cli_test ibmw_service_call_server_fixture)
+  foreach(backend IN LISTS call_test_backends)
+    set(extra_call_test_args)
+    if(backend STREQUAL "dds" OR backend STREQUAL "grpc")
+      list(APPEND extra_call_test_args --dds-types "$<TARGET_FILE:ibmw_schema_common_ts>")
+    elseif(backend STREQUAL "dds_ros2")
+      list(APPEND extra_call_test_args --dds-types "$<TARGET_FILE:ibmw_service_call_ros2_dds_types_fixture>")
+    endif()
+    add_test(NAME ibmw_service_call_${backend}_test
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/tests/test_service_call.py
+        --cli "$<TARGET_FILE:ibmw_core_main>" --server "$<TARGET_FILE:ibmw_service_call_server_fixture>"
+        --types "$<TARGET_FILE:ibmw_service_call_types_fixture>" --backend ${backend} ${extra_call_test_args})
+    set_tests_properties(ibmw_service_call_${backend}_test PROPERTIES TIMEOUT 70 RUN_SERIAL TRUE LABELS integration)
+  endforeach()
 endif()

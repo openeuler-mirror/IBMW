@@ -236,6 +236,65 @@ TLS MQTT 来源，认证或连接失败返回退出码 1，不作为成功的空
 同时保留其他来源的有效结果。旧版 HTTP/gRPC 服务端缺少目录方法时会报错；
 旧版 MQTT/Zenoh 运行时则不会回复元数据查询。
 
+### 调用 Service
+
+`ibmw service call <service> <type> '<request>' [options]` 创建临时 RPC 客户端，
+发送一次请求，输出 JSON 响应后退出。请求接受单个 JSON/YAML 对象。
+类型加载、文本转换和调用生命周期由 service 命令独立实现。
+
+```bash
+# HTTP：使用已安装的请求/响应 TypeSupport 包
+ibmw service call 'json:/my_project.ComputeService/Compute' \
+  'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' \
+  '{value: 21}' --http 127.0.0.1:50080 \
+  --type-support ./libmy_project_typesupport.so --timeout 5
+
+# DDS：必须使用类型包中的规范类型名，不能直接把发现得到的 wire type 当作它
+ibmw service call 'dds:/my_project.EchoService/Echo' \
+  'dds:my_project::Request -> dds:my_project::Response' \
+  '{value: 21}' --dds --domain 10 --type-support ./libmy_project_typesupport.so
+
+# 原生 ROS 2：从已 source 的 ROS 安装中加载服务和消息 introspection
+ibmw service call /add_two_ints example_interfaces/srv/AddTwoInts \
+  '{a: 19, b: 23}' --ros2 --ros-domain 10
+```
+
+每次调用必须且只能选择一个后端：`--dds`、`--ros2`、`--zenoh`、
+`--mqtt <broker-uri>`、`--http <host:port>` 或 `--grpc <host:port>`。
+HTTP 和 gRPC 地址也可使用 `http://host:port`，当前不提供 HTTPS。
+gRPC 方法名必须符合现有 Driver 的 `cdr:`、`dds:` 或 `ros2:` 前缀约定。
+使用 `--transport-library <path>` 可显式指定所选后端的运行时库。
+显式方法名允许调用隐藏服务；`--include-hidden-services` 也被接受。
+
+除原生 ROS 2 外，`<type>` 必须是带引号的 `request_type -> response_type`；
+`--type-support <library>` 可以重复，用来加载两种类型。两种 TypeSupport 都必须
+支持 JSON 文本转换；发送前先验证请求。DDS 还要求原生 DDS TypeSupport 和 CDR 支持。
+DDS 默认使用 IBMW RPC topic 命名；调用 ROS 2 兼容服务时增加 `--ros2-compatible`，
+服务名使用实际线协议名称，请求/响应类型必须与对端 DDS 类型和布局兼容。
+这条 DDS 路径不依赖 rcl，也不自动从 `.srv` 名称生成类型支持。
+原生 `--ros2` 则要求构建 `IBMW_BUILD_ROS2_EXTENSION=ON`，部署
+`libibmw_service_call_ros2.so`，并安装相应的 C++ service typesupport 和
+introspection 库；此模式不使用 `--type-support`。
+
+`--domain`、`--dds-domain`、`--ros-domain`、`--zenoh-domain` 和
+`--zenoh-config` 沿用对应后端的连接配置。MQTT 可设置 `--mqtt-client-id`、
+`--mqtt-server-id`、`--mqtt-qos`；TLS broker 使用 `ssl://` 或 `mqtts://`，
+必须提供 `--mqtt-truststore`，可配套提供 `--mqtt-client-cert` 和
+`--mqtt-client-key`。HTTP/gRPC/MQTT/Zenoh 可通过 `--serialization` 选择两种
+类型共同支持的格式，否则优先使用请求类型的默认格式。
+
+`--discovery-timeout` 是客户端就绪等待上限（默认 2 秒），`--timeout` 是发送后
+的响应等待上限（默认 5 秒），两者互相独立；初始化和资源清理另有开销。
+DDS 等待请求与响应端点匹配，原生 ROS 2 查询客户端可用状态，MQTT 等待连接和
+订阅确认，Zenoh 等待请求订阅端匹配。连接就绪不保证业务调用一定成功。命令不自动重发请求；响应超时或
+Ctrl+C 后，服务端仍可能已执行请求。
+
+成功返回 0，stdout 只有 JSON 响应；失败返回 1，诊断写入 stderr。
+错误状态沿用所选 Driver 的映射；HTTP Driver 对非 200 响应不保留原始服务端状态码。
+SIGINT/SIGTERM 分别返回 130/143。registry 只是发现来源，`local` 只在进程内通信，
+本命令不通过 registry 控制 socket 转发其他进程的纯 local 服务。需要显式选择
+服务端已经启用的网络 Driver 及其地址/domain；不会自动选择一个同名服务实例。
+
 ### 查看本机模块
 
 `ibmw module list` 通过 RuntimeRegistry 列出本机同一用户的有效运行时中登记的模块，

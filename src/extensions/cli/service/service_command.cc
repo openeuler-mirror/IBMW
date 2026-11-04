@@ -9,18 +9,20 @@
 #include <vector>
 
 #include "cli/command.h"
+#include "call_command.h"
 #include "find_command.h"
 #include "list_command.h"
 #include "type_command.h"
 
 int RunServiceCommand(int argc, const char* const* argv) {
   try {
-    ibmw::cli::Command service("ibmw service", "Inspect local and network services");
+    ibmw::cli::Command service("ibmw service", "Inspect and call services");
     service.AddHelpOption("--include-hidden-services",
                           "Include hidden services in list, type and find queries");
     ibmw::cli::service::AddListCommand(service);
     ibmw::cli::service::AddTypeCommand(service);
     ibmw::cli::service::AddFindCommand(service);
+    ibmw::cli::service::AddCallCommand(service);
 
     std::vector<std::string> arguments;
     for (int index = 0; index < argc; ++index) arguments.emplace_back(argv[index]);
