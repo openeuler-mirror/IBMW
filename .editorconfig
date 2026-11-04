@@ -17,9 +17,6 @@ indent_size = 4
 # A trailing double space is a Markdown line break.
 trim_trailing_whitespace = false
 
-[*.bat]
-end_of_line = unset
-
 [*.{mcap,lz4,zst,db3}]
 charset = unset
 end_of_line = unset
