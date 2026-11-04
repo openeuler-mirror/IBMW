@@ -32,16 +32,61 @@ cleanup() {
   [ -n "${SUB_PID:-}" ] && pids+=("$SUB_PID")
   if [ "${#pids[@]}" -gt 0 ]; then
     kill "${pids[@]}" 2>/dev/null || true
-    sleep 1
-    kill -9 "${pids[@]}" 2>/dev/null || true
+    # Bounded wait for a clean exit, then SIGKILL whatever is left.
+    local deadline=$((SECONDS + 3)) pid
+    for pid in "${pids[@]}"; do
+      while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do
+        sleep 0.1
+      done
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    done
   fi
 }
 trap cleanup EXIT
 
+# Logs carry ANSI colour codes; count matching lines of the stripped text.
+# grep -c prints 0 and exits 1 on no match, so `|| true` (not `|| echo 0`).
+count_lines() {
+  local file="$1" pattern="$2"
+  sed 's/\x1b\[[0-9;]*m//g' "$file" 2>/dev/null | grep -cE -- "$pattern" || true
+}
+
+fail() {
+  echo "RESULT: FAILED - $1" >&2
+  echo "--- publisher log tail ($PUB_LOG) ---" >&2
+  tail -n 40 "$PUB_LOG" >&2 2>/dev/null || true
+  echo "--- subscriber log tail ($SUB_LOG) ---" >&2
+  tail -n 40 "$SUB_LOG" >&2 2>/dev/null || true
+  exit 1
+}
+
+# Poll <file> every 0.1 s until it matches the ERE <pattern>. Fail (log tails,
+# non-zero exit) if <pid> dies first or <timeout_sec> elapses.
+wait_for_log() {
+  local file="$1" pattern="$2" pid="$3" name="$4" timeout_sec="$5"
+  local deadline=$((SECONDS + timeout_sec))
+  until grep -qE -- "$pattern" "$file" 2>/dev/null; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fail "$name exited before logging '$pattern'"
+    fi
+    if (( SECONDS >= deadline )); then
+      fail "$name did not log '$pattern' within ${timeout_sec}s"
+    fi
+    sleep 0.1
+  done
+}
+
+READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-15}"
+# SubscriberModule logs [RECV] for messages 1-3 and every 5th after that.
+MIN_RECV_LINES="${MIN_RECV_LINES:-3}"
+ENGINE_RUNNING_PATTERN='Running( \(async\))?\. Waiting for shutdown signal\.'
+PUBLISH_FAILURE_PATTERN='Failed to (borrow|publish) loaned message'
+
 echo "=========================================="
 echo "Multi-Process Communication Test"
 echo "=========================================="
-echo "Publisher: plain_pub_only_app (Point, zero-copy)"
+echo "Publisher: plain_pub_only_app (Point, LoanedMessage API)"
 echo "Subscriber: sub_only_app (separate process)"
 echo "Build dir: $BUILD_DIR"
 echo "Config dir: $CFG_DIR"
@@ -53,18 +98,37 @@ echo "Starting subscriber process..."
 cd "$BUILD_DIR"
 ./sub_only_app "$CFG_DIR/sub_only_cfg.yaml" > "$SUB_LOG" 2>&1 &
 SUB_PID=$!
-sleep 3
+# The engine logs "Running..." once Start() has created every DDS reader.
+wait_for_log "$SUB_LOG" "$ENGINE_RUNNING_PATTERN" "$SUB_PID" subscriber "$READY_TIMEOUT_SEC"
 
 # Start publisher
 echo "Starting publisher process..."
 ./plain_pub_only_app "$CFG_DIR/plain_pub_only_cfg.yaml" > "$PUB_LOG" 2>&1 &
 PUB_PID=$!
+wait_for_log "$PUB_LOG" "$ENGINE_RUNNING_PATTERN" "$PUB_PID" publisher "$READY_TIMEOUT_SEC"
 
-# Wait for messages to flow
-echo "Waiting $RUN_SECONDS seconds for messages..."
-sleep "$RUN_SECONDS"
+# Poll until the subscriber has logged MIN_RECV_LINES samples; RUN_SECONDS is
+# the deadline, not a fixed sleep.
+echo "Waiting up to $RUN_SECONDS seconds for $MIN_RECV_LINES [RECV] lines..."
+deadline=$((SECONDS + RUN_SECONDS))
+while :; do
+  PUB_FAILURES=$(count_lines "$PUB_LOG" "$PUBLISH_FAILURE_PATTERN")
+  if [ "$PUB_FAILURES" -gt 0 ]; then
+    fail "publisher logged $PUB_FAILURES loaned borrow/publish failures"
+  fi
+  SUB_COUNT=$(count_lines "$SUB_LOG" '\[RECV\]')
+  if [ "$SUB_COUNT" -ge "$MIN_RECV_LINES" ]; then
+    break
+  fi
+  kill -0 "$SUB_PID" 2>/dev/null || fail "subscriber exited while waiting for [RECV]"
+  kill -0 "$PUB_PID" 2>/dev/null || fail "publisher exited while waiting for [RECV]"
+  if (( SECONDS >= deadline )); then
+    fail "subscriber logged $SUB_COUNT [RECV] lines in ${RUN_SECONDS}s (need $MIN_RECV_LINES)"
+  fi
+  sleep 0.2
+done
+PUB_COUNT=$(count_lines "$PUB_LOG" '\[SEND\]')
 
-# Check results - strip ANSI color codes from logs
 STRIP_ANSI='s/\x1b\[[0-9;]*m//g'
 
 echo ""
@@ -74,33 +138,19 @@ echo "=========================================="
 
 echo ""
 echo "--- Publisher output ---"
-sed "$STRIP_ANSI" "$PUB_LOG" | grep -E "\[SEND\]|is_zero_copy|Statistics|Zero-copy" | head -10 || echo "(no SEND messages found)"
+sed "$STRIP_ANSI" "$PUB_LOG" | grep -E "\[SEND\]|is_zero_copy|can_loan_messages|is_plain" | head -10 || true
 
 echo ""
 echo "--- Subscriber output ---"
-sed "$STRIP_ANSI" "$SUB_LOG" | grep -E "\[RECV\]" | head -10 || echo "(no RECV messages found)"
-
-# Verify
-PUB_COUNT=$(sed "$STRIP_ANSI" "$PUB_LOG" | grep -c "\[SEND\]" 2>/dev/null || echo "0")
-SUB_COUNT=$(sed "$STRIP_ANSI" "$SUB_LOG" | grep -c "\[RECV\]" 2>/dev/null || echo "0")
+sed "$STRIP_ANSI" "$SUB_LOG" | grep -E "\[RECV\]" | head -10 || true
 
 echo ""
 echo "=========================================="
 echo "Publisher sent: $PUB_COUNT messages (sampled)"
 echo "Subscriber received: $SUB_COUNT messages (sampled)"
 
-if [ "$SUB_COUNT" -gt 0 ]; then
-  echo "RESULT: PASSED - Cross-process DDS communication works!"
-else
-  echo "RESULT: FAILED - Subscriber received no messages"
-  echo "  Possible causes:"
-  echo "  - DDS discovery takes time (try longer wait)"
-  echo "  - Domain ID mismatch"
-  echo "  - Network/firewall issues"
+if [ "$PUB_COUNT" -le 0 ]; then
+  fail "no [SEND] evidence in the publisher log"
 fi
+echo "RESULT: PASSED - Cross-process DDS communication works!"
 echo "=========================================="
-
-if [ "$PUB_COUNT" -le 0 ] || [ "$SUB_COUNT" -le 0 ]; then
-  echo "ERROR: expected publisher and subscriber message evidence" >&2
-  exit 1
-fi
