@@ -21,11 +21,23 @@ modules:
     transport: dds
     topic: hello_topic
     message: HelloMsg
+    user_code:
+      publish_body: |
+        msg_count_++;
+        msg.id = msg_count_;
+        msg.message = "hello";
+        msg.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
   - name: SubscriberModule
     type: subscriber
     transport: dds
     topic: hello_topic
     message: HelloMsg
+    user_code:
+      on_message_body: |
+        MW_INFO("Received message: id={}, message='{}', timestamp={}",
+                msg->id, msg->message, msg->timestamp);
 apps:
   - name: dds_native_app
     type: pubsub

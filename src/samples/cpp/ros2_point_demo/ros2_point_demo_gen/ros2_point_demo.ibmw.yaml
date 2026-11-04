@@ -38,11 +38,19 @@ modules:
     type: direct_ros2_publisher
     topic: "point_topic"
     message: "geometry_msgs::msg::Point"
+    user_code:
+      publish_body: |
+        msg.x = static_cast<double>(publish_count_ + 1);
+        msg.y = msg.x * 2.0;
+        msg.z = msg.x * 3.0;
 
   - name: PointSubscriberModule
     type: direct_ros2_subscriber
     topic: "point_topic"
     message: "geometry_msgs::msg::Point"
+    user_code:
+      on_message_body: |
+        MW_INFO("Received point: x={}, y={}, z={}", msg->x, msg->y, msg->z);
 
 apps:
   - name: ros2_point_app

@@ -47,7 +47,11 @@ void PointPublisherModule::Stop() {
 void PointPublisherModule::PublishLoop() {
   while (running_) {
     geometry_msgs::msg::Point msg;
-    // TODO: populate msg fields here
+    // IBMW: user code begin (publish_body)
+    msg.x = static_cast<double>(publish_count_ + 1);
+    msg.y = msg.x * 2.0;
+    msg.z = msg.x * 3.0;
+    // IBMW: user code end (publish_body)
     publish_count_++;
 
     ibmw::ros2::transport::Send(

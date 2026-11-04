@@ -32,10 +32,16 @@ modules:
     type: direct_ros2_publisher
     topic: "chatter"
     message: "std_msgs::msg::String"
+    user_code:
+      publish_body: |
+        msg.data = "hello #" + std::to_string(publish_count_ + 1);
   - name: SubscriberModule
     type: direct_ros2_subscriber
     topic: "chatter"
     message: "std_msgs::msg::String"
+    user_code:
+      on_message_body: |
+        MW_INFO("Received data: '{}'", msg->data);
 apps:
   - name: ros2_interop_app
     modules: [PublisherModule, SubscriberModule]

@@ -37,6 +37,11 @@ modules:
     #     ros2_msg_include  = "geometry_msgs/msg/point.hpp"
     # ros2_type_name auto-derived as "geometry_msgs/msg/Point".
     # dds_type_name defaults to ros2_type_name.
+    user_code:
+      populate_loaned_message: |
+        loop_var->x = static_cast<double>(publish_count_);
+        loop_var->y = loop_var->x * 2.0;
+        loop_var->z = loop_var->x * 3.0;
   # Subscriber side. transport=dds → callback signature is
   # OnMessage(const std::shared_ptr<const geometry_msgs::msg::Point>&).
   - name: PointLoanedSubscriber

@@ -61,6 +61,11 @@ modules:
     type: rpc_server
     transport: dds
     message: AddTwoIntsService
+    user_code:
+      rpc_server_handler_body.AddTwoInts: |
+        rsp.sum(req.a() + req.b());
+        MW_INFO("AddTwoInts: {} + {} = {}", req.a(), req.b(), rsp.sum());
+        return ibmw::rpc::Status();
   - name: RpcClientModule
     type: rpc_client
     transport: dds
@@ -68,6 +73,12 @@ modules:
       rpc_frq: 2.0
 
     message: AddTwoIntsService
+    user_code:
+      rpc_client_request_parameter_build.AddTwoInts: |
+        req.a(static_cast<int64_t>(counter));
+        req.b(static_cast<int64_t>(counter) * 10);
+      rpc_client_response_parameter_consume.AddTwoInts: |
+        MW_INFO("AddTwoInts OK: {} + {} = {}", req.a(), req.b(), rsp.sum());
 apps:
   - name: dds_rpc_server_app
     type: rpc

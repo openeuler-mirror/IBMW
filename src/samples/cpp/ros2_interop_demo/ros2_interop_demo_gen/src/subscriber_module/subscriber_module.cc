@@ -45,7 +45,9 @@ void SubscriberModule::OnMessage(
   // the logger while the live interop test is already checking process logs.
   std::fprintf(stderr, "Received ROS2 interop message [%u]\n", receive_count_);
   MW_INFO("Received ROS2 interop message [{}]", receive_count_);
-  // TODO: process msg fields here
+  // IBMW: user code begin (on_message_body)
+  MW_INFO("Received data: '{}'", msg->data);
+  // IBMW: user code end (on_message_body)
 
   auto serialization_type = ctx.GetSerializationType();
   MW_DEBUG("Serialization type: {}", serialization_type);

@@ -1,5 +1,7 @@
     /* IBMW_PUBSUB_LOANED_PUBLISHER_BODY_BEGIN */                             \
     /* IBMW: user code begin (populate_loaned_message) */                     \
-    /* TODO: populate `*loop_var` (or `loop_var->field`) here. */             \
+    loop_var->x = static_cast<double>(publish_count_);                        \
+    loop_var->y = loop_var->x * 2.0;                                          \
+    loop_var->z = loop_var->x * 3.0;                                          \
     /* IBMW: user code end (populate_loaned_message) */                       \
     /* IBMW_PUBSUB_LOANED_PUBLISHER_BODY_END */                               \
