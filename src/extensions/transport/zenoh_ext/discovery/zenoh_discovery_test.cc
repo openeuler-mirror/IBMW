@@ -321,9 +321,11 @@ TEST(ZenohKeyExprTest, NormalizesLimitDomain) {
 
 TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding) {
   using ibmw::extensions::zenoh_extension::DecodeZenohPayload;
-  EXPECT_ANY_THROW(DecodeZenohPayload("abc"));
+  using ibmw::common::util::BufferOutOfBoundsException;
+  // The length prefix is parsed by the shared GetLengthPrefixedPayload.
+  EXPECT_THROW(DecodeZenohPayload("abc"), BufferOutOfBoundsException);
   auto bytes = Envelope("json", "{}");
-  EXPECT_ANY_THROW(DecodeZenohPayload(std::string_view(bytes).substr(0, bytes.size() - 1)));
+  EXPECT_THROW(DecodeZenohPayload(std::string_view(bytes).substr(0, bytes.size() - 1)), BufferOutOfBoundsException);
   bytes.append(100, 'x');
   const auto decoded = DecodeZenohPayload(bytes);
   EXPECT_EQ(decoded.serialization, "json");
