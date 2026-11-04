@@ -79,7 +79,7 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
 
   std::function<executor::ExecutorHandle(std::string_view)> get_executor_func_;
 
-  std::atomic_uint32_t req_id_ = 0;
+  std::atomic_uint32_t req_id_{runtime::core::util::RandomReqIdStart()};
 
   std::shared_mutex z_shared_mutex_;
 

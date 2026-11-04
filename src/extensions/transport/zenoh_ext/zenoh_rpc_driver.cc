@@ -182,7 +182,12 @@ bool ZenohRpcDriver::RegisterServiceFunc(
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
         ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, serialization_type);
 
-        std::string pattern(buf_oper.GetString(util::BufferLenType::kUInt8));
+        // The answer key is the registered one: a request naming another
+        // function would get its answer onto that function's answer key.
+        if (buf_oper.GetString(util::BufferLenType::kUInt8) != pattern) [[unlikely]] {
+          MW_WARN_INTERVAL(5000, "Drop zenoh rpc request for '{}': it names another answer key.", info.func_name);
+          return;
+        }
         char req_id_buf[4];
         buf_oper.GetBuffer(req_id_buf, 4);
 
@@ -225,7 +230,7 @@ bool ZenohRpcDriver::RegisterServiceFunc(
              service_req_ptr,
              service_rsp_ptr,
              serialization_type{std::move(serialization_type)},
-             pattern{std::move(pattern)},
+             pattern,
              req_id_buf](ibmw::rpc::Status status) {
               if (!status.OK()) [[unlikely]] {
                 ReturnRspWithStatusCode(
@@ -472,7 +477,8 @@ bool ZenohRpcDriver::RegisterClientFunc(
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
                           key_suffix_;
-    auto handle = [this](const z_loaned_sample_t* message) {
+    auto handle = [this, func = std::string(rpc::GetFuncNameWithoutPrefix(info.func_name))](
+                      const z_loaned_sample_t* message) {
       std::shared_ptr<runtime::core::service::ServiceMessageFrame> client_call_wrapper_ptr;
       try {
         // read data
@@ -492,7 +498,10 @@ bool ZenohRpcDriver::RegisterClientFunc(
         uint32_t req_id = buf_oper.GetUint32();
         uint32_t code = buf_oper.GetUint32();
 
-        auto msg_recorder = client_tool_ptr_->GetRecord(req_id);
+        // Only an answer on the key of the called function completes the call.
+        auto msg_recorder = client_tool_ptr_->GetRecordIf(req_id, [&func](const auto& record) {
+          return rpc::GetFuncNameWithoutPrefix(record->info.func_name) == func;
+        });
         if (!msg_recorder) [[unlikely]] {
           // can't find recorder, which means timeout
           MW_TRACE("Can not get req id {} from recorder.", req_id);

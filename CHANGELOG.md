@@ -36,6 +36,10 @@ details remain governed by the documentation for each release.
   requests carrying any other answer topic are dropped with a rate-limited
   warning. Clients only accept an answer from the called function's answer
   topic, and request ids start at a random value. The wire format is unchanged.
+- Zenoh RPC: servers answer only on the answer key of the called function;
+  requests naming another answer key are dropped with a rate-limited warning.
+  Clients only accept an answer from the called function's answer key, and
+  request ids start at a random value. The wire format is unchanged.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /
