@@ -7,12 +7,13 @@
 // needed -- FastDDS owns its own SHM segment via DataSharing /
 // SharedMemoryTransport.
 //
-// Unlike dds_loaned, no driver pointer needs to be injected into the
-// module: the publish path goes through `ibmw::transport::Send()`,
+// Unlike dds_loaned, the publish path goes through `ibmw::transport::Send()`,
 // which the engine routes to the dds driver via the yaml
 // `messaging.publishers` rule. The dds driver CDR-serializes via
 // GenericDdsPubSubType<T>::serialize, then FastDDS hands the bytes to
-// its transport (SHM if both peers advertise it, UDP otherwise).
+// its transport (SHM if both peers advertise it, UDP otherwise). The dds
+// driver is still injected so the module can wait for the writer to match
+// a subscriber before its first publish.
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -26,6 +27,9 @@
 #include "cpp/core.h"
 #include "engine/engine.h"
 
+// IBMW_R1_EXEMPT_BEGIN
+#include "dds_ext/dds_transport_driver.h"
+// IBMW_R1_EXEMPT_END
 #include "publisher_module/publisher_module.h"
 
 using namespace ibmw::runtime::core;
@@ -106,6 +110,18 @@ int main(int argc, char** argv) {
     Engine::Options options;
     options.cfg_file_path = argv[1];
     engine.Initialize(options);
+
+    // IBMW_R2_EXEMPT_BEGIN: driver injected only for the bounded match wait
+    // IBMW_R3_EXEMPT_BEGIN
+    for (auto* td : engine.GetTransportBus().GetUsedTransportDriver()) {
+      if (td->Name() == "dds") {
+        pub.SetDdsDriver(
+            dynamic_cast<ibmw::extensions::dds_extension::DdsTransportDriver*>(td));
+        break;
+      }
+    }
+    // IBMW_R3_EXEMPT_END
+    // IBMW_R2_EXEMPT_END
 
     engine.Start();
     engine.Shutdown();
