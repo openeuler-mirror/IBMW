@@ -2192,6 +2192,27 @@ TEST(ShmExtensionOptionsTest, GroupAndRequireReadOnly) {
   EXPECT_EQ(ParseShmGroupId("4294967294"), std::optional<gid_t>(4294967294u));
 }
 
+// EXT-61 driver_name collisions: the engine routes a name to the first driver
+// registered with it, so shm_extension refuses a name that the built-in local
+// transport or another configured "<name>_extension" also registers.
+TEST(ShmExtensionOptionsTest, DriverNameConflict) {
+  const std::vector<std::string> both = {"shm_extension", "iceoryx_extension"};
+  EXPECT_EQ(FindDriverNameConflict("iceoryx", both), "extension 'iceoryx_extension'");
+  EXPECT_EQ(FindDriverNameConflict("iceoryx", {"iceoryx_extension", "shm_extension"}),
+            "extension 'iceoryx_extension'");
+  EXPECT_EQ(FindDriverNameConflict("shm", both), "");
+  EXPECT_EQ(FindDriverNameConflict("iceoryx", {"shm_extension"}), "");
+  EXPECT_EQ(FindDriverNameConflict("dds", {"shm_extension", "dds_extension"}), "extension 'dds_extension'");
+  EXPECT_EQ(FindDriverNameConflict("local", {"shm_extension"}), "the built-in local transport");
+  EXPECT_EQ(FindDriverNameConflict("tcp", {"shm_extension", "net_extension"}), "extension 'net_extension'");
+  EXPECT_EQ(FindDriverNameConflict("http", {"net_extension", "shm_extension"}), "extension 'net_extension'");
+  EXPECT_EQ(FindDriverNameConflict("udp", {"shm_extension"}), "");
+  EXPECT_EQ(FindDriverNameConflict("net", {"shm_extension", "net_extension"}), "");
+  // Only the exact "<name>_extension" counts; shm_extension never conflicts with itself.
+  EXPECT_EQ(FindDriverNameConflict("iceoryx", {"shm_extension", "iceoryx_extension2", "xiceoryx_extension"}), "");
+  EXPECT_EQ(FindDriverNameConflict("shm", {"shm_extension"}), "");
+}
+
 // EXT-45 A publisher works under require_read_only on this kernel, and the
 // selfdev health counters reach the initialization report.
 TEST_F(ShmDriverTest, ReportsSelfdevHealthCounters) {

@@ -6,11 +6,17 @@ DDS 与 TCP 路径。性能数据依赖硬件和运行环境；应用决策应�
 
 ## 构建与运行
 
-`full` preset 不会启用 benchmark；benchmark 还依赖 examples 和 Iceoryx。
-上述命令从仓库根目录运行；`IBMW_BUILD_EXAMPLES=ON` 和
-`IBMW_BUILD_ICEORYX_EXTENSION=ON` 是 benchmark gate 的依赖，DDS 行还需要
+`full` preset 不会启用 benchmark；benchmark 还依赖 examples 和一个共享内存扩展。
+下述命令从仓库根目录运行；benchmark gate 要求 `IBMW_BUILD_EXAMPLES=ON`，且
+`IBMW_BUILD_ICEORYX_EXTENSION=ON` 与 `IBMW_BUILD_SHM_EXTENSION=ON`（自研共享内存）
+至少开一个；各 sample 在自己的传输未开启时自动跳过。DDS 行还需要
 `IBMW_BUILD_DDS_EXTENSION=ON`，topology interop 的 DDS endpoint 还需要
-`IBMW_BUILD_ROS2_TYPES=ON`。
+`IBMW_BUILD_ROS2_TYPES=ON`。benchmark payload 使用 CDR 序列化，任何组合都需要 Fast DDS/Fast CDR。
+
+在 Linux 主机上只开 `IBMW_BUILD_SHM_EXTENSION` 时得到 `shm_send`、`shm_loan_v2`、`shm_loaned_pod`、
+`shm_loaned_ctx` 四个 sample（不构建 iceoryx）。它们不在 sweep 的缺省列表中，用
+`IBMW_BENCH_SAMPLES="shm_send shm_loaned_pod ..."` 选择；对比方法与结果见
+[selfdev/shm/docs/对标基准.md](../../selfdev/shm/docs/对标基准.md)。
 
 ```bash
 cmake -S . -B ./build \

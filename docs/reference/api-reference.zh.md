@@ -715,7 +715,7 @@ typedef uint64_t ibmw_driver_slot_t;
 ```
 
 每个 `*TransportDriver` 子类（local / tcp / http / udp / dds / mqtt /
-ros2 / iceoryx / zenoh，共 9 个）通过 `IBMW_DECLARE_DRIVER_SLOT(...)` 在
+ros2 / iceoryx / zenoh / shm，共 10 个）通过 `IBMW_DECLARE_DRIVER_SLOT(...)` 在
 header 内声明一个稳定 slot id。该 id 进入 Engine 在 `Start()` 阶段调用的
 广播链路：`engine.cc::Start()` → `module_bus.cc::BroadcastDriverSlot` →
 `package_loader.cc::PackageHandle::SetDriverSlot`。

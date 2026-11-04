@@ -430,6 +430,7 @@ Subscribers:
 | `IBMW_BUILD_NET_EXTENSION` | HTTP/TCP/UDP Transport + RPC |
 | `IBMW_BUILD_MQTT_EXTENSION` | MQTT Transport |
 | `IBMW_BUILD_ICEORYX_EXTENSION` | Iceoryx 共享内存 Transport（零拷贝） |
+| `IBMW_BUILD_SHM_EXTENSION` | 自研共享内存 Transport（零拷贝，无 RouDi，不依赖 iceoryx；仅 Linux/OHOS）。可与 iceoryx 同时开启；预设 `shm` |
 | `IBMW_BUILD_GRPC_EXTENSION` | gRPC RPC |
 | `IBMW_BUILD_ROS2_EXTENSION` | ROS2 Transport **（已废弃）**—— 改用 DDS Extension |
 | `IBMW_BUILD_ECHO_EXTENSION` | Echo RPC（测试用） |
@@ -1210,7 +1211,7 @@ ibmw:
 ibmw:
   messaging:
     drivers:
-      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx
+      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx, shm
         options: { ... }
     publishers:
       - topic: <regex>       # 匹配 Topic 名
@@ -1383,6 +1384,39 @@ ibmw:
 跨进程 Pub/Sub 时，每个进程使用 **不同的** `runtime_id`（但都连接同一
 RouDi），并且 Subscriber 必须在 Publisher 第一次发送之前启动。
 
+#### Shm Extension（自研共享内存）
+
+零拷贝共享内存 Transport，不需要 RouDi，也不链接 iceoryx（构建开关
+`IBMW_BUILD_SHM_EXTENSION`，仅 Linux 内核，含 OHOS）。兼容 iceoryx_ext 的 API
+（`shm_ext/iox_style_publisher.h`），但两者**不互通**：同一 Topic 的所有进程要用同一种。
+
+```yaml
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          runtime_id: my_shm_app
+          # driver_name: iceoryx  # 原位替换 iceoryx_extension，messaging 段保持 type: iceoryx
+  messaging:
+    drivers:
+      - type: shm
+    publishers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+    subscribers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+```
+
+`driver_name` 缺省为 `shm`。核心只使用第一个同名驱动，所以与 `iceoryx_extension`
+同时加载时不能设 `driver_name: iceoryx`，否则启动失败。OHOS 上必须设置 `root_dir`
+（或环境变量 `IBMW_SHM_ROOT`）。`driver_name: iceoryx` 只对按名查找驱动的代码透明：驱动槽位恒为
+`shm`，按 iceoryx 驱动类型绑定的模块（`IBMW_USE_DRIVER`、生成的 `direct_iceoryx_*` 模块）要改用 shm
+头文件或重新生成。全部选项、行为差异与未替代项见
+[自研共享内存使用与迁移](../../selfdev/shm/docs/使用与迁移.md)。
+
 #### ROS2 Extension
 
 | Key | 类型 | 默认 | 说明 |
@@ -1437,7 +1471,7 @@ ibmw topic pub /header dds:ibmw::protocols::common::Header \
 ```
 
 必须选择一个传输后端：`--dds`、`--ros2`、`--zenoh`、`--mqtt`、`--tcp`、
-`--udp`、`--http`、`--iceoryx` 或 `--local`。类型库通过可重复的
+`--udp`、`--http`、`--iceoryx`、`--shm` 或 `--local`。类型库通过可重复的
 `--type-support` 提供；可用 `--transport-library` 覆盖默认驱动库路径。
 `--domain`、`--dds-domain`、`--ros-domain`、`--zenoh-domain` 和
 `--zenoh-config` 沿用观察命令的连接参数含义。`--ros2-compatible` 仅用于 DDS，
@@ -1452,6 +1486,7 @@ ibmw topic pub /header dds:ibmw::protocols::common::Header \
 | TCP / UDP | 必须提供 `--target IPv4:port`，可重复指定多个接收端 |
 | HTTP | 必须提供 `--target http://host:port`，可重复指定多个接收端 |
 | Iceoryx | 先启动 RouDi；可选 `--iceoryx-runtime-id`、`--shm-init-size`（默认 1024 字节） |
+| Shm（自研） | 无需 RouDi；可选 `--shm-domain`、`--shm-root-dir`、`--shm-runtime-id`、`--shm-group`、`--shm-init-size` 等 `--shm-*` 选项 |
 | local | 仅当前 CLI 进程内发送，无法投递给另一进程的 local 订阅者 |
 
 MQTT TLS 连接使用 `ssl://host:port`，必须提供 `--mqtt-truststore`；

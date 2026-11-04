@@ -60,7 +60,9 @@ cmake --build build/source-fastdds2-deps --target ibmw_third_party_source_prefix
 - **RPC 框架** —— 基于 IDL 的请求/响应模型，支持可插拔后端及四种调用模式：
   同步、异步回调、Future、协程
 - **Transport（发布/订阅）** —— 基于 Topic 的 Pub/Sub，支持后端路由
-- **零拷贝支持** —— 用于共享内存传输的 LoanedMessage API
+- **零拷贝支持** —— 用于共享内存传输的 LoanedMessage API：Iceoryx，或可选的自研
+  `shm` 传输（`IBMW_BUILD_SHM_EXTENSION`，无需 RouDi，Linux/OHOS，见
+  [使用与迁移](selfdev/shm/docs/使用与迁移.md)）
 - **多 Driver direct 模块** —— 明确命名的 `direct_<transport>_*`、benchmark
   或 transport-specific 零拷贝模块可通过 `IBMW_USE_DRIVERS(...)` 将多个具体
   Driver 绑定到 typed slot；普通 managed Module 应使用 transport-neutral API
@@ -321,7 +323,7 @@ ibmw/
     |  pkg/                     #   Package ABI（动态库入口）
     |  type_support/            #   Type Support ABI（序列化插件）
     extensions/                 # 可插拔 Extension
-    |  transport/               #   DDS、Net (TCP/UDP)、MQTT、ROS2、Iceoryx、Zenoh
+    |  transport/               #   DDS、Net (TCP/UDP)、MQTT、ROS2、Iceoryx、Shm、Zenoh
     |  rpc/                     #   gRPC
     |  observability/           #   Log Control、Topic Logger、OpenTelemetry
     |  management/              #   Parameter、Time Manipulator、Service
@@ -396,6 +398,9 @@ ibmw/
 source /opt/ros/humble/setup.bash
 scripts/run_bench_sweep.sh --reset-csv
 ```
+
+自研 shm 传输另有 `shm_send`、`shm_loan_v2`、`shm_loaned_pod`、`shm_loaned_ctx` 四个
+sample（用 `IBMW_BENCH_SAMPLES` 选择；不开 Iceoryx 也能构建）。
 
 sweep 脚本负责每个 sample 跑前的 SHM 清理、完整 6×7 CSV 输出，详细教程见
 [英文 benchmark 指南](docs/guides/transport-benchmark.md)和

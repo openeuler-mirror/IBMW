@@ -69,6 +69,18 @@ ShmBusOptions MakeShmBusOptions(const ShmExtension::Options& options) {
   return bus_options;
 }
 
+std::string FindDriverNameConflict(std::string_view driver_name, const std::vector<std::string>& extension_names) {
+  if (driver_name == "local") return "the built-in local transport";
+  // net_extension registers tcp, udp and http; the others register "<x>" from "<x>_extension".
+  const bool net = driver_name == "tcp" || driver_name == "udp" || driver_name == "http";
+  const std::string owner = net ? "net_extension" : std::string(driver_name) + "_extension";
+  if (!net && owner == "net_extension") return {};  // net_extension registers no "net" driver
+  for (const auto& name : extension_names) {
+    if (name == owner && name != "shm_extension") return "extension '" + name + "'";
+  }
+  return {};
+}
+
 ShmExtension::ShmExtension() { SetExtensionLogger(&g_logger); }
 
 bool ShmExtension::OnInit(runtime::core::Engine* core_ptr) {
@@ -77,6 +89,15 @@ bool ShmExtension::OnInit(runtime::core::Engine* core_ptr) {
     options_ = ParseShmExtensionOptions(extension_options_node);
   }
   MW_REQUIRE(!options_.driver_name.empty(), "shm_extension: driver_name must not be empty.");
+  std::vector<std::string> extension_names;
+  for (const auto& ext : core_ptr_->GetExtensionBus().GetOptions().extensions_options) {
+    extension_names.push_back(ext.name);
+  }
+  const std::string conflict = FindDriverNameConflict(options_.driver_name, extension_names);
+  MW_REQUIRE(conflict.empty(),
+             "shm_extension: driver_name '{}' is also registered by {}; the engine would use only one of them. "
+             "Load only one of the two extensions, or give shm_extension another driver_name.",
+             options_.driver_name, conflict);
 
   shm_bus_->Initialize(MakeShmBusOptions(options_));
 

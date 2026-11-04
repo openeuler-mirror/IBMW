@@ -21,7 +21,10 @@ all with DDS IDL / FastCDR as the primary type system.
 - **RPC framework** -- IDL-based request/response with pluggable backends
   and four calling patterns: synchronous, async callback, future, coroutine
 - **Transport (pub/sub)** -- Topic-based publish/subscribe with backend routing
-- **Zero-copy support** -- Loaned message API for shared-memory transports
+- **Zero-copy support** -- Loaned message API for shared-memory transports:
+  Iceoryx, or the optional self-developed `shm` transport
+  (`IBMW_BUILD_SHM_EXTENSION`, no RouDi daemon, Linux/OHOS; see
+  [usage and migration](selfdev/shm/docs/使用与迁移.md), in Chinese)
 - **Multi-driver modules** -- Bind multiple transport drivers (e.g., DDS +
   Iceoryx) to typed slots in a single module via the variadic
   `IBMW_USE_DRIVERS(...)` macro
@@ -308,7 +311,7 @@ ibmw/
     |  pkg/                     #   Package ABI (dynlib entry points)
     |  type_support/            #   Type support ABI (serialization plugins)
     extensions/                 # Pluggable extensions
-    |  transport/               #   DDS, Net (TCP/UDP), MQTT, ROS2, Iceoryx, Zenoh
+    |  transport/               #   DDS, Net (TCP/UDP), MQTT, ROS2, Iceoryx, Shm, Zenoh
     |  rpc/                     #   gRPC
     |  observability/           #   Log Control, Topic Logger, OpenTelemetry
     |  management/              #   Parameter, Time Manipulator, Service
@@ -383,6 +386,10 @@ size matrix (1KiB / 4KiB / 16KiB / 64KiB / 256KiB / 1MiB).
 source /opt/ros/humble/setup.bash
 scripts/run_bench_sweep.sh --reset-csv
 ```
+
+The self-developed shm transport adds the `shm_send`, `shm_loan_v2`,
+`shm_loaned_pod` and `shm_loaned_ctx` samples (select them with
+`IBMW_BENCH_SAMPLES`; they also build without Iceoryx).
 
 The sweep script handles per-sample SHM cleanup, full 6×7 CSV emission,
 and is documented step-by-step in

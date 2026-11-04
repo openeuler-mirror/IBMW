@@ -480,6 +480,7 @@ All extensions default to OFF and require `IBMW_BUILD_RUNTIME=ON`:
 | `IBMW_BUILD_NET_EXTENSION` | HTTP/TCP/UDP transport + RPC |
 | `IBMW_BUILD_MQTT_EXTENSION` | MQTT transport |
 | `IBMW_BUILD_ICEORYX_EXTENSION` | Iceoryx shared-memory transport (zero-copy) |
+| `IBMW_BUILD_SHM_EXTENSION` | Self-developed shared-memory transport (zero-copy, no RouDi, no iceoryx; Linux/OHOS only). Can be enabled together with iceoryx; preset `shm` |
 | `IBMW_BUILD_GRPC_EXTENSION` | gRPC RPC |
 | `IBMW_BUILD_ROS2_EXTENSION` | ROS2 transport **(deprecated)** -- use DDS extension instead |
 | `IBMW_BUILD_ECHO_EXTENSION` | Echo RPC (testing) |
@@ -1271,7 +1272,7 @@ ibmw:
 ibmw:
   messaging:
     drivers:
-      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx
+      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx, shm
         options: { ... }
     publishers:
       - topic: <regex>       # Match topic names
@@ -1458,6 +1459,44 @@ For two-process pub/sub, give each process a **different** `runtime_id`
 (both pointing at the same RouDi) and start the subscriber **before** the
 publisher's first send.
 
+#### Shm Extension (self-developed shared memory)
+
+Zero-copy shared-memory transport that needs no RouDi daemon and does not link
+iceoryx (build option `IBMW_BUILD_SHM_EXTENSION`; Linux kernels only, including
+OHOS). It offers the iceoryx_ext API (`shm_ext/iox_style_publisher.h`), but the
+two transports do **not** interoperate: every process on a topic must use the
+same one.
+
+```yaml
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          runtime_id: my_shm_app
+          # driver_name: iceoryx  # drop-in for iceoryx_extension; keep type: iceoryx below
+  messaging:
+    drivers:
+      - type: shm
+    publishers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+    subscribers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+```
+
+`driver_name` defaults to `shm`. The engine uses only the first driver with a
+given name, so with `iceoryx_extension` loaded in the same process
+`driver_name: iceoryx` is refused at start-up. On OHOS set `root_dir` (or the
+`IBMW_SHM_ROOT` environment variable). `driver_name: iceoryx` covers drivers
+looked up by name only: the driver slot stays `shm`, so modules bound to the
+iceoryx driver type (`IBMW_USE_DRIVER`, generated `direct_iceoryx_*` modules) must
+switch to the shm headers or be regenerated. All options, behavior differences and
+what is not replaced yet are described (in Chinese) in
+[selfdev/shm/docs/使用与迁移.md](../../selfdev/shm/docs/使用与迁移.md).
+
 #### ROS2 Extension
 
 | Key | Type | Default | Description |
@@ -1497,7 +1536,7 @@ ibmw topic pub /header dds:ibmw::protocols::common::Header \
 ```
 
 Select exactly one of `--dds`, `--ros2`, `--zenoh`, `--mqtt`, `--tcp`, `--udp`,
-`--http`, `--iceoryx`, or `--local`. Supply message libraries with
+`--http`, `--iceoryx`, `--shm`, or `--local`. Supply message libraries with
 repeatable `--type-support`; `--transport-library` overrides the installed driver
 library. Domain and Zenoh connection options have the same meanings as observation
 commands. `--ros2-compatible` enables the existing DDS driver's ROS 2 wire naming
@@ -1512,6 +1551,7 @@ queries use wire topic names, while Registry queries use logical topic names.
 | TCP / UDP | Required `--target IPv4:port`; repeat for multiple recipients |
 | HTTP | Required `--target http://host:port`; repeat for multiple recipients |
 | Iceoryx | Start RouDi first; optional `--iceoryx-runtime-id`, `--shm-init-size` (default: 1024 bytes) |
+| Shm (self-developed) | No RouDi; optional `--shm-domain`, `--shm-root-dir`, `--shm-runtime-id`, `--shm-group`, `--shm-init-size` and the other `--shm-*` options |
 | local | Sends inside this CLI process only; cannot reach local subscribers in another process |
 
 MQTT TLS uses `ssl://host:port`, requires `--mqtt-truststore`, and accepts

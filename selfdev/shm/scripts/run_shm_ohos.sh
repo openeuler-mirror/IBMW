@@ -855,8 +855,8 @@ stage_hap-device() {
       fail "hap-device ${f}: the tests' typeinfo is not libc++_shared.so's"
     summarize "hap-${f}" "$(grep -xE -- '-?[0-9]+' "${runs}/${f}.rc" || echo -2)" "${runs}/${f}.log" ||
       fail "hap-device ${f} (${runs}/${f}.log)"
-    [[ "$(grep -c '^\[  PASSED  \] 57 tests\.$' "${runs}/${f}.log")" -eq "$([[ ${f} == ext-once ]] && echo 1 || echo "${REPEAT}")" ]] ||
-      fail "hap-device ${f}: expected 57 tests passed per iteration"
+    [[ "$(grep -c '^\[  PASSED  \] 58 tests\.$' "${runs}/${f}.log")" -eq "$([[ ${f} == ext-once ]] && echo 1 || echo "${REPEAT}")" ]] ||
+      fail "hap-device ${f}: expected 58 tests passed per iteration"
   done
   cat "${runs}/runner-pub.log" "${runs}/runner-sub.log" >"${runs}/runner.log"
   grep -E '^(HAP_CHILD|PROC_CREDS|DYN_)' "${runs}/runner.log" | grep -v '^DYN_ABI .*result=PASS$'

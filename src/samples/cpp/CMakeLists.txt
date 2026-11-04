@@ -38,9 +38,10 @@ if(IBMW_BUILD_EXAMPLES)
     add_subdirectory(iceoryx_interproc_demo)
   endif()
 
-  # Multi-transport end-to-end benchmark suite (seven pub/sub sample pairs
-  # comparing iceoryx / DDS / net_extension paths, feeding
-  # docs/transport-benchmark.{md,zh.md}). Gated by IBMW_BUILD_BENCHMARKS.
+  # Multi-transport end-to-end benchmark suite (pub/sub sample pairs comparing
+  # iceoryx / self-developed shm / DDS / net_extension paths, feeding
+  # docs/transport-benchmark.{md,zh.md}). Gated by IBMW_BUILD_BENCHMARKS; each
+  # sample skips itself when its transport is off.
   if(IBMW_BUILD_BENCHMARKS)
     add_subdirectory(transport_benchmark)
     # r8_validation links the benchmark's bench_payload target, so load it

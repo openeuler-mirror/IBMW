@@ -6,6 +6,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "engine/engine.h"
 #include "engine/extension/extension_base.h"
@@ -50,5 +52,13 @@ class ShmExtension : public ExtensionBase {
 // The extension's YAML options; throws on an invalid value.
 IBMW_SHM_EXPORT ShmExtension::Options ParseShmExtensionOptions(const YAML::Node& node);
 IBMW_SHM_EXPORT ShmBusOptions MakeShmBusOptions(const ShmExtension::Options& options);
+
+// The engine picks the first driver whose name matches, so a second driver
+// with the same name is silently unused. Returns who else registers
+// driver_name: the built-in local transport, or a configured extension named
+// "<driver_name>_extension" (e.g. iceoryx_extension for "iceoryx"; net_extension
+// for tcp, udp and http); empty if nobody does.
+IBMW_SHM_EXPORT std::string FindDriverNameConflict(std::string_view driver_name,
+                                                   const std::vector<std::string>& extension_names);
 
 }  // namespace ibmw::extensions::shm_extension

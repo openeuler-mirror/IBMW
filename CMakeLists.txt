@@ -77,11 +77,14 @@ option(IBMW_INSTALL "Enable installation of IBMW." ON)
 cmake_dependent_option(IBMW_BUILD_EXAMPLES "IBMW build examples." OFF "IBMW_BUILD_RUNTIME" OFF)
 
 # Multi-transport end-to-end benchmark suite (src/samples/cpp/transport_benchmark).
-# Compares iceoryx / DDS (FastDDS) / native net_extension paths across seven
-# pub/sub sample pairs. Gated on iceoryx extension because 3 of 7 samples need
-# it; DDS extension should also be enabled to build all 7 samples. Off by
-# default to keep regular CI builds light.
-cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+# Compares iceoryx / self-developed shm / DDS (FastDDS) / native net_extension
+# paths across the pub/sub sample pairs. Gated on a shared-memory extension
+# (iceoryx or shm): each lane skips itself when its transport is off, so a
+# shm-only Linux build gets the shm_* lanes without iceoryx (the OHOS cross build
+# of the benchmark tree has only iox_loaned_ctx). The DDS extension should
+# also be enabled to build the DDS lanes. Off by default to keep regular CI
+# builds light.
+cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION" OFF)
 if(CMAKE_CROSSCOMPILING)
   set(_IBMW_ROS2_SAMPLE_DEFAULT OFF)
 else()
@@ -276,8 +279,10 @@ endif()
 # ============================================================================
 include(NamespaceTool)
 
+# The benchmark payloads are CDR-serialized (bench_payload links dds_types).
 if(IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_DDS_EXTENSION OR
-   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION)
+   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION OR
+   IBMW_BUILD_BENCHMARKS)
   # Resolve the explicitly selected DDS provider before loading code-generation
   # helpers. Those helpers must never perform an independent provider search.
   include(GetFastDDS)

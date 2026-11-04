@@ -84,6 +84,17 @@
       }
     },
     {
+      "name": "shm",
+      "displayName": "Shm — dev build with the self-developed shared-memory transport",
+      "description": "Development build with examples and the self-developed zero-copy shm transport (no RouDi, no iceoryx). Linux/OHOS only.",
+      "inherits": "dev",
+      "binaryDir": "${sourceDir}/build-shm",
+      "cacheVariables": {
+        "IBMW_BUILD_SHM_EXTENSION": "ON",
+        "IBMW_BUILD_ICEORYX_EXTENSION": "OFF"
+      }
+    },
+    {
       "name": "together-ros2-minimal-sdk",
       "displayName": "Together — Humble minimal DDS SDK",
       "description": "Compatibility-focused build using an explicit Humble Fast DDS 2.6.12/Fast CDR 1.0.29 prefix, without ROS2 runtime or examples.",
@@ -234,6 +245,10 @@
     {
       "name": "iceoryx",
       "configurePreset": "iceoryx"
+    },
+    {
+      "name": "shm",
+      "configurePreset": "shm"
     },
     {
       "name": "together-ros2-minimal-sdk",

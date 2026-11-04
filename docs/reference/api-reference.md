@@ -717,8 +717,8 @@ typedef uint64_t ibmw_driver_slot_t;
 #define IBMW_DECLARE_DRIVER_SLOT(name)  /* injects kStableDriverId into a Driver class */
 ```
 
-Each of the nine `*TransportDriver` subclasses (local / tcp / http / udp /
-dds / mqtt / ros2 / iceoryx / zenoh) declares a stable slot id via
+Each of the ten `*TransportDriver` subclasses (local / tcp / http / udp /
+dds / mqtt / ros2 / iceoryx / zenoh / shm) declares a stable slot id via
 `IBMW_DECLARE_DRIVER_SLOT(...)`. That id flows through the broadcast chain
 the Engine fires at `Start()`:
 `engine.cc::Start()` -> `module_bus.cc::BroadcastDriverSlot` ->
