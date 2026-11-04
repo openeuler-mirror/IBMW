@@ -34,6 +34,7 @@ from generators.dds_idl_gen import generate_dds_idl_files
 from generators.dds_types_gen import generate_dds_type_bridges
 from generators.dds_rpc_yaml_gen import generate_dds_rpc_yamls
 from generators.module_gen import generate_modules
+from generators.user_code import UserCodeError
 from generators.app_gen import generate_app_mains
 from generators.pkg_gen import generate_pkg_mains
 from generators.type_support_pkg_gen import generate_type_support_package_sources
@@ -645,7 +646,12 @@ def main():
                 emit(rel_path, content)
 
     if "modules" in categories:
-        for rel_path, content in generate_modules(project):
+        try:
+            module_files = generate_modules(project)
+        except UserCodeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        for rel_path, content in module_files:
             emit(rel_path, content)
 
     if "apps" in categories:

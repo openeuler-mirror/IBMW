@@ -379,6 +379,7 @@ _SHM_CAPABLE_TRANSPORTS = {"iceoryx", "shm", "dds"}
 # tools/ibmw_gen/transports/__init__.py. Adding a new transport no
 # longer requires editing this file.
 import transports as _transports  # noqa: E402  (after constants)
+from generators.user_code import UserCodeError, validate_user_code  # noqa: E402
 VALID_APP_TYPES = {"pubsub", "rpc", "bare"}
 
 EXPERIMENTAL_ACTION_FIBONACCI = "example_interfaces/action/Fibonacci"
@@ -906,7 +907,10 @@ def _validate_modules(data: dict):
     for mod in data["modules"]:
         if "name" not in mod:
             _error("Each module must have a 'name' field")
-        _check_module_strings(str(mod["name"]), mod, "")
+        # user_code is emitted as C++ code, not inside a string literal, so it
+        # is exempt from TOOL-023 and validated by validate_user_code() below.
+        _check_module_strings(str(mod["name"]),
+                              {k: v for k, v in mod.items() if k != "user_code"}, "")
         if "type" not in mod:
             _error(f"Module '{mod['name']}' must have a 'type' field")
         if mod["type"] not in VALID_MODULE_TYPES:
@@ -915,6 +919,10 @@ def _validate_modules(data: dict):
         # R10 alias normalization: translate deprecated
         # ros2_interop_* → direct_ros2_* in-place + emit deprecation warn.
         _normalize_module_type_alias(mod)
+        try:
+            validate_user_code(mod)
+        except UserCodeError as exc:
+            _error(str(exc))
         # R10 advisory: direct_<transport>_* templates are explicit
         # escape hatches that couple user code to a named transport. Emit
         # a one-time advisory so users know they are opting out of the

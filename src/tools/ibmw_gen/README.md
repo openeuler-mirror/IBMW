@@ -542,6 +542,40 @@ modules:
     executor_name: my_exec    # Optional: bind to an executor
 ```
 
+#### `user_code` (optional, per module)
+
+Fills a module's user-code region at generation time instead of the default
+TODO placeholder. Each key names a region; its value is C++ code that
+**replaces the whole default body** of that region (re-indented to the
+region; inside the loaned publisher macro every line gets the aligned ` \`
+continuation). Without `user_code` the output is unchanged. Because the user
+`.h/.cc` files are only written once, use `--force` to re-emit them.
+
+| Module type | Regions |
+|---|---|
+| `publisher`, `direct_ros2_publisher`, `direct_iceoryx_publisher` | `publish_body` |
+| `subscriber`, `loaned_subscriber`, `direct_ros2_subscriber`, `direct_iceoryx_subscriber` | `on_message_body` |
+| `loaned_publisher` | `populate_loaned_message` (macro body: `/* */` comments only) |
+| `rpc_server` | `rpc_server_handler_body.<Method>` |
+| `rpc_client` | `rpc_client_request_parameter_build.<Method>`, `rpc_client_response_parameter_consume.<Method>`, `rpc_client_return_status_handling.<Method>` |
+
+```yaml
+  - name: PublisherModule
+    type: publisher
+    transport: dds
+    topic: hello_topic
+    message: HelloMsg
+    user_code:
+      publish_body: |
+        msg.id(msg_count_);
+        msg.message("hello");
+        msg_count_++;
+```
+
+Unknown regions, wrong module types, non-string values and lines that look
+like IBMW marker anchors are rejected. `user_code` is emitted as code, so it
+is exempt from the quote/backslash check that applies to other module values.
+
 ### apps (required)
 
 Define runnable applications. Each app bundles one or more modules.

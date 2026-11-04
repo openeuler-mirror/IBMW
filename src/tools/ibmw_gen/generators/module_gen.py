@@ -13,6 +13,7 @@ import importlib
 # Shared snake_case and copyright helpers live in generators/_common.py
 # so transport plugins (transports/*.py) can use them too.
 from generators._common import _snake, _COPYRIGHT  # noqa: F401
+from generators.user_code import apply_user_code
 
 
 # ── Unified publisher skeleton ──────────────────────────────────────────────
@@ -1275,6 +1276,14 @@ _GENERATORS = {
 
 
 def generate_modules(project: dict) -> list[tuple[str, str]]:
+    """Generate module .h and .cc files, then splice optional `user_code`."""
+    results = []
+    for mod in project.get("modules", []):
+        results.extend(apply_user_code(mod, _generate_module_files(project, [mod])))
+    return results
+
+
+def _generate_module_files(project: dict, modules: list) -> list[tuple[str, str]]:
     """Generate module .h and .cc files.
 
     Returns list of (rel_path, content) tuples.
@@ -1297,7 +1306,7 @@ def generate_modules(project: dict) -> list[tuple[str, str]]:
     ns = project["project"]["_namespace_cpp"]
     results = []
 
-    for mod in project.get("modules", []):
+    for mod in modules:
         _resolve_module_metadata(mod, project)
 
         mod_type = mod["type"]
