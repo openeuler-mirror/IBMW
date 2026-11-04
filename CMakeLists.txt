@@ -367,16 +367,13 @@ list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-  add_compile_options(/utf-8 /wd4819)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus")
 endif()
 
 # Security hardening baseline (checksec). Off by default: the stack protector
 # and eager symbol binding cost some run/startup time, and many toolchains
 # already enable part of it. Enable for artifacts bound to a hardening policy.
 if(IBMW_ENABLE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
-   AND NOT WIN32 AND NOT APPLE)
+   AND NOT APPLE)
   set(_ibmw_hardening_flags "-fstack-protector-strong")
   if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     # FORTIFY_SOURCE needs optimization; replace any toolchain default level.
@@ -392,10 +389,6 @@ if(IBMW_ENABLE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
   string(APPEND CMAKE_EXE_LINKER_FLAGS " -pie")
   unset(_ibmw_link_kind)
   unset(_ibmw_hardening_flags)
-endif()
-
-if(WIN32)
-  add_compile_definitions(NOMINMAX)
 endif()
 
 # ============================================================================

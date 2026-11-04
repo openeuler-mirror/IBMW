@@ -34,6 +34,5 @@ macro(add_werror target)
                   -Werror)
       endif()
     endif()
-    # MSVC: no warning set has been validated, so there is no warning gate.
   endif()
 endmacro()

@@ -37,11 +37,6 @@ target_link_libraries(
           ibmw::extensions::net_base
           nghttp2::nghttp2)
 
-# Set compile options of target
-if(WIN32)
-  target_compile_definitions(${CUR_TARGET_NAME} PRIVATE ssize_t=long)
-endif()
-
 # Add -Werror option
 include(AddWerror)
 add_werror(${CUR_TARGET_NAME})
