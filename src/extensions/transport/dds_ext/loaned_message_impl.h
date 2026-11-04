@@ -34,7 +34,7 @@ LoanedMessage<MsgType> BorrowLoanedMessage(
     if (fallback == nullptr) {
       return LoanedMessage<MsgType>(nullptr, is_plain, "Failed to allocate fallback memory");
     }
-    return LoanedMessage<MsgType>(fallback, is_plain);
+    return LoanedMessage<MsgType>(fallback, is_plain, "", writer);
   }
 
   // Non-plain type cannot use loan
@@ -46,7 +46,7 @@ LoanedMessage<MsgType> BorrowLoanedMessage(
     if (fallback == nullptr) {
       return LoanedMessage<MsgType>(nullptr, is_plain, "Failed to allocate fallback memory");
     }
-    return LoanedMessage<MsgType>(fallback, is_plain, "Non-Plain type, using fallback");
+    return LoanedMessage<MsgType>(fallback, is_plain, "Non-Plain type, using fallback", writer);
   }
 
   // Try loan from DDS
@@ -77,7 +77,7 @@ LoanedMessage<MsgType> BorrowLoanedMessage(
   if (fallback == nullptr) {
     return LoanedMessage<MsgType>(nullptr, is_plain, "Failed to allocate fallback memory");
   }
-  return LoanedMessage<MsgType>(fallback, is_plain, "Loan failed, using fallback");
+  return LoanedMessage<MsgType>(fallback, is_plain, "Loan failed, using fallback", writer);
 }
 
 // ============================================================================
