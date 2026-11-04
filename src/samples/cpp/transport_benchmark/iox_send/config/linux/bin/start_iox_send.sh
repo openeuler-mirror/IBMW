@@ -70,8 +70,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Give RouDi a moment to set up shared memory and IPC channels.
-sleep 1
+# Poll <file> every 0.1 s until it matches the ERE <pattern>. Fail loudly
+# (log tail, non-zero exit) if <pid> dies first or READY_TIMEOUT_SEC elapses.
+READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-15}"
+wait_for_log() {
+  local file="$1" pattern="$2" pid="$3" what="$4"
+  local deadline=$((SECONDS + READY_TIMEOUT_SEC))
+  until grep -Eq -- "${pattern}" "${file}" 2>/dev/null; do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      echo "[start_iox_send.sh] ${what} exited before it was ready; tail of ${file}:" >&2
+      tail -n 20 "${file}" >&2 || true
+      exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "[start_iox_send.sh] ${what} not ready after ${READY_TIMEOUT_SEC}s; tail of ${file}:" >&2
+      tail -n 20 "${file}" >&2 || true
+      exit 1
+    fi
+    sleep 0.1
+  done
+}
+
+# Wait until RouDi has set up shared memory and IPC channels.
+wait_for_log roudi.log 'RouDi is ready for clients' "${ROUDI_PID}" RouDi
 
 echo "[start_iox_send.sh] launching subscriber (background)..."
 "${SUB_BIN}" "${SUB_CFG}" >subscriber.log 2>&1 &
@@ -79,7 +100,8 @@ SUB_PID=$!
 
 # Subscriber needs PoshRuntime + OnMessage handler wired before the
 # publisher emits the first sample.
-sleep 1
+# The engine logs "Running..." once Start() has wired every subscription.
+wait_for_log subscriber.log 'Running( \(async\))?\. Waiting for shutdown signal\.' "${SUB_PID}" subscriber
 
 echo "[start_iox_send.sh] launching publisher (background)..."
 "${PUB_BIN}" "${PUB_CFG}" >publisher.log 2>&1 &
