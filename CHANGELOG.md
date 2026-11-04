@@ -61,6 +61,11 @@ details remain governed by the documentation for each release.
   and wait for callbacks already running, so a late message no longer runs
   into a destroyed driver. A callback that is still running after 5 s is
   logged and waited for.
+- Zenoh: a message whose frame exceeds the 4 GiB length prefix is refused
+  (RPC calls complete with `CLI_SERIALIZATION_FAILED`, servers answer
+  `SVR_SERIALIZATION_FAILED`). With `shm_enabled: true` such an already
+  serialized RPC message used to be cut to its low 32 bits and copied past
+  its shared memory loan.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

@@ -407,6 +407,11 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
 
       } while (!is_shm_loan_size_enough);
 
+      // too long for its length prefix: refused by the network path below
+      const uint64_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
+      if (is_shm_pool_size_enough && !FitsFrame(data_size)) [[unlikely]]
+        is_shm_pool_size_enough = false;
+
       if (is_shm_pool_size_enough) {
         // if has cache, the copy it to shm to replace the serialization
         if (buffer_array_cache_ptr != nullptr) {
@@ -415,7 +420,6 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
           buffer_array_cache_ptr = nullptr;
         }
         // write info pkg length on loaned shm
-        uint32_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
         util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), data_size);
 
         z_owned_bytes_t z_payload;
@@ -447,8 +451,9 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
     const size_t buffer_array_len = buffer_array_view_ptr->Size();
     size_t msg_size = buffer_array_view_ptr->BufferSize();
 
-    int32_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
-    int32_t pkg_size = data_size + 4;
+    const size_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
+    MW_REQUIRE(FitsFrame(data_size), "Zenoh message of {} bytes is too long, topic_name: {}", msg_size, info.topic_name);
+    const size_t pkg_size = data_size + 4;
 
     // create buffer for serialization
     std::vector<char> serialized_data(pkg_size);

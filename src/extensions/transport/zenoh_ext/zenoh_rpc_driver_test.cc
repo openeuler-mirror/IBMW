@@ -425,6 +425,68 @@ TEST_F(ZenohRpcDriverTest, StartFreezesTheBus) {
   EXPECT_FALSE(bus_->RegisterPublisher("req/late", false));
 }
 
+// A cached message too long for the uint32 length prefix (its views claim
+// 4 GiB + 100 bytes; nothing reads them) is refused, not cut to 100 bytes and
+// copied whole into a small loan.
+std::shared_ptr<ibmw::util::BufferArrayView> TooLongCache(const std::string& data) {
+  return std::make_shared<ibmw::util::BufferArrayView>(std::vector<ibmw_buffer_view_t>{
+      {.data = data.data(), .len = size_t{1} << 32}, {.data = data.data(), .len = 100}});
+}
+
+TEST_F(ZenohRpcDriverTest, ClientRefusesARequestTooLongForItsFrame) {
+  auto& driver = NewDriver("{clients: [{func_name: /test/a, shm_enabled: true}]}");
+  const runtime::core::service::ClientFuncWrapper client{.info = BlobInfo()};
+  ASSERT_TRUE(driver.RegisterClientFunc(client));
+  driver.Start();
+  Watch("req/" + Pattern("/test/a"));
+
+  auto req = std::make_shared<std::string>(100, 'x');
+  auto rsp = std::make_shared<std::string>();
+  auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+      runtime::core::service::ServiceMessageFrame{
+          .info = client.info, .req_ptr = req.get(), .rsp_ptr = rsp.get(), .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+  frame->req_serialization_cache["json"] = TooLongCache(*req);
+  std::promise<uint32_t> code;
+  frame->callback = [req, rsp, &code](ibmw::rpc::Status status) { code.set_value(status.Code()); };
+  driver.Call(frame);
+  auto result = code.get_future();
+  ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(result.get(), IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(WaitSeen(0).empty());
+}
+
+TEST_F(ZenohRpcDriverTest, ServerRefusesAnAnswerTooLongForItsFrame) {
+  auto& driver = NewDriver("{servers: [{func_name: /test/a, shm_enabled: true}]}");
+  auto answer = std::make_shared<std::string>(100, 'w');
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = BlobInfo(), .service_func = [answer](const auto& frame) {
+        *static_cast<std::string*>(frame->rsp_ptr) = *answer;
+        frame->rsp_serialization_cache["json"] = TooLongCache(*answer);
+        Answer(frame);
+      }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + Pattern("/test/a")}));
+  driver.Start();
+  const std::string a = Pattern("/test/a");
+  Watch("rsp/" + a);
+
+  Put("req/" + a, Frame(std::string(1, static_cast<char>(a.size())) + a + std::string(3, '\0') + '\1' +
+                            std::string(1, '\0'),
+                        "q"));
+  ASSERT_EQ(WaitSeen(1).size(), 1u);
+  std::this_thread::sleep_for(100ms);
+  const auto seen = WaitSeen(0);
+  ASSERT_EQ(seen.size(), 1u);  // only the refusal
+  // [u32 len = 13][u8 4]["json"][u32 req id][u32 code]
+  const std::string& answer_frame = seen[0].second;
+  ASSERT_EQ(answer_frame.size(), 4u + 1 + 4 + 4 + 4);
+  EXPECT_EQ(common::util::GetUint32FromBuf(answer_frame.data()), 13u);
+  EXPECT_EQ(answer_frame.substr(4 + 1 + 4, 4), std::string(3, '\0') + '\1');
+  EXPECT_EQ(common::util::GetUint32FromBuf(answer_frame.data() + 4 + 1 + 4 + 4),
+            uint32_t{IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED});
+}
+
 // Shutdown removes the driver's subscribers and waits for a request being
 // served, so the driver may be destroyed right after it.
 TEST_F(ZenohRpcDriverTest, ShutdownWaitsForTheHandlersAndRemovesThem) {

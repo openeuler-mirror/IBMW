@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -241,6 +242,28 @@ TEST_F(ZenohTransportDriverTest, StartFreezesTheBus) {
 TEST_F(ZenohTransportDriverTest, ShutdownRemovesItsSubscribers) {
   driver_->Shutdown();
   EXPECT_FALSE(bus_->UnregisterSubscriber("transport/%2Fin/test%3ABlob"));
+}
+
+// A cached message too long for the uint32 length prefix (its view claims
+// 4 GiB + 100 bytes; nothing reads it) is refused, and its loan is collected.
+TEST_F(ZenohTransportDriverTest, MessageTooLongForItsFrameIsRefused) {
+  std::string blob(100, 'x');
+  ibmw::transport::Context ctx;
+  runtime::core::transport::MessageFrame frame{.info = wrapper_.info, .msg_ptr = &blob, .ctx_ref = ctx};
+  frame.serialization_cache["raw"] = std::make_shared<ibmw::util::BufferArrayView>(std::vector<ibmw_buffer_view_t>{
+      {.data = blob.data(), .len = size_t{1} << 32}, {.data = blob.data(), .len = 100}});
+  driver_->Send(frame);
+  EXPECT_EQ(z_shm_provider_available(z_loan(bus_->shm_provider_)), kPool);
+  const auto next = SendBlob(100);  // the refused one did not arrive before it
+  ExpectFrame(next, 100);
+  std::lock_guard lock(mutex_);
+  EXPECT_EQ(seen_.size(), 1u);
+}
+
+TEST(FitsFrameTest, FrameAndItsLengthPrefix) {
+  EXPECT_TRUE(FitsFrame(0));
+  EXPECT_TRUE(FitsFrame(std::numeric_limits<uint32_t>::max()));
+  EXPECT_FALSE(FitsFrame(uint64_t{std::numeric_limits<uint32_t>::max()} + 1));
 }
 
 // Grow doubles a loan up to the pool, Need takes what fits the pool, and

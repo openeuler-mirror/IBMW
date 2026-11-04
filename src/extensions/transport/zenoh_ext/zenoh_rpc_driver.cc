@@ -269,8 +269,8 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                 bool is_shm_loan_size_enough = true;
                 bool is_shm_pool_size_enough = true;
 
-                uint32_t msg_size = 0;
-                uint32_t header_len = 0;
+                uint64_t msg_size = 0;
+                uint64_t header_len = 0;
                 ShmLoan loan;
                 const uint64_t pool_size = zenoh_bus_ptr_->ShmPoolSize();
 
@@ -346,6 +346,10 @@ bool ZenohRpcDriver::RegisterServiceFunc(
 
                 } while (!is_shm_loan_size_enough);
 
+                // too long for its length prefix: refused by the network path below
+                if (is_shm_pool_size_enough && !FitsFrame(header_len + msg_size)) [[unlikely]]
+                  is_shm_pool_size_enough = false;
+
                 if (is_shm_pool_size_enough) {
                   // if has cache, the copy it to shm to replace the serialization
                   if (buffer_array_cache_ptr != nullptr) {
@@ -388,6 +392,12 @@ bool ZenohRpcDriver::RegisterServiceFunc(
               size_t rsp_size = buffer_array_view_ptr->BufferSize();
 
               size_t z_data_size = 1 + serialization_type.size() + 4 + 4 + rsp_size;
+              if (!FitsFrame(z_data_size)) [[unlikely]] {
+                MW_ERROR("Zenoh rpc answer of {} bytes is too long, pattern: {}", rsp_size, pattern);
+                ReturnRspWithStatusCode(
+                    pattern, serialization_type, req_id_buf, IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED);
+                return;
+              }
               size_t pkg_size = z_data_size + 4;
 
               // get buf to store data
@@ -643,8 +653,8 @@ void ZenohRpcDriver::Call(
       bool is_shm_loan_size_enough = true;
       bool is_shm_pool_size_enough = true;
 
-      uint32_t msg_size = 0;
-      uint32_t header_len = 0;
+      uint64_t msg_size = 0;
+      uint64_t header_len = 0;
       ShmLoan loan;
       const uint64_t pool_size = zenoh_bus_ptr_->ShmPoolSize();
 
@@ -728,6 +738,10 @@ void ZenohRpcDriver::Call(
         }
       } while (!is_shm_loan_size_enough);
 
+      // too long for its length prefix: refused by the network path below
+      if (is_shm_pool_size_enough && !FitsFrame(header_len + msg_size)) [[unlikely]]
+        is_shm_pool_size_enough = false;
+
       if (is_shm_pool_size_enough) {
         // if has cache, the copy it to shm to replace the serialization
         if (buffer_array_cache_ptr != nullptr) {
@@ -775,6 +789,13 @@ void ZenohRpcDriver::Call(
                          4 +
                          context_meta_kv_size +
                          req_size;
+    if (!FitsFrame(z_data_size)) [[unlikely]] {
+      MW_ERROR("Zenoh rpc request of {} bytes is too long, func_name: {}", req_size, info.func_name);
+      // Taking the record releases the cached request and races no timeout.
+      if (client_tool_ptr_->GetRecord(cur_req_id))
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED));
+      return;
+    }
 
     size_t pkg_size = z_data_size + 4;
     // create buffer for serialization
