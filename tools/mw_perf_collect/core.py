@@ -2634,6 +2634,10 @@ def run(args: argparse.Namespace) -> int:
         if cli_command[:1] == ["--"]: cli_command = cli_command[1:]
         command = cli_command or sut.get("command")
         if mode == "managed" and not command: raise RuntimeError("managed mode requires sut.command")
+        if command and (not isinstance(command, list) or not all(isinstance(arg, str) for arg in command)):
+            # A string would run through a shell; the native capture agent refuses shells as well.
+            raise RuntimeError("sut.command must be a list of strings (argv); "
+                               'to use a shell, write it explicitly: ["/bin/sh", "-c", "..."]')
         if mode not in ("managed", "attached"): raise RuntimeError("sut.mode must be managed or attached")
         run_dir = Path(args.output)/(time.strftime("%Y%m%d-%H%M%S")+"-"+uuid.uuid4().hex[:8])
         for d in ("environment", "topology", "capability", "raw", "normalized", "logs", "registration", "validation"): (run_dir/d).mkdir(parents=True)
@@ -2739,7 +2743,7 @@ def run(args: argparse.Namespace) -> int:
             if exact_run:
                 comm_trace_controls["MW_PERF_EXACT_REQUIRED"] = "1"
         if mode == "managed":
-            cmd = command if isinstance(command, list) else ["/bin/sh", "-c", str(command)]
+            cmd = command
             producer_env = {"MW_PERF_RUN_ID": manifest["run_id"],
                             "MW_PERF_ARTIFACT_SCHEMA_VERSION": "mw_perf.latency.v1"}
             try:
