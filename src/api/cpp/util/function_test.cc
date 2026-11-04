@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
@@ -61,6 +62,30 @@ TEST(UtilFunction, EmptyStatesAreObservableBeforeCalling) {
   EXPECT_FALSE(static_cast<bool>(from_null));
   Task from_null_base(static_cast<ibmw_function_base_t*>(nullptr));
   EXPECT_FALSE(static_cast<bool>(from_null_base));
+}
+
+// R-N6: a null function pointer or an empty std::function is an empty Function,
+// whether it is passed as an lvalue or an rvalue.
+TEST(UtilFunction, NullCallablesMakeAnEmptyFunction) {
+  using FnPtr = void (*)();
+  FnPtr null_fn = nullptr;
+  EXPECT_FALSE(static_cast<bool>(Task(null_fn)));
+  EXPECT_FALSE(static_cast<bool>(Task(static_cast<FnPtr>(nullptr))));
+  EXPECT_FALSE(static_cast<bool>(Task(std::function<void()>())));
+  Task assigned([] {});
+  assigned = static_cast<FnPtr>(nullptr);
+  EXPECT_FALSE(static_cast<bool>(assigned));
+  assigned = std::function<void()>();
+  EXPECT_FALSE(static_cast<bool>(assigned));
+  int calls = 0;
+  static int static_calls = 0;
+  Task from_ptr(static_cast<FnPtr>([] { ++static_calls; }));
+  ASSERT_TRUE(static_cast<bool>(from_ptr));
+  from_ptr();
+  EXPECT_EQ(static_calls, 1);
+  Task from_std(std::function<void()>([&calls] { ++calls; }));
+  from_std();
+  EXPECT_EQ(calls, 1);
 }
 
 #ifndef NDEBUG

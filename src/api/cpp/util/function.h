@@ -102,7 +102,7 @@ class Function<Ops> {
   template <class T,
             class = std::enable_if_t<CheckImplicitlyConvertible<T>(Indices{})>>
   Function(T&& action) {
-    if constexpr (std::is_assignable<T, std::nullptr_t>::value) {
+    if constexpr (std::is_assignable_v<std::decay_t<T>&, std::nullptr_t>) {
       if (action == nullptr) {
         base_.ops = nullptr;
         return;
@@ -118,7 +118,7 @@ class Function<Ops> {
     // Reset first so that a throwing construction leaves *this empty
     // (destroy + placement-new of the whole object left a dangling ops on throw).
     *this = nullptr;
-    if constexpr (std::is_assignable<T, std::nullptr_t>::value) {
+    if constexpr (std::is_assignable_v<std::decay_t<T>&, std::nullptr_t>) {
       if (action == nullptr) return *this;
     }
     ConstructorImpl<T>(std::forward<T>(action), Indices{});
