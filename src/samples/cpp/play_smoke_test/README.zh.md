@@ -11,8 +11,13 @@ payload 顺序、transport driver（typed DDS/ROS2 路径则检查相应的 publ
 
 ## 构建
 
-完整矩阵需要 Linux、DDS、Iceoryx、MQTT、Zenoh、Net、ROS2 和 record/playback
-extension。示例使用 `ros2` preset，并显式打开 Zenoh：
+完整矩阵需要 Linux、DDS、MQTT、Zenoh、Net、ROS2、record/playback extension，
+以及至少一种共享内存 transport：Iceoryx（`IBMW_BUILD_ICEORYX_EXTENSION`）或自研 shm
+（`IBMW_BUILD_SHM_EXTENSION`）。构建了哪一种就运行哪一种的用例，两者都构建时两个用例
+都运行。构建目标会在构建目录写入 `play_smoke_iceoryx_required` /
+`play_smoke_shm_required` 标记，测试脚本据此决定运行哪些共享内存用例；只有构建了
+Iceoryx 时才需要并启动 `iox-roudi`。shm 用例默认使用本次运行私有的 `IBMW_SHM_ROOT`
+（运行结束后删除），调用方已设置 `IBMW_SHM_ROOT` 时沿用调用方的值。示例使用 `ros2` preset，并显式打开 Zenoh：
 
 ```bash
 cd <IBMW_ROOT>
@@ -99,7 +104,8 @@ bag player publisher -> transport -> play-smoke subscriber
 |---|---|---|
 | local | CDR MCAP | 收到 data `0..9`、secondary `100..109`，driver 为 `local` |
 | DDS | CDR MCAP | native DDS subscriber 收到 10 条并按顺序解码；raw DDS publisher 注册成功；ACK 等待不超时 |
-| Iceoryx | CDR MCAP | 收到 10 条，序号/payload 正确，driver 为 `iceoryx` |
+| Iceoryx（仅构建 Iceoryx 时） | CDR MCAP | 收到 10 条，序号/payload 正确，driver 为 `iceoryx` |
+| shm（仅构建自研 shm 时） | CDR MCAP | 收到 10 条，序号/payload 正确，driver 为 `shm` |
 | MQTT | CDR MCAP | 收到 10 条，序号/payload 正确，driver 为 `mqtt` |
 | Zenoh | CDR MCAP | 收到 10 条，序号/payload 正确，driver 为 `zenoh` |
 | ROS2 | ROS2 MCAP | ROS2 subscriber/publisher 注册成功，收到并解码 `ros2-0..ros2-9` |

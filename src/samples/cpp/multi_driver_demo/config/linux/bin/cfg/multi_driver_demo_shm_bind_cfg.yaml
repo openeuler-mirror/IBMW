@@ -1,0 +1,42 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# DDS + shm pkg-mode config that also exercises slot binding at runtime:
+# both extensions are loaded and one topic uses both drivers, so the engine
+# hands the DDS and shm driver pointers to MultiDriverModule's typed slots
+# ("Run: ... driver slot bound." in the log). No RouDi daemon is needed.
+#
+# Usage: ./ibmw run ./cfg/multi_driver_demo_shm_bind_cfg.yaml
+
+ibmw:
+  extensions:
+    items:
+      - name: dds_extension
+        path: ./libibmw_dds_transport.so
+        options:
+          domain_id: 0
+          participant_name: multi_driver_demo_shm
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          runtime_id: multi_driver_demo_shm
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  messaging:
+    drivers:
+      - type: dds
+      - type: shm
+    publishers:
+      - topic: multi_driver_demo_topic
+        enable_drivers: [dds, shm]
+
+  modules:
+    packages:
+      - path: ./libmulti_driver_shm_pkg.so
+    modules:
+      - name: MultiDriverModule
+        log_level: INFO

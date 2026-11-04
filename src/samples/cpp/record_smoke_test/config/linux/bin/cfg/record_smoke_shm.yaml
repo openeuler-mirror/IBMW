@@ -1,0 +1,42 @@
+# Independently owned self-developed shm transport configuration for record smoke.
+ibmw:
+  config:
+    temp_cfg_path: ./cfg/tmp/record-smoke-shm
+  runtime_graph:
+    runtime_id: record-smoke-shm
+    type_support_pkgs:
+      - path: ./libcommon_dds_ts.so
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          shm_init_size: 1024
+          runtime_id: record_smoke_shm_publisher
+      - name: record_playback_extension
+        path: ./libibmw_record_playback.so
+        options: {}
+  logging:
+    core_level: INFO
+    backends: [{type: console}]
+  scheduling:
+    executors:
+      - name: record_smoke_executor
+        type: thread_pool
+        options: {thread_num: 2}
+  messaging:
+    drivers:
+      - type: shm
+    publishers:
+      - topic: /ibmw_record_smoke/transport/shm
+        enable_drivers: [shm]
+  modules:
+    packages:
+      - path: ./librecord_smoke_pkg.so
+        enable_modules: [RecordSmokeCdrModule]
+    modules:
+      - name: RecordSmokeCdrModule
+        log_level: INFO
+RecordSmokeCdrModule:
+  publish_topics: [/ibmw_record_smoke/transport/shm]
+  frequency_hz: 10.0

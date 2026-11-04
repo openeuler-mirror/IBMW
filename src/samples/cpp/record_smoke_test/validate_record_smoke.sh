@@ -22,10 +22,18 @@ export ROS_DOMAIN_ID=87
 export AMENT_PREFIX_PATH="$BUILD_DIR/record_smoke_ros2_runtime:${AMENT_PREFIX_PATH:-}"
 export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/record_smoke_ros2_runtime/lib:/usr/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
 
+# Shared-memory transports built into this tree. The record_smoke_test target
+# writes one marker per built transport; a tree without either marker predates
+# them and always required Iceoryx.
+ICEORYX_BUILT=0
+SHM_BUILT=0
+[[ -f "$BUILD_DIR/record_smoke_iceoryx_required" ]] && ICEORYX_BUILT=1
+[[ -f "$BUILD_DIR/record_smoke_shm_required" ]] && SHM_BUILT=1
+[[ "$ICEORYX_BUILT" == 1 || "$SHM_BUILT" == 1 ]] || ICEORYX_BUILT=1
+
 required_configs=(
   record_smoke_local.yaml
   record_smoke_dds.yaml
-  record_smoke_iceoryx.yaml
   record_smoke_mqtt.yaml
   record_smoke_zenoh.yaml
   record_smoke_ros2.yaml
@@ -46,22 +54,31 @@ required_artifacts=(
   libcommon_dds_ts.so
   libibmw_record_playback.so
   libibmw_dds_transport.so
-  libibmw_iceoryx_transport.so
   libibmw_mqtt_transport.so
   libibmw_zenoh_transport.so
   libibmw_ros2_transport.so
   libibmw_net_transport.so
 )
 required_commands=(jq mosquitto mosquitto_pub python3 ss timeout)
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  required_configs+=(record_smoke_iceoryx.yaml)
+  required_artifacts+=(libibmw_iceoryx_transport.so)
+fi
+if [[ "$SHM_BUILT" == 1 ]]; then
+  required_configs+=(record_smoke_shm.yaml)
+  required_artifacts+=(libibmw_shm_transport.so)
+fi
 
 [[ -x "$IBMW_BIN" ]] || {
   echo "record smoke: missing ibmw binary: $IBMW_BIN" >&2
   exit 2
 }
-[[ -x "$ROUDI_BIN" ]] || {
-  echo "record smoke: missing iox-roudi binary: $ROUDI_BIN" >&2
-  exit 2
-}
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  [[ -x "$ROUDI_BIN" ]] || {
+    echo "record smoke: missing iox-roudi binary: $ROUDI_BIN" >&2
+    exit 2
+  }
+fi
 for item in "${required_configs[@]}"; do
   [[ -f "$CFG_DIR/$item" ]] || {
     echo "record smoke: missing config: $CFG_DIR/$item" >&2
@@ -84,6 +101,8 @@ done
 mkdir -p "$RUN_PARENT"
 RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
 cd "$BUILD_DIR"
+
+SHM_ROOT_OWNED=""
 
 RUNTIME_PID=""
 RECORD_PID=""
@@ -126,9 +145,19 @@ cleanup() {
   if [[ "$CASE_CHILD" == 0 ]]; then
     stop_pid "$ROUDI_PID" TERM
     stop_pid "$MOSQUITTO_PID" TERM
+    [[ -z "$SHM_ROOT_OWNED" ]] || rm -rf -- "$SHM_ROOT_OWNED"
   fi
 }
 trap cleanup EXIT INT TERM
+
+# The shm transport needs no daemon. Unless the caller chose a root, give this
+# run a private one so it never shares segments with another shm user. It is
+# under /tmp, not $TMPDIR: root + "/ibmw_shm.<uid>.<domain>" must fit in 63 bytes.
+if [[ "$SHM_BUILT" == 1 && -z "${IBMW_SHM_ROOT:-}" ]]; then
+  IBMW_SHM_ROOT="$(mktemp -d /tmp/ibmw-rs.XXXXXX)"
+  SHM_ROOT_OWNED="$IBMW_SHM_ROOT"
+  export IBMW_SHM_ROOT
+fi
 
 fail_case() {
   echo "FAIL: $CURRENT_CASE: $*" >&2
@@ -161,7 +190,7 @@ wait_for_log() {
 }
 
 start_services() {
-  if ! pgrep -x iox-roudi >/dev/null 2>&1; then
+  if [[ "$ICEORYX_BUILT" == 1 ]] && ! pgrep -x iox-roudi >/dev/null 2>&1; then
     "$ROUDI_BIN" >"$RUN_DIR/iox-roudi.log" 2>&1 &
     ROUDI_PID=$!
     sleep 1
@@ -492,8 +521,14 @@ run_case transport_local run_transport_case local runtime_tap \
   "runtime tap (runtime record-smoke-local)" auto
 run_case transport_dds run_transport_case dds native_serialized \
   "dds subscriber (/ibmw_record_smoke/transport/dds)" cdr
-run_case transport_iceoryx run_transport_case iceoryx cached_serialized \
-  "iceoryx cached serialized subscriber (runtime record-smoke-iceoryx)" cdr
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  run_case transport_iceoryx run_transport_case iceoryx cached_serialized \
+    "iceoryx cached serialized subscriber (runtime record-smoke-iceoryx)" cdr
+fi
+if [[ "$SHM_BUILT" == 1 ]]; then
+  run_case transport_shm run_transport_case shm cached_serialized \
+    "shm cached serialized subscriber (runtime record-smoke-shm)" cdr
+fi
 run_case transport_mqtt run_transport_case mqtt cached_serialized \
   "mqtt cached serialized subscriber (runtime record-smoke-mqtt)" cdr
 run_case transport_zenoh run_transport_case zenoh native_serialized \

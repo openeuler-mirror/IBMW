@@ -1,0 +1,50 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# shm_interproc_demo - publisher process configuration.
+#
+# iceoryx_interproc_demo/cfg/publisher.yaml with the extension item switched
+# to the self-developed shm transport (libibmw_shm_transport.so, driver
+# "shm"). No RouDi daemon: both processes meet in the same shm root
+# ($IBMW_SHM_ROOT when set, else /dev/shm, else /tmp) and domain.
+#
+# - runtime_id is unique per process and names this process's shm
+#   runtime. The subscriber uses a different id.
+# - shm_init_size is intentionally tiny (256 bytes) so that publishing
+#   1 KB / 16 KB / 256 KB / 1 MB samples walks the loan grow path across
+#   the process boundary.
+
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          shm_init_size: 256
+          runtime_id: "shm_demo_pub"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: shm
+        options:
+          listener_thread_name: "shm_pub_listen"
+    publishers:
+      - topic: "compressed_image_topic"
+        enable_drivers: [shm]
+
+  modules:
+    modules:
+      - name: PublisherModule
+        log_level: INFO

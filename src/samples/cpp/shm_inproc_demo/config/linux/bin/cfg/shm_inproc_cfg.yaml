@@ -1,0 +1,53 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# shm_inproc_demo: single-process pub + sub over the self-developed shm
+# transport (shm_ext, no RouDi daemon).
+#
+# iceoryx_inproc_cfg.yaml with the extension item switched to
+# libibmw_shm_transport.so and the driver named "shm". shm_init_size is set
+# very small (256 bytes) so that publishing 1 KB / 16 KB / 256 KB / 1 MB
+# payloads walks the loan grow path, exactly like the iceoryx demo.
+#
+# Segments are created under $IBMW_SHM_ROOT when set (else /dev/shm, else
+# /tmp); pass root_dir / domain here to pin them instead.
+
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          shm_init_size: 256        # bytes, intentionally tiny — exercises grow path
+          runtime_id: ""            # empty -> fallback "shm<pid>" (single process)
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: shm
+        options:
+          listener_thread_name: "shm_listen"
+    publishers:
+      - topic: "compressed_image_topic"
+        enable_drivers: [shm]
+    subscribers:
+      - topic: "compressed_image_topic"
+        enable_drivers: [shm]
+
+  modules:
+    modules:
+      - name: PublisherModule
+        log_level: INFO
+      - name: SubscriberModule
+        log_level: INFO

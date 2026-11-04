@@ -1,0 +1,16 @@
+ibmw:
+  runtime_graph:
+    type_support_pkgs: [../libplay_smoke_ts.so]
+  extensions:
+    items:
+      - name: shm_extension
+        path: ../libibmw_shm_transport.so
+        options: {shm_init_size: 1024, runtime_id: play_smoke_shm_player}
+  logging: {core_level: INFO, backends: [{type: console}]}
+  scheduling:
+    executors:
+      - {name: play_smoke_executor, type: thread_pool, options: {thread_num: 2}}
+  messaging:
+    drivers: [{type: shm}]
+    publishers:
+      - {topic: /ibmw_play_smoke/data, enable_drivers: [shm]}

@@ -151,6 +151,12 @@ if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
   copy_required "$BUILD/validate_record_smoke.sh" "$STAGE/validate_record_smoke.sh"
   copy_required "$BUILD/record_smoke_ros2_runtime" "$STAGE/record_smoke_ros2_runtime"
   copy_required "$BUILD/record_smoke_required" "$STAGE/record_smoke_required"
+  # A tree without transport markers predates them; its validator defaults
+  # to Iceoryx, so the Iceoryx marker is optional while the shm one is not.
+  cp "$BUILD/record_smoke_iceoryx_required" "$STAGE/" 2>/dev/null || true
+  if [ "$SHM_BUILT" -eq 1 ]; then
+    copy_required "$BUILD/record_smoke_shm_required" "$STAGE/record_smoke_shm_required"
+  fi
   chmod +x "$STAGE/validate_record_smoke.sh"
 else
   cp "$BUILD/validate_record_smoke.sh" "$STAGE/validate_record_smoke.sh" 2>/dev/null || true
@@ -158,14 +164,18 @@ else
 fi
 
 if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
-  record_iceoryx_cfgs=""
-  record_iceoryx_libs=""
+  record_shm_transport_cfgs=""
+  record_shm_transport_libs=""
   if [ "$ICEORYX_BUILT" -eq 1 ]; then
-    record_iceoryx_cfgs="record_smoke_iceoryx.yaml"
-    record_iceoryx_libs="libibmw_iceoryx_transport.so"
+    record_shm_transport_cfgs="record_smoke_iceoryx.yaml"
+    record_shm_transport_libs="libibmw_iceoryx_transport.so"
+  fi
+  if [ "$SHM_BUILT" -eq 1 ]; then
+    record_shm_transport_cfgs="$record_shm_transport_cfgs record_smoke_shm.yaml"
+    record_shm_transport_libs="$record_shm_transport_libs libibmw_shm_transport.so"
   fi
   for cfg in \
-    record_smoke_local.yaml record_smoke_dds.yaml $record_iceoryx_cfgs \
+    record_smoke_local.yaml record_smoke_dds.yaml $record_shm_transport_cfgs \
     record_smoke_mqtt.yaml record_smoke_zenoh.yaml record_smoke_ros2.yaml \
     record_smoke_tcp.yaml record_smoke_udp.yaml record_smoke_http.yaml \
     record_smoke_features.yaml record_smoke_json.yaml \
@@ -180,7 +190,7 @@ if [ "$RECORD_SMOKE_REQUIRED" -eq 1 ]; then
   for artifact in \
     librecord_smoke_pkg.so librecord_smoke_ts.so libcommon_dds_ts.so \
     libibmw_record_playback.so libibmw_dds_transport.so \
-    $record_iceoryx_libs libibmw_mqtt_transport.so \
+    $record_shm_transport_libs libibmw_mqtt_transport.so \
     libibmw_zenoh_transport.so libibmw_ros2_transport.so \
     libibmw_net_transport.so; do
     [ -f "$STAGE/lib/$artifact" ] || {
@@ -276,6 +286,12 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
   copy_required "$BUILD/play_smoke_cfg" "$STAGE/play_smoke_cfg"
   copy_required "$BUILD/play_smoke_ros2_runtime" "$STAGE/play_smoke_ros2_runtime"
   copy_required "$BUILD/play_smoke_required" "$STAGE/play_smoke_required"
+  # A tree without transport markers predates them; its validator defaults
+  # to Iceoryx, so the Iceoryx marker is optional while the shm one is not.
+  cp "$BUILD/play_smoke_iceoryx_required" "$STAGE/" 2>/dev/null || true
+  if [ "$SHM_BUILT" -eq 1 ]; then
+    copy_required "$BUILD/play_smoke_shm_required" "$STAGE/play_smoke_shm_required"
+  fi
   chmod +x "$STAGE/validate_play_smoke.sh"
 else
   cp "$BUILD/validate_play_smoke.sh" "$STAGE/validate_play_smoke.sh" 2>/dev/null || true
@@ -295,11 +311,15 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
       exit 1
     }
   done
-  play_iceoryx_cfgs=""
-  play_iceoryx_libs=""
+  play_shm_transport_cfgs=""
+  play_shm_transport_libs=""
   if [ "$ICEORYX_BUILT" -eq 1 ]; then
-    play_iceoryx_cfgs="play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml"
-    play_iceoryx_libs="libibmw_iceoryx_transport.so"
+    play_shm_transport_cfgs="play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml"
+    play_shm_transport_libs="libibmw_iceoryx_transport.so"
+  fi
+  if [ "$SHM_BUILT" -eq 1 ]; then
+    play_shm_transport_cfgs="$play_shm_transport_cfgs play_smoke_shm_subscriber.yaml play_smoke_shm_player.yaml"
+    play_shm_transport_libs="$play_shm_transport_libs libibmw_shm_transport.so"
   fi
   for cfg in \
     play_smoke_local_subscriber.yaml play_smoke_local_player.yaml \
@@ -307,7 +327,7 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
     play_smoke_json_player.yaml play_smoke_mcap_reader.yaml \
     play_smoke_sqlite_reader.yaml \
     play_smoke_dds_subscriber.yaml play_smoke_dds_player.yaml \
-    $play_iceoryx_cfgs \
+    $play_shm_transport_cfgs \
     play_smoke_mqtt_subscriber.yaml play_smoke_mqtt_player.yaml \
     play_smoke_zenoh_subscriber.yaml play_smoke_zenoh_player.yaml \
     play_smoke_ros2_subscriber.yaml play_smoke_ros2_player.yaml \
@@ -322,7 +342,7 @@ if [ "$PLAY_SMOKE_REQUIRED" -eq 1 ]; then
   for artifact in \
     libplay_smoke_pkg.so libplay_smoke_ts.so \
     libibmw_record_playback.so libibmw_dds_transport.so \
-    $play_iceoryx_libs libibmw_mqtt_transport.so \
+    $play_shm_transport_libs libibmw_mqtt_transport.so \
     libibmw_zenoh_transport.so libibmw_ros2_transport.so \
     libibmw_net_transport.so; do
     [ -f "$STAGE/lib/$artifact" ] || {

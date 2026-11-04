@@ -38,6 +38,13 @@ if(IBMW_BUILD_EXAMPLES)
     add_subdirectory(iceoryx_interproc_demo)
   endif()
 
+  # The same two demos on the self-developed shm transport (shm_ext, no
+  # RouDi). They build the iceoryx demo sources and do not link iceoryx.
+  if(IBMW_BUILD_SHM_EXTENSION)
+    add_subdirectory(shm_inproc_demo)
+    add_subdirectory(shm_interproc_demo)
+  endif()
+
   # Multi-transport end-to-end benchmark suite (pub/sub sample pairs comparing
   # iceoryx / self-developed shm / DDS / net_extension paths, feeding
   # docs/transport-benchmark.{md,zh.md}). Gated by IBMW_BUILD_BENCHMARKS; each
@@ -69,10 +76,11 @@ if(IBMW_BUILD_EXAMPLES)
   endif()
 
   # Mixed-transport record/info demonstration. This sample requires the
-  # complete DDS, Iceoryx, MQTT and ROS2 recording matrix.
+  # complete DDS, MQTT and ROS2 recording matrix plus at least one shared-memory
+  # transport (Iceoryx and/or the self-developed shm transport).
   if(IBMW_BUILD_DDS_EXTENSION AND
      IBMW_BUILD_PROTOCOLS AND
-     IBMW_BUILD_ICEORYX_EXTENSION AND
+     (IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) AND
      IBMW_BUILD_MQTT_EXTENSION AND
      IBMW_BUILD_RECORD_PLAYBACK_EXTENSION AND
      IBMW_BUILD_WITH_ROS2 AND
@@ -83,9 +91,11 @@ if(IBMW_BUILD_EXAMPLES)
 
   # Strict bag-record smoke coverage for every recordable transport and the
   # record CLI feature surface. The sample owns its configs and test runner.
+  # Either shared-memory transport (iceoryx or the self-developed shm) is
+  # enough; the suite runs the case of every one that is built.
   if(IBMW_BUILD_DDS_EXTENSION AND
      IBMW_BUILD_PROTOCOLS AND
-     IBMW_BUILD_ICEORYX_EXTENSION AND
+     (IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) AND
      IBMW_BUILD_MQTT_EXTENSION AND
      IBMW_BUILD_ZENOH_EXTENSION AND
      IBMW_BUILD_NET_EXTENSION AND
@@ -123,9 +133,11 @@ if(IBMW_BUILD_EXAMPLES)
 
   # Strict end-to-end coverage for every bag play transport route and normal
   # CLI option.  The suite owns its fixtures, configs, subscriber and runner.
+  # Either shared-memory transport (iceoryx or the self-developed shm) is
+  # enough; the suite runs the case of every one that is built.
   if(IBMW_BUILD_DDS_EXTENSION AND
      IBMW_BUILD_PROTOCOLS AND
-     IBMW_BUILD_ICEORYX_EXTENSION AND
+     (IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) AND
      IBMW_BUILD_MQTT_EXTENSION AND
      IBMW_BUILD_ZENOH_EXTENSION AND
      IBMW_BUILD_NET_EXTENSION AND
@@ -152,7 +164,10 @@ if(IBMW_BUILD_DDS_EXTENSION AND IBMW_BUILD_ROS2_ACTION_FIBONACCI_SAMPLES)
   add_subdirectory(ros2_action_fibonacci_dds_client)
 endif()
 
-if(IBMW_BUILD_EXAMPLES AND IBMW_BUILD_DDS_EXTENSION AND IBMW_BUILD_ICEORYX_EXTENSION)
+# DDS + Iceoryx and/or DDS + self-developed shm variants (one per enabled
+# second driver, see multi_driver_demo/CMakeLists.txt).
+if(IBMW_BUILD_EXAMPLES AND IBMW_BUILD_DDS_EXTENSION AND
+   (IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION))
   add_subdirectory(multi_driver_demo)
 endif()
 
