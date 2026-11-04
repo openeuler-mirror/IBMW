@@ -23,6 +23,19 @@ file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(REMOVE_ITEM src ${test_files})
 # test_peer/ is a standalone test helper, not part of the plugin.
 list(FILTER src EXCLUDE REGEX "/test_peer/")
+# Reporter V1 / core metrics bridge, as in iceoryx_ext: the real one only when
+# the build switch is on, else a no-op without any host lookup.
+list(REMOVE_ITEM src
+  ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge_stub.cc)
+if(IBMW_ENABLE_REPORTER_V1)
+  list(APPEND src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge.cc)
+else()
+  list(APPEND src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_bridge_stub.cc)
+endif()
+# Needs a host executable exporting the reporter query: its own binary below.
+set(REPORTER_HOST_BOUNDARY_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/reporter_host_boundary_test.cc)
+list(REMOVE_ITEM test_files ${REPORTER_HOST_BOUNDARY_TEST_SRC})
 
 file(GLOB shm_ext_public_headers ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
 
@@ -50,6 +63,10 @@ target_link_libraries(
           $<BUILD_INTERFACE:ibmw::selfdev::shm>
   PUBLIC  ibmw::api::cpp
           ibmw::core::engine)
+if(IBMW_ENABLE_REPORTER_V1)
+  # dlopen(nullptr)/dlsym of the host reporter query.
+  target_link_libraries(${CUR_TARGET_NAME} PRIVATE ${CMAKE_DL_LIBS})
+endif()
 # Installed, the selfdev headers sit in <prefix>/include (ibmw_selfdev_install);
 # say so here rather than rely on another target adding that directory.
 target_include_directories(
@@ -93,6 +110,29 @@ if(IBMW_BUILD_TESTS AND test_files)
   target_include_directories(${CUR_TARGET_NAME}_test PRIVATE ${selfdev_shm_source_dir}/test)
   target_compile_definitions(${CUR_TARGET_NAME}_test
     PRIVATE IBMW_SHM_EXT_PEER_PATH="$<TARGET_FILE:ibmw_shm_ext_peer>")
+
+  # Reporter V1 host boundary: the executable is the host (exports the reporter
+  # query) and compiles the plugin sources in, so ShmTransportDriver reports
+  # into the real core registry; it also dlopens the plugin itself.
+  if(UNIX AND NOT APPLE)
+    get_target_property(shm_reporter_test_sources ${CUR_TARGET_NAME} SOURCES)
+    get_target_property(shm_reporter_test_includes ${CUR_TARGET_NAME} INCLUDE_DIRECTORIES)
+    get_target_property(shm_reporter_test_links ${CUR_TARGET_NAME} LINK_LIBRARIES)
+    add_executable(ibmw_shm_reporter_host_boundary_test
+                   ${REPORTER_HOST_BOUNDARY_TEST_SRC} ${shm_reporter_test_sources}
+                   ${selfdev_shm_source_dir}/test/fail_alloc.cc)
+    target_include_directories(ibmw_shm_reporter_host_boundary_test
+      PRIVATE ${shm_reporter_test_includes} ${selfdev_shm_source_dir}/test)
+    target_link_libraries(ibmw_shm_reporter_host_boundary_test
+      PRIVATE ibmw::core::reporter_host_abi ${shm_reporter_test_links}
+              GTest::gtest GTest::gtest_main ${CMAKE_DL_LIBS})
+    target_compile_definitions(ibmw_shm_reporter_host_boundary_test PRIVATE
+      "SHM_EXTENSION_PATH=\"$<TARGET_FILE:${CUR_TARGET_NAME}>\"")
+    set_target_properties(ibmw_shm_reporter_host_boundary_test PROPERTIES ENABLE_EXPORTS ON)
+    add_dependencies(ibmw_shm_reporter_host_boundary_test ${CUR_TARGET_NAME})
+    add_test(NAME ibmw_shm_reporter_host_boundary_test
+             COMMAND $<TARGET_FILE:ibmw_shm_reporter_host_boundary_test>)
+  endif()
 endif()
 
 set_target_properties(${CUR_TARGET_NAME} PROPERTIES OUTPUT_NAME "ibmw_shm_transport")

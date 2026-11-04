@@ -97,9 +97,10 @@ class IBMW_SHM_EXPORT ShmTransportDriver
   // handle of another driver or mode, a stale or duplicate token, a handle
   // given back after Shutdown(), or a chunk the library refused (that chunk is
   // released). A handle that is not one of this driver's (another source
-  // driver, or a mode other than kPodOnly / kCtxMetaThenPayloadUnreported) is
-  // left untouched, as by PublishLoaned() and ReleaseLoaned(); otherwise the
-  // handle is cleared.
+  // driver, or a mode other than kPodOnly / kCtxMetaThenPayloadUnreported, and
+  // kCtxMetaThenPayload in a Reporter V1 build, the mode of a ctx-meta loan
+  // counted in direct_shm_loan) is left untouched, as by PublishLoaned() and
+  // ReleaseLoaned(); otherwise the handle is cleared.
   // Telling a duplicate or stale token apart is best effort: the token carries
   // the slot's loan generation modulo ShmLoanSlot::kTagCount (64), so a copy
   // that is exactly a multiple of 64 loans of the same slot old is taken for
@@ -149,9 +150,10 @@ class IBMW_SHM_EXPORT ShmTransportDriver
 
   bool LoanCtxMeta(ShmPublisher* pub, const runtime::core::transport::TransportInfo& info, size_t requested_size,
                    const ibmw::transport::Context& ctx, runtime::core::transport::LoanedSampleHandle& out_handle);
+  // `retries`: growth retries taken (each a further loan and serialize).
   bool LoanSerialized(ShmPublisher* pub, const runtime::core::transport::TransportInfo& info,
                       const ibmw::transport::Context& ctx, const void* msg_ptr,
-                      runtime::core::transport::LoanedSampleHandle& out_handle);
+                      runtime::core::transport::LoanedSampleHandle& out_handle, size_t& retries);
 
   ShmBus& bus_;
   const std::string name_;
@@ -163,6 +165,9 @@ class IBMW_SHM_EXPORT ShmTransportDriver
   // Start() attached every subscription; until then a Start() may be retried.
   bool delivery_started_ = false;
   const runtime::core::transport::TransportCatalog* transport_catalog_ptr_ = nullptr;
+  // Reporter V1 host (internal/reporter_bridge.h), set by Initialize();
+  // nullptr when reporting is off.
+  std::shared_ptr<void> reporter_state_;
 
   std::unordered_map<std::string, std::shared_ptr<runtime::core::transport::MessageHandlerTool>>
       message_handler_map_;

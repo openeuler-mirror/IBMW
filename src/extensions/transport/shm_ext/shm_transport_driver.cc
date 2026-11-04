@@ -10,6 +10,10 @@
 #include "base/url_encode.h"
 #include "cpp/util/buffer_array_allocator.h"
 #include "shm_ext/global.h"
+#include "shm_ext/internal/reporter_bridge.h"
+#ifdef IBMW_ENABLE_REPORTER_V1
+#include "shm_ext/internal/reporter_sidecar.h"
+#endif
 
 namespace YAML {
 template <>
@@ -204,6 +208,7 @@ void ShmTransportDriver::Initialize(YAML::Node options_node) {
     });
   }
   options_ = std::move(options);
+  reporter_state_ = CreateDriverReporterState(name_);
   state_.store(State::kInit);
 }
 
@@ -287,8 +292,15 @@ bool ShmTransportDriver::RegisterSendType(const transport::SendTypeWrapper& send
     MW_REQUIRE(state_.load() == State::kInit, "Method can only be called when state is 'Init'.");
     const auto& info = send_type_wrapper.info;
     std::string url = MakeStdTransportUrl(info.topic_name, info.msg_type);
-    auto* publisher = bus_.RegisterPublisher(url);
-    if (publisher == nullptr) return false;
+    // The Reporter V1 slots are registered before the publisher is visible, so
+    // a failure leaves nothing another thread could already be using.
+    auto* publisher = bus_.RegisterPublisher(url, 0, nullptr, [&](ShmPublisher& created) {
+      return PreparePublisherReporter(reporter_state_.get(), created, info);
+    });
+    if (publisher == nullptr) {
+      MW_ERROR("Cannot register the Reporter V1 slots of shm publisher '{}'.", url);
+      return false;
+    }
     std_pub_map_.emplace(TopicKey(info.topic_name, info.msg_type), publisher);
     MW_INFO("Register publish type to shm transport, url: {}", url);
     return true;
@@ -621,12 +633,25 @@ std::unique_ptr<transport::LoanedSubscriptionHandle> ShmTransportDriver::AttachL
     subscription_options.retained = true;
     subscription_options.max_outstanding = options.max_outstanding;
     subscription_options.url_reserved = true;
+    if (!PrepareSubscriptionReporter(reporter_state_.get(), subscription_options, message_handler.info.topic_name,
+                                     message_handler.info.msg_type)) {
+      bus_.RollbackSubscriberUrl(url);
+      MW_ERROR("Cannot register the Reporter V1 slots of retained shm subscriber '{}'.", url);
+      return nullptr;
+    }
     auto subscription = bus_.RegisterSubscriber(
         url,
         [callback = message_handler.callback](const void* payload, size_t size, std::function<void()>&& release) {
           callback(nullptr, payload, size, std::move(release));
         },
         subscription_options);
+    if (!CommitSubscriptionReporter(subscription_options)) {
+      // Init state: nothing was delivered, so this frees the URL at once.
+      subscription->Stop();
+      subscription->TryFinalize();
+      MW_ERROR("Cannot commit the Reporter V1 slots of retained shm subscriber '{}'.", url);
+      return nullptr;
+    }
     return std::make_unique<ShmLoanedSubscriptionHandle>(std::move(subscription));
   } catch (const std::exception& e) {
     if (!url.empty()) bus_.RollbackSubscriberUrl(url);
@@ -682,7 +707,15 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
                 info.topic_name, info.msg_type);
         return false;
       }
+#ifdef IBMW_ENABLE_REPORTER_V1
+      DirectLoanReporterOutcome outcome(pub->Reporter());
+      if (!LoanCtxMeta(pub, info, requested_size, *ctx, out_handle)) return false;
+      if (outcome.Reported()) out_handle.mode = transport::LoanMode::kCtxMetaThenPayload;
+      outcome.MarkSuccess();
+      return true;
+#else
       return LoanCtxMeta(pub, info, requested_size, *ctx, out_handle);
+#endif
     } catch (const std::exception& e) {
       MW_ERROR("LoanSample[ctx-meta] exception: {}", e.what());
       return false;
@@ -727,7 +760,7 @@ bool ShmTransportDriver::LoanSample(const transport::TransportInfo& info, size_t
 
 bool ShmTransportDriver::LoanSerialized(ShmPublisher* pub, const transport::TransportInfo& info,
                                         const ibmw::transport::Context& ctx, const void* msg_ptr,
-                                        transport::LoanedSampleHandle& out_handle) {
+                                        transport::LoanedSampleHandle& out_handle, size_t& retries) {
   const std::string_view serialization_type = SerializationTypeOf(ctx, info);
   const auto kv_map = ctx.GetMetaKeyVals();
   const size_t header_size = ComputeCtxMetaHeaderSize(serialization_type, kv_map);
@@ -774,6 +807,8 @@ bool ShmTransportDriver::LoanSerialized(ShmPublisher* pub, const transport::Tran
     }
     if (chunk_size > std::numeric_limits<uint32_t>::max() / 2) break;
     chunk_size *= 2;
+    // A retry only when another loan follows; the last OOM ends the loop.
+    if (attempt + 1 < kMaxLoanRetries) ++retries;
   }
   MW_ERROR("LoanSerializedSample: gave up after {} growth retries (final chunk_size={})", kMaxLoanRetries,
            chunk_size);
@@ -798,7 +833,16 @@ bool ShmTransportDriver::LoanSerializedSample(const transport::TransportInfo& in
               info.topic_name, info.msg_type);
       return false;
     }
-    return LoanSerialized(pub, info, ctx, msg_ptr, out_handle);
+#ifdef IBMW_ENABLE_REPORTER_V1
+    DirectLoanReporterOutcome outcome(pub->Reporter());
+    if (!LoanSerialized(pub, info, ctx, msg_ptr, out_handle, outcome.retries)) return false;
+    if (outcome.Reported()) out_handle.mode = transport::LoanMode::kCtxMetaThenPayload;
+    outcome.MarkSuccess();
+    return true;
+#else
+    size_t retries = 0;
+    return LoanSerialized(pub, info, ctx, msg_ptr, out_handle, retries);
+#endif
   } catch (const std::exception& e) {
     MW_ERROR("LoanSerializedSample exception: {}", e.what());
     return false;
@@ -847,7 +891,11 @@ void ShmTransportDriver::PublishLoaned(transport::LoanedSampleHandle& handle) no
 
 namespace {
 
+// kCtxMetaThenPayload: a ctx-meta loan counted in direct_shm_loan (same token).
 bool IsShmLoanMode(transport::LoanMode mode) noexcept {
+#ifdef IBMW_ENABLE_REPORTER_V1
+  if (mode == transport::LoanMode::kCtxMetaThenPayload) return true;
+#endif
   return mode == transport::LoanMode::kCtxMetaThenPayloadUnreported || mode == transport::LoanMode::kPodOnly;
 }
 
@@ -864,7 +912,16 @@ bool ShmTransportDriver::TryPublishLoaned(transport::LoanedSampleHandle& handle)
   }
   bool published = false;
   if (auto lease = bus_.TryAcquireLoanReturn(); lease && bus_.Generation() == bus_generation_) {
-    published = ShmLoanSlot::FromToken(handle.driver_token)->owner->PublishSlot(handle.driver_token);
+    ShmPublisher* owner = ShmLoanSlot::FromToken(handle.driver_token)->owner;
+#ifdef IBMW_ENABLE_REPORTER_V1
+    bool released = false;
+    published = owner->PublishSlot(handle.driver_token, &released);
+    if (handle.mode == transport::LoanMode::kCtxMetaThenPayload) {
+      ReportDirectLoanReturn(owner->Reporter(), published, released);
+    }
+#else
+    published = owner->PublishSlot(handle.driver_token);
+#endif
   }
   ClearHandle(handle);
   return published;
@@ -876,7 +933,15 @@ void ShmTransportDriver::ReleaseLoaned(transport::LoanedSampleHandle& handle) no
     return;
   }
   if (auto lease = bus_.TryAcquireLoanReturn(); lease && bus_.Generation() == bus_generation_) {
-    ShmLoanSlot::FromToken(handle.driver_token)->owner->ReleaseSlot(handle.driver_token);
+    ShmPublisher* owner = ShmLoanSlot::FromToken(handle.driver_token)->owner;
+#ifdef IBMW_ENABLE_REPORTER_V1
+    const bool released = owner->ReleaseSlot(handle.driver_token);
+    if (handle.mode == transport::LoanMode::kCtxMetaThenPayload) {
+      ReportDirectLoanReturn(owner->Reporter(), false, released);
+    }
+#else
+    owner->ReleaseSlot(handle.driver_token);
+#endif
   }
   ClearHandle(handle);
 }

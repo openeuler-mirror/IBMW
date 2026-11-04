@@ -121,7 +121,15 @@ class ShmExtEnvironment : public ::testing::Environment {
     ::unsetenv("IBMW_SHM_DOMAIN");
     ::signal(SIGPIPE, SIG_IGN);
   }
-  void TearDown() override { RemoveTree(root_); }
+  // A runtime still alive at exit (e.g. a leaked or global driver) has a
+  // control thread that re-creates a removed service directory while the root
+  // exists; once the root is gone it cannot.
+  void TearDown() override {
+    for (int i = 0; i < 100 && ::access(root_.c_str(), F_OK) == 0; ++i) {
+      RemoveTree(root_);
+      if (::access(root_.c_str(), F_OK) == 0) std::this_thread::sleep_for(10ms);
+    }
+  }
 
  private:
   std::string root_;

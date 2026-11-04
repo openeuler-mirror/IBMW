@@ -207,9 +207,15 @@ class IBMW_SHM_EXPORT ShmPublisher {
   // Take a slot token (ShmLoanSlot::Token). No-ops for a token of another
   // publisher or of a loan already given back; PublishSlot() then returns false.
   // A chunk the library refuses to publish (out of memory) is released, so a
-  // spent token never strands its loan.
-  bool PublishSlot(void* token) noexcept;
-  void ReleaseSlot(void* token) noexcept;
+  // spent token never strands its loan; `released` tells that case apart.
+  // ReleaseSlot() is true when it gave a loan back.
+  bool PublishSlot(void* token, bool* released = nullptr) noexcept;
+  bool ReleaseSlot(void* token) noexcept;
+
+  // Reporter V1 direct_shm_loan slots (internal/reporter_sidecar.h), set once
+  // when the publisher is registered; nullptr when reporting is off.
+  const void* Reporter() const noexcept { return reporter_.load(std::memory_order_acquire); }
+  void SetReporter(std::shared_ptr<const void> reporter) noexcept;
 
   // Loan size that most recently fitted a framed Send(); grows only.
   size_t SizeHint() const noexcept { return size_hint_.load(std::memory_order_relaxed); }
@@ -234,6 +240,8 @@ class IBMW_SHM_EXPORT ShmPublisher {
   std::mutex wait_mu_;
   std::condition_variable wait_cv_;
   std::array<ShmLoanSlot, shm::kMaxChunksAllocatedPerPublisher> slots_;
+  std::shared_ptr<const void> reporter_owner_;
+  std::atomic<const void*> reporter_{nullptr};
   shm::Publisher publisher_;
 };
 
@@ -248,6 +256,9 @@ struct ShmSubscriptionOptions {
   size_t max_outstanding = 1;
   // URL reserved beforehand with ShmBus::ReserveSubscriberUrl().
   bool url_reserved = false;
+  // Reporter V1 retained_shm_receive slots of a retained subscription
+  // (internal/reporter_sidecar.h); nullptr when reporting is off.
+  std::shared_ptr<void> reporter_state;
 };
 
 class ShmListenerPool;
@@ -396,9 +407,12 @@ class IBMW_SHM_EXPORT ShmBus {
   uint64_t Generation() const noexcept { return generation_.load(std::memory_order_acquire); }
 
   // Creates the publisher of `url` or returns the existing one. Throws on
-  // failure or after shutdown started.
+  // failure or after shutdown started. `prepare` runs on a new publisher before
+  // any other thread can look it up; when it returns false the publisher is
+  // destroyed unpublished and the result is nullptr.
   ShmPublisher* RegisterPublisher(std::string_view url, size_t size_hint = 0,
-                                  bool* created = nullptr);
+                                  bool* created = nullptr,
+                                  const std::function<bool(ShmPublisher&)>& prepare = {});
   // nullptr without a lease, after shutdown started, or when unknown.
   ShmPublisher* GetPublisher(const ShmOperationGate::Lease& lease, std::string_view url) const;
   void RollbackPublisher(std::string_view url, const ShmPublisher* expected) noexcept;

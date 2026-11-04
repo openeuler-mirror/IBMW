@@ -9,6 +9,16 @@
 
 #include "shm_ext/global.h"
 
+#ifdef IBMW_ENABLE_REPORTER_V1
+#include "shm_ext/internal/reporter_sidecar.h"
+// Reporter V1 retained_shm_receive hooks; compiled out without the switch.
+#define SHM_REPORT_RECEIVE(slot) ReportReceive(options_.reporter_state.get(), &ShmReceiveReporter::slot)
+#define SHM_REPORT_LEASE_LOCKED(acquired) ReportLeaseLocked(options_.reporter_state.get(), acquired, outstanding_)
+#else
+#define SHM_REPORT_RECEIVE(slot) static_cast<void>(0)
+#define SHM_REPORT_LEASE_LOCKED(acquired) static_cast<void>(0)
+#endif
+
 namespace ibmw::extensions::shm_extension {
 
 namespace {
@@ -296,17 +306,26 @@ void* ShmPublisher::TakeSlot(void* token) noexcept {
   return chunk;
 }
 
-bool ShmPublisher::PublishSlot(void* token) noexcept {
+bool ShmPublisher::PublishSlot(void* token, bool* released) noexcept {
   void* chunk = TakeSlot(token);
   if (chunk == nullptr) return false;
   if (Publish(chunk)) return true;
   // Still on loan, and the token that could give it back is spent.
   Release(chunk);
+  if (released) *released = true;
   return false;
 }
 
-void ShmPublisher::ReleaseSlot(void* token) noexcept {
-  if (void* chunk = TakeSlot(token)) Release(chunk);
+bool ShmPublisher::ReleaseSlot(void* token) noexcept {
+  void* chunk = TakeSlot(token);
+  if (chunk == nullptr) return false;
+  Release(chunk);
+  return true;
+}
+
+void ShmPublisher::SetReporter(std::shared_ptr<const void> reporter) noexcept {
+  reporter_owner_ = std::move(reporter);
+  reporter_.store(reporter_owner_.get(), std::memory_order_release);
 }
 
 void ShmPublisher::RaiseSizeHint(size_t size) noexcept {
@@ -469,10 +488,12 @@ void ShmSubscription::Deliver(const void* payload) noexcept {
     std::lock_guard<std::mutex> lock(mu_);
     if (outstanding_ >= options_.max_outstanding) {
       dropped_.fetch_add(1, std::memory_order_relaxed);
+      SHM_REPORT_RECEIVE(limit_drop);
       subscriber_.Release(payload);
       return;
     }
     ++outstanding_;
+    SHM_REPORT_LEASE_LOCKED(true);
   }
   std::shared_ptr<ReleaseToken> token;
   try {
@@ -485,11 +506,15 @@ void ShmSubscription::Deliver(const void* payload) noexcept {
   delivered_.fetch_add(1, std::memory_order_relaxed);
   try {
     CallbackScope scope(this);
+    SHM_REPORT_RECEIVE(callback_entered);
     handler_(payload, size, std::function<void()>([token] { token->Release(); }));
+    SHM_REPORT_RECEIVE(callback_completed);
   } catch (const std::exception& e) {
+    SHM_REPORT_RECEIVE(callback_threw_std);
     MW_WARN("shm retained callback for '{}' threw: {}", url_, e.what());
     token->Release();
   } catch (...) {
+    SHM_REPORT_RECEIVE(callback_threw_nonstd);
     MW_WARN("shm retained callback for '{}' threw an unknown exception.", url_);
     token->Release();
   }
@@ -507,10 +532,14 @@ void ShmSubscription::ReleaseSample(const void* payload, bool leased) noexcept {
       starved_ = false;
       while (auto t = subscriber_.Take()) {
         subscriber_.Release(t.value());
-        if (count) dropped_.fetch_add(1, std::memory_order_relaxed);
+        if (count) {
+          dropped_.fetch_add(1, std::memory_order_relaxed);
+          SHM_REPORT_RECEIVE(limit_drop);
+        }
       }
     }
     --outstanding_;
+    SHM_REPORT_LEASE_LOCKED(false);
   }
   cv_.notify_all();
 }
@@ -722,7 +751,8 @@ void ShmBus::SetListenerThreadName(std::string name) { listeners_.SetThreadName(
 
 void ShmBus::SetListenerThreadSetup(std::function<void()> setup) { listeners_.SetThreadSetup(std::move(setup)); }
 
-ShmPublisher* ShmBus::RegisterPublisher(std::string_view url, size_t size_hint, bool* created) {
+ShmPublisher* ShmBus::RegisterPublisher(std::string_view url, size_t size_hint, bool* created,
+                                        const std::function<bool(ShmPublisher&)>& prepare) {
   auto operation = TryAcquireOperation();
   if (!operation) throw std::runtime_error("shm bus is shutting down");
   CheckUrlLength(url);
@@ -747,6 +777,10 @@ ShmPublisher* ShmBus::RegisterPublisher(std::string_view url, size_t size_hint, 
   if (!publisher->Valid()) {
     throw std::runtime_error(std::string("cannot create shm publisher for '") + std::string(url) +
                              "': " + shm::ErrorName(publisher->InitError()));
+  }
+  if (prepare && !prepare(*publisher)) {
+    if (created) *created = false;
+    return nullptr;
   }
   auto* result = publisher.get();
   publishers_.emplace(std::string(url), std::move(publisher));
@@ -998,5 +1032,8 @@ ShmBusStats ShmBus::Stats() const {
   }
   return total;
 }
+
+#undef SHM_REPORT_RECEIVE
+#undef SHM_REPORT_LEASE_LOCKED
 
 }  // namespace ibmw::extensions::shm_extension
