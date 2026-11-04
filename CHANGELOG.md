@@ -51,6 +51,12 @@ details remain governed by the documentation for each release.
 - Zenoh with `shm_enabled: true` (publishers and RPC): a message whose
   serialization cache holds several buffers is copied whole into shared
   memory. Previously the copy read past the cache and crashed or sent garbage.
+- Zenoh: publishers and subscribers can only be registered before the
+  drivers start; later registrations are refused with an error (native
+  capture subscribers still attach at any time). An RPC server drops requests
+  that arrive before it starts. RPC registration reports failures; a second
+  server of a function is accepted with a warning and, as before, never
+  called over zenoh.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

@@ -32,8 +32,14 @@ class ZenohBus {
   // releases all in-flight references, including after undeclaration.
   bool CreateSubscriber(const std::string& keyexpr, MsgHandleFunc handle,
                         z_owned_subscriber_t& subscriber);
+  // Registration is refused after Freeze(); CreateSubscriber is not.
   bool RegisterSubscriber(const std::string& keyexpr, MsgHandleFunc handle);
   bool RegisterPublisher(const std::string& keyexpr, bool shm_enabled);
+
+  // Ends registration; the drivers call it when they start. Sends read the
+  // publisher catalog without a lock, so they may only come from a driver in
+  // state Start: by then every registration is done.
+  void Freeze() noexcept;
 
   void RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole role,
                               std::string topic, std::string type, std::string key);
@@ -48,17 +54,21 @@ class ZenohBus {
   }
   void StopServiceDiscovery() noexcept { service_discovery_.Stop(); }
 
-  void RegisterRpcNode(const std::string& keyexpr, MsgHandleFunc handle, const std::string& role, bool shm_enabled);
+  // Clients of one function share its answer subscriber. A function has one
+  // server: a later one is accepted with a warning and never called.
+  bool RegisterRpcNode(const std::string& keyexpr, MsgHandleFunc handle, const std::string& role, bool shm_enabled);
 
+  // Only from a driver in state Start, see Freeze().
   void Send(const std::string& topic, char* serialized_data_ptr, uint64_t serialized_data_len);
 
  public:
   z_owned_shm_provider_t shm_provider_;
   z_alloc_alignment_t alignment_ = {0};
-  z_publisher_put_options_t z_pub_options_;
+  z_publisher_put_options_t z_pub_options_;  // shared by all puts, set once
 
   size_t ShmPoolSize() const noexcept { return shm_pool_size_; }
 
+  // Read without the lock: only from a driver in state Start, see Freeze().
   const std::unordered_map<std::string, std::shared_ptr<ZenohPubCtx>>& GetPublisherRegisterMap() const {
     return z_pub_catalog_;
   }
@@ -98,6 +108,7 @@ class ZenohBus {
   z_owned_memory_layout_t shm_layout_;
 
   std::atomic_bool shm_initialized_ = false;
+  std::atomic_bool frozen_ = false;
 
   std::mutex z_catalog_mutex_;
 };

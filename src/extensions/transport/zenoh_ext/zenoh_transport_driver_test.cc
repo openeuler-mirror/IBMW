@@ -227,6 +227,11 @@ TEST_F(ZenohTransportDriverTest, LoanGrowsAfterEarlierSends) {
   }
 }
 
+// TRANS-046: once the driver started, the bus takes no more registrations.
+TEST_F(ZenohTransportDriverTest, StartFreezesTheBus) {
+  EXPECT_FALSE(bus_->RegisterPublisher("transport/late", false));
+}
+
 // Grow doubles a loan up to the pool, Need takes what fits the pool, and
 // neither lowers a size.
 TEST(ShmLoanSizesTest, GrowAndNeedStayWithinThePool) {

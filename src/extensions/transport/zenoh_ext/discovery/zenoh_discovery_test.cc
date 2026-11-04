@@ -336,6 +336,8 @@ TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding
 TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBeforeDetach) {
   Business sender(server_, "robot");
   ASSERT_TRUE(sender.Add("/capture", EndpointRole::kPublisher));
+  // The bus takes registrations only before its drivers start.
+  ASSERT_TRUE(sender.bus->RegisterPublisher("custom/capture/address", false));
   sender.driver.Start();
   Business receiver(client_, "robot");
   receiver.driver.Start();
@@ -345,7 +347,6 @@ TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBefor
   // The discovered address is authoritative; capture must not reconstruct it
   // from the logical topic/type or append a second domain suffix.
   options.wire_topic_name = "custom/capture/address";
-  ASSERT_TRUE(sender.bus->RegisterPublisher(options.wire_topic_name, false));
   std::promise<void> entered, release;
   auto ready = entered.get_future();
   auto released = release.get_future().share();
@@ -384,6 +385,10 @@ TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBefor
 
 TEST_F(ZenohDiscoveryTest, NativeCaptureRejectsBroadKeysAndDoesNotMixTopics) {
   Business sender(server_, "robot");
+  // The bus takes registrations only before its drivers start.
+  for (const char* key : {"transport/exact", "transport/other", "transport/exact/child"}) {
+    ASSERT_TRUE(sender.bus->RegisterPublisher(key, false));
+  }
   sender.driver.Start();
   Business receiver(client_, "robot");
   receiver.driver.Start();
@@ -398,9 +403,6 @@ TEST_F(ZenohDiscoveryTest, NativeCaptureRejectsBroadKeysAndDoesNotMixTopics) {
     if (invalid) receiver.driver.DetachSerializedSubscriber(invalid);
   }
   options.wire_topic_name = "transport/exact";
-  ASSERT_TRUE(sender.bus->RegisterPublisher(options.wire_topic_name, false));
-  ASSERT_TRUE(sender.bus->RegisterPublisher("transport/other", false));
-  ASSERT_TRUE(sender.bus->RegisterPublisher("transport/exact/child", false));
   std::atomic<unsigned> received = 0, polluted = 0;
   const auto handle = receiver.driver.AttachSerializedSubscriber(options, [&](auto&& message) {
     if (message.payload->JoinToString() != "selected") ++polluted;

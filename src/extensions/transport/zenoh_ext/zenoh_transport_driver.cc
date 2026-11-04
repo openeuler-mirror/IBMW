@@ -58,6 +58,7 @@ void ZenohTransportDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->Freeze();
   zenoh_bus_ptr_->StartDiscovery(limit_domain_);
 }
 

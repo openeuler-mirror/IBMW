@@ -13,6 +13,7 @@ ZenohBus::ZenohBus() {
   z_internal_null(&z_config_);
   z_internal_null(&shm_provider_);
   z_internal_null(&shm_layout_);
+  z_publisher_put_options_default(&z_pub_options_);
 }
 
 void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_size) {
@@ -57,20 +58,28 @@ void ZenohBus::Shutdown() {
   z_drop(z_move(shm_provider_));
   z_drop(z_move(shm_layout_));
   shm_initialized_ = false;
+  frozen_ = false;
   initialized_ = false;
   discovery_.Clear();
+}
+
+void ZenohBus::Freeze() noexcept {
+  std::lock_guard lock(z_catalog_mutex_);
+  frozen_.store(true);
 }
 
 bool ZenohBus::RegisterPublisher(const std::string &keyexpr, bool shm_enabled) {
   if (!initialized_) return false;
   std::lock_guard<std::mutex> lock(z_catalog_mutex_);
+  if (frozen_.load()) [[unlikely]] {
+    MW_ERROR("Publisher {} is registered after the zenoh bus started.", keyexpr);
+    return false;
+  }
   if (z_pub_catalog_.contains(keyexpr)) return true;
   z_view_keyexpr_t key;
   if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
 
   z_owned_publisher_t z_pub;
-  z_publisher_put_options_default(&z_pub_options_);
-
   if (z_declare_publisher(z_loan(z_session_), &z_pub, z_loan(key), nullptr) < 0) {
     MW_ERROR("Unable to declare Publisher!");
     return false;
@@ -105,6 +114,10 @@ bool ZenohBus::CreateSubscriber(const std::string& keyexpr, MsgHandleFunc handle
 bool ZenohBus::RegisterSubscriber(const std::string &keyexpr, MsgHandleFunc handle) {
   if (!initialized_) return false;
   std::lock_guard<std::mutex> lock(z_catalog_mutex_);
+  if (frozen_.load()) [[unlikely]] {
+    MW_ERROR("Subscriber {} is registered after the zenoh bus started.", keyexpr);
+    return false;
+  }
   if (z_sub_catalog_.contains(keyexpr)) return false;
   z_view_keyexpr_t key;
   if (z_view_keyexpr_from_str(&key, keyexpr.c_str()) < 0) return false;
@@ -144,7 +157,7 @@ void ZenohBus::StartDiscovery(const std::string& limit_domain) {
 
 void ZenohBus::StopDiscovery() noexcept { discovery_.Stop(); }
 
-void ZenohBus::RegisterRpcNode(const std::string &keyexpr, MsgHandleFunc handle, const std::string &role, bool shm_enabled) {
+bool ZenohBus::RegisterRpcNode(const std::string &keyexpr, MsgHandleFunc handle, const std::string &role, bool shm_enabled) {
   std::string pub_keyexpr;
   std::string sub_keyexpr;
 
@@ -156,12 +169,29 @@ void ZenohBus::RegisterRpcNode(const std::string &keyexpr, MsgHandleFunc handle,
     sub_keyexpr = "req/" + keyexpr;
   } else {
     MW_ERROR("Invalid role: {}", role);
-    return;
+    return false;
   }
 
-  RegisterPublisher(pub_keyexpr, shm_enabled);
-  RegisterSubscriber(sub_keyexpr, std::move(handle));
+  if (!RegisterPublisher(pub_keyexpr, shm_enabled)) {
+    MW_ERROR("Unable to register the publisher of {} {}.", role, keyexpr);
+    return false;
+  }
+  // A client's handler finds the call by request id, so one subscriber serves
+  // all clients of the function. Requests go to the first server only.
+  {
+    std::lock_guard lock(z_catalog_mutex_);
+    if (z_sub_catalog_.contains(sub_keyexpr)) {
+      if (role == "server")
+        MW_WARN("Server {} is registered again; zenoh requests keep going to the first one.", keyexpr);
+      return true;
+    }
+  }
+  if (!RegisterSubscriber(sub_keyexpr, std::move(handle))) {
+    MW_ERROR("Unable to register the subscriber of {} {}.", role, keyexpr);
+    return false;
+  }
   MW_INFO("{} with keyexpr: {} ,role: {} , shm_enabled: {}  is registered successfully.", role, keyexpr.c_str(), role, shm_enabled);
+  return true;
 }
 
 void ZenohBus::Send(const std::string &topic, char *serialized_data_ptr, uint64_t serialized_data_len) {

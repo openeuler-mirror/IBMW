@@ -106,6 +106,7 @@ void ZenohRpcDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::Start) == State::Init,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->Freeze();
   zenoh_bus_ptr_->StartServiceDiscovery(limit_domain_);
 }
 
@@ -155,6 +156,10 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                           key_suffix_;
 
     auto handle = [this, &service_func_wrapper, pattern](const z_loaned_sample_t* message) {
+      // The subscriber is live from registration on. Before Start other
+      // publishers are still being registered and the answer could not be
+      // looked up safely: the request is dropped, the client times out.
+      if (state_.load() != State::Start) [[unlikely]] return;
       try {
         // create service invoke wrapper
         auto service_invoke_wrapper_ptr = std::make_shared<runtime::core::service::ServiceMessageFrame>(
@@ -415,7 +420,7 @@ bool ZenohRpcDriver::RegisterServiceFunc(
       }
     };
     shm_loan_sizes_.Set("rsp/" + pattern, shm_init_loan_size_);
-    zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled);
+    if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled)) return false;
     zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
                                  info.rsp_type_support_ref.TypeName());
     return true;
@@ -532,7 +537,7 @@ bool ZenohRpcDriver::RegisterClientFunc(
     };
 
     shm_loan_sizes_.Set("req/" + pattern, shm_init_loan_size_);
-    zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "client", shm_enabled);
+    if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "client", shm_enabled)) return false;
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
     return false;

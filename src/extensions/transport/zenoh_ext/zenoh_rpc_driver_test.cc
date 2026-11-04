@@ -4,10 +4,13 @@
 // TRANS-005: a zenoh RPC server answers only on the answer key of the called
 // function, and a client completes a call only with an answer on that key.
 // TRANS-045: shm loans that turn out too small go back to the pool.
+// TRANS-046: a function has one server, clients share its answer key; servers
+// answer only after Start, which freezes the bus.
 // One isolated session (no scouting, loopback only) carries both sides.
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -172,10 +175,12 @@ class ZenohRpcDriverTest : public ::testing::Test {
     subs_.push_back(sub);
   }
 
-  void Put(const std::string& keyexpr, std::vector<char> frame) {
-    ASSERT_TRUE(bus_->RegisterPublisher(keyexpr, false));
-    bus_->Send(keyexpr, frame.data(), frame.size());
+  // The test's own publishers, registered like the driver's before it starts.
+  void PeerPublishes(std::initializer_list<std::string> keyexprs) {
+    for (const auto& keyexpr : keyexprs) ASSERT_TRUE(bus_->RegisterPublisher(keyexpr, false));
   }
+
+  void Put(const std::string& keyexpr, std::vector<char> frame) { bus_->Send(keyexpr, frame.data(), frame.size()); }
 
   // `payload` is a frame whose body of `size` bytes ends with `last`.
   static void ExpectFrame(const std::string& payload, size_t size, char last) {
@@ -235,6 +240,7 @@ TEST_F(ZenohRpcDriverTest, ServerAnswersOnlyOnTheKeyOfTheCalledFunction) {
                         }});
   }
   for (const auto& service : services) ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + Pattern("/test/a")}));
   driver.Start();
   Watch("rsp/ibmw_rpc/**");
 
@@ -259,6 +265,7 @@ TEST_F(ZenohRpcDriverTest, ServerAnswersOnlyOnTheKeyOfTheCalledFunction) {
 TEST_F(ZenohRpcDriverTest, ClientCompletesCallOnlyWithAnswerOnItsKey) {
   auto& driver = NewDriver();
   for (const auto& info : infos_) ASSERT_TRUE(driver.RegisterClientFunc({.info = info}));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"rsp/" + Pattern("/test/a"), "rsp/" + Pattern("/test/b")}));
   driver.Start();
   const std::string a = Pattern("/test/a"), b = Pattern("/test/b");
   Watch("req/" + a);
@@ -293,6 +300,127 @@ TEST_F(ZenohRpcDriverTest, ClientCompletesCallOnlyWithAnswerOnItsKey) {
   while (completed().empty() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
   ASSERT_EQ(completed(), std::vector<uint32_t>{IBMW_RPC_STATUS_OK});
   EXPECT_EQ(rsp, 5);
+}
+
+// A request with id `id` for `pattern`.
+std::vector<char> Request(const std::string& pattern, char id, const std::string& body) {
+  return Frame(std::string(1, static_cast<char>(pattern.size())) + pattern + std::string(3, '\0') + id +
+                   std::string(1, '\0'),
+               body);
+}
+
+// A request that arrives before Start is dropped: answering it would look up
+// the answer publisher while others are still being registered.
+TEST_F(ZenohRpcDriverTest, ServerAnswersOnlyAfterStart) {
+  auto& driver = NewDriver();
+  std::atomic<int> served = 0;
+  const runtime::core::service::ServiceFuncWrapper service{.info = infos_[0], .service_func = [&](const auto& frame) {
+    ++served;
+    *static_cast<int*>(frame->rsp_ptr) = 1;
+    Answer(frame);
+  }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  Watch("rsp/" + a);
+  Put("req/" + a, Request(a, 1, "1"));  // the test's peer; nothing registers concurrently
+  std::this_thread::sleep_for(300ms);
+  EXPECT_EQ(served.load(), 0);
+  driver.Start();
+  Put("req/" + a, Request(a, 2, "2"));
+  EXPECT_EQ(WaitSeen(1).size(), 1u);
+  EXPECT_EQ(served.load(), 1);
+}
+
+// A function registered again by another module is accepted, but requests
+// keep going to the first server.
+TEST_F(ZenohRpcDriverTest, SecondServerOfAFunctionIsNotCalled) {
+  auto& driver = NewDriver();
+  auto other = infos_[0];
+  other.module_name = "other";
+  std::vector<std::string> served;
+  auto serve = [this, &served](const std::string& module) {
+    return [this, &served, module](const auto& frame) {
+      {
+        std::lock_guard lock(mutex_);
+        served.push_back(module);
+      }
+      *static_cast<int*>(frame->rsp_ptr) = 1;
+      Answer(frame);
+    };
+  };
+  const runtime::core::service::ServiceFuncWrapper first{.info = infos_[0], .service_func = serve("mod")};
+  const runtime::core::service::ServiceFuncWrapper second{.info = other, .service_func = serve("other")};
+  ASSERT_TRUE(driver.RegisterServiceFunc(first));
+  ASSERT_TRUE(driver.RegisterServiceFunc(second));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  Watch("rsp/" + a);
+  Put("req/" + a, Request(a, 1, "1"));
+  ASSERT_EQ(WaitSeen(1).size(), 1u);
+  std::lock_guard lock(mutex_);
+  EXPECT_EQ(served, std::vector<std::string>{"mod"});
+}
+
+// Clients of one function in two modules share its answer subscriber: calls
+// of both complete.
+TEST_F(ZenohRpcDriverTest, ClientsOfOneFunctionShareItsAnswers) {
+  auto& driver = NewDriver();
+  auto other = infos_[0];
+  other.module_name = "other";
+  ASSERT_TRUE(driver.RegisterClientFunc({.info = infos_[0]}));
+  ASSERT_TRUE(driver.RegisterClientFunc({.info = other}));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"rsp/" + a}));
+  driver.Start();
+  Watch("req/" + a);
+
+  std::vector<uint32_t> codes;
+  int req = 7, rsp[2] = {0, 0};
+  for (int i = 0; i < 2; ++i) {
+    auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+        runtime::core::service::ServiceMessageFrame{.info = i == 0 ? infos_[0] : other,
+                                                    .req_ptr = &req,
+                                                    .rsp_ptr = &rsp[i],
+                                                    .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+    frame->callback = [this, &codes](ibmw::rpc::Status status) {
+      std::lock_guard lock(mutex_);
+      codes.push_back(status.Code());
+    };
+    driver.Call(frame);
+  }
+  const auto seen = WaitSeen(2);
+  ASSERT_EQ(seen.size(), 2u);
+  for (int i = 0; i < 2; ++i) {
+    // [len][u8 "json"][u8 pattern][req id]...: the id follows the pattern.
+    const std::string req_id = seen[i].second.substr(4 + 1 + 4 + 1 + a.size(), 4);
+    Put("rsp/" + a, Frame(req_id + std::string(4, '\0'), std::to_string(5 + i)));
+  }
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  auto done = [&] {
+    std::lock_guard lock(mutex_);
+    return codes.size() == 2;
+  };
+  while (!done() && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(5ms);
+  std::lock_guard lock(mutex_);
+  EXPECT_EQ(codes, (std::vector<uint32_t>{IBMW_RPC_STATUS_OK, IBMW_RPC_STATUS_OK}));
+  EXPECT_EQ(rsp[0] + rsp[1], 11);
+  EXPECT_NE(rsp[0], 0);
+}
+
+// The driver reports what the bus refuses, here because it is frozen.
+TEST_F(ZenohRpcDriverTest, RegistrationOnAFrozenBusFails) {
+  auto& driver = NewDriver();
+  bus_->Freeze();
+  EXPECT_FALSE(driver.RegisterClientFunc({.info = infos_[0]}));
+  const runtime::core::service::ServiceFuncWrapper service{.info = infos_[1], .service_func = [](const auto&) {}};
+  EXPECT_FALSE(driver.RegisterServiceFunc(service));
+}
+
+TEST_F(ZenohRpcDriverTest, StartFreezesTheBus) {
+  NewDriver().Start();
+  EXPECT_FALSE(bus_->RegisterPublisher("req/late", false));
 }
 
 // Requests of 600 KiB outgrow the 1 KiB loan: each smaller loan goes back
@@ -390,6 +518,7 @@ TEST_F(ZenohRpcDriverTest, ServerLoansThatWereTooSmallGoBackToThePool) {
         Answer(frame);
       }};
   ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + Pattern("/test/a")}));
   driver.Start();
   const std::string a = Pattern("/test/a");
   Watch("rsp/" + a);
@@ -419,6 +548,7 @@ TEST_F(ZenohRpcDriverTest, ServerCachedAnswerGetsALoanOfItsSize) {
         Answer(frame);
       }};
   ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + Pattern("/test/a")}));
   driver.Start();
   const std::string a = Pattern("/test/a");
   Watch("rsp/" + a);
@@ -450,6 +580,7 @@ TEST_F(ZenohRpcDriverTest, ServerCachedAnswerInSeveralBuffersIsCopiedWhole) {
         Answer(frame);
       }};
   ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + Pattern("/test/a")}));
   driver.Start();
   const std::string a = Pattern("/test/a");
   Watch("rsp/" + a);
