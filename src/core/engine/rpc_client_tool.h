@@ -77,8 +77,10 @@ class RpcClientTool {
             return;
 
           auto msg_recorder_op = state->Take(req_id);
-          if (msg_recorder_op && state->timeout_handle) [[unlikely]]
+          if (msg_recorder_op && state->timeout_handle) [[unlikely]] {
+            InTimeoutHandle in_handle(*state);
             state->timeout_handle(std::move(*msg_recorder_op));
+          }
         });
       } catch (...) {
         // A record without its timeout would never end: give it back, the
@@ -116,7 +118,9 @@ class RpcClientTool {
   // Hands every remaining record to `handle` exactly once, so no call is
   // dropped without a result; an exception from `handle` only affects its
   // own record. Later timeouts are no-ops and timeout tasks still running
-  // are waited for, so this must not be called from a timeout task.
+  // are waited for; called from this tool's timeout handle (a timeout that
+  // shuts the driver down) it does not wait for that task itself. It must
+  // not be called from another timeout task of this tool.
   //
   // Known limitation: concurrent Record()/GetRecord() calls are not
   // synchronized with this (the map is iterated). Call it from the driver
@@ -124,7 +128,8 @@ class RpcClientTool {
   // before destroying drivers (pre-existing, tracked separately).
   void AbandonAll(const TimeoutHandle& handle) noexcept {
     state_->closed.store(true);
-    while (state_->running_timeout_tasks.load() != 0) std::this_thread::yield();
+    const int self = InTimeoutHandle::Current() == state_.get() ? 1 : 0;
+    while (state_->running_timeout_tasks.load() != self) std::this_thread::yield();
 
     for (auto& item : state_->client_msg_recorder_map) {
       try {
@@ -185,6 +190,22 @@ class RpcClientTool {
 
    private:
     State& state_;
+  };
+
+  // Marks the thread while it runs a timeout handle; only a timeout that
+  // fires pays for it.
+  class InTimeoutHandle {
+   public:
+    explicit InTimeoutHandle(const State& state) noexcept : outer_(current_) { current_ = &state; }
+    ~InTimeoutHandle() { current_ = outer_; }
+    InTimeoutHandle(const InTimeoutHandle&) = delete;
+    InTimeoutHandle& operator=(const InTimeoutHandle&) = delete;
+
+    static const State* Current() noexcept { return current_; }
+
+   private:
+    static inline thread_local const State* current_ = nullptr;
+    const State* outer_;
   };
 
   std::shared_ptr<State> state_;

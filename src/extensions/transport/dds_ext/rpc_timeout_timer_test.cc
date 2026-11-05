@@ -83,6 +83,24 @@ TEST(RpcTimeoutTimerTest, UnansweredClientCallTimesOut) {
   EXPECT_FALSE(tool.GetRecord(1).has_value());
 }
 
+// A timeout handle that shuts the driver down hands out the other pending
+// calls without waiting for its own task.
+TEST(RpcTimeoutTimerTest, AbandonAllFromTheTimeoutHandle) {
+  RpcTimeoutTimer timer;
+  runtime::core::util::RpcClientTool<int> tool;
+  tool.RegisterTimeoutExecutor(timer.Handle());
+  std::vector<int> abandoned;
+  std::promise<void> done;
+  tool.RegisterTimeoutHandle([&](int&&) {
+    tool.AbandonAll([&](int&& call) { abandoned.push_back(call); });
+    done.set_value();
+  });
+  ASSERT_TRUE(tool.Record(1, 20ms, 41));
+  ASSERT_TRUE(tool.Record(2, 1h, 42));
+  ASSERT_EQ(done.get_future().wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(abandoned, (std::vector<int>{42}));
+}
+
 // A timeout callback may shut the driver down: Stop from a task does not
 // join its own thread, and the thread still ends.
 TEST(RpcTimeoutTimerTest, StopFromATaskDoesNotJoinItself) {
