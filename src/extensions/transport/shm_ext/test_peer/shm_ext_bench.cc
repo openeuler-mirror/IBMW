@@ -15,6 +15,12 @@
 // Prints one line per case, the median over the repetitions of a process:
 //   RESULT case=<name> payload=<bytes> threads=<n> ns_per_op=<x> mops=<x> ...
 // With several threads ns_per_op is per thread (n * 1000 / mops).
+//
+// Built with Reporter V1 (IBMW_SHM_EXT_BENCH_REPORTER_HOST, see CMakeLists.txt)
+// the binary is also the Reporter V1 host: IBMW_CORE_METRICS=counters makes the
+// compiled-in shm_ext sources count into its core metrics, and the final
+// snapshot goes to IBMW_OBSERVABILITY_OUTPUT_DIR/metrics.jsonl (default ".").
+// Prints METRICS_MODE=<counters|off> and METRICS_FINAL_SNAPSHOT=<ok|fail>.
 
 #include <sched.h>
 #include <signal.h>
@@ -41,6 +47,9 @@
 #include "shm_ext/shm_bus.h"
 #include "shm_ext/shm_transport_driver.h"
 #include "yaml-cpp/yaml.h"
+#ifdef IBMW_SHM_EXT_BENCH_REPORTER_HOST
+#include "observability/core_metrics.h"
+#endif
 
 namespace ibmw::extensions::shm_extension {
 namespace {
@@ -433,6 +442,16 @@ int Main(int argc, char** argv) {
 #else
   g_logger.Set(ibmw::logger::LoggerRef(&g_warn_logger));  // also builds against older trees
 #endif
+#ifdef IBMW_SHM_EXT_BENCH_REPORTER_HOST
+  // Initialized before the first driver, so every driver finds the host
+  // reporter. Started (which freezes the registry) only after the last case:
+  // each case registers its publishers after the previous case has ended, and a
+  // frozen registry refuses new slots. Counting does not depend on Start.
+  static const int kMetricsOwner = 0;
+  auto& metrics = runtime::core::observability::CoreMetricsController();
+  metrics.Initialize(&kMetricsOwner);
+  std::printf("METRICS_MODE=%s\n", metrics.Enabled() ? "counters" : "off");
+#endif
 
   {
     // Downcast a base pointer as shm_loaned_pod does. In ibmw_shm_ext_bench_so
@@ -456,7 +475,15 @@ int Main(int argc, char** argv) {
     SendSmall(payload);
     for (int threads : kThreadCounts) PodLoanPublish(payload, threads, "scale_pod_loan_publish");
   }
+#ifdef IBMW_SHM_EXT_BENCH_REPORTER_HOST
+  metrics.Start(&kMetricsOwner);
+  const bool snapshot_ok = metrics.FinalizeSnapshot(&kMetricsOwner);
+  std::printf("METRICS_FINAL_SNAPSHOT=%s\n", snapshot_ok ? "ok" : "fail");
+#endif
   std::printf("PIN_FAILURES=%llu\n", static_cast<unsigned long long>(g_pin_failures.load()));
+#ifdef IBMW_SHM_EXT_BENCH_REPORTER_HOST
+  if (!snapshot_ok) return 1;
+#endif
   return 0;
 }
 

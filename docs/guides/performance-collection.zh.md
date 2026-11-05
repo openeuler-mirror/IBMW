@@ -322,6 +322,22 @@ python3 scripts/core_metrics_shm_perf.py --output /path/to/empty-run --jobs 10 \
 - 绑定 CPU 25、26、27；每次试验使用私有 `/tmp/ishm*` 根并在结束后删除，不写 `/dev/shm`。
 - 结果只在 shm 协议内比较 off/out/counters，不要与 iceoryx 门禁的数值对比（进程数与冻结负载不同）。
 
+**干扰核算（shm 门禁）。** 本机常有他人负载。`scripts/core_metrics_shm_perf.py` 只判定运行本门禁进程的 CPU：E2E 为 26（订阅）和 27（发布），micro 为 27。CPU 25 和共享 L2 的 24 只作为上下文记录。
+
+E2E 在门禁自己的 CPU 采样窗口内（不含预热与冷却）约每秒取一个原始样本。每 CPU 的 foreign = max(`/proc/schedstat` 运行时间 − 本门禁进程在该 CPU 上的 utime+stime, 逐任务扫描归因的外来时间)。样本按原始计数封存，加载时重新推导并校验首尾相接。不用 `/proc/stat` 作被减数，因为它的忙时是 tick 采样：本通道 5750 批/秒恰为每 tick 23 批，读数会在 0.06–2.04 核之间混叠。
+
+判为受干扰的条件（阈值在验收前由本机噪声数据确定，并登记在计划中）：
+
+- 两 CPU 窗口均值之和 > 0.02 核；
+- 或任一 CPU 的 1 s 样本 > 0.10 核：无突发试验最大 0.039 核，最小的外来突发 0.12 核；
+- 或出现 `accounting_deficit`、`sampler_gap`。
+
+micro 用紧贴基准运行的专用窗口：foreign = CPU 27 的运行时间 − 基准 rusage（扣除登记的 1 ms 启动余量后判 deficit），再加 CPU 27 的 run delay。超过基准时长的 1% 即受干扰。
+
+受干扰的试验 `quality_valid=false`，所在通道结论为 INCONCLUSIVE。通道之间仍按 FAIL > INCONCLUSIVE > PASS 合并。`summary.json` 给出 `e2e_reason`/`micro_reason`，只有总结论为 INCONCLUSIVE 时才有顶层 `reason: interference`。每次试验前要求 2 s 安静窗口，最长等待 10 min。
+
+2026-11-05 的主机验收结果为 `FAIL (E2E INCONCLUSIVE, micro FAIL)`：E2E 72 次中 38 次受干扰；micro 90 次均 clean，其 FAIL 在 iceoryx 构建上同样出现（counters/off 10.86），来自每次 add 一次原子读改写（约 5 ns）对 0.024 ns 预算的超出，与传输和干扰无关。主机结果不外推到 OHOS，性能结论建议在 OHOS 设备上测得，并同样检查环境干扰。
+
 ### 8.3 OHOS remote capture candidate
 
 OHOS 上 host collector 的 inherited FD 不能穿过 HDC。需要验证设备端 DDS exact capture 时，可分别启用默认关闭的 native agent 与 production candidate：

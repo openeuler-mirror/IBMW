@@ -5,6 +5,13 @@
 # and runs assert_shm_metrics.py on each metrics.jsonl. Each workload gets a
 # private discovery root under /tmp (never /dev/shm), removed on exit. Only the
 # processes started here are signalled, with bounded timeouts.
+#
+# For a target without Python or /tmp (the OHOS device, run_shm_ohos.sh
+# metrics-device): IBMW_SHM_CHECK_TMP is the parent of the private roots
+# (default /tmp; keep it short, see new_root), and IBMW_SHM_CHECK_ASSERT=0 skips
+# assert_shm_metrics.py: each workload then ends with SHM_RETAINED_E2E_CHECK_RUN
+# and the script with SHM_RETAINED_E2E_CHECK_ALL_RUN, and the caller asserts
+# the metrics.jsonl files on another machine.
 set -u
 
 if [ "$#" -ne 2 ]; then
@@ -16,6 +23,8 @@ BUILD_DIR=$1
 WORK_DIR=$2
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON=${PYTHON:-python3}
+CHECK_TMP=${IBMW_SHM_CHECK_TMP:-/tmp}
+CHECK_ASSERT=${IBMW_SHM_CHECK_ASSERT:-1}
 E2E="$BUILD_DIR/shm_retained_loan_e2e"
 if [ ! -x "$E2E" ]; then
   echo "shm_retained_loan_e2e is not executable: $E2E" >&2
@@ -55,7 +64,7 @@ fail() {
 # <root>/ibmw_shm.<uid>.<domain> must fit the library's 63-byte limit.
 new_root() {
   cleanup
-  SHM_ROOT=$(mktemp -d /tmp/ibR.XXXXXX) || fail "$1" mktemp
+  SHM_ROOT=$(mktemp -d "$CHECK_TMP/ibR.XXXXXX") || fail "$1" mktemp
   IBMW_SHM_ROOT=$SHM_ROOT
   IBMW_SHM_DOMAIN="c$$$1"
   export IBMW_SHM_ROOT IBMW_SHM_DOMAIN
@@ -69,6 +78,10 @@ assert_metrics() {
   mode=$1
   out="$WORK_DIR/$mode"
   [ -s "$out/metrics.jsonl" ] || fail "$mode" no_metrics_jsonl
+  if [ "$CHECK_ASSERT" = 0 ]; then
+    echo "SHM_RETAINED_E2E_CHECK_RUN mode=$mode metrics=$out/metrics.jsonl (assert elsewhere)"
+    return 0
+  fi
   "$PYTHON" "$SCRIPT_DIR/assert_shm_metrics.py" --check-run "$mode" "$out/metrics.jsonl" \
     >"$out/assert.log" 2>&1 || fail "$mode" assert_shm_metrics
   echo "SHM_RETAINED_E2E_CHECK_PASS mode=$mode $(cat "$out/assert.log")"
@@ -122,4 +135,8 @@ has "$out/subscriber.log" 'RETAINED_E2E_CROSS_THREAD_RELEASE ok=1 payload_valid=
 assert_metrics retained
 
 cleanup
-echo "SHM_RETAINED_E2E_CHECK_ALL_PASS"
+if [ "$CHECK_ASSERT" = 0 ]; then
+  echo "SHM_RETAINED_E2E_CHECK_ALL_RUN"
+else
+  echo "SHM_RETAINED_E2E_CHECK_ALL_PASS"
+fi

@@ -53,6 +53,43 @@
 #            logs/hap-<time>/ (hap-release-<time>/), check them and uninstall
 #            the bundle
 #   hap-release  hap with HAP_SIGN=release (normal_hap domain)
+#   metrics  metrics-build metrics-device metrics-bench metrics-clean
+#   metrics-build  build into OUT/dyn/metrics (PIE, libc++_shared.so, Reporter V1 +
+#            core metrics compiled in): the plugin, shm_retained_loan_e2e and the
+#            Reporter host ibmw_shm_ext_bench, plus the rt bench as the arm without
+#            them; checks INTERP/NEEDED and the exported reporter query
+#   metrics-device  push to METRICS_DEVICE_DIR; check_shm_metrics.sh (direct +
+#            retained, IBMW_CORE_METRICS=counters) as root and as METRICS_UID (through
+#            run_as); pulls each metrics.jsonl to logs/metrics-device-<time>/ and runs
+#            assert_shm_metrics.py --check-run on the host. Needs metrics-build
+#   metrics-bench  arms out (rt bench), off and counters (metrics bench, metrics off
+#            or counting) interleaved METRICS_BENCH_ROUNDS times, cycling through all arm orders;
+#            paired deltas off vs out and counters vs off over CLEAN rounds in
+#            logs/metrics-bench-<time>/; shm_ext_bench_metrics_check.py proves per
+#            round that counters counted and off did not. Needs metrics-build
+#   metrics-clean  remove METRICS_DEVICE_DIR and METRICS_DEVICE_ROOT from the device
+#   env-baseline  idle statistics of the device for the perf_env.py thresholds:
+#            BASELINE_SNAPS snapshots, no bench, also summarized over windows of
+#            BASELINE_WINDOW s, logs/env-baseline-<time>/; leaves
+#            METRICS_DEVICE_DIR (metrics-clean removes it)
+#
+# Interference (bench-ext, dyn-bench, metrics-*; docs: 测试文档.md §6.18). The device
+# is shared, so with GUARD=1 (default) a stage first waits until no foreign
+# benchmark (FOREIGN_PATTERN) has run for GUARD_CHECKS checks GUARD_INTERVAL s apart,
+# and every bench round: re-checks that once, needs a quiet window on BENCH_CPUS
+# (else it is retried, and after QUIET_TRIES recorded as disturbed without running),
+# runs through ohos/run_round.sh (taskset + `time -p`, ROUND_TIMEOUT), takes
+# snapshots before and after (under the complementary mask) and gets a perf_env.py
+# verdict in <label>.<round>.env.json (all verdicts: interference.txt in the run
+# directory): foreign load on BENCH_CPUS or in the whole system, a foreign benchmark
+# seen, CPU accounting that does not add up, pin failures. Summaries use CLEAN rounds
+# only and list per-case outliers. GUARD=0: no wait, no snapshots, all rounds.
+# Processes are stopped by pid or by executable/working directory in our directories,
+# never by name (device_ours). A round fails on a non-zero exit code, a timeout or a
+# log without RESULT lines.
+# Exit status: 0 ok; 1 a failure (includes a guard wait over GUARD_MAX_WAIT); 3 no
+# failure, but fewer than MIN_CLEAN clean rounds: INCONCLUSIVE, the numbers are not
+# a result; 64 unknown stage.
 #
 # Environment:
 #   OUT                 outputs (default: <repo>/build-ohos-shm)
@@ -83,6 +120,29 @@
 #                       "debug": true, runs in u:r:debug_hap:s0; release: release
 #                       profile (os_integration) and "debug": false, runs in
 #                       u:r:normal_hap:s0. hap-build and hap-device must agree
+#   METRICS_DEVICE_DIR  metrics-stage binaries (default: /data/local/tmp/ibmw_shm_met)
+#   METRICS_DEVICE_ROOT metrics-stage private roots; keep it short (default: /data/local/tmp/ibm)
+#   METRICS_BENCH_ROUNDS metrics-bench rounds per arm (default: 20)
+#   METRICS_UID         metrics-device non-root uid, gid = uid; empty: root only (default: 2000)
+#   BASELINE_SNAPS      env-baseline snapshots (default: 120)
+#   BASELINE_INTERVAL   seconds of sleep between them (default: 4.7; with the snapshot
+#                       itself about 5.2 s apart, the length of a bench round, and with
+#                       the same snapshot load inside the window as a round has)
+#   BASELINE_WINDOW     shortest window of the env-baseline round-window summary, in s
+#                       (default: 4.9, so that one window is one pair of snapshots)
+#   GUARD               1 interference guard and verdicts, 0 none (default: 1)
+#   FOREIGN_PATTERN     grep -E pattern of foreign benchmarks on the device
+#   GUARD_CHECKS        consecutive idle checks before a stage (default: 3)
+#   GUARD_INTERVAL      seconds between them (default: 30)
+#   GUARD_BUSY_SLEEP    seconds to wait when busy (default: 60)
+#   GUARD_MAX_WAIT      seconds of waiting per script run before giving up (default: 10800)
+#   QUIET_WINDOW        seconds of the quiet window of a round (default: 2)
+#   QUIET_TRIES         quiet attempts of a round (default: 15)
+#   MIN_CLEAN           clean rounds needed per arm and per pair of arms (default:
+#                       two thirds of the planned rounds)
+#   ROUND_TIMEOUT       seconds per bench round, device side (default: 300)
+#   HDC_TIMEOUT         seconds per guard, snapshot and process-list hdc call (default: 60)
+#   PERF_ENV_ARGS       more perf_env.py arguments (--max-foreign, --quiet-cpu-busy, ...)
 #
 # build/qemu/device/bench/bench-ext use fully static binaries (-static,
 # c++_static), which do not exercise the device's dynamic linker. The SDK
@@ -113,6 +173,23 @@ DYN_DEVICE_DIR="${DYN_DEVICE_DIR:-/data/local/tmp/ibmw_shm_dyn}"
 DYN_DEVICE_ROOT="${DYN_DEVICE_ROOT:-/data/local/tmp/ibd}"
 DYN_BENCH_ROUNDS="${DYN_BENCH_ROUNDS:-15}"
 RUN_UIDS="${RUN_UIDS:-2000 20099999}"
+METRICS_DEVICE_DIR="${METRICS_DEVICE_DIR:-/data/local/tmp/ibmw_shm_met}"
+METRICS_DEVICE_ROOT="${METRICS_DEVICE_ROOT:-/data/local/tmp/ibm}"
+METRICS_BENCH_ROUNDS="${METRICS_BENCH_ROUNDS:-20}"
+METRICS_UID="${METRICS_UID-2000}"
+BASELINE_SNAPS="${BASELINE_SNAPS:-120}"
+BASELINE_INTERVAL="${BASELINE_INTERVAL:-4.7}"
+BASELINE_WINDOW="${BASELINE_WINDOW:-4.9}"
+GUARD="${GUARD:-1}"
+FOREIGN_PATTERN="${FOREIGN_PATTERN:-qb\.sh|qb2\.sh|q\.[a-z0-9]+ --|selfdev_st|ft[0-9]+\.sh}"
+GUARD_CHECKS="${GUARD_CHECKS:-3}"
+GUARD_INTERVAL="${GUARD_INTERVAL:-30}"
+GUARD_BUSY_SLEEP="${GUARD_BUSY_SLEEP:-60}"
+GUARD_MAX_WAIT="${GUARD_MAX_WAIT:-10800}"
+QUIET_WINDOW="${QUIET_WINDOW:-2}"
+QUIET_TRIES="${QUIET_TRIES:-15}"
+MIN_CLEAN="${MIN_CLEAN:-}"
+PERF_ENV_ARGS="${PERF_ENV_ARGS:-}"
 SRC="${OUT}/src"
 LOGS="${OUT}/logs"
 CORE_TEST="${OUT}/core/shm/ibmw_selfdev_shm_test"
@@ -125,6 +202,7 @@ DYN="${OUT}/dyn"
 LIBCXX_SHARED="${SDK}/llvm/lib/aarch64-linux-ohos/libc++_shared.so"
 PLUGIN_SO="${DYN}/rt/libibmw_shm_transport.so"
 RUN_AS="${OUT}/run_as"
+METRICS_TREE="${DYN}/metrics"
 HAP="${OUT}/hap"
 HAP_BUNDLE="${HAP_BUNDLE:-com.ibmw.shmhap}"
 HAP_SIGN="${HAP_SIGN:-debug}"
@@ -133,9 +211,247 @@ SIGN_LIB="${SDK_ROOT}/toolchains/lib"
 mkdir -p "${LOGS}"
 
 rc=0
+INCONCLUSIVE=0
 fail() {
   echo "FAIL: $*" >&2
   rc=1
+}
+
+# ---------------------------------------------------------------- interference
+
+GUARD_LOG="${LOGS}/guard.log"
+GUARD_WAITED=0
+PERF_ENV="${HERE}/perf_env.py"
+# Host-side limit of one hdc call of the guard and the snapshots: a hung hdc
+# must not block the guard forever (a timed-out call counts as busy / no verdict).
+HDC_TIMEOUT="${HDC_TIMEOUT:-60}"
+# FOREIGN_PATTERN goes into single quotes of a device command line.
+if [[ "${FOREIGN_PATTERN}" == *"'"* || "${FOREIGN_PATTERN}" == *$'\n'* || -z "${FOREIGN_PATTERN}" ]]; then
+  echo "FOREIGN_PATTERN must be non-empty, without single quotes or newlines" >&2
+  exit 64
+fi
+
+guard_log() {
+  echo "$(date '+%F %T') $*" | tee -a "${GUARD_LOG}"
+}
+
+# Number of foreign benchmark processes; anything but a number (no answer, a hung
+# hdc, a process list without pid 1) is not 0. The device shell's own children
+# (ps, awk, grep with the pattern on its command line) are left out by pid.
+foreign_count() {
+  # The process list is taken before any command with the pattern on its command
+  # line starts; the device shell and its forks ($$, parent $$) carry the pattern.
+  timeout --foreground "${HDC_TIMEOUT}" hdc shell "l=\$(ps -eo pid,ppid,args 2>/dev/null); \
+    if echo \"\$l\" | awk '\$1 == 1' | grep -q .; then \
+      echo \"\$l\" | awk -v s=\$\$ '\$1 != s && \$2 != s' | grep -E '${FOREIGN_PATTERN}' | wc -l; \
+    else echo no-process-list; fi" 2>&1 | tr -d '\r '
+}
+
+# device_wait_idle <what>: until GUARD_CHECKS consecutive checks found no foreign
+# benchmark. False when the waiting of this script run exceeds GUARD_MAX_WAIT.
+device_wait_idle() {
+  [[ "${GUARD}" == 1 ]] || return 0
+  local what=$1 ok=0 n
+  while ((ok < GUARD_CHECKS)); do
+    n="$(foreign_count)"
+    if [[ "${n}" == 0 ]]; then
+      ok=$((ok + 1))
+      guard_log "guard ${what}: idle check ${ok}/${GUARD_CHECKS}"
+      if ((ok < GUARD_CHECKS)); then
+        sleep "${GUARD_INTERVAL}"
+        GUARD_WAITED=$((GUARD_WAITED + GUARD_INTERVAL))
+      fi
+    else
+      ok=0
+      if ((GUARD_WAITED >= GUARD_MAX_WAIT)); then
+        guard_log "guard ${what}: GIVING UP after ${GUARD_WAITED} s, foreign=${n}"
+        return 1
+      fi
+      guard_log "guard ${what}: busy, foreign=${n}, waited ${GUARD_WAITED} s"
+      sleep "${GUARD_BUSY_SLEEP}"
+      GUARD_WAITED=$((GUARD_WAITED + GUARD_BUSY_SLEEP))
+    fi
+  done
+}
+
+# cpu_mask <cpu list>: hex mask for the device's taskset (toybox: no -c).
+cpu_mask() {
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import perf_env
+print("%x" % sum(1 << c for c in perf_env.parse_cpus(sys.argv[2])))' "${HERE}" "$1"
+}
+
+# push_checked <local file> <device path>: push and compare the size (hdc does
+# not reliably report failures).
+push_checked() {
+  local size
+  size="$(stat -c %s "$1")"
+  hdc shell "rm -f $2" >/dev/null
+  hdc file send "$1" "$2" >/dev/null
+  [[ "$(hdc shell "stat -c %s $2 2>/dev/null" | tr -d '\r')" == "${size}" ]] || { fail "push $2"; return 1; }
+}
+
+# env_setup <device dir>: pushes the round runner (ohos/run_round.sh) and, with
+# GUARD=1, the snapshot snippet to the existing directory; sets BENCH_MASK and,
+# for the snapshots and the runner, ENV_PREFIX: the mask of the device's other
+# CPUs, so they do not run on the watched ones.
+ENV_PREFIX=""
+env_setup() {
+  local dir=$1 snippet="${LOGS}/perf_env_snippet.sh" cpus env_mask
+  push_checked "${HERE}/ohos/run_round.sh" "${dir}/run_round.sh" || return 1
+  [[ "${GUARD}" == 1 ]] || return 0
+  python3 "${PERF_ENV}" snippet >"${snippet}" || return 1
+  push_checked "${snippet}" "${dir}/perf_env.sh" || return 1
+  BENCH_MASK="$(cpu_mask "${BENCH_CPUS}")" || { fail "bad BENCH_CPUS ${BENCH_CPUS}"; return 1; }
+  # The CPUs the device lists, not a count: they need not be 0..n-1.
+  cpus="$(timeout --foreground "${HDC_TIMEOUT}" hdc shell "grep -o '^cpu[0-9][0-9]*' /proc/stat" | tr -d '\r' | sed 's/^cpu//' | tr '\n' ' ')"
+  env_mask="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import perf_env
+have, bench = set(perf_env.parse_cpus(sys.argv[2])), set(perf_env.parse_cpus(sys.argv[3]))
+if not bench <= have: sys.exit("BENCH_CPUS %s not all on the device (%s)" % (sys.argv[3], perf_env.fmt_cpus(sorted(have))))
+m = 0
+for c in have - bench: m |= 1 << c
+print("%x" % m)' "${HERE}" "${cpus}" "${BENCH_CPUS}")" || { fail "device CPUs '${cpus}'"; return 1; }
+  ENV_PREFIX="taskset ${env_mask}"
+  [[ "${env_mask}" == 0 ]] && ENV_PREFIX=""
+  return 0
+}
+
+# env_snap <device dir> <file>
+env_snap() {
+  timeout --foreground "${HDC_TIMEOUT}" hdc shell "${ENV_PREFIX} sh $1/perf_env.sh" 2>&1 | tr -d '\r' >"$2"
+}
+
+# perf_env <subcommand> <args...> with the thresholds of this run.
+perf_env() {
+  local cmd=$1
+  shift
+  # shellcheck disable=SC2086
+  python3 "${PERF_ENV}" "${cmd}" --cpus "${BENCH_CPUS}" --foreign "${FOREIGN_PATTERN}" \
+    --quiet-min-window "${QUIET_WINDOW}" ${PERF_ENV_ARGS} "$@"
+}
+
+# round_guard <device dir> <base>: foreign check and quiet window before a round,
+# leaving <base>.qpre.txt and <base>.pre.txt. One foreign check only (the stage
+# started with the full device_wait_idle); a foreign benchmark seen here repeats
+# that. The time of failed quiet attempts counts into GUARD_WAITED.
+# 0 quiet; 1 the guard gave up; 2 not quiet after QUIET_TRIES attempts.
+round_guard() {
+  local dir=$1 base=$2 name=${2##*/} try n out start
+  for ((try = 1; try <= QUIET_TRIES; ++try)); do
+    start=${SECONDS}
+    n="$(foreign_count)"
+    if [[ "${n}" != 0 ]]; then
+      guard_log "round ${name}: foreign=${n}"
+      device_wait_idle "round ${name}" || return 1
+      start=${SECONDS}
+    fi
+    env_snap "${dir}" "${base}.qpre.txt"
+    sleep "${QUIET_WINDOW}"
+    env_snap "${dir}" "${base}.pre.txt"
+    out="$(perf_env quiet "${base}.qpre.txt" "${base}.pre.txt" 2>&1)" && return 0
+    sleep 5
+    GUARD_WAITED=$((GUARD_WAITED + SECONDS - start))
+    guard_log "round ${name}: attempt ${try}: ${out} (waited ${GUARD_WAITED} s)"
+    if ((GUARD_WAITED >= GUARD_MAX_WAIT)); then
+      guard_log "guard round ${name}: GIVING UP after ${GUARD_WAITED} s"
+      return 1
+    fi
+  done
+  return 2
+}
+
+# env_disturbed <json> <reason>: verdict of a round that perf_env.py could not judge.
+env_disturbed() {
+  python3 -c 'import json, sys
+open(sys.argv[1], "w").write(json.dumps({"verdict": "DISTURBED", "reasons": [sys.argv[2]]}) + "\n")' "$1" "$2"
+}
+
+# round_verdict <device dir> <base> <log>: post snapshot, <base>.env.json and one
+# line in interference.txt beside it. A verdict that cannot be made is DISTURBED.
+round_verdict() {
+  local dir=$1 base=$2 log=$3 out st
+  env_snap "${dir}" "${base}.post.txt"
+  rm -f "${base}.env.json"
+  out="$(perf_env round --pre "${base}.pre.txt" --post "${base}.post.txt" --quiet-pre "${base}.qpre.txt" \
+    --time "${log}" --json "${base}.env.json" 2>&1)"
+  st=$?
+  if [[ "${st}" -ne 0 && "${st}" -ne 1 || ! -s "${base}.env.json" ]]; then
+    env_disturbed "${base}.env.json" "no verdict: ${out}"
+    out="VERDICT DISTURBED no verdict: ${out}"
+  fi
+  echo "${base##*/} ${out}" | tee -a "${base%/*}/interference.txt"
+}
+
+# guarded_round <runs> <device dir> <label> <round> <env assignments> <bench> <after>:
+# one bench run in the device dir through run_round.sh (env_setup pushed it), its
+# log in <runs>/<label>.<round>.log; <after> is a device command run after it.
+# Reports the exit code of the bench in-band (hdc does not reliably return it).
+# A round fails on a non-zero exit code, a timeout (124) or a log without RESULT
+# lines. 0 the round was run; 1 stop the stage (the guard gave up); 2 the round
+# was skipped as disturbed (not quiet).
+ROUND_TIMEOUT="${ROUND_TIMEOUT:-300}"
+guarded_round() {
+  local runs=$1 dir=$2 label=$3 round=$4 envs=$5 bench=$6 after=$7
+  local base="${runs}/${label}.${round}" log="${runs}/${label}.${round}.log" mask=- st run_rc
+  if [[ "${GUARD}" == 1 ]]; then
+    round_guard "${dir}" "${base}"
+    st=$?
+    if [[ "${st}" -eq 1 ]]; then
+      fail "${label} round ${round}: the guard gave up after ${GUARD_WAITED} s"
+      return 1
+    elif [[ "${st}" -eq 2 ]]; then
+      echo "ROUND_SKIPPED not quiet after ${QUIET_TRIES} attempts" >"${log}"
+      env_disturbed "${base}.env.json" "skipped: not quiet after ${QUIET_TRIES} attempts"
+      echo "${base##*/} VERDICT DISTURBED skipped: not quiet after ${QUIET_TRIES} attempts" | tee -a "${runs}/interference.txt"
+      return 2
+    fi
+    mask="${BENCH_MASK}"
+  fi
+  # run_round.sh: time directly above the bench (toybox timeout does not pass the
+  # CPU time of its child on), its own timeout, and on a timeout it kills the
+  # process tree it started by pid. The runner itself stays off the watched CPUs.
+  # The host timeout only ends a hung hdc client (log without DEVICE_RC: a failure).
+  # --foreground: timeout stays in our process group, so Ctrl-C reaches hdc and the
+  # trap of the stage runs at once.
+  timeout --foreground "$((ROUND_TIMEOUT + 120))" hdc shell "cd ${dir} && ${envs} ${ENV_PREFIX} sh ./run_round.sh ${ROUND_TIMEOUT} ${mask} ${dir}/round.pid ./${bench} --cpus ${BENCH_CPUS} ${BENCH_ARGS} 2>&1; echo DEVICE_RC=\$?; ${after}" \
+    | tr -d '\r' >"${log}"
+  [[ "${GUARD}" == 1 ]] && round_verdict "${dir}" "${base}" "${log}"
+  run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
+  if [[ "${run_rc:-255}" -ne 0 ]]; then
+    fail "${label} round ${round}: exit ${run_rc:-none}$([[ "${run_rc}" == 124 ]] && echo ' (timeout)') (${log})"
+  elif ! grep -q '^RESULT ' "${log}"; then
+    fail "${label} round ${round}: no RESULT lines (${log})"
+  fi
+  return 0
+}
+
+# bench_summary <planned rounds> <runs> [<a> <b>]: over CLEAN rounds with GUARD=1,
+# else over all; fewer than MIN_CLEAN (default: two thirds of the planned rounds)
+# clean rounds of a label, or clean in both labels, set INCONCLUSIVE (exit status 3).
+bench_summary() {
+  local args=() st planned=$1
+  shift
+  if [[ "${GUARD}" == 1 ]]; then
+    args+=(--clean-only --planned "${planned}")
+    [[ -n "${MIN_CLEAN}" ]] && args+=(--min-clean "${MIN_CLEAN}")
+  fi
+  python3 "${HERE}/shm_ext_bench_summary.py" "${args[@]}" "$@"
+  st=$?
+  if [[ "${st}" -eq 3 ]]; then
+    INCONCLUSIVE=1
+  elif [[ "${st}" -ne 0 ]]; then
+    fail "summary of $1"
+  fi
+}
+
+# ohos_patch_tree <tree>: what a copied tree needs to configure for OHOS. Besides
+# the patch: since 9441ed2 a shm build also resolves the Fast DDS provider for
+# dds_types, which nothing here uses (shm_ext, its bench and shm_retained_loan_e2e
+# do not link it) and which has no OHOS package. By sed, as a baseline tree
+# (bench-ext) older than that commit does not have these lines.
+ohos_patch_tree() {
+  (cd "$1" && patch -p1 --quiet <"${HERE}/ohos/ibmw-core-workaround.diff") || return 1
+  sed -i 's/^   IBMW_BUILD_SHM_EXTENSION OR IBMW_BUILD_BENCHMARKS)$/   IBMW_BUILD_BENCHMARKS)/' \
+    "$1/CMakeLists.txt" "$1/src/extensions/CMakeLists.txt"
 }
 
 # common: toolchain and static linking for a copied tree <src>.
@@ -159,12 +475,16 @@ ext_cmake_args() {
     ext_args+=("-DFETCHCONTENT_SOURCE_DIR_${d}=${DEPS_DIR}/${lower}-src")
   done
   ext_args+=(-DCMAKE_CXX_COMPILER_LAUNCHER="${HERE}/ohos/ibmw-core-launcher.sh")
+  # reporter_host_abi links with $<LINK_LIBRARY:WHOLE_ARCHIVE,...>, and CMake has no
+  # OHOS platform module to define that feature: as its Linux module does.
+  ext_args+=("-DCMAKE_CXX_LINK_LIBRARY_USING_WHOLE_ARCHIVE=LINKER:--push-state,--whole-archive;<LINK_ITEM>;LINKER:--pop-state"
+    -DCMAKE_CXX_LINK_LIBRARY_USING_WHOLE_ARCHIVE_SUPPORTED=TRUE)
 }
 
 stage_build() {
   mkdir -p "${SRC}"
   rsync -a --delete --exclude .git --exclude '.omc' --exclude '/build*/' "${REPO}/" "${SRC}/" || return 1
-  (cd "${SRC}" && patch -p1 --quiet <"${HERE}/ohos/ibmw-core-workaround.diff") || return 1
+  ohos_patch_tree "${SRC}" || return 1
 
   "${SDK}/llvm/bin/clang" --target=aarch64-linux-ohos --sysroot="${SDK}/sysroot" -static -O1 -w \
     "${HERE}/ohos/shm_probe.c" -o "${PROBE}" || return 1
@@ -265,7 +585,7 @@ bench_ext_build() {
   mkdir -p "${src}"
   rsync -a --delete --exclude .git --exclude .omc --exclude '/build*/' "${from}/" "${src}/" || return 1
   "${HERE}/shm_ext_bench_overlay.sh" "${REPO}" "${src}" || return 1
-  (cd "${src}" && patch -p1 --quiet <"${HERE}/ohos/ibmw-core-workaround.diff") || return 1
+  ohos_patch_tree "${src}" || return 1
   common_cmake_args "${src}"
   ext_cmake_args
   # IBMW_BUILD_TESTS would add --coverage, whose counters would be measured.
@@ -280,7 +600,7 @@ bench_ext_build() {
 stage_bench-ext() {
   hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
   device_path_ok "${BENCH_DEVICE_DIR}" "${BENCH_DEVICE_ROOT}" || return 1  # rm -rf ROOT/* below
-  local labels=(new) label round log run_rc
+  local labels=(new) label round
   bench_ext_build new "${REPO}" || return 1
   if [[ -n "${BENCH_BASE_SRC}" ]]; then
     bench_ext_build base "${BENCH_BASE_SRC}" || return 1
@@ -293,19 +613,20 @@ stage_bench-ext() {
   done
   local runs="${LOGS}/bench-ext-runs"
   rm -rf "${runs}" && mkdir -p "${runs}"
-  for ((round = 1; round <= BENCH_ROUNDS; ++round)); do
+  env_setup "${BENCH_DEVICE_DIR}" || return 1
+  device_wait_idle bench-ext || { fail "bench-ext: the guard gave up"; device_rm "${BENCH_DEVICE_DIR}" "${BENCH_DEVICE_ROOT}" >/dev/null; return 1; }
+  local stop=0
+  for ((round = 1; round <= BENCH_ROUNDS && !stop; ++round)); do
     for label in "${labels[@]}"; do
-      log="${runs}/${label}.${round}.log"
-      echo "round ${round} ${label} load: $(hdc shell 'cat /proc/loadavg' | tr -d '\r' | cut -d' ' -f1)"
-      # hdc does not reliably return the remote exit code: report it in-band.
-      hdc shell "cd ${BENCH_DEVICE_DIR} && IBMW_SHM_ROOT=${BENCH_DEVICE_ROOT} timeout 300 ./bench_${label} --cpus ${BENCH_CPUS} ${BENCH_ARGS} 2>&1; echo DEVICE_RC=\$?; rm -rf ${BENCH_DEVICE_ROOT}/*" \
-        | tr -d '\r' >"${log}"
-      run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
-      [[ "${run_rc:-255}" -eq 0 ]] || fail "bench-ext ${label} round ${round} (${log})"
+      [[ "${GUARD}" == 1 ]] || echo "round ${round} ${label} load: $(hdc shell 'cat /proc/loadavg' | tr -d '\r' | cut -d' ' -f1)"
+      guarded_round "${runs}" "${BENCH_DEVICE_DIR}" "${label}" "${round}" "IBMW_SHM_ROOT=${BENCH_DEVICE_ROOT}" \
+        "bench_${label}" "rm -rf ${BENCH_DEVICE_ROOT}/*"
+      [[ $? -eq 1 ]] && { stop=1; break; }
     done
   done
   device_rm "${BENCH_DEVICE_DIR}" "${BENCH_DEVICE_ROOT}" >/dev/null
-  python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" | tee "${LOGS}/bench-ext-summary.txt"
+  bench_summary "${BENCH_ROUNDS}" "${runs}" >"${LOGS}/bench-ext-summary.txt"
+  cat "${LOGS}/bench-ext-summary.txt"
 }
 
 # device_path_ok <path...>: true when every path is strictly below
@@ -324,27 +645,45 @@ device_path_ok() {
 # device_rm <path...>: rm -rf on the device for paths that pass device_path_ok.
 device_rm() {
   device_path_ok "$@" || return 1
-  hdc shell "rm -rf $*"
+  timeout --foreground "${HDC_TIMEOUT}" hdc shell "rm -rf $*"
 }
 
 stage_clean() {
   device_rm "${DEVICE_DIR}" "${DEVICE_TMP}"
 }
 
-# Our processes on the device: the dynamic-stage binaries by name.
-DYN_PROC_NAMES=(run_as ibmw_shm_ext_dyn_runner ibmw_extensions_shm_ext_test ibmw_shm_ext_peer bench_static bench_pie bench_so)
-DYN_PROCS="$(IFS='|'; echo "${DYN_PROC_NAMES[*]}")"
+# Our processes on the device are those whose executable or working directory is
+# in one of our directories (all binaries are started from there, scripts with it
+# as the working directory), never a name: a generic name can also be another
+# user's process (e.g. their run_as, or a /bench_soak for bench_so).
+# device_ours <list|kill> <dir...>: one "OURS <pid> <command line>" line per
+# process; kill sends them SIGKILL. The device shell running this is left out.
+device_ours() {
+  local action=$1 d dirs=""
+  shift
+  device_path_ok "$@" || return 1
+  for d in "$@"; do dirs+=" ${d}"; done
+  local k=":"
+  [[ "${action}" == kill ]] && k="kill -9 \$n 2>/dev/null"
+  local answer
+  answer="$(mktemp /tmp/ibo.XXXXXX)" || return 1
+  timeout --foreground "${HDC_TIMEOUT}" hdc shell "for p in /proc/[0-9]*; do n=\${p#/proc/}; [ \$n = \$\$ ] && continue; \
+    e=\$(readlink \$p/exe 2>/dev/null); c=\$(readlink \$p/cwd 2>/dev/null); \
+    for d in${dirs}; do case \"\$e/\" in \"\$d\"/*) ;; *) case \"\$c/\" in \"\$d\"/*) ;; *) continue ;; esac ;; esac; \
+      echo \"OURS \$n \$(tr '\\0' ' ' <\$p/cmdline 2>/dev/null)\"; ${k}; break; done; done; echo OURS_END" 2>&1 | tr -d '\r' >"${answer}"
+  grep '^OURS [0-9]' "${answer}"
+  # No end marker (hung hdc, no device): do not report that nothing is left.
+  grep -q '^OURS_END$' "${answer}" || echo "OURS ? no complete answer from the device"
+  rm -f "${answer}"
+  return 0
+}
 
 # On Ctrl-C or SIGTERM during a dyn stage, stop what still runs on the device
 # (hdc does not forward the signal) and remove the dynamic-stage directories.
 dyn_interrupted() {
   trap - INT TERM
   echo "interrupted: stopping device processes and removing ${DYN_DEVICE_DIR} ${DYN_DEVICE_ROOT}" >&2
-  local name
-  # Started as ./<name> or, for the EXT peer, by absolute path. The pattern
-  # [/]<name> matches both but not the command line of the device shell running
-  # pkill (which contains "]<name>").
-  for name in "${DYN_PROC_NAMES[@]}"; do hdc shell "pkill -f '[/]${name}'" >/dev/null 2>&1; done
+  device_ours kill "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" >&2
   device_rm "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" >/dev/null 2>&1
   exit 130
 }
@@ -391,11 +730,16 @@ tls_report() {
   done
 }
 
-stage_dyn-build() {
+# The tree the dyn and metrics stages build: this repository plus the OHOS patch.
+dyn_sync_src() {
   mkdir -p "${DYN}/src"
   rsync -a --delete --exclude .git --exclude '.omc' --exclude '/build*/' "${REPO}/" "${DYN}/src/" || return 1
-  (cd "${DYN}/src" && patch -p1 --quiet <"${HERE}/ohos/ibmw-core-workaround.diff") || return 1
+  ohos_patch_tree "${DYN}/src" || return 1
   [[ -f "${LIBCXX_SHARED}" ]] || { echo "missing ${LIBCXX_SHARED}"; return 1; }
+}
+
+stage_dyn-build() {
+  dyn_sync_src || return 1
   # rt: no IBMW_BUILD_TESTS, whose --coverage would be measured by the bench and
   # would make the plugin write counters when it is unloaded.
   dyn_cmake rt c++_shared -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON -DIBMW_BUILD_SHM_EXT_DYN_CHECK=ON || return 1
@@ -564,10 +908,10 @@ stage_dyn-uid() {
     hdc shell "find ${dir} ! -user ${uid} -print 2>&1" | tr -d '\r' >"${LOGS}/${base}-foreign.log"
     [[ ! -s "${LOGS}/${base}-foreign.log" ]] || fail "dyn-uid${uid}: files not owned by ${uid} (${LOGS}/${base}-foreign.log)"
     # Nothing of ours may still run as the uid (e.g. a peer after a timeout).
-    left="$(hdc shell "ps -A -o UID,PID,ARGS | awk '\$1 == ${uid}'" | tr -d '\r' | grep -E "${DYN_PROCS}")"
+    left="$(device_ours list "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}")"
     if [[ -n "${left}" ]]; then
       fail "dyn-uid${uid}: processes left: ${left}"
-      for f in "${DYN_PROC_NAMES[@]}"; do hdc shell "pkill -f '[/]${f}'" >/dev/null 2>&1; done
+      device_ours kill "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" >/dev/null
     fi
     device_rm "${dir}" >/dev/null || fail "dyn-uid${uid}: removing ${dir}"
   done
@@ -587,27 +931,28 @@ stage_dyn-bench() {
   dyn_push "${DYN}/rt/ibmw_shm_ext_bench" bench_pie || return 1
   dyn_push "${DYN}/rt/ibmw_shm_ext_bench_so" bench_so || return 1
   # A new directory per run: earlier results stay where the docs cite them.
-  local runs="${LOGS}/dyn-bench-$(date +%Y%m%d-%H%M%S)" round label log run_rc others
+  local runs="${LOGS}/dyn-bench-$(date +%Y%m%d-%H%M%S)" round label others stop=0
   mkdir -p "${runs}"
-  for ((round = 1; round <= DYN_BENCH_ROUNDS; ++round)); do
+  env_setup "${DYN_DEVICE_DIR}" || return 1
+  device_wait_idle dyn-bench || { fail "dyn-bench: the guard gave up"; return 1; }
+  for ((round = 1; round <= DYN_BENCH_ROUNDS && !stop; ++round)); do
     for label in static pie so; do
-      log="${runs}/${label}.${round}.log"
-      others="$(hdc shell "ps -ef | grep -E '${DYN_PROCS}' | grep -v grep" | tr -d '\r')"
+      others="$(device_ours list "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}")"
       [[ -z "${others}" ]] || echo "WARN: round ${round} ${label}: our processes still on the device: ${others}"
-      echo "round ${round} ${label} loadavg $(hdc shell 'cat /proc/loadavg' | tr -d '\r')" | tee -a "${runs}/load.txt"
-      hdc shell "cd ${DYN_DEVICE_DIR} && LD_LIBRARY_PATH=${DYN_DEVICE_DIR} IBMW_SHM_ROOT=${DYN_DEVICE_ROOT}/b timeout 300 ./bench_${label} --cpus ${BENCH_CPUS} ${BENCH_ARGS} 2>&1; echo DEVICE_RC=\$?; rm -rf ${DYN_DEVICE_ROOT}/b/*" \
-        | tr -d '\r' >"${log}"
-      run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
-      [[ "${run_rc:-255}" -eq 0 ]] || fail "dyn-bench ${label} round ${round} (${log})"
+      [[ "${GUARD}" == 1 ]] || echo "round ${round} ${label} loadavg $(hdc shell 'cat /proc/loadavg' | tr -d '\r')" | tee -a "${runs}/load.txt"
+      guarded_round "${runs}" "${DYN_DEVICE_DIR}" "${label}" "${round}" \
+        "LD_LIBRARY_PATH=${DYN_DEVICE_DIR} IBMW_SHM_ROOT=${DYN_DEVICE_ROOT}/b" "bench_${label}" "rm -rf ${DYN_DEVICE_ROOT}/b/*"
+      [[ $? -eq 1 ]] && { stop=1; break; }
     done
   done
   {
     echo "# ${runs}: ${DYN_BENCH_ROUNDS} rounds, ${BENCH_ARGS}, CPUs ${BENCH_CPUS}"
     echo "# static = -static (SDK musl, c++_static); pie = plugin sources compiled in, device libc + libc++_shared.so;"
     echo "# so = linked against libibmw_shm_transport.so"
-    echo; echo "## pie vs static (libc/libc++)"; python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" static pie
-    echo; echo "## so vs pie (shared object)"; python3 "${HERE}/shm_ext_bench_summary.py" "${runs}" pie so
-  } | tee "${runs}/summary.txt"
+    echo; echo "## pie vs static (libc/libc++)"; bench_summary "${DYN_BENCH_ROUNDS}" "${runs}" static pie
+    echo; echo "## so vs pie (shared object)"; bench_summary "${DYN_BENCH_ROUNDS}" "${runs}" pie so
+  } >"${runs}/summary.txt"
+  cat "${runs}/summary.txt"
 }
 
 stage_dyn-clean() {
@@ -882,14 +1227,238 @@ stage_hap-release() {
   stage_hap
 }
 
+# ---------------------------------------------------------------- core metrics
+
+# As dyn_interrupted, for the metrics stages.
+metrics_interrupted() {
+  trap - INT TERM
+  echo "interrupted: stopping device processes and removing ${METRICS_DEVICE_DIR} ${METRICS_DEVICE_ROOT}" >&2
+  device_ours kill "${METRICS_DEVICE_DIR}" "${METRICS_DEVICE_ROOT}" >&2
+  device_rm "${METRICS_DEVICE_DIR}" "${METRICS_DEVICE_ROOT}" >/dev/null 2>&1
+  exit 130
+}
+
+metrics_push() {
+  local DYN_DEVICE_DIR="${METRICS_DEVICE_DIR}"
+  dyn_push "$@"
+}
+
+stage_metrics-build() {
+  dyn_sync_src || return 1
+  # The arm without Reporter V1 and core metrics, as dyn-build builds it.
+  dyn_cmake rt c++_shared -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON -DIBMW_BUILD_SHM_EXT_DYN_CHECK=ON || return 1
+  dyn_make rt ibmw_shm_ext_bench || return 1
+  dyn_cmake metrics c++_shared -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON -DIBMW_ENABLE_CORE_METRICS=ON \
+    -DIBMW_ENABLE_REPORTER_V1=ON -DIBMW_BUILD_SHM_RETAINED_LOAN_E2E=ON || return 1
+  dyn_make metrics ibmw_extensions_shm_ext ibmw_shm_ext_bench shm_retained_loan_e2e || return 1
+
+  local readelf="${SDK}/llvm/bin/llvm-readelf" nm="${SDK}/llvm/bin/llvm-nm" f sym
+  for f in "${DYN}/rt/ibmw_shm_ext_bench" "${METRICS_TREE}/ibmw_shm_ext_bench" "${METRICS_TREE}/shm_retained_loan_e2e"; do
+    "${readelf}" -lW "${f}" | grep 'ld-musl-aarch64.so.1' >/dev/null || { echo "${f}: no dynamic interpreter"; return 1; }
+    "${readelf}" -dW "${f}" | grep 'NEEDED.*libc++_shared.so' >/dev/null || { echo "${f}: not linked to libc++_shared.so"; return 1; }
+  done
+  "${readelf}" -dW "${METRICS_TREE}/libibmw_shm_transport.so" | grep 'NEEDED.*libc++_shared.so' >/dev/null ||
+    { echo "metrics plugin not linked to libc++_shared.so"; return 1; }
+  # The plugin finds the Reporter V1 query through dlsym in the host executable.
+  for f in "${METRICS_TREE}/ibmw_shm_ext_bench" "${METRICS_TREE}/shm_retained_loan_e2e"; do
+    for sym in ibmw_reporter_query_v1 ibmw_reporter_query_batch_v1; do
+      "${nm}" -D --defined-only "${f}" | grep -qw "${sym}" || { echo "${f}: does not export ${sym}"; return 1; }
+    done
+  done
+  "${nm}" -D --defined-only "${DYN}/rt/ibmw_shm_ext_bench" | grep -q ibmw_reporter_query &&
+    { echo "the rt bench exports the reporter query"; return 1; }
+  du -sh "${METRICS_TREE}"
+  echo "metrics-build OK"
+}
+
+# metrics_check <run name> <prefix> <bin dir> <tmp> <work> <local dir>:
+# check_shm_metrics.sh on the device for <bin dir>/shm_retained_loan_e2e, with the
+# private roots in <tmp> and the results in <work>, started through <prefix>;
+# pulls the results and asserts them here.
+metrics_check() {
+  local name=$1 prefix=$2 bin=$3 tmp=$4 work=$5 dir=$6 log="$6/check.log" run_rc mode f
+  mkdir -p "${dir}"
+  # The device has no Python: IBMW_SHM_CHECK_ASSERT=0, the assertion is below.
+  hdc shell "cd ${METRICS_DEVICE_DIR} && LD_LIBRARY_PATH=${METRICS_DEVICE_DIR} IBMW_SHM_CHECK_TMP=${tmp} IBMW_SHM_CHECK_ASSERT=0 timeout 200 ${prefix} sh ./check_shm_metrics.sh ${bin} ${work} 2>&1; echo DEVICE_RC=\$?" \
+    | tr -d '\r' >"${log}"
+  run_rc="$(sed -n 's/^DEVICE_RC=//p' "${log}" | tail -1)"
+  grep -E '^(RUN_AS|SHM_RETAINED_E2E_CHECK|DEVICE_RC)' "${log}"
+  if [[ "${run_rc:-255}" -ne 0 ]] || ! grep -q '^SHM_RETAINED_E2E_CHECK_ALL_RUN$' "${log}"; then
+    cat "${log}"
+    fail "metrics-device ${name} (${log})"
+    return 1
+  fi
+  for mode in direct retained; do
+    mkdir -p "${dir}/${mode}"
+    for f in $(hdc shell "ls ${work}/${mode}" | tr -d '\r'); do
+      hdc file recv "${work}/${mode}/${f}" "${dir}/${mode}/${f}" >/dev/null
+    done
+    if python3 "${HERE}/../../../src/samples/cpp/retained_loan_e2e/assert_shm_metrics.py" --check-run "${mode}" \
+      "${dir}/${mode}/metrics.jsonl" >"${dir}/${mode}/assert.log" 2>&1; then
+      echo "METRICS_DEVICE_PASS run=${name} mode=${mode} $(cat "${dir}/${mode}/assert.log")"
+    else
+      cat "${dir}/${mode}/assert.log"
+      fail "metrics-device ${name} ${mode}: assert_shm_metrics.py"
+    fi
+  done
+}
+
+stage_metrics-device() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${METRICS_DEVICE_DIR}" "${METRICS_DEVICE_ROOT}" || return 1
+  trap metrics_interrupted INT TERM
+  "${SDK}/llvm/bin/clang" --target=aarch64-linux-ohos --sysroot="${SDK}/sysroot" -static -O1 -Wall -Wextra -Werror \
+    "${HERE}/ohos/run_as.c" -o "${RUN_AS}" || return 1
+  device_rm "${METRICS_DEVICE_ROOT}" >/dev/null || return 1
+  hdc shell "mkdir -p ${METRICS_DEVICE_DIR} ${METRICS_DEVICE_ROOT} && chmod 755 ${METRICS_DEVICE_DIR} ${METRICS_DEVICE_ROOT}" >/dev/null
+  local f
+  for f in "${LIBCXX_SHARED}" "${METRICS_TREE}/libibmw_shm_transport.so" "${METRICS_TREE}/shm_retained_loan_e2e" \
+    "${HERE}/../../../src/samples/cpp/retained_loan_e2e/check_shm_metrics.sh" "${RUN_AS}"; do
+    metrics_push "${f}" || return 1
+  done
+  local runs="${LOGS}/metrics-device-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "${runs}"
+  device_wait_idle metrics-device-root || { fail "metrics-device: the guard gave up"; return 1; }
+  metrics_check root "" . "${METRICS_DEVICE_ROOT}" "${METRICS_DEVICE_ROOT}/w" "${runs}/root"
+  if [[ -n "${METRICS_UID}" ]]; then
+    [[ "${METRICS_UID}" =~ ^[1-9][0-9]*$ ]] || { fail "bad METRICS_UID ${METRICS_UID}"; return 1; }
+    local deny="${METRICS_DEVICE_ROOT}/deny" dir="${METRICS_DEVICE_ROOT}/u"
+    # Short: <dir>/ibR.XXXXXX/ibmw_shm.<uid>.c<pid>retained must fit 63 bytes.
+    hdc shell "mkdir -p ${deny} ${dir} ${METRICS_DEVICE_DIR}/sh && chmod 700 ${deny} ${dir} && chmod 755 ${METRICS_DEVICE_DIR}/sh && chown -R ${METRICS_UID}:${METRICS_UID} ${dir}" >/dev/null
+    # On this device a non-root process exec'ed directly by toybox (timeout, time,
+    # env) does not load the libraries of LD_LIBRARY_PATH (empty error from the
+    # loader, exit 127); exec'ed by sh it does. So timeout starts a sh script here.
+    printf '#!/bin/sh\nexec %s/shm_retained_loan_e2e "$@"\n' "${METRICS_DEVICE_DIR}" >"${runs}/e2e_wrapper.sh"
+    metrics_push "${runs}/e2e_wrapper.sh" sh/shm_retained_loan_e2e || return 1
+    device_wait_idle metrics-device-uid || { fail "metrics-device: the guard gave up"; return 1; }
+    metrics_check "uid${METRICS_UID}" "./run_as ${METRICS_UID} ${METRICS_UID} ${deny}" sh "${dir}" "${dir}/w" "${runs}/uid${METRICS_UID}"
+    grep -q "^RUN_AS uid=${METRICS_UID} .*result=PASS" "${runs}/uid${METRICS_UID}/check.log" ||
+      fail "metrics-device: not run as uid ${METRICS_UID}"
+  fi
+  # check_shm_metrics.sh removes its private roots and stops what it started.
+  local left
+  left="$(hdc shell "ls -d ${METRICS_DEVICE_ROOT}/ibR.* ${METRICS_DEVICE_ROOT}/u/ibR.* 2>/dev/null" | tr -d '\r'
+    device_ours list "${METRICS_DEVICE_DIR}" "${METRICS_DEVICE_ROOT}")"
+  [[ -z "${left}" ]] || fail "metrics-device: left on the device: ${left}"
+  echo "metrics-device logs: ${runs}"
+}
+
+stage_metrics-bench() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${METRICS_DEVICE_DIR}" "${METRICS_DEVICE_ROOT}" || return 1  # rm -rf ROOT/* below
+  trap metrics_interrupted INT TERM
+  hdc shell "mkdir -p ${METRICS_DEVICE_DIR} ${METRICS_DEVICE_ROOT}/b" >/dev/null
+  metrics_push "${LIBCXX_SHARED}" || return 1
+  metrics_push "${DYN}/rt/ibmw_shm_ext_bench" bench_out || return 1
+  metrics_push "${METRICS_TREE}/ibmw_shm_ext_bench" bench_met || return 1
+  local runs="${LOGS}/metrics-bench-$(date +%Y%m%d-%H%M%S)" round i label bench envs st stop=0 metrics out="${METRICS_DEVICE_ROOT}/o"
+  local arms=(out off counters) passed=0 failed=0 have
+  mkdir -p "${runs}"
+  env_setup "${METRICS_DEVICE_DIR}" || return 1
+  device_wait_idle metrics-bench || { fail "metrics-bench: the guard gave up"; return 1; }
+  for ((round = 1; round <= METRICS_BENCH_ROUNDS && !stop; ++round)); do
+    # The order cycles through all 6 permutations of the arms (the 3 rotations,
+    # then the 3 rotations of the reverse order), so over 6 rounds each arm runs
+    # first, second and third twice and after each of the other arms equally often.
+    for i in 0 1 2; do
+      if (((round - 1) % 6 < 3)); then
+        label="${arms[$(((round - 1 + i) % 3))]}"
+      else
+        label="${arms[$(((round - 1 - i + 6) % 3))]}"
+      fi
+      bench=bench_met
+      envs="LD_LIBRARY_PATH=${METRICS_DEVICE_DIR} IBMW_SHM_ROOT=${METRICS_DEVICE_ROOT}/b IBMW_OBSERVABILITY_OUTPUT_DIR=${out}"
+      [[ "${label}" == out ]] && bench=bench_out
+      [[ "${label}" == counters ]] && envs+=" IBMW_CORE_METRICS=counters"
+      hdc shell "rm -rf ${out} && mkdir -p ${out}" >/dev/null
+      guarded_round "${runs}" "${METRICS_DEVICE_DIR}" "${label}" "${round}" "${envs}" "${bench}" "rm -rf ${METRICS_DEVICE_ROOT}/b/*"
+      st=$?
+      [[ "${st}" -eq 1 ]] && { stop=1; break; }
+      [[ "${st}" -eq 2 ]] && continue
+      metrics="${runs}/${label}.${round}.metrics.jsonl"
+      have="$(timeout --foreground "${HDC_TIMEOUT}" hdc shell "if [ -f ${out}/metrics.jsonl ]; then echo yes; else echo no; fi" | tr -d '\r')"
+      case "${have}" in
+        yes) timeout --foreground "${HDC_TIMEOUT}" hdc file recv "${out}/metrics.jsonl" "${metrics}" >/dev/null ;;
+        no) ;;
+        *) fail "metrics-bench ${label} round ${round}: no answer about ${out}/metrics.jsonl: '${have}'"; continue ;;
+      esac
+      # Whatever the interference, the arm must have counted what it should.
+      if python3 "${HERE}/shm_ext_bench_metrics_check.py" "${label}" "${runs}/${label}.${round}.log" "${metrics}" \
+        >>"${runs}/metrics_check.txt" 2>&1; then
+        passed=$((passed + 1))
+      else
+        failed=$((failed + 1))
+        fail "metrics-bench ${label} round ${round}: $(tail -1 "${runs}/metrics_check.txt")"
+      fi
+    done
+  done
+  hdc shell "rm -rf ${out}" >/dev/null
+  {
+    echo "# ${runs}: ${METRICS_BENCH_ROUNDS} rounds, ${BENCH_ARGS}, CPUs ${BENCH_CPUS}"
+    echo "# out = plugin sources compiled in, no Reporter V1 or core metrics (rt tree); off = compiled in"
+    echo "# (metrics tree), IBMW_CORE_METRICS unset; counters = compiled in, IBMW_CORE_METRICS=counters"
+    echo "# metrics check per round: ${passed} passed, ${failed} failed; last counters round:"
+    grep 'mode=counters' "${runs}/metrics_check.txt" | tail -1 | sed 's/^/# /'
+    echo; echo "## off vs out (compiled in, not enabled)"; bench_summary "${METRICS_BENCH_ROUNDS}" "${runs}" out off
+    echo; echo "## counters vs off (counting)"; bench_summary "${METRICS_BENCH_ROUNDS}" "${runs}" off counters
+  } >"${runs}/summary.txt"
+  cat "${runs}/summary.txt"
+}
+
+# The idle statistics the perf_env.py thresholds rest on: BASELINE_SNAPS snapshots
+# of the device BASELINE_INTERVAL s apart plus the hdc round trip (no bench) in
+# logs/env-baseline-<time>/, summarized per pair and over windows of at least
+# BASELINE_WINDOW s (the length of a bench round: compare like with like).
+stage_env-baseline() {
+  hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
+  device_path_ok "${METRICS_DEVICE_DIR}" || return 1
+  local GUARD=1 runs="${LOGS}/env-baseline-$(date +%Y%m%d-%H%M%S)" i
+  mkdir -p "${runs}"
+  hdc shell "mkdir -p ${METRICS_DEVICE_DIR}" >/dev/null
+  env_setup "${METRICS_DEVICE_DIR}" || return 1
+  device_wait_idle env-baseline || { fail "env-baseline: the guard gave up"; return 1; }
+  for ((i = 1; i <= BASELINE_SNAPS; ++i)); do
+    env_snap "${METRICS_DEVICE_DIR}" "${runs}/$(printf 'snap%03d' "${i}").txt"
+    sleep "${BASELINE_INTERVAL}"
+  done
+  python3 "${PERF_ENV}" baseline --cpus "${BENCH_CPUS}" --foreign "${FOREIGN_PATTERN}" --window "${BASELINE_WINDOW}" \
+    --json "${runs}/baseline.json" "${runs}"/snap*.txt
+  echo "snapshots: ${runs}; windows with a foreign benchmark are left out of the statistics"
+  # Thresholds need enough idle windows of a round's length.
+  python3 -c 'import json, sys
+sys.exit(json.load(open(sys.argv[1]))["round_window"]["windows"] < 30)' "${runs}/baseline.json" \
+    || { fail "env-baseline: fewer than 30 idle windows; run it again"; return 1; }
+}
+
+stage_metrics-clean() {
+  device_rm "${METRICS_DEVICE_DIR}" "${METRICS_DEVICE_ROOT}"
+  local st=$?
+  trap - INT TERM
+  return "${st}"
+}
+
+stage_metrics() {
+  stage_metrics-build || return 1
+  local ok=0
+  stage_metrics-device || ok=1
+  stage_metrics-bench || ok=1
+  stage_metrics-clean || ok=1
+  return "${ok}"
+}
+
 [[ $# -eq 0 ]] && set -- build qemu
 for s in "$@"; do
   echo "==== [shm-ohos] ${s} ===="
   case "${s}" in
     build | qemu | device | bench | bench-ext | clean | dynamic | dyn-build | dyn-device | dyn-uid | dyn-bench | dyn-clean | \
-      hap | hap-build | hap-device | hap-release)
+      hap | hap-build | hap-device | hap-release | metrics | metrics-build | metrics-device | metrics-bench | metrics-clean | \
+      env-baseline)
       "stage_${s}" || fail "stage ${s}" ;;
     *) echo "unknown stage ${s}" >&2; exit 64 ;;
   esac
 done
+if [[ "${rc}" -eq 0 && "${INCONCLUSIVE}" -ne 0 ]]; then
+  echo "INCONCLUSIVE: fewer clean rounds than required; the numbers are not a result (see the interference sections)" >&2
+  exit 3
+fi
 exit "${rc}"

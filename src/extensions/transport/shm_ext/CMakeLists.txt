@@ -149,6 +149,28 @@ if(IBMW_BUILD_SHM_EXT_BENCH)
   target_link_libraries(ibmw_shm_ext_bench PRIVATE ibmw::core::extension_api ibmw::selfdev::shm ibmw::api::cpp
                                                    ibmw::core::engine)
   add_werror(ibmw_shm_ext_bench)
+  # With Reporter V1 the bench is the Reporter V1 host (run_shm_ohos.sh
+  # metrics-bench): it exports the query, so the compiled-in shm_ext sources
+  # count into its core metrics under IBMW_CORE_METRICS=counters. A tree without
+  # the switch, or a baseline tree this block is copied into (no
+  # reporter_host_abi target), builds the bench as before.
+  if(IBMW_ENABLE_REPORTER_V1 AND TARGET ibmw::core::reporter_host_abi)
+    target_link_libraries(ibmw_shm_ext_bench PRIVATE ibmw::core::reporter_host_abi ${CMAKE_DL_LIBS})
+    target_compile_definitions(ibmw_shm_ext_bench PRIVATE IBMW_SHM_EXT_BENCH_REPORTER_HOST)
+    set_target_properties(ibmw_shm_ext_bench PROPERTIES ENABLE_EXPORTS ON)
+    if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+      # No OHOS platform module: ENABLE_EXPORTS does not add export-dynamic there.
+      target_link_options(ibmw_shm_ext_bench PRIVATE "LINKER:--export-dynamic")
+      set(shm_ext_bench_verify_export
+          ${CMAKE_CURRENT_SOURCE_DIR}/../../../samples/cpp/retained_loan_e2e/verify_reporter_export.cmake)
+      if(EXISTS ${shm_ext_bench_verify_export})
+        add_custom_command(TARGET ibmw_shm_ext_bench POST_BUILD
+          COMMAND "${CMAKE_COMMAND}" -DIBMW_NM=${CMAKE_NM} -DIBMW_EXECUTABLE=$<TARGET_FILE:ibmw_shm_ext_bench>
+                  -P "${shm_ext_bench_verify_export}"
+          VERBATIM)
+      endif()
+    endif()
+  endif()
 endif()
 # END shm_ext bench block
 

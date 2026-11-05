@@ -51,6 +51,8 @@ DIRECT_COUNTER_KIND="direct_iceoryx_loan"
 COUNTER_MODULE="IoxLoanedCtxPublisherModule"
 COUNTER_TOPIC="iox_bench_ctx_topic"
 COUNTER_DRIVER="iceoryx"
+# Lane hook into run_trial; None here, so this lane's trials never call it.
+TRIAL_OBSERVER=None
 
 class InvalidTrial(RuntimeError): pass
 
@@ -673,6 +675,7 @@ def _load_sealed_result(trial,mode,micro=False):
     return stored
 def run_trial(mode,build_dir,trial,hz,measured,quality=True,warmup=10,cooldown=5,
               subscriber_build_dir=None):
+    if TRIAL_OBSERVER:TRIAL_OBSERVER.before_trial(trial)
     subscriber_build_dir=Path(subscriber_build_dir or build_dir)
     if trial.exists():shutil.rmtree(trial)
     trial.mkdir(parents=True);metrics=trial/"metrics";metrics.mkdir();lat=trial/"latency.csv";status=trial/"status.json";pub_status=trial/"publisher-status.json"
@@ -696,6 +699,7 @@ def run_trial(mode,build_dir,trial,hz,measured,quality=True,warmup=10,cooldown=5
         if not all(x[0] for x in affin.values()):raise InvalidTrial(f"critical thread affinity escaped: {affin}")
         time.sleep(max(0,(begin_ns-time.monotonic_ns())/1_000_000_000));start_sample_ns=time.monotonic_ns();start={k:proc_ticks(v.pid) for k,v in procs.items()}
         if any(v is None for v in start.values()):raise InvalidTrial("initial proc ticks unreadable")
+        if TRIAL_OBSERVER:TRIAL_OBSERVER.window_begin({k:v.pid for k,v in procs.items()})
         totals=[];invalid_pss=0
         while time.monotonic_ns()<end_ns and all(v.poll() is None for v in procs.values()):
             stamp=[]
@@ -703,11 +707,13 @@ def run_trial(mode,build_dir,trial,hz,measured,quality=True,warmup=10,cooldown=5
                 x=pss_kib(v.pid);stamp.append(x)
             if all(x is not None for x in stamp):totals.append(sum(stamp))
             else:invalid_pss+=1
+            if TRIAL_OBSERVER:TRIAL_OBSERVER.window_sample()
             time.sleep(min(1,max(0,(end_ns-time.monotonic_ns())/1_000_000_000)))
         # Freeze the measured wall-clock window with the sampled counters;
         # cooldown and natural shutdown are deliberately outside denominators.
         end_sample_ns=time.monotonic_ns();measured_end={k:proc_ticks(v.pid) for k,v in procs.items()}
         if any(v is None for v in measured_end.values()):raise InvalidTrial("endpoint proc ticks unreadable")
+        if TRIAL_OBSERVER:TRIAL_OBSERVER.window_end()
         # Let the application execute its registered cooldown and natural
         # module Stop(), which writes correctness artifacts. CPU accounting
         # remains frozen at measured_end above.
@@ -737,6 +743,7 @@ def run_trial(mode,build_dir,trial,hz,measured,quality=True,warmup=10,cooldown=5
             cpu_by[k]=cpu_cores_for_interval(start_sample_ns,end_sample_ns,
                                               begin_tick,end_tick,hzclock)
         row=rows[-1]; result={"mode":mode,"hz":hz,"measured_sec":elapsed,"unique":st["unique_measured"],"throughput":st["unique_measured"]/elapsed,"p50_us":float(row["p50_us"]),"p99_us":float(row["p99_us"]),"cpu_cores":sum(cpu_by.values()),"cpu_by_process":cpu_by,"cpu_sample_elapsed_sec":cpu_elapsed,"bottleneck_utilization":max(cpu_by.values()),"pss_median_kib":statistics.median(totals),"pss_peak_kib":max(totals),"pss_valid_samples":len(totals),"pss_invalid_samples":invalid_pss,"correctness":st,"publisher_correctness":pst,"reconciliation":reconciliation,"counter_conservation":conservation,"thread_affinity":affin,"delivery_profile":LOSSLESS_PROFILE,"publisher_yaml_sha256":publisher_yaml_sha256,"subscriber_yaml_sha256":subscriber_yaml_sha256,"measure_begin_monotonic_ns":begin_ns,"measure_end_monotonic_ns":end_ns,"subscriber_ready_ns":subscriber_ready_ns,"publisher_ready_ns":publisher_ready_ns,"cpu_sample_begin_ns":start_sample_ns,"cpu_sample_end_ns":end_sample_ns}
+        if TRIAL_OBSERVER:result["interference"]=TRIAL_OBSERVER.evidence()
         result["valid"]=reconciliation["valid"]
         result["quality_valid"]=reconciliation["valid"] and (not quality or .65<=result["bottleneck_utilization"]<=.90)
         base={key:value for key,value in result.items() if key not in ("unique","throughput","p50_us","p99_us","correctness","publisher_correctness","reconciliation","counter_conservation","publisher_yaml_sha256","subscriber_yaml_sha256","valid","quality_valid")}
@@ -826,7 +833,9 @@ def run_micro(mode,build_dir,trial):
     trial.mkdir(parents=True);metrics=trial/"metrics";metrics.mkdir()
     env=clean_env({"IBMW_CORE_METRICS":"counters" if mode=="counters" else "off"})
     env["IBMW_OBSERVABILITY_OUTPUT_DIR"]=str(metrics)
+    if TRIAL_OBSERVER:TRIAL_OBSERVER.micro_begin()
     cp=subprocess.run(["taskset","-c",str(CPUS[2]),str(build_dir/"core_metrics_reporter_hot_bench")],cwd=build_dir,env=env,text=True,capture_output=True,check=True)
+    if TRIAL_OBSERVER:TRIAL_OBSERVER.micro_end()
     raw=strict_json_bytes(cp.stdout.splitlines()[-1].encode(),"micro output");write_json(trial/"bench-output.json",raw)
     result=recompute_micro_result(trial,mode);write_json(trial/"result.json",result);_seal_artifacts(trial,mode,True)
     return result
