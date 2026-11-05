@@ -33,7 +33,7 @@ from generators.json_types_gen import (
 from generators.dds_idl_gen import generate_dds_idl_files
 from generators.dds_types_gen import generate_dds_type_bridges
 from generators.dds_rpc_yaml_gen import generate_dds_rpc_yamls
-from generators.module_gen import generate_modules
+from generators.module_gen import ModuleGenError, generate_modules
 from generators.user_code import UserCodeError
 from generators.app_gen import generate_app_mains
 from generators.pkg_gen import generate_pkg_mains
@@ -648,7 +648,7 @@ def main():
     if "modules" in categories:
         try:
             module_files = generate_modules(project)
-        except UserCodeError as exc:
+        except (ModuleGenError, UserCodeError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         for rel_path, content in module_files:

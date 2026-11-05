@@ -1275,6 +1275,10 @@ _GENERATORS = {
 }
 
 
+class ModuleGenError(ValueError):
+    """A module the generator cannot emit."""
+
+
 def generate_modules(project: dict) -> list[tuple[str, str]]:
     """Generate module .h and .cc files, then splice optional `user_code`."""
     results = []
@@ -1412,9 +1416,10 @@ def _generate_module_files(project: dict, modules: list) -> list[tuple[str, str]
         # 3) Legacy dispatch.
         key = (mod_type, transport)
         if key not in _GENERATORS:
-            print(f"Warning: no generator for type={mod_type}, transport={transport}",
-                  flush=True)
-            continue
+            # The project CMake still lists the module's sources.
+            raise ModuleGenError(
+                f"no generator for module '{mod['name']}' "
+                f"(type={mod_type}, transport={transport})")
 
         gen_h, gen_cc = _GENERATORS[key]
         hdr = gen_h(mod, ns)

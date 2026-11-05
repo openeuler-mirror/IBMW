@@ -158,17 +158,19 @@ modules:
     ros2_package: example_ros2
     ros2_msg_include: "example_ros2/msg/ros_test_msg.hpp"
 
-  # 5. ROS2 RPC (skeleton only — requires external ROS2 service packages)
+  # 5. ROS2 RPC (example_ros2/srv/RosTestRpc)
   - name: Ros2RpcServerModule
     type: rpc_server
     transport: ros2
     ros2_package: example_ros2
+    ros2_service: RosTestRpc
     ros2_rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
 
   - name: Ros2RpcClientModule
     type: rpc_client
     transport: ros2
     ros2_package: example_ros2
+    ros2_service: RosTestRpc
     ros2_rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
 
   # 6. JSON Pub/Sub

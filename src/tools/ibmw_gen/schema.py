@@ -985,12 +985,11 @@ def _validate_modules(data: dict):
             elif transport == "ros2":
                 if "ros2_package" not in mod:
                     _error(f"Module '{mod['name']}' (ROS2 RPC) requires 'ros2_package'")
-                # ros2_service is optional; if provided, real code is generated
-                # instead of TODO skeletons
-                if "ros2_service" in mod:
-                    mod["_has_ros2_service_info"] = True
-                else:
-                    mod["_has_ros2_service_info"] = False
+                # Only modules with a service are generated; the project CMake
+                # and configs list every module.
+                if "ros2_service" not in mod:
+                    _error(f"Module '{mod['name']}' (ROS2 RPC) requires 'ros2_service'")
+                mod["_has_ros2_service_info"] = True
 
         # direct_* publishers/subscribers — R10 escape hatches.
         # direct_ros2_* use low-level ros2::transport API over DDS;

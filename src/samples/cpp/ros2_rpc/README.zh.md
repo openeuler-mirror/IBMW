@@ -277,8 +277,8 @@ Server 记录每个收到的请求，client 记录每次成功的响应。具体
 本 demo 也可以通过 `ibmw-gen` 从
 [`ros2_rpc.ibmw.yaml`](./ros2_rpc.ibmw.yaml) 定义生成。
 
-当 YAML 中指定 `ros2_service` 时，ibmw-gen 会生成**真正可编译的** ROS2 RPC
-代码 —— 而非仅仅是骨架桩。生成的 server 会注册服务，生成的 client 会在循环
+ROS2 RPC module 必须在 YAML 中指定 `ros2_service`，ibmw-gen 会生成**真正可编译的** ROS2 RPC
+代码。生成的 server 会注册服务，生成的 client 会在循环
 中周期性发送 RPC 调用。你只需要补充服务处理逻辑（server `.cc` 中的 `// TODO`）。
 
 ### ibmw-gen 生成 vs 你自己写
@@ -336,7 +336,7 @@ modules:
 
 `ros2_service` 字段告知 ibmw-gen 生成的代码要 include gencode 头文件
 （`RosTestRpc.ibmw_rpc.srv.h`），并使用其中类型化的 `SyncService`/`SyncAccess`
-类。若不指定 `ros2_service`，ibmw-gen 退化为带 TODO 标记的骨架桩。
+类。若不指定 `ros2_service`，ibmw-gen 报错且不生成任何文件。
 
 生成的配置自动包含：
 - `ros2_extension`，其 `node_name` 由项目命名空间派生

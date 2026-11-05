@@ -29,11 +29,11 @@ find_package(example_ros2 REQUIRED)
 
 ibmw_add_module(normal_publisher_module
   SRCS src/normal_publisher_module/normal_publisher_module.cc
-  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp)
+  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
 
 ibmw_add_module(normal_subscriber_module
   SRCS src/normal_subscriber_module/normal_subscriber_module.cc
-  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp)
+  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
 
 ibmw_add_pkg(ros2_chn_pkg
   SRCS src/ros2_chn_pkg/pkg_main.cc

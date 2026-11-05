@@ -500,9 +500,9 @@ modules:
       rpc_frq: 1.0
 ```
 
-When `ros2_service` is specified, ibmw-gen produces **real, compilable** RPC
-code (typed service impl, client loop with SyncAccess, config reading via
-yaml-cpp). Without it, skeleton stubs with TODO markers are generated.
+ROS2 RPC modules require `ros2_service`; ibmw-gen produces **real,
+compilable** RPC code (typed service impl, client loop with SyncAccess, config
+reading via yaml-cpp).
 
 The generated config automatically includes `ros2_extension` loading and
 `type: ros2` service driver configuration.

@@ -620,6 +620,9 @@ def generate_cmake(project: dict) -> str:
             ros2_pkg = mod.get("ros2_package")
             if ros2_pkg:
                 deps.append(f"{ros2_pkg}::{ros2_pkg}__rosidl_generator_cpp")
+                if mod_type not in ("rpc_server", "rpc_client"):
+                    # The ROS2 transport's text form reads the message members.
+                    deps.append(f"{ros2_pkg}::{ros2_pkg}__rosidl_typesupport_introspection_cpp")
             if mod.get("ros2_imported_srv_adapter") and ros2_pkg:
                 deps.append(f"{_snake(str(ros2_pkg))}_ibmw_imported_srv_glue")
             # ROS2 RPC may need gencode targets

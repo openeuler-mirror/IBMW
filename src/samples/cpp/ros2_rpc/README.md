@@ -277,8 +277,8 @@ Notes:
 This demo can also be generated using `ibmw-gen` from the
 [`ros2_rpc.ibmw.yaml`](./ros2_rpc.ibmw.yaml) definition.
 
-When `ros2_service` is specified in the YAML, ibmw-gen produces **real,
-compilable** ROS2 RPC code — not just skeleton stubs. The generated server
+ROS2 RPC modules require `ros2_service` in the YAML; ibmw-gen produces **real,
+compilable** ROS2 RPC code. The generated server
 registers the service, and the generated client sends periodic RPC calls in a
 loop. You only need to fill in the service handler logic (the `// TODO` in the
 server `.cc`).
@@ -339,7 +339,7 @@ modules:
 The `ros2_service` field tells ibmw-gen to generate code that includes the
 gencode header (`RosTestRpc.ibmw_rpc.srv.h`) and uses the typed
 `SyncService`/`SyncAccess` classes from it. Without `ros2_service`, ibmw-gen
-falls back to skeleton stubs with TODO markers.
+reports an error and generates nothing.
 
 The generated config automatically includes:
 - `ros2_extension` with `node_name` derived from the project namespace
