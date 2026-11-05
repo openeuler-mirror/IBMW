@@ -233,7 +233,8 @@ void TimerExecutor::DispatchAt(
     for (size_t ii = 1; ii < timing_wheel_vec_.size(); ++ii) {
       auto& level = timing_wheel_vec_[ii];
       if (target_tick < level.limit) {
-        // Unsorted: the pull-down places each task by its own tick.
+        // Unsorted: the pull-down places each task by its own tick; the order
+        // within one tick is not guaranteed.
         level.wheel[(target_tick / level.unit) % level.wheel.size()].emplace_back(
             TaskWithTimestamp{target_tick, std::move(task)});
         return;
