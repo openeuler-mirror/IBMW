@@ -4,7 +4,8 @@
 # In-tree regen of all ibmw-gen sample projects.
 # For every src/samples/cpp/<demo>/<demo>.ibmw.yaml file, runs ibmw_gen.py
 # with -o = <sample_dir>/<project.name_with_gen_suffix>, then reports
-# PASS / FAIL counts.
+# PASS / FAIL counts. ibmw-template/my_ibmw_project is regenerated from
+# ibmw-template/ibmw_template.ibmw.yaml the same way.
 #
 # Used by the verification workflow to regenerate all 14 in-tree samples.
 
@@ -32,11 +33,13 @@ if [[ ${#yaml_files[@]} -eq 0 ]]; then
     exit 2
 fi
 
-for y in "${yaml_files[@]}"; do
+for y in "${yaml_files[@]}" ibmw-template/ibmw_template.ibmw.yaml; do
     sdir=$(dirname "$y")
     name=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['project']['name'])" "$y")
     # Append _gen suffix only if not already present
-    if [[ "$name" == *_gen ]]; then
+    if [[ "$y" == ibmw-template/* ]]; then
+        out="$sdir/$name"
+    elif [[ "$name" == *_gen ]]; then
         out="$sdir/$name"
     else
         out="$sdir/${name}_gen"

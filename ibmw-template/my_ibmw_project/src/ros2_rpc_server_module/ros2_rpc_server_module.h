@@ -1,22 +1,16 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-//
-// ROS2 RPC demo — Server module.
-// NOTE: This is a skeleton. ROS2 RPC requires external service type packages.
-
 #pragma once
 
-#include <memory>
-
 #include "cpp/module_base.h"
-// TODO: #include your ROS2 RPC generated header, e.g.:
-// #include "YourService.ibmw_rpc.srv.h"
+#include "ros2_rpc_server_module_typesupport.inc.h"
+
+namespace ibmw::context {
+class Context;
+}
 
 namespace my_project {
-
-// TODO: Implement your ROS2 RPC service class deriving from
-//       your_package::srv::YourServiceCoService
 
 class Ros2RpcServerModule : public ibmw::Module {
  public:
@@ -31,11 +25,13 @@ class Ros2RpcServerModule : public ibmw::Module {
   bool Run() override;
   void Stop() override;
 
+  IBMW_TS_RPC_SERVER_HANDLER_DECL
+
  private:
   auto GetLogger() { return core_.GetLogger(); }
 
   ibmw::Runtime core_;
-  // TODO: std::shared_ptr<YourServiceImpl> service_ptr_;
+  std::shared_ptr<ibmw::context::Context> ctx_ptr_;
 };
 
 }  // namespace my_project

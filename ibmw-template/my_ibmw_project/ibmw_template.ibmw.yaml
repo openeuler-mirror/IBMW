@@ -123,23 +123,59 @@ modules:
     transport: dds
     topic: example_topic
     message_type: ExampleEventMsg
+    user_code:
+      publish_body: |
+        msg.msg("Hello from IBMW template!");
+        msg.num(static_cast<int32_t>(msg_count_++));
 
   - name: SubscriberModule
     type: subscriber
     transport: dds
     topic: example_topic
     message_type: ExampleEventMsg
+    user_code:
+      on_message_body: |
+        MW_INFO("Received: msg='{}', num={}", msg->msg(), msg->num());
 
   # 3. DDS RPC
   - name: RpcServerModule
     type: rpc_server
     transport: dds
     dds_service: ExampleService
+    user_code:
+      rpc_server_handler_body.GetFooData: |
+        MW_INFO("GetFooData called, req.msg='{}'", req.msg());
+        rsp.code(0);
+        rsp.msg("echo " + req.msg());
+        ibmw::protocols::example::ExampleFoo foo;
+        foo.code(42);
+        foo.data("sample data");
+        rsp.data(foo);
+        return ibmw::rpc::Status();
+      rpc_server_handler_body.GetBarData: |
+        MW_INFO("GetBarData called, req.msg='{}', req.data.num={}",
+                req.msg(), req.data().num());
+        rsp.code(0);
+        rsp.msg("echo " + req.msg());
+        return ibmw::rpc::Status();
 
   - name: RpcClientModule
     type: rpc_client
     transport: dds
     dds_service: ExampleService
+    user_code:
+      rpc_client_request_parameter_build.GetFooData: |
+        req.msg("hello from template #" + std::to_string(counter));
+      rpc_client_response_parameter_consume.GetFooData: |
+        MW_INFO("GetFooData OK: rsp.msg='{}', rsp.data.code={}, rsp.data.data='{}'",
+                rsp.msg(), rsp.data().code(), rsp.data().data());
+      rpc_client_request_parameter_build.GetBarData: |
+        req.msg("bar request #" + std::to_string(counter));
+        ibmw::protocols::example::ExampleBar bar;
+        bar.num(static_cast<int32_t>(counter));
+        req.data(bar);
+      rpc_client_response_parameter_consume.GetBarData: |
+        MW_INFO("GetBarData OK: rsp.code={}, rsp.msg='{}'", rsp.code(), rsp.msg());
 
   # 4. ROS2 Pub/Sub
   - name: Ros2PublisherModule
@@ -149,6 +185,14 @@ modules:
     message_type: "example_ros2::msg::RosTestMsg"
     ros2_package: example_ros2
     ros2_msg_include: "example_ros2/msg/ros_test_msg.hpp"
+    user_code:
+      publish_body: |
+        msg.num = static_cast<int64_t>(msg_count_);
+        msg.data = {0x48, 0x65, 0x6C, 0x6C, 0x6F};  // "Hello" in bytes
+        msg.test_msg2.num = static_cast<int32_t>(msg_count_);
+        msg.test_msg2.num2 = 3.14f;
+        msg.test_msg2.data = 'A';
+        msg_count_++;
 
   - name: Ros2SubscriberModule
     type: subscriber
@@ -157,19 +201,37 @@ modules:
     message_type: "example_ros2::msg::RosTestMsg"
     ros2_package: example_ros2
     ros2_msg_include: "example_ros2/msg/ros_test_msg.hpp"
+    user_code:
+      on_message_body: |
+        MW_INFO("Received ROS2: num={}, data_size={}, nested.num={}, nested.data='{}'",
+                msg->num, msg->data.size(), msg->test_msg2.num, msg->test_msg2.data);
 
-  # 5. ROS2 RPC (skeleton only — requires external ROS2 service packages)
+  # 5. ROS2 RPC (example_ros2/srv/RosTestRpc)
   - name: Ros2RpcServerModule
     type: rpc_server
     transport: ros2
     ros2_package: example_ros2
+    ros2_service: RosTestRpc
     ros2_rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
+    user_code:
+      rpc_server_handler_body.RosTestRpc: |
+        // Echo the request data size as the response code
+        rsp.code = static_cast<int64_t>(req.data.size());
+        MW_INFO("ROS2 RPC Server: received {} bytes, responding with code={}",
+                req.data.size(), rsp.code);
+        return ibmw::rpc::Status();
 
   - name: Ros2RpcClientModule
     type: rpc_client
     transport: ros2
     ros2_package: example_ros2
+    ros2_service: RosTestRpc
     ros2_rpc_gencode_target: "ibmw::schema::example_ros2_ibmw_rpc_gencode"
+    user_code:
+      rpc_client_request_parameter_build.RosTestRpc: |
+        req.data = {0x01, 0x02, 0x03, 0x04, 0x05};
+      rpc_client_response_parameter_consume.RosTestRpc: |
+        MW_INFO("RPC OK: code={}", rsp.code);
 
   # 6. JSON Pub/Sub
   - name: JsonPublisherModule
@@ -177,12 +239,27 @@ modules:
     transport: json
     topic: json_topic
     message_type: SensorReading
+    user_code:
+      publish_body: |
+        msg.sensor_id = "sensor_01";
+        msg.temperature = 20.0 + static_cast<double>(msg_count_ % 10);
+        msg.humidity = 50.0 + static_cast<double>(msg_count_ % 20);
+        msg.timestamp_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+        msg.extra_values = {1.1, 2.2, 3.3};
+        msg_count_++;
 
   - name: JsonSubscriberModule
     type: subscriber
     transport: json
     topic: json_topic
     message_type: SensorReading
+    user_code:
+      on_message_body: |
+        MW_INFO("Received JSON: sensor={}, temp={:.1f}, humidity={:.1f}, ts={}",
+                msg->sensor_id, msg->temperature, msg->humidity, msg->timestamp_ms);
 
   # 7. JSON RPC
   - name: JsonRpcServerModule
@@ -193,6 +270,22 @@ modules:
       - name: Compute
         request: ComputeRequest
         response: ComputeResponse
+    user_code:
+      rpc_server_handler_body.Compute: |
+        rsp.code = 0;
+        rsp.msg = "OK";
+        if (req.operation == "add") {
+          rsp.result = req.operand_a + req.operand_b;
+        } else if (req.operation == "multiply") {
+          rsp.result = req.operand_a * req.operand_b;
+        } else if (req.operation == "subtract") {
+          rsp.result = req.operand_a - req.operand_b;
+        } else {
+          rsp.result = 0.0;
+          rsp.code = 1;
+          rsp.msg = "UNKNOWN_OPERATION";
+        }
+        return 0;
 
   - name: JsonRpcClientModule
     type: rpc_client
@@ -202,6 +295,16 @@ modules:
       - name: Compute
         request: ComputeRequest
         response: ComputeResponse
+    user_code:
+      rpc_client_request_parameter_build.Compute: |
+        static const char* const kOperations[] = {"add", "multiply", "subtract", "unknown_op"};
+        req.operation = kOperations[round % 4];
+        req.operand_a = 10.0 + round;
+        req.operand_b = 3.0;
+      rpc_client_response_parameter_consume.Compute: |
+        MW_LOG(self->GetLogger(), ibmw::common::util::kLogLevelInfo,
+               "[Round {}] Compute({}, {:.1f}, {:.1f}) => code={}, msg='{}', result={:.1f}",
+               round, req.operation, req.operand_a, req.operand_b, rsp.code, rsp.msg, rsp.result);
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Apps — each app defines both App and Pkg modes

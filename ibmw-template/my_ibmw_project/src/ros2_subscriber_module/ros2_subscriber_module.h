@@ -1,13 +1,13 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-//
-// ROS2 Pub/Sub demo — Subscriber module.
-
 #pragma once
 
 #include "cpp/module_base.h"
-#include "type_support/ros2/ros2_transport.h"
+
+// Transport-specific typesupport lives in the generated inc.h.
+// The user-facing template remains transport-agnostic.
+#include "ros2_subscriber_module_typesupport.inc.h"
 
 namespace my_project {
 

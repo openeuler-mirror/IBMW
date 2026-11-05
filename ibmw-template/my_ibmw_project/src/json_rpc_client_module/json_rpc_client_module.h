@@ -1,16 +1,10 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-//
-// JSON RPC demo — Client module.
-// Uses JSON type support (no IDL/code-gen).
-
 #pragma once
 
-#include <atomic>
-
 #include "cpp/module_base.h"
-#include "cpp/service/rpc_handle.h"
+#include "json_rpc_client_module_typesupport.inc.h"
 
 namespace my_project {
 
@@ -27,13 +21,8 @@ class JsonRpcClientModule : public ibmw::Module {
   bool Run() override;
   void Stop() override;
 
- private:
-  void RpcLoop();
-  auto GetLogger() { return core_.GetLogger(); }
-
+  IBMW_TS_RPC_CLIENT_LOOP_DECL
   ibmw::Runtime core_;
-  ibmw::rpc::ServiceRef service_ref_;
-  std::atomic<bool> running_{false};
 };
 
 }  // namespace my_project

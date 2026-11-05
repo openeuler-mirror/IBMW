@@ -1,15 +1,14 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-//
-// DDS RPC Server module — uses ServeInline for request handling.
-
 #pragma once
 
-#include <memory>
+#include "cpp/module_base.h"
+#include "rpc_server_module_typesupport.inc.h"
 
-#include "cpp/ibmw_sdk.h"
-#include "ExampleRpc.ibmw_rpc.dds.h"
+namespace ibmw::context {
+class Context;
+}
 
 namespace my_project {
 
@@ -26,9 +25,12 @@ class RpcServerModule : public ibmw::Module {
   bool Run() override;
   void Stop() override;
 
- private:
-  ibmw::logger::LoggerRef GetLogger() const { return ctx_ptr_->GetLogger(); }
+  IBMW_TS_RPC_SERVER_HANDLER_DECL
 
+ private:
+  auto GetLogger() { return core_.GetLogger(); }
+
+  ibmw::Runtime core_;
   std::shared_ptr<ibmw::context::Context> ctx_ptr_;
 };
 

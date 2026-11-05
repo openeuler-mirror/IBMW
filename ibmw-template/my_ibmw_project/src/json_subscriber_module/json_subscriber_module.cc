@@ -3,27 +3,36 @@
 
 #include "json_subscriber_module/json_subscriber_module.h"
 
-#include "cpp/util/json_transport.h"
-#include "json_custom_types.h"
+// Include the transport-specific typesupport translation unit.
+// This header is produced by the transport plugin
+// and carries every dds/ros2/json-specific symbol referenced below
+// (type aliases, ReceiverAccess<T>, subscriber free functions).
+#include "json_subscriber_module/json_subscriber_module_typesupport.inc.cc"
 
 namespace my_project {
 
 bool JsonSubscriberModule::Setup(ibmw::Runtime core) {
   core_ = core;
 
-  auto subscriber = core_.GetTransport().GetSubscriber("json_topic");
-
-  // ReceiverAccess<T> wraps subscribe + type dispatch in one object.
-  ibmw::transport::ReceiverAccess<SensorReading> access(subscriber);
+  // Plugin-injected: produce a stack-local `access` bound to the
+  // transport-specific ReceiverAccess<T> specialization. The macro is
+  // defined in <name>_typesupport.inc.h so user code never needs to
+  // name a transport-coupled type.
+  IBMW_TS_RECEIVER_ACCESS_SETUP(core_, access);
 
   bool ret = access.OnMessage(
-      [this](const std::shared_ptr<const SensorReading>& msg) {
-        MW_INFO("Received JSON message.");
-        // TODO: process msg fields here
+      [this](const std::shared_ptr<const IBMW_TS_RECEIVER_MSG_TYPE>& msg) {
+        // IBMW_PUBSUB_SUBSCRIBER_BODY_BEGIN
+        // IBMW: user code begin (on_message_body)
+        MW_INFO("Received JSON: sensor={}, temp={:.1f}, humidity={:.1f}, ts={}",
+                msg->sensor_id, msg->temperature, msg->humidity, msg->timestamp_ms);
+        // IBMW: user code end (on_message_body)
+        // IBMW_PUBSUB_SUBSCRIBER_BODY_END
       });
 
   if (!ret) {
-    MW_ERROR("Subscribe to JSON type failed!");
+    MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+           "Subscribe failed!");
     return false;
   }
 

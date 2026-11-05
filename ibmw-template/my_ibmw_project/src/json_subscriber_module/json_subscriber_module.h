@@ -1,12 +1,13 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-//
-// JSON Pub/Sub demo — Subscriber module.
-
 #pragma once
 
 #include "cpp/module_base.h"
+
+// Transport-specific typesupport lives in the generated inc.h.
+// The user-facing template remains transport-agnostic.
+#include "json_subscriber_module_typesupport.inc.h"
 
 namespace my_project {
 

@@ -2,24 +2,31 @@
 // All rights reserved.
 
 #include "subscriber_module/subscriber_module.h"
-#include "example_event_dds_types.h"
 
-using ibmw::protocols::example::ExampleEventMsg;
+// Include the transport-specific typesupport translation unit.
+// This header is produced by the transport plugin
+// and carries every dds/ros2/json-specific symbol referenced below
+// (type aliases, ReceiverAccess<T>, subscriber free functions).
+#include "subscriber_module/subscriber_module_typesupport.inc.cc"
 
 namespace my_project {
 
 bool SubscriberModule::Setup(ibmw::Runtime core) {
   core_ = core;
 
-  auto subscriber = core_.GetTransport().GetSubscriber("example_topic");
-
-  // ReceiverAccess<T> wraps subscribe + type dispatch in one object.
-  ibmw::transport::ReceiverAccess<ExampleEventMsg> access(subscriber);
+  // Plugin-injected: produce a stack-local `access` bound to the
+  // transport-specific ReceiverAccess<T> specialization. The macro is
+  // defined in <name>_typesupport.inc.h so user code never needs to
+  // name a transport-coupled type.
+  IBMW_TS_RECEIVER_ACCESS_SETUP(core_, access);
 
   bool ret = access.OnMessage(
-      [this](const std::shared_ptr<const ExampleEventMsg>& msg) {
-        MW_INFO("Received DDS message.");
-        // TODO: process msg fields here
+      [this](const std::shared_ptr<const IBMW_TS_RECEIVER_MSG_TYPE>& msg) {
+        // IBMW_PUBSUB_SUBSCRIBER_BODY_BEGIN
+        // IBMW: user code begin (on_message_body)
+        MW_INFO("Received: msg='{}', num={}", msg->msg(), msg->num());
+        // IBMW: user code end (on_message_body)
+        // IBMW_PUBSUB_SUBSCRIBER_BODY_END
       });
 
   if (!ret) {

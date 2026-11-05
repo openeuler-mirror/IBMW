@@ -3,11 +3,9 @@
 
 #include "ros2_rpc_client_module/ros2_rpc_client_module.h"
 
-#include "cpp/co/ibmw_context.h"
-#include "cpp/co/inline_executor.h"
-#include "cpp/co/on.h"
-#include "cpp/co/schedule.h"
-#include "cpp/co/sync_wait.h"
+#include "yaml-cpp/yaml.h"
+
+#include "ros2_rpc_client_module/ros2_rpc_client_module_typesupport.inc.cc"
 
 namespace my_project {
 
@@ -15,15 +13,22 @@ bool Ros2RpcClientModule::Setup(ibmw::Runtime core) {
   core_ = core;
 
   try {
-    // Get executor handle
-    executor_ = core_.GetExecutor().GetExecutor("work_thread_pool");
-    MW_REQUIRE(executor_ && executor_.SupportsTimedDispatch(),
-               "Get executor 'work_thread_pool' failed.");
+    std::string file_path = std::string(core_.GetConfigurator().GetConfigFilePath());
+    if (!file_path.empty()) {
+      YAML::Node cfg_node = YAML::LoadFile(file_path);
+      if (cfg_node["Ros2RpcClientModule"] && cfg_node["Ros2RpcClientModule"]["rpc_frq"]) {
+        rpc_frq_ = cfg_node["Ros2RpcClientModule"]["rpc_frq"].as<double>();
+      }
+    }
 
-    // TODO: Register ROS2 RPC client and create access object
-    // auto rpc_handle = core_.GetService();
-    // bool ret = your_package::srv::RegisterYourServiceClientFunc(rpc_handle);
-    // access_ = std::make_shared<your_package::srv::YourServiceCoAccess>(rpc_handle);
+    auto rpc_handle = core_.GetService();
+    MW_CHECK_LOG_THROW(core_.GetLogger(), rpc_handle,
+        ibmw::common::util::kLogLevelError, "Get service handle failed.");
+
+    bool ret = example_ros2::srv::RegisterRosTestRpcClientFunc(rpc_handle);
+    MW_REQUIRE(ret, "Register ROS2 RPC client failed.");
+
+    access_ = std::make_shared<example_ros2::srv::RosTestRpcSyncAccess>(rpc_handle);
 
     MW_INFO("Ros2RpcClientModule::Setup succeeded.");
   } catch (const std::exception& e) {
@@ -35,56 +40,20 @@ bool Ros2RpcClientModule::Setup(ibmw::Runtime core) {
 }
 
 bool Ros2RpcClientModule::Run() {
-  try {
-    scope_.spawn(ibmw::co::On(ibmw::co::InlineExecutor(), MainLoop()));
-  } catch (const std::exception& e) {
-    MW_ERROR("Run failed: {}", e.what());
-    return false;
-  }
+  loop_thread_ = std::thread([this]() { RpcLoop(); });
 
   MW_INFO("Ros2RpcClientModule::Run succeeded.");
   return true;
 }
 
 void Ros2RpcClientModule::Stop() {
-  try {
-    run_flag_ = false;
-    ibmw::co::SyncWait(scope_.complete());
-  } catch (const std::exception& e) {
-    MW_ERROR("Stop failed: {}", e.what());
-    return;
+  run_flag_ = false;
+  if (loop_thread_.joinable()) {
+    loop_thread_.join();
   }
-
   MW_INFO("Ros2RpcClientModule::Stop succeeded.");
 }
 
-ibmw::co::Task<void> Ros2RpcClientModule::MainLoop() {
-  try {
-    MW_INFO("Start ROS2 RPC MainLoop.");
-
-    ibmw::co::IbmwExecutor work_executor(executor_);
-    co_await ibmw::co::Schedule(work_executor);
-
-    uint32_t count = 0;
-    while (run_flag_) {
-      co_await ibmw::co::ScheduleAfter(
-          work_executor, std::chrono::seconds(1));
-      count++;
-
-      MW_INFO("RPC call #{} -------------------------", count);
-
-      // TODO: Build request, call RPC, handle response
-      // auto ctx_ptr = access_->NewContextSharedPtr();
-      // ctx_ptr->SetTimeout(std::chrono::seconds(3));
-      // auto status = co_await access_->YourMethod(ctx_ptr, req, rsp);
-    }
-
-    MW_INFO("Exit ROS2 RPC MainLoop.");
-  } catch (const std::exception& e) {
-    MW_ERROR("MainLoop exception: {}", e.what());
-  }
-
-  co_return;
-}
+IBMW_TS_RPC_CLIENT_LOOP_IMPL(Ros2RpcClientModule)
 
 }  // namespace my_project
