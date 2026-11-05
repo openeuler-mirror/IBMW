@@ -5,16 +5,20 @@
 // logger when destroyed.
 // CORE-007: executor threads get their own alternate signal stack, so a stack
 // overflow there is still reported.
+// CORE-004: the raw part of the report (fault address and an unsymbolized
+// trace) is written before the symbolizing part, which may never finish.
 
 #include "engine/logger/crash_signal_handling.h"
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -101,6 +105,80 @@ TEST(CrashSignalHandlingTest, CrashAfterDestructionUsesPreviousHandler) {
   EXPECT_EQ(output.find("IBMW crash signal"), std::string::npos) << output;
 }
 
+// The symbolizing part ends the process at once here, as a hang there would:
+// what was written before it is the raw part.
+TEST(CrashSignalHandlingTest, RawTraceIsWrittenBeforeTheSymbolizedReport) {
+  int fds[2];
+  ASSERT_EQ(pipe(fds), 0);
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const rlimit no_core{0, 0};
+    (void)setrlimit(RLIMIT_CORE, &no_core);
+    dup2(fds[1], STDERR_FILENO);
+    close(fds[0]);
+    CrashSignalHandling handling;
+    auto logger = std::make_shared<ibmw::common::util::LoggerWrapper>();
+    logger->get_log_level_func = [] { return 0u; };
+    logger->log_func = [](uint32_t, uint32_t, const char*, const char*, const char*, size_t) { _exit(42); };
+    CrashSignalHandling::SetLogger(logger);
+    *reinterpret_cast<volatile int*>(0x10) = 1;
+    _exit(0);
+  }
+  close(fds[1]);
+  std::string output;
+  char buffer[4096];
+  for (ssize_t n; (n = read(fds[0], buffer, sizeof(buffer))) > 0;) output.append(buffer, n);
+  close(fds[0]);
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status)) << output;
+  EXPECT_EQ(WEXITSTATUS(status), 42) << output;  // the symbolizing part was reached
+  EXPECT_NE(output.find("IBMW crash signal: 11\nIBMW crash pc: 0x"), std::string::npos) << output;
+  EXPECT_NE(output.find(" addr: 0x10 code: 0x1\n"), std::string::npos) << output;  // SEGV_MAPERR
+  // backtrace_symbols_fd(): one "...[0x...]" line per frame, the test among them.
+  EXPECT_NE(output.find("[0x"), std::string::npos) << output;
+  EXPECT_NE(output.find("ibmw_core_engine_test"), std::string::npos) << output;
+}
+
+// Even writing the report can block (stderr a full pipe nobody reads): the
+// watchdog still ends the process with the original signal (~10 s).
+TEST(CrashSignalHandlingTest, BlockedStderrStillEndsTheProcess) {
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const rlimit no_core{0, 0};
+    (void)setrlimit(RLIMIT_CORE, &no_core);
+    int fds[2];
+    if (pipe(fds) != 0) _exit(1);
+    (void)fcntl(fds[1], F_SETFL, O_NONBLOCK);
+    static char fill[4096];
+    while (write(fds[1], fill, sizeof(fill)) > 0) {
+    }
+    (void)fcntl(fds[1], F_SETFL, 0);
+    dup2(fds[1], STDERR_FILENO);  // fds[0] stays open and unread
+    CrashSignalHandling handling;
+    raise(SIGSEGV);
+    _exit(0);
+  }
+  int status = 0;
+  pid_t done = 0;
+  const auto start = std::chrono::steady_clock::now();
+  const auto limit = start + std::chrono::seconds(30);
+  while ((done = waitpid(child, &status, WNOHANG)) == 0 && std::chrono::steady_clock::now() < limit) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (done == 0) {
+    kill(child, SIGKILL);
+    (void)waitpid(child, &status, 0);
+    FAIL() << "the crashed process hung";
+  }
+  ASSERT_EQ(done, child);
+  ASSERT_TRUE(WIFSIGNALED(status));
+  EXPECT_EQ(WTERMSIG(status), SIGSEGV);
+  EXPECT_GE(std::chrono::steady_clock::now() - start, std::chrono::seconds(9));  // it did block
+}
+
 bool CurrentThreadHasAltStack() {
   stack_t current{};
   return sigaltstack(nullptr, &current) == 0 && (current.ss_flags & SS_DISABLE) == 0;
@@ -158,6 +236,8 @@ TEST(CrashSignalHandlingTest, StackOverflowOnWorkerThreadIsReported) {
   ASSERT_TRUE(WIFSIGNALED(status));
   EXPECT_EQ(WTERMSIG(status), SIGSEGV);
   EXPECT_NE(output.find("IBMW crash signal: 11"), std::string::npos) << output.substr(0, 512);
+  EXPECT_NE(output.find("IBMW crash pc: 0x"), std::string::npos) << output.substr(0, 512);
+  EXPECT_NE(output.find(")[0x"), std::string::npos) << output.substr(0, 2048);  // backtrace() frames
 }
 
 }  // namespace

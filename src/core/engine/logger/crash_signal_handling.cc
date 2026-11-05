@@ -24,12 +24,16 @@
 #endif
 
 #if IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
+#include <execinfo.h>
+
 #include "backward.hpp"
 #endif
 
+#include <errno.h>
 #include <signal.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
@@ -101,10 +105,10 @@ CrashSignalHandling::~CrashSignalHandling() {
   }
 }
 
-void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
+namespace {
+// Program counter at the fault, or nullptr where it is not known.
+void* FaultingPc(void* _ctx) {
   ucontext_t* uctx = static_cast<ucontext_t*>(_ctx);
-
-  backward::StackTrace st;
   void* error_addr = nullptr;
 
   #ifdef REG_RIP          // x86_64
@@ -134,6 +138,17 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   error_addr = reinterpret_cast<void*>(uctx->uc_mcontext->__ss.__eip);
   #endif
 
+  (void)uctx;
+  return error_addr;
+}
+}  // namespace
+
+void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
+  ucontext_t* uctx = static_cast<ucontext_t*>(_ctx);
+
+  backward::StackTrace st;
+  void* error_addr = FaultingPc(_ctx);
+
   if (error_addr) {
     st.load_from(error_addr, 32, reinterpret_cast<void*>(uctx), info->si_addr);
   } else {
@@ -146,16 +161,52 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   MW_ERROR("Crash signal handling signal: {}, stacktrace: \n{}", info->si_signo, ss.str());
   // SigHandler re-raises the signal right after this returns.
   RunCrashFlush();
-
-  #if _XOPEN_SOURCE >= 700 || _POSIX_C_SOURCE >= 200809L
-  psiginfo(info, nullptr);
-  #else
-  (void)info;
-  #endif
 }
 
 namespace {
 volatile sig_atomic_t g_crash_signo = 0;
+
+void WriteStderr(const char* text, size_t size) noexcept {
+  while (size > 0) {
+    const ssize_t written = write(STDERR_FILENO, text, size);
+    if (written < 0 && errno == EINTR) continue;
+    if (written <= 0) return;
+    text += written;
+    size -= static_cast<size_t>(written);
+  }
+}
+
+// Appends "0x" and `value` in hex to `out`; returns the end.
+char* AppendHex(char* out, uintptr_t value) noexcept {
+  *out++ = '0';
+  *out++ = 'x';
+  int shift = static_cast<int>(sizeof(value) * 8) - 4;
+  while (shift > 0 && ((value >> shift) & 0xf) == 0) shift -= 4;
+  for (; shift >= 0; shift -= 4) *out++ = "0123456789abcdef"[(value >> shift) & 0xf];
+  return out;
+}
+
+// Where it crashed (async-signal-safe; `addr` is the fault address only when
+// `code` is positive, i.e. sent by the kernel) and a raw trace, one
+// "binary(symbol+offset)[address]" line per frame. backtrace() is not
+// async-signal-safe by the letter, only in practice once preloaded, so this
+// runs under the watchdog too.
+void WriteRawCrashReport(const siginfo_t* info, void* _ctx) noexcept {
+  char line[96];
+  char* end = line;
+  for (const char* text = "IBMW crash pc: "; *text != '\0';) *end++ = *text++;
+  end = AppendHex(end, reinterpret_cast<uintptr_t>(FaultingPc(_ctx)));
+  for (const char* text = " addr: "; *text != '\0';) *end++ = *text++;
+  end = AppendHex(end, reinterpret_cast<uintptr_t>(info->si_addr));
+  for (const char* text = " code: "; *text != '\0';) *end++ = *text++;
+  end = AppendHex(end, static_cast<uintptr_t>(static_cast<unsigned>(info->si_code)));
+  *end++ = '\n';
+  WriteStderr(line, static_cast<size_t>(end - line));
+
+  void* frames[64];
+  const int count = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, count, STDERR_FILENO);
+}
 
 // Watchdog for a hung crash report: terminate with the original signal (now
 // SIG_DFL thanks to SA_RESETHAND) so the core dump and exit status are kept.
@@ -175,17 +226,9 @@ __attribute__((noreturn))
   #endif
 void
 CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
-  // Async-signal-safe part first: the crash is reported even if the
-  // symbolized trace below never completes.
-  char msg[] = "IBMW crash signal: 00\n";
-  msg[sizeof(msg) - 4] = static_cast<char>('0' + (signo / 10) % 10);
-  msg[sizeof(msg) - 3] = static_cast<char>('0' + signo % 10);
-  (void)!write(STDERR_FILENO, msg, sizeof(msg) - 1);
-
-  // HandleSignal() allocates, symbolizes and logs, none of which is
-  // async-signal-safe: if the crash happened while malloc or the log lock was
-  // held it would hang forever. Bound it with a watchdog (SIGALRM is left
-  // unblocked by InstallHandlers).
+  // Nothing below may hang the process: even a write to a stderr pipe nobody
+  // reads blocks. Bound it all with a watchdog (SIGALRM is left unblocked by
+  // InstallHandlers).
   g_crash_signo = signo;
   struct sigaction on_timeout;
   std::memset(&on_timeout, 0, sizeof on_timeout);
@@ -194,6 +237,18 @@ CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
   (void)sigaction(SIGALRM, &on_timeout, nullptr);
   alarm(10);
 
+  // The raw part first: the crash is reported even if the symbolized trace
+  // below never completes.
+  char msg[] = "IBMW crash signal: 00\n";
+  msg[sizeof(msg) - 4] = static_cast<char>('0' + (signo / 10) % 10);
+  msg[sizeof(msg) - 3] = static_cast<char>('0' + signo % 10);
+  WriteStderr(msg, sizeof(msg) - 1);
+  WriteRawCrashReport(info, _ctx);
+
+  // HandleSignal() allocates, symbolizes and logs, none of which is
+  // async-signal-safe: if the crash happened while malloc or the log lock was
+  // held it would hang. It gets a full watchdog period of its own.
+  alarm(10);
   HandleSignal(signo, info, _ctx);
 
   // Forward the signal (SA_RESETHAND makes it use default on re-raise).
@@ -221,6 +276,10 @@ void CrashSignalHandling::EnsureAltStack() {
 
 void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
   EnsureAltStack();
+  // The first backtrace() loads libgcc_s, which allocates: do it here, not in
+  // the handler.
+  void* frame = nullptr;
+  (void)backtrace(&frame, 1);
 
   for (int sig : signals) {
     struct sigaction action;
