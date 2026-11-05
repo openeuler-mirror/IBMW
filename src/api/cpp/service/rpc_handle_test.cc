@@ -6,8 +6,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -114,15 +116,30 @@ struct InlineExecutor {
 
 // Runs every dispatched task on a new thread, after Dispatch returns, like a
 // real executor resuming the caller later.
+// A task may dispatch the next one from its own thread.
 struct ThreadExecutor {
   static void Dispatch(void* ctx, ibmw_function_base_t* task) {
-    static_cast<ThreadExecutor*>(ctx)->threads.emplace_back([t = ibmw::executor::Task{task}]() mutable { t(); });
+    auto* self = static_cast<ThreadExecutor*>(ctx);
+    std::lock_guard lock(self->mutex);
+    self->threads.emplace_back([t = ibmw::executor::Task{task}]() mutable { t(); });
+    ++self->dispatched;
   }
   ~ThreadExecutor() {
-    for (auto& thread : threads) thread.join();
+    while (true) {
+      std::thread thread;
+      {
+        std::lock_guard lock(mutex);
+        if (threads.empty()) break;
+        thread = std::move(threads.back());
+        threads.pop_back();
+      }
+      thread.join();
+    }
   }
 
+  std::mutex mutex;
   std::vector<std::thread> threads;
+  std::atomic<int> dispatched = 0;
   ibmw_executor_base_t base{
       .type = &InlineExecutor::Type,
       .name = &InlineExecutor::Type,
@@ -173,7 +190,32 @@ TEST(RpcHandle, CoCallResumedOnAnotherThread) {
   EXPECT_EQ(RunCo(CoService::Mode::kAnswer, &exe.base).Code(), 5u);
   EXPECT_EQ(RunCo(CoService::Mode::kDrop, &exe.base).Code(),
             static_cast<uint32_t>(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
-  EXPECT_EQ(exe.threads.size(), 2u);
+  EXPECT_EQ(exe.dispatched.load(), 2);
+}
+
+// The caller resumes on another thread of the executor; its next call there
+// still finds the executor to resume on.
+struct CoTwiceProbe : CoAccessBase {
+  using CoAccessBase::CoAccessBase;
+  ibmw::co::Task<Status> Run() {
+    int req = 0, rsp = 0;
+    auto first = co_await Call("json:/svc/fn", ContextRef(), req, rsp);
+    if (first.Code() != 5u) co_return first;  // the provider answers 5
+    co_return co_await Call("json:/svc/fn", ContextRef(), req, rsp);
+  }
+};
+
+TEST(RpcHandle, CoCallAfterResumingOnAnotherThread) {
+  CoService::mode = CoService::Mode::kAnswer;
+  CoService svc;
+  ThreadExecutor exe;
+  CoTwiceProbe probe(ServiceRef(&svc.base), "json", "svc");
+  ibmw::context::details::ScopedThreadContextRestore restore;
+  ibmw::context::details::g_thread_ctx.exe = ibmw::executor::ExecutorHandle(&exe.base);
+  auto result = ibmw::co::SyncWait(probe.Run());
+  ASSERT_TRUE(result);
+  EXPECT_EQ(result->Code(), 5u);
+  EXPECT_EQ(exe.dispatched.load(), 2);
 }
 
 TEST(RpcHandle, CoCallOffExecutorFailsWithoutThrowing) {
