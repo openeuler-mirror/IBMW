@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <unordered_set>
 
@@ -70,6 +72,30 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
       const char* req_id_buf,
       uint32_t code);
 
+  // Shared with the answer callbacks, which a service function may keep past
+  // the driver: a closed gate tells them not to touch it.
+  struct ReplyGate {
+    std::atomic<bool> closed{false};
+    std::atomic<int> running{0};
+  };
+
+  // Held while an answer uses the driver. Pairs with CloseReplyGate(): either
+  // it sees this answer or the answer sees the closed flag.
+  class ReplyPass {
+   public:
+    explicit ReplyPass(ReplyGate& gate) noexcept : gate_(gate) { gate_.running.fetch_add(1); }
+    ~ReplyPass() { gate_.running.fetch_sub(1); }
+    ReplyPass(const ReplyPass&) = delete;
+    ReplyPass& operator=(const ReplyPass&) = delete;
+
+    bool Open() const noexcept { return !gate_.closed.load(); }
+
+   private:
+    ReplyGate& gate_;
+  };
+
+  void CloseReplyGate();
+
   enum class State : uint32_t {
     PreInit,
     Init,
@@ -89,6 +115,8 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
   std::string key_suffix_;
 
   std::unique_ptr<runtime::core::util::RpcClientTool<std::shared_ptr<runtime::core::service::ServiceMessageFrame>>> client_tool_ptr_;
+
+  std::shared_ptr<ReplyGate> reply_gate_ = std::make_shared<ReplyGate>();
 
   ShmLoanSizes shm_loan_sizes_;
   std::unordered_set<std::string> sub_keyexprs_;  // bus subscribers of the handlers, removed by Shutdown

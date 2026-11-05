@@ -56,6 +56,8 @@ void ZenohBus::Initialize(const std::string &native_cfg_path, size_t shm_pool_si
   initialized_ = true;
 }
 
+bool ZenohBus::InCallback() noexcept { return in_bus_callback; }
+
 std::string ZenohBus::PrettyConfig(const z_loaned_string_t *text) {
   const char *begin = z_string_data(text);
   Json::Value json_data;

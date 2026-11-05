@@ -49,6 +49,8 @@ class ZenohBus {
   // from inside a bus callback it cannot wait for that callback: it logs and
   // returns without waiting.
   bool UnregisterSubscriber(const std::string& keyexpr);
+  // Whether this thread runs a bus callback, which nothing on it can wait for.
+  static bool InCallback() noexcept;
   bool RegisterPublisher(const std::string& keyexpr, bool shm_enabled);
 
   // Ends registration; the drivers call it when they start. Sends read the

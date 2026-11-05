@@ -514,6 +514,126 @@ TEST_F(ZenohRpcDriverTest, ShutdownWaitsForTheHandlersAndRemovesThem) {
   EXPECT_FALSE(bus_->UnregisterSubscriber("rsp/" + Pattern("/test/b")));
 }
 
+// A service function may answer after the driver shut down, or is gone: nothing is sent.
+TEST_F(ZenohRpcDriverTest, LateAnswersAreDropped) {
+  auto& driver = NewDriver();
+  std::vector<std::shared_ptr<runtime::core::service::ServiceMessageFrame>> frames;
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = infos_[0], .service_func = [&](const auto& frame) { frames.push_back(frame); }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  Watch("rsp/" + a);
+  Put("req/" + a, Request(a, 1, "1"));
+  Put("req/" + a, Request(a, 2, "2"));
+  Put("req/" + a, Request(a, 3, "3"));
+  ASSERT_EQ(frames.size(), 3u);
+
+  Answer(frames[0]);  // the proof that an answer shows up here
+  ASSERT_EQ(WaitSeen(1).size(), 1u);
+  driver.Shutdown();
+  Answer(frames[1]);
+  driver_.reset();
+  Answer(frames[2]);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(WaitSeen(0).size(), 1u);
+}
+
+// A handler running when shutdown begins still gets its answer out.
+TEST_F(ZenohRpcDriverTest, HandlerRunningAtShutdownStillAnswers) {
+  auto& driver = NewDriver();
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  const runtime::core::service::ServiceFuncWrapper service{.info = infos_[0], .service_func = [&](const auto& frame) {
+    entered.set_value();
+    released.wait();
+    Answer(frame);
+  }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  Watch("rsp/" + a);
+  auto request = std::async(std::launch::async, [&] { Put("req/" + a, Request(a, 1, "1")); });
+  ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+  auto shutdown = std::async(std::launch::async, [&] { driver.Shutdown(); });
+  EXPECT_EQ(shutdown.wait_for(200ms), std::future_status::timeout);
+  release.set_value();
+  ASSERT_EQ(shutdown.wait_for(5s), std::future_status::ready);
+  request.get();
+  EXPECT_EQ(WaitSeen(1).size(), 1u);
+}
+
+// An answer being sent keeps the driver: a local subscriber runs in its put.
+TEST_F(ZenohRpcDriverTest, ShutdownWaitsForARunningAnswer) {
+  auto& driver = NewDriver();
+  std::shared_ptr<runtime::core::service::ServiceMessageFrame> held;
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = infos_[0], .service_func = [&](const auto& frame) { held = frame; }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  std::promise<void> entered, release;
+  auto released = release.get_future().share();
+  ASSERT_TRUE(bus_->RegisterSubscriber("rsp/" + a, [&](const z_loaned_sample_t*) {
+    entered.set_value();
+    released.wait();
+  }));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  Put("req/" + a, Request(a, 1, "1"));
+  ASSERT_NE(held, nullptr);
+  auto answer = std::async(std::launch::async, [&] { Answer(held); });
+  ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+  auto shutdown = std::async(std::launch::async, [&] { driver.Shutdown(); });
+  EXPECT_EQ(shutdown.wait_for(200ms), std::future_status::timeout);
+  release.set_value();
+  ASSERT_EQ(shutdown.wait_for(5s), std::future_status::ready);
+  answer.get();
+}
+
+// Shutdown from inside an answer's own put cannot wait for that answer.
+TEST_F(ZenohRpcDriverTest, ShutdownFromAnAnswersSubscriberDoesNotWaitForIt) {
+  auto& driver = NewDriver();
+  std::shared_ptr<runtime::core::service::ServiceMessageFrame> held;
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = infos_[0], .service_func = [&](const auto& frame) { held = frame; }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  std::promise<void> done;
+  ASSERT_TRUE(bus_->RegisterSubscriber("rsp/" + a, [&](const z_loaned_sample_t*) {
+    driver.Shutdown();
+    done.set_value();
+  }));
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  Put("req/" + a, Request(a, 1, "1"));
+  ASSERT_NE(held, nullptr);
+  auto answer = std::async(std::launch::async, [&] { Answer(held); });
+  ASSERT_EQ(done.get_future().wait_for(5s), std::future_status::ready);
+  answer.get();
+}
+
+// Destruction includes the shutdown: no handler or answer reaches the driver afterwards.
+TEST_F(ZenohRpcDriverTest, DestructionShutsTheDriverDown) {
+  auto& driver = NewDriver();
+  std::shared_ptr<runtime::core::service::ServiceMessageFrame> held;
+  const runtime::core::service::ServiceFuncWrapper service{
+      .info = infos_[0], .service_func = [&](const auto& frame) { held = frame; }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  driver.Start();
+  Watch("rsp/" + a);
+  Put("req/" + a, Request(a, 1, "1"));
+  ASSERT_NE(held, nullptr);
+  driver_.reset();
+  EXPECT_FALSE(bus_->UnregisterSubscriber("req/" + a));
+  Answer(held);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_TRUE(WaitSeen(0).empty());
+}
+
 // Shutdown keeps the client tool; a call still waiting gets its result, once.
 TEST_F(ZenohRpcDriverTest, CallStillWaitingGetsItsResultFromTheDestructor) {
   auto& driver = NewDriver();

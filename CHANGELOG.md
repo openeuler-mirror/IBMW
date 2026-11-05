@@ -71,6 +71,10 @@ details remain governed by the documentation for each release.
 - Zenoh RPC: the client tool is kept until the driver is destroyed, so a call
   racing with `Shutdown()` no longer reaches a destroyed tool. Calls still
   waiting then complete with `CLI_DRIVER_INTERNAL_ERROR` from the destructor.
+- Zenoh RPC: shutdown waits for answers being sent, except when called from a
+  bus callback. A service function that answers later no longer reaches the
+  destroyed driver: the answer is dropped, and its client gets its timeout if
+  it has one. Destroying the driver includes its shutdown.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

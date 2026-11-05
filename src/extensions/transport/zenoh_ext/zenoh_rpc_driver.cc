@@ -3,6 +3,9 @@
 
 #include "zenoh_ext/zenoh_rpc_driver.h"
 
+#include <chrono>
+#include <thread>
+
 #include "cpp/service/rpc_handle.h"
 
 namespace YAML {
@@ -116,16 +119,38 @@ void ZenohRpcDriver::Shutdown() {
 
   zenoh_bus_ptr_->StopServiceDiscovery();
   // The handlers use this driver and its client tool: none may run once they are destroyed.
-  // Servers go first: one waiting for an answer still gets it.
-  for (const std::string_view prefix : {"req/", "rsp/"}) {
+  // Servers go first: one waiting for an answer still gets it. So does a client
+  // of an answer already being sent; later answers are dropped, their clients time out.
+  auto unregister = [this](std::string_view prefix) {
     for (const auto& keyexpr : sub_keyexprs_)
       if (keyexpr.starts_with(prefix)) zenoh_bus_ptr_->UnregisterSubscriber(keyexpr);
-  }
+  };
+  unregister("req/");
+  CloseReplyGate();
+  unregister("rsp/");
   // client_tool_ptr_ stays until destruction: a Call() past its state check
   // still reaches it. Calls still waiting then get their result from the destructor.
 }
 
+void ZenohRpcDriver::CloseReplyGate() {
+  reply_gate_->closed.store(true);
+  // The caller of a shutdown from a bus callback keeps the driver until its answers ended.
+  if (ZenohBus::InCallback()) [[unlikely]] {
+    MW_WARN("Zenoh RPC shutdown from a bus callback: not waiting for running answers.");
+    return;
+  }
+  auto warn_at = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (reply_gate_->running.load() != 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (std::chrono::steady_clock::now() >= warn_at) {
+      MW_WARN("Zenoh RPC shutdown: still waiting for {} running answer(s).", reply_gate_->running.load());
+      warn_at += std::chrono::seconds(5);
+    }
+  }
+}
+
 ZenohRpcDriver::~ZenohRpcDriver() {
+  ZenohRpcDriver::Shutdown();
   if (!client_tool_ptr_) return;
   client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
     CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
@@ -244,6 +269,7 @@ bool ZenohRpcDriver::RegisterServiceFunc(
         // set callback
         service_invoke_wrapper_ptr->callback =
             [this,
+             reply_gate = reply_gate_,
              service_invoke_wrapper_ptr,
              ctx_ptr,
              service_req_ptr,
@@ -251,6 +277,9 @@ bool ZenohRpcDriver::RegisterServiceFunc(
              serialization_type{std::move(serialization_type)},
              pattern,
              req_id_buf](ibmw::rpc::Status status) {
+              const ReplyPass pass(*reply_gate);
+              if (!pass.Open()) [[unlikely]] return;
+
               if (!status.OK()) [[unlikely]] {
                 ReturnRspWithStatusCode(
                     pattern, serialization_type, req_id_buf, status.Code());
