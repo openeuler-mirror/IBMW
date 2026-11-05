@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -23,7 +24,10 @@ namespace ibmw::extensions::dds_extension {
 // One thread sleeps until the earliest deadline; nothing runs while idle.
 class RpcTimeoutTimer {
  public:
-  RpcTimeoutTimer() : thread_([this] { Run(); }) {}
+  RpcTimeoutTimer() : state_(std::make_shared<State>()) {
+    thread_ = std::thread([state = state_] { Run(*state); });
+    thread_id_ = thread_.get_id();
+  }
   ~RpcTimeoutTimer() { Stop(); }
 
   RpcTimeoutTimer(const RpcTimeoutTimer&) = delete;
@@ -31,27 +35,45 @@ class RpcTimeoutTimer {
 
   ibmw::executor::ExecutorHandle Handle() const { return ibmw::executor::ExecutorHandle(&base_); }
 
-  // Waits for a running task; pending tasks are dropped.
+  // Waits for a running task; pending tasks are dropped. From a task (a
+  // timeout callback that shuts the driver down) the thread is not joined:
+  // it ends after the task, holding the state it uses.
   void Stop() noexcept {
     {
-      std::lock_guard lock(mutex_);
-      stop_ = true;
+      std::lock_guard lock(state_->mutex);
+      state_->stop = true;
     }
-    cv_.notify_all();
-    if (thread_.joinable()) thread_.join();
+    state_->cv.notify_all();
+    if (thread_.joinable()) {
+      if (std::this_thread::get_id() == thread_id_) {
+        thread_.detach();
+      } else {
+        thread_.join();
+      }
+    }
     std::vector<Entry> dropped;
     {
-      std::lock_guard lock(mutex_);
-      dropped.swap(heap_);
+      std::lock_guard lock(state_->mutex);
+      dropped.swap(state_->heap);
     }
   }
 
  private:
   using Clock = std::chrono::steady_clock;
 
+  // Longest delay kept; a larger one (an "infinite" timeout) is capped.
+  static constexpr uint64_t kMaxDelayNs = 100ULL * 365 * 24 * 3600 * 1000000000ULL;
+
   struct Entry {
     Clock::time_point deadline;
     ibmw::executor::Task task;
+  };
+
+  struct State {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::vector<Entry> heap;
+    bool stop = false;
   };
 
   // Min-heap on the deadline.
@@ -66,38 +88,42 @@ class RpcTimeoutTimer {
   }
 
   // The deadline is given on the system clock; it is kept on the steady one.
+  // Throws only if the heap cannot grow (the task is destroyed then).
   void Add(uint64_t system_ns, ibmw_function_base_t* native_task) {
     ibmw::executor::Task task(native_task);
     const uint64_t now_ns = SystemNowNs();
-    const auto delay = std::chrono::nanoseconds(system_ns > now_ns ? system_ns - now_ns : 0);
-    const auto deadline = Clock::now() + delay;
+    const uint64_t delay_ns = system_ns > now_ns ? std::min(system_ns - now_ns, kMaxDelayNs) : 0;
+    const auto deadline = Clock::now() + std::chrono::nanoseconds(delay_ns);
+    State& state = *state_;
     bool earliest = false;
     {
-      std::lock_guard lock(mutex_);
-      if (stop_) return;  // task destroyed after the lock is released
-      heap_.push_back(Entry{deadline, std::move(task)});
-      std::push_heap(heap_.begin(), heap_.end(), Later);
-      earliest = heap_.front().deadline == deadline;
+      std::lock_guard lock(state.mutex);
+      if (state.stop) return;  // task destroyed after the lock is released
+      state.heap.push_back(Entry{deadline, std::move(task)});
+      std::push_heap(state.heap.begin(), state.heap.end(), Later);
+      earliest = state.heap.front().deadline == deadline;
     }
     // Only a new earliest deadline shortens the wait.
-    if (earliest) cv_.notify_one();
+    if (earliest) state.cv.notify_one();
   }
 
-  void Run() {
-    std::unique_lock lock(mutex_);
-    while (!stop_) {
-      if (heap_.empty()) {
-        cv_.wait(lock);
+  static void Run(State& state) {
+    std::unique_lock lock(state.mutex);
+    while (!state.stop) {
+      if (state.heap.empty()) {
+        state.cv.wait(lock);
         continue;
       }
-      if (Clock::now() < heap_.front().deadline) {
-        cv_.wait_until(lock, heap_.front().deadline);
+      // A copy: the heap may grow (and move) while the lock is released.
+      const auto deadline = state.heap.front().deadline;
+      if (Clock::now() < deadline) {
+        state.cv.wait_until(lock, deadline);
         continue;
       }
-      std::pop_heap(heap_.begin(), heap_.end(), Later);
+      std::pop_heap(state.heap.begin(), state.heap.end(), Later);
       {
-        ibmw::executor::Task task = std::move(heap_.back().task);
-        heap_.pop_back();
+        ibmw::executor::Task task = std::move(state.heap.back().task);
+        state.heap.pop_back();
         lock.unlock();
         task();
       }  // destroyed unlocked too
@@ -105,22 +131,20 @@ class RpcTimeoutTimer {
     }
   }
 
-  std::mutex mutex_;
-  std::condition_variable cv_;
-  std::vector<Entry> heap_;
-  bool stop_ = false;
+  std::shared_ptr<State> state_;
+  std::thread thread_;
+  std::thread::id thread_id_;  // set once, before any task can run
   const ibmw_executor_base_t base_{
       .struct_size = sizeof(ibmw_executor_base_t),
       .type = [](void*) { return ibmw::util::ToIbmwStringView("dds_rpc_timeout"); },
       .name = [](void*) { return ibmw::util::ToIbmwStringView("dds_rpc_timeout"); },
       .is_thread_safe = [](void*) { return true; },
-      .is_in_current_executor = [](void* ctx) { return std::this_thread::get_id() == Self(ctx)->thread_.get_id(); },
+      .is_in_current_executor = [](void* ctx) { return std::this_thread::get_id() == Self(ctx)->thread_id_; },
       .supports_timed_dispatch = [](void*) { return true; },
       .dispatch = [](void* ctx, ibmw_function_base_t* task) { Self(ctx)->Add(SystemNowNs(), task); },
       .now = [](void*) { return SystemNowNs(); },
       .dispatch_at_ns = [](void* ctx, uint64_t ns, ibmw_function_base_t* task) { Self(ctx)->Add(ns, task); },
       .ctx = this};
-  std::thread thread_;  // last: starts after the members above
 };
 
 }  // namespace ibmw::extensions::dds_extension

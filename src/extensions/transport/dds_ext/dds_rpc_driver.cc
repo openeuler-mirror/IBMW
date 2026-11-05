@@ -138,6 +138,9 @@ void DdsRpcDriver::Shutdown() {
 
   auto* participant = dds_bus_.GetParticipant();
 
+  // First the built-in timer: a running timeout ends before the endpoints go.
+  if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
+
   // Clean up client endpoints
   for (auto& [key, ep] : client_endpoints_) {
     if (ep->reader) subscriber_->delete_datareader(ep->reader);
@@ -145,8 +148,6 @@ void DdsRpcDriver::Shutdown() {
   }
   client_listeners_.clear();
   client_endpoints_.clear();
-  // After the endpoints: their timeouts are no-ops once the records are gone.
-  if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
 
   // Clean up server endpoints
   for (auto& [key, ep] : server_endpoints_) {

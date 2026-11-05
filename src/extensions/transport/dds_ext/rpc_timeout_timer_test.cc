@@ -8,9 +8,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "dds_ext/rpc_timeout_timer.h"
@@ -79,6 +81,37 @@ TEST(RpcTimeoutTimerTest, UnansweredClientCallTimesOut) {
   ASSERT_EQ(result.wait_for(5s), std::future_status::ready);
   EXPECT_EQ(result.get(), 41);
   EXPECT_FALSE(tool.GetRecord(1).has_value());
+}
+
+// A timeout callback may shut the driver down: Stop from a task does not
+// join its own thread, and the thread still ends.
+TEST(RpcTimeoutTimerTest, StopFromATaskDoesNotJoinItself) {
+  auto timer = std::make_unique<RpcTimeoutTimer>();
+  std::promise<void> stopped;
+  auto alive = std::make_shared<int>(0);
+  std::weak_ptr<int> watch = alive;
+  timer->Handle().Dispatch([&, alive = std::move(alive)] {
+    timer->Stop();
+    stopped.set_value();
+  });
+  ASSERT_EQ(stopped.get_future().wait_for(5s), std::future_status::ready);
+  for (int i = 0; i < 500 && !watch.expired(); ++i) std::this_thread::sleep_for(10ms);
+  EXPECT_TRUE(watch.expired());  // the task ended and was destroyed
+  timer.reset();
+}
+
+// An "infinite" deadline does not wrap around to an immediate one.
+TEST(RpcTimeoutTimerTest, HugeDeadlineIsNotRunEarly) {
+  RpcTimeoutTimer timer;
+  auto ran = std::make_shared<std::atomic<bool>>(false);
+  const auto* table = timer.Handle().NativeHandle();
+  ibmw::executor::Task never([ran] { *ran = true; });
+  table->dispatch_at_ns(table->ctx, UINT64_MAX, never.NativeHandle());  // beyond int64 nanoseconds
+  timer.Handle().DispatchAfter(std::chrono::nanoseconds::max() / 2, [ran] { *ran = true; });
+  std::promise<void> later;
+  timer.Handle().DispatchAfter(50ms, [&] { later.set_value(); });
+  ASSERT_EQ(later.get_future().wait_for(5s), std::future_status::ready);
+  EXPECT_FALSE(*ran);
 }
 
 }  // namespace
