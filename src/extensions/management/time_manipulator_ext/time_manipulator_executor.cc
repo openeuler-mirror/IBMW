@@ -372,17 +372,33 @@ void TimeManipulatorExecutor::TimerLoop(std::chrono::system_clock::time_point st
           real_dt = std::chrono::nanoseconds(0);
         }
 
+        // A long sleep ends at once on shutdown; a tick at the default dt stays
+        // a plain sleep. Only shutdown ends it: a new ratio applies from the next tick.
+        const auto sleep_until = [&](const auto& time_point) {
+          static constexpr auto kMinWakeableSleepDt = std::chrono::milliseconds(500);
+          if (sleep_time < kMinWakeableSleepDt) {
+            std::this_thread::sleep_until(time_point);
+            return;
+          }
+          std::shared_lock<std::shared_mutex> lck(ratio_mutex_);
+          pause_cv_.wait_until(lck, time_point,
+                               [this] { return state_.load() == State::kShutdown; });
+        };
+
         if (!options_.use_system_clock) {
-          std::this_thread::sleep_until(
+          sleep_until(
               last_loop_std_tp +=
               std::chrono::duration_cast<std::chrono::steady_clock::time_point::duration>(sleep_time));
         } else {
-          std::this_thread::sleep_until(
+          sleep_until(
               last_loop_sys_tp +=
               std::chrono::duration_cast<std::chrono::system_clock::time_point::duration>(sleep_time));
         }
 
       } while (state_.load() != State::kShutdown && real_dt.count());
+
+      // The sleep may have ended early: this tick's tasks are not due.
+      if (state_.load() == State::kShutdown) break;
 
       // Advance the time wheel
 

@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <limits>
@@ -117,6 +118,56 @@ TEST_F(TimeManipulatorExecutorTest, PauseEndsAtOnceOnResumeAndShutdown) {
   begin = std::chrono::steady_clock::now();
   executor_.Shutdown();
   EXPECT_LT(std::chrono::steady_clock::now() - begin, 500ms);
+}
+
+// A slowed tick sleeps in pieces of up to 1 s. Tasks of the tick it was sleeping
+// for are not due and do not run.
+TEST(TimeManipulatorExecutorSlowTick, ShutdownEndsItWithoutRunningItsTasks) {
+  for (const char* use_system_clock : {"false", "true"}) {
+    InlineExecutor inline_executor;
+    TimeManipulatorExecutor executor;
+    executor.RegisterGetExecutorFunc([&](std::string_view) { return inline_executor.Handle(); });
+    executor.Initialize("tm", YAML::Load(std::string("{bind_executor: x, dt_us: 1000, "
+                                                     "use_system_clock: ") +
+                                         use_system_clock + "}"));
+    executor.Start();
+    EXPECT_TRUE(executor.SetTimeRatio(0.0001));  // 10 s a tick, from the next tick on
+    // The last 1 ms tick is over once Now() stays put: the long sleep has begun.
+    auto seen = executor.Now();
+    auto seen_at = std::chrono::steady_clock::now();
+    const auto limit = seen_at + 5s;
+    while (std::chrono::steady_clock::now() - seen_at < 100ms &&
+           std::chrono::steady_clock::now() < limit) {
+      std::this_thread::sleep_for(1ms);
+      if (const auto now = executor.Now(); now != seen) {
+        seen = now;
+        seen_at = std::chrono::steady_clock::now();
+      }
+    }
+    std::atomic_bool ran = false;
+    executor.DispatchAt(executor.Now(), [&ran] { ran = true; });  // in the tick being slept for
+    const auto begin = std::chrono::steady_clock::now();
+    executor.Shutdown();
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, 500ms);
+    EXPECT_FALSE(ran.load());
+  }
+}
+
+// Waking the slow tick's sleep for anything but shutdown does not shorten it.
+// The + 2 allows for the old ratio's tick in flight and a lagging timer thread.
+TEST_F(TimeManipulatorExecutorTest, RatioChangeDoesNotShortenASlowTick) {
+  Init("{bind_executor: x, dt_us: 20000}");
+  executor_.Start();
+  ASSERT_TRUE(executor_.SetTimeRatio(0.02));  // 1 s a tick, from the next tick on
+  const auto start_now = executor_.Now();
+  const auto begin = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - begin < 600ms) {
+    ASSERT_TRUE(executor_.SetTimeRatio(0.02));
+    std::this_thread::sleep_for(1ms);
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  const auto ticks = (executor_.Now() - start_now) / 20ms;
+  EXPECT_LE(ticks, elapsed / 1s + 2);
 }
 
 TEST_F(TimeManipulatorExecutorTest, NowIsInTheSystemClockDomain) {
