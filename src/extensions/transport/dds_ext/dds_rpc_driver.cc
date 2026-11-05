@@ -145,6 +145,8 @@ void DdsRpcDriver::Shutdown() {
   }
   client_listeners_.clear();
   client_endpoints_.clear();
+  // After the endpoints: their timeouts are no-ops once the records are gone.
+  if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
 
   // Clean up server endpoints
   for (auto& [key, ep] : server_endpoints_) {
@@ -413,14 +415,19 @@ bool DdsRpcDriver::RegisterClientFunc(
     auto instance_handle = ep->reader->get_instance_handle();
     dds_rpc_rtps::iHandle2GUID(ep->reply_reader_guid, instance_handle);
 
-    // Setup timeout
-    if (timeout_executor_) {
-      ep->client_tool.RegisterTimeoutExecutor(timeout_executor_);
-      ep->client_tool.RegisterTimeoutHandle(
-          [](std::shared_ptr<runtime::core::service::ServiceMessageFrame>&& frame) {
-            runtime::core::service::CallResultCallback(*frame, ibmw::rpc::Status(IBMW_RPC_STATUS_TIMEOUT));
-          });
+    // Setup timeout. Always on: a native .srv server cannot answer a failure,
+    // so without a configured timeout_executor a built-in timer is started
+    // with the first client (TRANS-049).
+    if (!timeout_executor_) {
+      builtin_timeout_timer_ = std::make_unique<RpcTimeoutTimer>();
+      timeout_executor_ = builtin_timeout_timer_->Handle();
+      MW_TRACE("DDS RPC driver: no timeout executor configured, using the built-in timer.");
     }
+    ep->client_tool.RegisterTimeoutExecutor(timeout_executor_);
+    ep->client_tool.RegisterTimeoutHandle(
+        [](std::shared_ptr<runtime::core::service::ServiceMessageFrame>&& frame) {
+          runtime::core::service::CallResultCallback(*frame, ibmw::rpc::Status(IBMW_RPC_STATUS_TIMEOUT));
+        });
 
     MW_INFO("DDS RPC client registered: func='{}', rq='{}', rr='{}'",
                info.func_name, ep->dds_topic_rq, ep->dds_topic_rr);

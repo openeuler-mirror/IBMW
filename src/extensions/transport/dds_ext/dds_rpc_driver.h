@@ -32,6 +32,7 @@
 #include "dds_ext/dds_bus.h"
 #include "dds_ext/global.h"
 #include "dds_ext/fastdds_compat.h"
+#include "dds_ext/rpc_timeout_timer.h"
 
 namespace ibmw::extensions::dds_extension {
 
@@ -181,6 +182,7 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver,
 
   GetExecutorFunc get_executor_func_;
   ibmw::executor::ExecutorHandle timeout_executor_;
+  std::unique_ptr<RpcTimeoutTimer> builtin_timeout_timer_;  // when none is configured
 
   eprosima::fastdds::dds::Publisher* publisher_ = nullptr;
   eprosima::fastdds::dds::Subscriber* subscriber_ = nullptr;
