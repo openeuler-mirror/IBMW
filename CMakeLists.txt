@@ -124,6 +124,7 @@ cmake_dependent_option(IBMW_BUILD_ZENOH_EXTENSION "IBMW build zenoh extension." 
 cmake_dependent_option(IBMW_BUILD_ICEORYX_EXTENSION "IBMW build iceoryx extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_SHM_EXTENSION "IBMW build self-developed zero-copy shm extension (iceoryx replacement, no RouDi)." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_RETAINED_LOAN_E2E "IBMW build retained-loan iceoryx E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+cmake_dependent_option(IBMW_BUILD_SHM_RETAINED_LOAN_E2E "IBMW build retained-loan shm E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_SHM_EXTENSION" OFF)
 option(IBMW_ICEORYX_USE_PACKAGE "Use a prebuilt target iceoryx package instead of FetchContent." OFF)
 cmake_dependent_option(IBMW_BUILD_OPENTELEMETRY_EXTENSION "IBMW build opentelemetry extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ECHO_EXTENSION "IBMW build echo extension." OFF "IBMW_BUILD_RUNTIME" OFF)
@@ -442,6 +443,11 @@ if(IBMW_BUILD_RUNTIME)
   if(IBMW_BUILD_RETAINED_LOAN_E2E AND NOT IBMW_BUILD_ICEORYX_EXTENSION)
     message(FATAL_ERROR
       "IBMW_BUILD_RETAINED_LOAN_E2E requires IBMW_BUILD_ICEORYX_EXTENSION")
+  endif()
+
+  if(IBMW_BUILD_SHM_RETAINED_LOAN_E2E AND NOT IBMW_BUILD_SHM_EXTENSION)
+    message(FATAL_ERROR
+      "IBMW_BUILD_SHM_RETAINED_LOAN_E2E requires IBMW_BUILD_SHM_EXTENSION")
   endif()
 
   if(IBMW_BUILD_MQTT_EXTENSION)

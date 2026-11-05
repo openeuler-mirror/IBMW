@@ -171,6 +171,6 @@ if(IBMW_BUILD_EXAMPLES AND IBMW_BUILD_DDS_EXTENSION AND
   add_subdirectory(multi_driver_demo)
 endif()
 
-if(IBMW_BUILD_RETAINED_LOAN_E2E)
+if(IBMW_BUILD_RETAINED_LOAN_E2E OR IBMW_BUILD_SHM_RETAINED_LOAN_E2E)
   add_subdirectory(retained_loan_e2e)
 endif()
