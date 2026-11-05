@@ -216,10 +216,18 @@ std::optional<CaptureV2Handshake> ParseCaptureV2Handshake() {
       throw std::runtime_error(std::string("missing v2 declaration: ") + name);
     }
   }
+  // Compare only what was checked above: getenv may return null.
+  const auto equals = [](const char* name, const char* expected) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::strcmp(value, expected) == 0;
+  };
   const char* capture_role = std::getenv("MW_PERF_CAPTURE_ROLE");
   const char* capture_fault = std::getenv("MW_PERF_CAPTURE_FAULT");
+  if (capture_role == nullptr || capture_fault == nullptr) {
+    throw std::runtime_error("missing v2 role or fault declaration");
+  }
   const bool fault_role = std::strcmp(capture_role, "fault_runtime_subject") == 0;
-  const bool valid_fault = capture_fault != nullptr &&
+  const bool valid_fault =
       (std::strcmp(capture_fault, "callback_loss") == 0 ||
        std::strcmp(capture_fault, "callback_status") == 0 ||
        std::strcmp(capture_fault, "producer_identity_mismatch") == 0 ||
@@ -227,10 +235,10 @@ std::optional<CaptureV2Handshake> ParseCaptureV2Handshake() {
        std::strcmp(capture_fault, "stage_status") == 0);
   if ((!fault_role && std::strcmp(capture_role, "exact_anchor") != 0) ||
       (fault_role ? !valid_fault : std::strcmp(capture_fault, "none") != 0) ||
-      std::strcmp(std::getenv("MW_PERF_CAPABILITY_ID"), kCaptureCapability) != 0 ||
-      std::strcmp(std::getenv("MW_PERF_CAPTURE_WORKLOAD_ID"), kCaptureCapability) != 0 ||
-      std::strcmp(std::getenv("MW_PERF_CAPTURE_CONTRACT_ID"), kCaptureContract) != 0 ||
-      std::strcmp(std::getenv("MW_PERF_CAPTURE_CONTRACT_SHA256"), kCaptureContractSha) != 0) {
+      !equals("MW_PERF_CAPABILITY_ID", kCaptureCapability) ||
+      !equals("MW_PERF_CAPTURE_WORKLOAD_ID", kCaptureCapability) ||
+      !equals("MW_PERF_CAPTURE_CONTRACT_ID", kCaptureContract) ||
+      !equals("MW_PERF_CAPTURE_CONTRACT_SHA256", kCaptureContractSha)) {
     throw std::runtime_error("unsupported v2 role or constant contract binding mismatch");
   }
   return handshake;
