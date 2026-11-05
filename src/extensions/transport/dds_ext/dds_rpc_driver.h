@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include <fastdds/dds/publisher/DataWriter.hpp>
@@ -180,6 +181,7 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver,
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
   std::atomic<bool> shutdown_done_ = false;  // set when the first Shutdown returns
+  std::atomic<std::thread::id> shutdown_thread_;  // runs the first Shutdown
 
   const runtime::core::service::ServiceCatalog* service_catalog_ptr_ = nullptr;
 

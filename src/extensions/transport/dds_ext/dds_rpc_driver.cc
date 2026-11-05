@@ -139,7 +139,9 @@ DdsRpcDriver::~DdsRpcDriver() {
 }
 
 // Not in a timeout task: the first Shutdown may be waiting for that task.
+// Not on the thread of the first Shutdown either (re-entered from a callback).
 void DdsRpcDriver::WaitForShutdown() const {
+  if (shutdown_thread_.load() == std::this_thread::get_id()) return;
   if (timeout_executor_ && timeout_executor_.IsInCurrentExecutor()) return;
   shutdown_done_.wait(false);
 }
@@ -150,6 +152,7 @@ void DdsRpcDriver::Shutdown() {
     WaitForShutdown();
     return;
   }
+  shutdown_thread_.store(std::this_thread::get_id());
   struct Done {
     std::atomic<bool>& flag;
     ~Done() {
