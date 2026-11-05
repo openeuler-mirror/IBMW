@@ -149,10 +149,19 @@ void DdsRpcDriver::Shutdown() {
   // First the built-in timer: a running timeout ends before the endpoints go.
   if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
 
-  // Clean up client endpoints
+  // Clean up client endpoints. Without readers no answer arrives any more;
+  // the calls still waiting get a result. Not from a timeout task, which
+  // AbandonAll would wait for.
+  const bool in_timeout_task = timeout_executor_ && timeout_executor_.IsInCurrentExecutor();
   for (auto& [key, ep] : client_endpoints_) {
     if (ep->reader) subscriber_->delete_datareader(ep->reader);
     if (ep->writer) publisher_->delete_datawriter(ep->writer);
+    if (!in_timeout_task) {
+      ep->client_tool.AbandonAll([](std::shared_ptr<runtime::core::service::ServiceMessageFrame>&& frame) {
+        runtime::core::service::CallResultCallback(
+            *frame, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+      });
+    }
   }
   client_listeners_.clear();
   client_endpoints_.clear();
