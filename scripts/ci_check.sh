@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # Local merge gate (HYG-044): runs, one after another, the build, unit tests,
-# release hygiene and docs governance on the committed tree, and commit-message
-# validation of every commit on the branch. Steps run serially and parallelism
-# is capped so the gate can run on a shared machine.
+# release hygiene, docs governance and generated-sample drift on the committed
+# tree, and commit-message validation of every commit on the branch. Steps run
+# serially and parallelism is capped so the gate can run on a shared machine.
 #
 # Usage: scripts/ci_check.sh [--build-dir DIR] [--base REF] [--skip-build]
 #   --build-dir DIR  CMake build directory (default: <repo>/build/ci). An
@@ -60,6 +60,9 @@ bash "$SCRIPT_DIR/tests/test_docs_governance.sh"
 bash "$SCRIPT_DIR/tests/test_release_hygiene.sh"
 bash "$SCRIPT_DIR/tests/test_commit_msg_hook.sh"
 bash "$SCRIPT_DIR/tests/test_check_python_package.sh"
+
+step "generated samples match the generator (committed tree)"
+python3 "$SCRATCH/tree/src/tools/ibmw_gen/tests/test_in_tree_samples_no_drift.py"
 
 step "commit messages"
 if [[ -z "$BASE" ]]; then
