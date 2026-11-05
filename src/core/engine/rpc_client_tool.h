@@ -123,9 +123,9 @@ class RpcClientTool {
   // not be called from another timeout task of this tool.
   //
   // Known limitation: concurrent Record()/GetRecord() calls are not
-  // synchronized with this (the map is iterated). Call it from the driver
-  // destructor; the service dispatcher does not yet drain in-flight Call()s
-  // before destroying drivers (pre-existing, tracked separately).
+  // synchronized with this (the map is iterated). Call it once no new calls
+  // are taken (Shutdown or the driver destructor); the service dispatcher
+  // does not yet drain in-flight Call()s (pre-existing, tracked separately).
   void AbandonAll(const TimeoutHandle& handle) noexcept {
     state_->closed.store(true);
     const int self = InTimeoutHandle::Current() == state_.get() ? 1 : 0;

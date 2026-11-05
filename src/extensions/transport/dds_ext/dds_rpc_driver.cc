@@ -531,10 +531,10 @@ void DdsRpcDriver::Call(
         dds_rpc_rtps::SequenceNumber_t(0, seq));
     auto write_ret = ep.writer->write(const_cast<void*>(client_call_wrapper_ptr->req_ptr), wparams);
     if (!DdsRpcWriteSucceeded(write_ret)) [[unlikely]] {
-      // Remove record
-      ep.client_tool.GetRecord(seq);
       MW_WARN("DDS RPC client write failed, func='{}'.", info.func_name);
-      CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED));
+      // Only if still recorded: a timeout or Shutdown may have completed it.
+      if (ep.client_tool.GetRecord(seq))
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED));
       return;
     }
 
