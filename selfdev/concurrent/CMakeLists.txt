@@ -56,4 +56,10 @@ if(IBMW_BUILD_TESTS)
   add_test(NAME ibmw_selfdev_concurrent_barrier_env_test COMMAND ibmw_selfdev_concurrent_barrier_test)
   set_tests_properties(ibmw_selfdev_concurrent_barrier_env_test
     PROPERTIES ENVIRONMENT IBMW_SELFDEV_NO_MEMBARRIER=1)
+  # Defines IBMW_SELFDEV_BBQ_RACE_POINT to steer the wakeup races.
+  ibmw_selfdev_add_test(ibmw_selfdev_concurrent_race_test
+    SRCS test/bounded_blocking_queue_race_test.cc
+    LIBS ibmw::selfdev::concurrent)
+  # Next to other tests too few of its trials may go as scripted, which fails it.
+  set_tests_properties(ibmw_selfdev_concurrent_race_test PROPERTIES RUN_SERIAL TRUE)
 endif()

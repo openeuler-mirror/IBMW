@@ -20,6 +20,14 @@
 #include "ibmw_selfdev/concurrent/detail/adaptive_lock.h"
 #include "ibmw_selfdev/concurrent/detail/asymmetric_barrier.h"
 
+// A test executable may define this before including the header (in every
+// file of it that does), to delay threads at points where races decide
+// whether a wakeup is lost (see test/bounded_blocking_queue_race_test.cc).
+// Does nothing otherwise.
+#ifndef IBMW_SELFDEV_BBQ_RACE_POINT
+#define IBMW_SELFDEV_BBQ_RACE_POINT(name) static_cast<void>(0)
+#endif
+
 namespace ibmw::selfdev::concurrent {
 
 namespace detail {
@@ -53,6 +61,18 @@ inline namespace IBMW_SELFDEV_BARRIER_NS {
 /// full, the previous producer or consumer of a lane not done, or an item
 /// still being written) spins briefly and then sleeps on a condition
 /// variable; wakers only signal when a sleeper is registered.
+///
+/// A push may leave sleeping consumers asleep while another consumer is
+/// spinning for an item (see Wake()), unless an item such a push left has
+/// been queued for kSkipGrace (50 us). If the spinning consumers then do not
+/// get the CPU (preempted, or at low priority), the item waits in the queue
+/// until the next push, or until a sleeper re-checks after at most kBackstop
+/// (10 ms) if that sleeper gets the CPU; once such an item has waited
+/// kHeldBack (1 ms), pushes wake sleepers for kSkipOff (1 s). A consumer
+/// thread that finds it gets little CPU keeps yielding instead of sleeping
+/// (kMinYields), so that wakes go to consumers that run. As with tbb, a
+/// consumer woken for an item that then does not get the CPU delays that
+/// item until it runs.
 ///
 /// T's constructors, move operations and destructor run while the calling
 /// thread holds its place in a lane, so they must not use the same queue.
@@ -224,11 +244,47 @@ class BoundedBlockingQueue {
   // Cells per block; a lane allocates one block per kBlockSlots of its items
   // at most, and recycles drained blocks through Lane::spare.
   static constexpr size_t kBlockSlots = 16;
-  // Before sleeping, a waiting thread pause-spins, then yields. Bounded, so
-  // a preempted thread it waits for (even on the same CPU under SCHED_FIFO)
-  // soon gets the CPU back.
+  // Before sleeping, a waiting thread (in Pop, or in Push on a full queue)
+  // pause-spins, then yields. Bounded, so a preempted thread it waits for
+  // (even on the same CPU under SCHED_FIFO) soon gets the CPU back. While a
+  // consumer sleeps, each push pays a futex wake: on the OHOS board (HongMeng
+  // kernel) that was most of a producer's time with 1 producer and 8
+  // consumers. Up to kWaitYields yields, and mostly no wake while a
+  // consumer spins (see Wake()), made 1P8C 2 to 3 times as fast as a fixed 4
+  // yields. But a yield there costs about 3 us of CPU, wasted when no item
+  // comes: the number of yields adapts (see YieldBudget), so that consumers
+  // fed every 20 or 200 us use about as much CPU as tbb's, which sleep at
+  // once (the sparse cases in queue_bench).
   static constexpr int kWaitSpins = 64;
-  static constexpr int kWaitYields = 4;
+  static constexpr int kWaitYields = 16;
+  // Fewest yields a pop waiter makes on a thread that gets little CPU
+  // (preempted, or at low priority): one whose last yield took over
+  // kYieldStall, or which ran over kWakeStall after the last pop wake when
+  // it woke from a sleep. It takes long over them, so it is mostly yielding
+  // rather than asleep, and wakes go to sleepers that run; with no yields it
+  // would sleep whenever it got the CPU and take wakes it cannot act on soon.
+  // Per thread, not a floor of the shared budget: that cost the sparse cases
+  // in queue_bench 10 to 25% more CPU on the OHOS board.
+  static constexpr int kMinYields = 4;
+  static constexpr Clock::duration kYieldStall = std::chrono::microseconds(50);
+  static constexpr Clock::duration kWakeStall = std::chrono::milliseconds(1);
+  // How long a pop sleeper sleeps at most while a pop waiter spins, so that
+  // an item whose wake was skipped is taken that soon even if no spinner
+  // gets the CPU (see Wake()).
+  static constexpr Clock::duration kBackstop = std::chrono::milliseconds(10);
+  // How long after a skipped wake pushes may still skip theirs while its
+  // item is queued, for spinners that are about to take it (see SkipGate).
+  // Skipping only while no such item was queued made consumers fed every
+  // 20 us use about 1.5 times as much CPU on the OHOS board (the sparse
+  // cases in queue_bench).
+  static constexpr Clock::duration kSkipGrace = std::chrono::microseconds(50);
+  // How long after its skipped wake an item in the queue counts as held back,
+  // not just about to be taken by a spinner that runs (see SkipGate).
+  static constexpr Clock::duration kHeldBack = std::chrono::milliseconds(1);
+  // How long no wake is skipped after a skipped one held an item back (see
+  // SkipGate); meanwhile pop waiters yield only as kMinYields says (see
+  // Wait()).
+  static constexpr Clock::duration kSkipOff = std::chrono::seconds(1);
   // A front wait is for a thread in the middle of a push or pop, which is
   // nearly always running (e.g. allocating a block) and done within these
   // yields. Sleeping there instead would cost a HeavyBarrier() and make
@@ -296,6 +352,88 @@ class BoundedBlockingQueue {
     uint64_t epoch;
     Clock::time_point deadline;
     Woken woken = Woken::kRetry;
+  };
+
+  // Yields a pop or push waiter makes before it sleeps: more while waits
+  // end during them or the spins before, fewer (down to none) while they
+  // do not, so that waits too long to spin through soon cost little CPU.
+  // Shared by the waiters of one kind; a lost update only shifts the count
+  // by one or two. Waits that end in yields beyond it (kMinYields) are no
+  // hits: else waiters that get little CPU, as all do on a loaded machine,
+  // keep every waiter yielding.
+  class YieldBudget {
+   public:
+    int Get() const { return n_.load(std::memory_order_relaxed); }
+    void Hit() {
+      const int n = Get();
+      if (n < kWaitYields) n_.store(std::min(n + 2, kWaitYields), std::memory_order_relaxed);
+    }
+    void Miss() {
+      const int n = Get();
+      if (n > 0) n_.store(n - 1, std::memory_order_relaxed);
+    }
+
+   private:
+    std::atomic<int> n_{kWaitYields};
+  };
+
+  // Whether a pop wake may be skipped for a spinning consumer: yes, unless
+  // an item whose wake was skipped has been queued since a skip kSkipGrace
+  // ago, so spinners are not taking items, or a skip lately held an item
+  // back, i.e. its item was still queued kHeldBack after the skip when a
+  // wake (Skip()) or the end of a timed pop sleeper's kBackstop (Missed())
+  // found it; then not for kSkipOff. An item still queued for other reasons
+  // (a producer preempted while writing an earlier one, a backlog, a loaded
+  // machine) can also turn skips off: that only costs wakes. Racing skips
+  // can pair one's end_ with the other's at_; that only makes one
+  // misjudged.
+  class SkipGate {
+   public:
+    // Records a skip of the wake for an item pushed while `popped` items
+    // were taken and `tail` tickets handed out; false while skips are off
+    // or an item of an earlier skip has been queued kSkipGrace. The caller
+    // may wake after all (see Wake()); the item then only counts as
+    // outstanding, which costs a pass-on or turns skips off sooner.
+    bool Skip(uint64_t popped, uint64_t tail) {
+      const Clock::rep now = Now();
+      if (now < off_until_.load(std::memory_order_relaxed)) return false;
+      const bool outstanding = Outstanding(popped);  // spinners have not taken it yet
+      if (outstanding && now - at_.load(std::memory_order_relaxed) >= kGrace) {
+        TurnOffIfHeldBack(now);
+        return false;
+      }
+      // The latest skip's tail_, also when racing skips store out of order;
+      // also within the grace, so that this item counts as outstanding too.
+      // seq_cst: see Wake().
+      uint64_t end = end_.load(std::memory_order_seq_cst);
+      while (end < tail && !end_.compare_exchange_weak(end, tail, std::memory_order_seq_cst)) {
+      }
+      if (!outstanding) at_.store(now, std::memory_order_relaxed);
+      return true;
+    }
+    // Whether an item whose wake was skipped may be queued after `popped`
+    // items were taken.
+    bool Outstanding(uint64_t popped) const { return popped < end_.load(std::memory_order_seq_cst); }
+    bool Off() const { return Now() < off_until_.load(std::memory_order_relaxed); }
+    // Called by a pop sleeper whose kBackstop ended with `popped` items taken.
+    void Missed(uint64_t popped) {
+      if (Outstanding(popped)) TurnOffIfHeldBack(Now());
+    }
+
+   private:
+    static Clock::rep Now() { return Clock::now().time_since_epoch().count(); }
+    void TurnOffIfHeldBack(Clock::rep now) {
+      if (now - at_.load(std::memory_order_relaxed) >= kHeld) off_until_.store(now + kOff, std::memory_order_relaxed);
+    }
+    static constexpr Clock::rep kGrace = kSkipGrace.count();
+    static constexpr Clock::rep kHeld = kHeldBack.count();
+    static constexpr Clock::rep kOff = kSkipOff.count();
+    // tail_ at the last skip, and when the first skip made with no item of
+    // an earlier one queued was.
+    std::atomic<uint64_t> end_{0};
+    std::atomic<Clock::rep> at_{0};
+    // Clock::rep before which no wake is skipped.
+    std::atomic<Clock::rep> off_until_{0};
   };
 
   static size_t Normalize(size_t capacity) { return capacity == 0 ? 1 : capacity; }
@@ -433,36 +571,57 @@ class BoundedBlockingQueue {
     const uint64_t epoch = abort_.load(std::memory_order_seq_cst);
     if ((epoch & 1) != 0) return false;
     Hold hold{epoch, deadline};
+    bool waited = false;
+    bool signalled = false;  // see Wait()
     while (true) {
       Woken woken = Woken::kRetry;
-      Front front;
+      bool taken = false;
+      // At most the ticket this call takes (head_.popped only grows); read
+      // only once a sleep of this call may have been signalled.
+      const uint64_t from = signalled ? head_.popped.load(std::memory_order_relaxed) : 0;
       try {
-        front = TryPopImpl(out, &hold);
+        switch (TryPopImpl(out, &hold)) {
+          case Front::kItem:
+            taken = true;
+            break;
+          case Front::kEmpty:
+            woken = Wait(kPopSleeper, [this] { return EmptyNow(); }, epoch, deadline, &signalled);
+            waited = true;
+            break;
+          case Front::kNotReady: {
+            if (hold.woken != Woken::kRetry) return GiveUp();
+            woken = WaitFront(head_.popped.load(std::memory_order_seq_cst), epoch, deadline);
+            break;
+          }
+        }
       } catch (...) {
-        GiveUp();  // a throwing move left the item queued
+        GiveUp();  // a throwing move left the item queued, or a wait failed
         throw;
       }
-      switch (front) {
-        case Front::kItem:
-          return true;
-        case Front::kEmpty:
-          woken = Wait(kPopSleeper, [this] { return EmptyNow(); }, epoch, deadline);
-          break;
-        case Front::kNotReady: {
-          if (hold.woken != Woken::kRetry) return GiveUp();
-          woken = WaitFront(head_.popped.load(std::memory_order_seq_cst), epoch, deadline);
-          break;
+      if (taken) {
+        IBMW_SELFDEV_BBQ_RACE_POINT(kTaken);
+        // A push may not wake a sleeper while a consumer spins (see
+        // Wake()), so after a wait pass the signal on for the items left if
+        // the wake of any of them may have been skipped. If this call was
+        // signalled, also if the item it took may be one whose wake was
+        // skipped (one taken from `from` on): the signal was then for
+        // another item. Not for every signalled call: that cost about 10%
+        // CPU in the sparse cases of the queue benchmark on the board.
+        if (waited && skip_gate_.Outstanding(signalled ? from : head_.popped.load(std::memory_order_relaxed)) &&
+            !EmptyNow()) {
+          Wake(kPopSleeper, 1);
         }
+        return true;
       }
       if (woken != Woken::kRetry) return GiveUp();
       if (abort_.load(std::memory_order_seq_cst) != epoch) return GiveUp();
     }
   }
 
-  // A push signals one pop sleeper (see Publish()). If that was this call
-  // and it gives up (deadline, Abort() or an exception) without an item,
-  // e.g. because the oldest item is still being written, the other pop
-  // sleepers would sleep with items queued: pass the signal on. Like a
+  // A push signals one pop sleeper (see Publish() and Wake()). If that was
+  // this call and it gives up (deadline, Abort() or an exception) without
+  // an item, e.g. because the oldest item is still being written, the other
+  // pop sleepers would sleep with items queued: pass the signal on. Like a
   // push, read sleepers_ after seeing the queue non-empty; tail_ and
   // head_.popped are seq_cst too, so a pop sleeper counted after that read
   // finds items (or a consumer took them) and does not sleep.
@@ -740,9 +899,11 @@ class BoundedBlockingQueue {
 
   // Waits while blocked(): spins, then counts itself in sleepers_ under
   // `kind` and sleeps on that kind's condition variable. kRetry once
-  // blocked() is false, else why it stopped.
+  // blocked() is false, else why it stopped. A pop waiter sets
+  // *signalled if it may have been signalled while asleep (see SleepPop()).
   template <class Blocked>
-  Woken Wait(uint64_t kind, Blocked blocked, uint64_t epoch, Clock::time_point deadline) {
+  Woken Wait(uint64_t kind, Blocked blocked, uint64_t epoch, Clock::time_point deadline,
+             bool* signalled = nullptr) {
     std::condition_variable& cv = kind == kPopSleeper ? not_empty_ : kind == kPushSleeper ? not_full_ : progress_;
     const auto aborted = [&] { return epoch != kIgnoreAbort && abort_.load(std::memory_order_seq_cst) != epoch; };
     if (deadline != kNoDeadline && Clock::now() >= deadline) {
@@ -752,21 +913,58 @@ class BoundedBlockingQueue {
     }
     // Short waits (an item about to be written, a slot about to be freed)
     // end here, without a futex sleep on this side or a wake on the other.
-    const int yields = kind == kFrontSleeper ? kFrontYields : kWaitYields;
+    // A pop waiter is counted in pop_spinners_ until it is counted in
+    // sleepers_ or stops waiting (see Wake()).
+    YieldBudget* budget = kind == kPopSleeper ? &pop_yields_ : kind == kPushSleeper ? &push_yields_ : nullptr;
+    // Whether this thread gets little CPU (see kMinYields): per thread, and
+    // per element type (one variable per instantiation of this template).
+    static thread_local bool slow = false;
+    // Yields from the budget, and in all; set after the spins.
+    int budgeted = 0;
+    int yields = 0;
+    struct Spinning {
+      explicit Spinning(std::atomic<uint64_t>* s) : spinners(s) {
+        if (spinners != nullptr) spinners->fetch_add(1, std::memory_order_seq_cst);
+      }
+      ~Spinning() { Stop(); }
+      void Stop() {
+        if (spinners != nullptr) spinners->fetch_sub(1, std::memory_order_seq_cst);
+        spinners = nullptr;
+      }
+      std::atomic<uint64_t>* spinners;
+    } spinning{kind == kPopSleeper ? &pop_spinners_ : nullptr};
+    if (kind == kPopSleeper) IBMW_SELFDEV_BBQ_RACE_POINT(kCounted);  // counted in pop_spinners_, before any spin
     for (int n = 0; n < kWaitSpins + yields; ++n) {
       if (n < kWaitSpins) {
         detail::CpuRelax();
       } else {
+        const Clock::time_point before = Clock::now();
         std::this_thread::yield();
+        if (kind == kPopSleeper) slow = Clock::now() - before > kYieldStall;
       }
-      if (!blocked()) return Woken::kRetry;
+      if (!blocked()) {
+        if (budget != nullptr && n < kWaitSpins + budgeted) budget->Hit();
+        return Woken::kRetry;
+      }
       if (aborted()) return Woken::kAborted;
+      if (n == kWaitSpins - 1) {
+        // While skips are off every push wakes a sleeper, as with tbb: then
+        // yielding first only costs CPU (twice tbb's in the sparse cases).
+        if (kind == kPopSleeper && skip_gate_.Off()) budget = nullptr;
+        budgeted = budget != nullptr ? budget->Get() : kind == kFrontSleeper ? kFrontYields : 0;
+        yields = kind == kPopSleeper && slow ? std::max(budgeted, kMinYields) : budgeted;
+      }
+      // A yield can take a whole time slice.
+      if (n >= kWaitSpins && deadline != kNoDeadline && Clock::now() >= deadline) return Woken::kTimeout;
     }
+    if (budget != nullptr) budget->Miss();
+    IBMW_SELFDEV_BBQ_RACE_POINT(kSpun);  // still counted in pop_spinners_
     // Counted, and for a front sleeper the HeavyBarrier() (an IPI to every
     // running thread, microseconds) done, before taking wait_mu_, so other
     // sleepers and wakers do not wait for it; see Wake() for why blocked()
     // need only be re-checked under the lock.
     sleepers_.fetch_add(kind, std::memory_order_seq_cst);
+    spinning.Stop();
     struct Uncount {  // also if taking the lock throws
       std::atomic<uint64_t>& sleepers;
       uint64_t kind;
@@ -777,17 +975,73 @@ class BoundedBlockingQueue {
     }
     std::unique_lock<std::mutex> lock(wait_mu_);
     Woken woken = Woken::kRetry;
+    bool timed = true;
     while (blocked()) {
       if (aborted()) {
         woken = Woken::kAborted;
         break;
       }
-      if (!SleepUntil(cv, lock, deadline)) {
+      // Only a signal since this sleep began tells how soon it ran (see
+      // kWakeStall); not one before a backstop timeout or spurious wakeup.
+      const Clock::duration asleep = kind == kPopSleeper ? Clock::now().time_since_epoch() : Clock::duration::zero();
+      const bool slept =
+          kind == kPopSleeper ? SleepPop(lock, deadline, asleep, timed, signalled) : SleepUntil(cv, lock, deadline);
+      if (!slept) {
         if (blocked()) woken = aborted() ? Woken::kAborted : Woken::kTimeout;
         break;
       }
+      if (kind == kPopSleeper && !blocked()) {
+        const Clock::duration at(pop_signalled_.load(std::memory_order_relaxed));
+        if (at >= asleep) slow = Clock::now().time_since_epoch() - at > kWakeStall;
+      }
     }
     return woken;
+  }
+
+  // SleepUntil() on not_empty_, for at most kBackstop while a pop waiter
+  // spins and wakes may be skipped, counted in timed_pop_sleepers_
+  // meanwhile; tells skip_gate_ if items are still queued after that. Once
+  // such a sleep ends with none queued, `timed` is false: the caller's
+  // further sleeps are untimed, so that sleepers next to a consumer that
+  // stays counted as spinning (it does not get the CPU) do not wake every
+  // kBackstop while the queue is empty. A sleep begun `asleep` (under the
+  // lock), timed or not, sets *signalled if a pop sleeper was signalled
+  // since: the item this call then takes may be one whose wake was
+  // skipped (see Wake()), while the signal was for another. A timed sleep
+  // may report a timeout although it was signalled (wait_until() judges by
+  // the clock after the wait). Not after a timeout with no signal: passing
+  // wakes on then made bursts late next to starved consumers (BQ-47).
+  bool SleepPop(std::unique_lock<std::mutex>& lock, Clock::time_point deadline, Clock::duration asleep, bool& timed,
+                bool* signalled) {
+    const auto note_signal = [&] {
+      if (signalled != nullptr && Clock::duration(pop_signalled_.load(std::memory_order_relaxed)) >= asleep) {
+        *signalled = true;
+      }
+    };
+    if (!timed || pop_spinners_.load(std::memory_order_seq_cst) == 0 || skip_gate_.Off()) {
+      IBMW_SELFDEV_BBQ_RACE_POINT(kAsleep);  // under wait_mu_, as kAsleepTimed and kTimedWoken
+      const bool woken = SleepUntil(not_empty_, lock, deadline);
+      note_signal();
+      return woken;
+    }
+    struct Timed {
+      std::atomic<uint64_t>& sleepers;
+      explicit Timed(std::atomic<uint64_t>& s) : sleepers(s) { sleepers.fetch_add(1, std::memory_order_seq_cst); }
+      ~Timed() { sleepers.fetch_sub(1, std::memory_order_seq_cst); }
+    } counted{timed_pop_sleepers_};
+    const Clock::time_point until = std::min(deadline, Clock::time_point(asleep) + kBackstop);
+    IBMW_SELFDEV_BBQ_RACE_POINT(kAsleepTimed);
+    const bool woken = SleepUntil(not_empty_, lock, until);
+    IBMW_SELFDEV_BBQ_RACE_POINT(kTimedWoken);
+    note_signal();
+    if (woken) return true;
+    if (until == deadline) return false;
+    if (EmptyNow()) {
+      timed = false;
+    } else {
+      skip_gate_.Missed(head_.popped.load(std::memory_order_relaxed));
+    }
+    return true;
   }
 
   // The rest of Wait() for a front sleeper whose HeavyBarrier() failed: a
@@ -845,16 +1099,66 @@ class BoundedBlockingQueue {
   // checks blocked() under wait_mu_: before the waker takes wait_mu_ (the
   // sleeper is then inside wait() when signalled) or after the waker has
   // released it (it then sees the waker's change, made before).
+  //
+  // One pop sleeper (n == 1, no front sleeper) is not woken while a pop
+  // waiter spins and a pop sleeper sleeps for at most kBackstop
+  // (timed_pop_sleepers_), unless skip_gate_ says no (an item of an earlier
+  // skip has been queued kSkipGrace, or a skip lately held an item back).
+  // A spinner leaves pop_spinners_ before it looks for an item (TryPopImpl,
+  // or blocked() under wait_mu_ once counted in sleepers_), a timed sleeper
+  // timed_pop_sleepers_ before it re-checks blocked() under wait_mu_; all
+  // seq_cst, like the pusher's ticket and its reads of the two counts, so
+  // if the pusher saw them counted they find an item: the spinner if it
+  // runs, the timed sleeper within kBackstop. That item may be another
+  // one: of an earlier skip, or one the timed sleeper was signalled for. So
+  // a consumer that took an item after waiting wakes a sleeper if items
+  // are left and skip_gate_ shows a skip of an item it may not have taken
+  // (PopUntil()); a signalled one also if its own item may be skipped, as
+  // the signal was then for another item. The pusher re-reads the counts
+  // after recording the skip (seq_cst, as the taker uncounts itself
+  // before it reads skip_gate_): a waiter it saw counted that took an item
+  // without seeing the skip has uncounted itself by then. Without that, a
+  // pusher preempted between the two left its item to the timed sleeper's
+  // kBackstop.
   void Wake(uint64_t kind, size_t n) {
     const uint64_t w = sleepers_.load(std::memory_order_seq_cst);
-    if ((w & (kind * kSleeperMask | kFrontSleeper * kSleeperMask)) != 0) WakeSlow(w, kind, n);
+    if ((w & (kind * kSleeperMask | kFrontSleeper * kSleeperMask)) == 0) return;
+    if (kind == kPopSleeper && n == 1 && (w & kFrontSleeper * kSleeperMask) == 0 && SkipPopWake()) return;
+    WakeSlow(w, kind, n);
+  }
+
+  // Whether the wake of one pop sleeper may be skipped (see Wake()).
+  bool SkipPopWake() {
+    if (!PopWaitersCover()) return false;
+    IBMW_SELFDEV_BBQ_RACE_POINT(kCovered);
+    if (!skip_gate_.Skip(head_.popped.load(std::memory_order_relaxed), tail_.load(std::memory_order_relaxed))) {
+      return false;
+    }
+    IBMW_SELFDEV_BBQ_RACE_POINT(kSkipped);
+    return PopWaitersCover();
+  }
+
+  // Whether a pop waiter spins and a pop sleeper sleeps for at most
+  // kBackstop.
+  bool PopWaitersCover() const {
+    return pop_spinners_.load(std::memory_order_seq_cst) != 0 &&
+           timed_pop_sleepers_.load(std::memory_order_seq_cst) != 0;
   }
 
   [[gnu::noinline]] void WakeSlow(uint64_t w, uint64_t kind, size_t n) {
-    { std::lock_guard<std::mutex> lock(wait_mu_); }
+    const bool signal = n != 0 && (w & kind * kSleeperMask) != 0;
+    {
+      std::lock_guard<std::mutex> lock(wait_mu_);
+      // Under the lock, so that a pop sleeper this signals, which took it
+      // before its sleep began and re-takes it after, sees a later time.
+      if (signal && kind == kPopSleeper) {
+        pop_signalled_.store(Clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+      }
+    }
     if ((w & kFrontSleeper * kSleeperMask) != 0) progress_.notify_all();
-    if (n != 0 && (w & kind * kSleeperMask) != 0) {
+    if (signal) {
       std::condition_variable& cv = kind == kPopSleeper ? not_empty_ : not_full_;
+      IBMW_SELFDEV_BBQ_RACE_POINT(kSignal);
       if (n > 1) {
         cv.notify_all();
       } else {
@@ -902,10 +1206,20 @@ class BoundedBlockingQueue {
   // looks full by it. Written by producers, so kept off the line above.
   alignas(64) std::atomic<uint64_t> popped_cache_{0};
   Lane lanes_[kLanes];
-  // Read after every push / pop; written only by threads going to sleep.
+  // Read after every push / pop; written by threads going to sleep.
   alignas(64) std::atomic<uint64_t> sleepers_{0};
+  // Pop waiters spinning; read by Wake() when there are pop sleepers.
+  std::atomic<uint64_t> pop_spinners_{0};
+  // Pop sleepers in SleepPop()'s timed sleep; read by Wake() likewise.
+  std::atomic<uint64_t> timed_pop_sleepers_{0};
+  // Written by Wake() while pop waiters spin and sleep, and by pop sleepers.
+  SkipGate skip_gate_;
+  // Clock::rep of the last signal to pop sleepers; read by woken ones.
+  std::atomic<Clock::rep> pop_signalled_{0};
   // Sleeping only; never held together with head_.mu.
   alignas(64) std::mutex wait_mu_;
+  YieldBudget pop_yields_;
+  YieldBudget push_yields_;
   std::condition_variable not_empty_;
   std::condition_variable not_full_;
   // A lane turn, a lane head_turn or head_.popped moved.

@@ -5,24 +5,32 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <random>
 #include <ratio>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <string>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
+#include <sys/file.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -1223,4 +1231,470 @@ TEST(BoundedBlockingQueueTest, ThrowingPopPassesWakeupOn) {
   EXPECT_TRUE(q.Empty());
 }
 
+// BQ-41: one producer pushes bursts with gaps of varying length to
+// consumers blocking in Pop, so consumers both spin and sleep, pushes skip
+// waking sleepers while one spins, and the number of yields before
+// sleeping both grows and shrinks. Every item comes out exactly once, and
+// after about one burst in four the queue drains. With capacity 4 the producer
+// waits too; a watchdog aborts the queue if a Push never returns.
+TEST(BoundedBlockingQueueTest, BurstsReachSleepingConsumers) {
+  for (size_t capacity : {BoundedBlockingQueue<int>::kUnbounded, size_t{4}}) {
+    constexpr int kConsumers = 8;
+    constexpr int kItems = 20000;
+    BoundedBlockingQueue<int> q(capacity);
+    std::vector<std::atomic<int>> seen(kItems);
+    std::atomic<int> got{0};
+    std::vector<std::thread> consumers;
+    for (int c = 0; c < kConsumers; ++c) {
+      consumers.emplace_back([&] {
+        int v = -1;
+        while (q.Pop(v)) {
+          seen[static_cast<size_t>(v)].fetch_add(1);
+          ++got;
+        }
+      });
+    }
+    std::atomic<bool> done{false};
+    std::thread watchdog([&] {
+      if (!Eventually([&] { return done.load(); }, 60s)) q.Abort();
+    });
+    // EXPECT rather than ASSERT until the threads are joined.
+    std::mt19937 rng(41);
+    bool ok = true;  // every Push returned and the queue drained
+    for (int i = 0; i < kItems && ok;) {
+      for (int burst = 1 + static_cast<int>(rng() % 32); burst > 0 && i < kItems && ok; --burst, ++i) {
+        ok = q.Push(i);
+        EXPECT_TRUE(ok) << "capacity " << capacity << ": Push " << i << " did not return in 60 s";
+      }
+      if (!ok) break;
+      switch (rng() % 4) {
+        case 0:
+          break;
+        case 1:
+          std::this_thread::yield();
+          break;
+        case 2:
+          std::this_thread::sleep_for(20us);
+          break;
+        default:
+          ok = Eventually([&] { return got.load() == i; });
+          EXPECT_TRUE(ok) << "capacity " << capacity << ": " << i - got.load() << " items left queued";
+          std::this_thread::sleep_for(300us);
+          break;
+      }
+    }
+    if (ok) {
+      EXPECT_TRUE(Eventually([&] { return got.load() == kItems; })) << "got " << got.load() << " of " << kItems;
+    }
+    done = true;
+    watchdog.join();
+    q.Abort();
+    for (auto& t : consumers) t.join();
+    if (!ok) continue;
+    for (int i = 0; i < kItems; ++i) ASSERT_EQ(seen[static_cast<size_t>(i)].load(), 1) << i;
+  }
+}
+
+// BQ-42: a push need not wake a sleeping Pop while another Pop spins (see
+// Wake()); here each consumer pops once and leaves, so no other Pop would
+// take an item whose wake was skipped wrongly. The pushes come while
+// consumers spin, sleep, or are about to.
+TEST(BoundedBlockingQueueTest, PopsThatSpunPassWakeupOn) {
+  constexpr int kConsumers = 4;
+  std::mt19937 rng(42);
+  for (int trial = 0; trial < 2000; ++trial) {
+    BoundedBlockingQueue<int> q;
+    std::atomic<int> got{0};
+    std::vector<std::thread> consumers;
+    for (int c = 0; c < kConsumers; ++c) {
+      consumers.emplace_back([&] {
+        int v = -1;
+        if (q.Pop(v)) ++got;
+      });
+    }
+    switch (rng() % 3) {
+      case 0:
+        break;
+      case 1:
+        std::this_thread::sleep_for(std::chrono::microseconds(rng() % 100));
+        break;
+      default:
+        std::this_thread::sleep_for(2ms);
+        break;
+    }
+    for (int i = 0; i < kConsumers; ++i) {
+      EXPECT_TRUE(q.Push(i));
+      if (rng() % 2 == 0) std::this_thread::yield();
+    }
+    const bool all = Eventually([&] { return got.load() == kConsumers; }, 5s);
+    EXPECT_TRUE(all) << "trial " << trial << ": " << kConsumers - got.load() << " items left queued";
+    q.Abort();  // releases the Pop calls that missed their wakeup
+    for (auto& t : consumers) t.join();
+    if (!all) return;
+  }
+}
+
+// Whether a SCHED_IDLE thread next to a busy one on its CPU still runs
+// every few milliseconds, as on OHOS (HongMeng kernel; on Linux it gets
+// almost no CPU). A starved consumer (below) is then a slow one: the items
+// whose wake or turn falls to it are late more often, with tbb too. On
+// the board (2026-11), items late in BQ-46 at a 3000 us gap: mean 66 of 700
+// in 16 runs (in 13 runs tbb 223, a mutex and condition variable queue 226),
+// at most 82 in 20 runs of the test; in BQ-47 with two starved consumers, 30
+// runs: mean 8.4 of 200, max 14 (tbb mean 7.8, max 15), at most 20 in 20 runs
+// of the test. The late counts allowed there are raised to fit.
+#if defined(__OHOS__)
+constexpr bool kIdleThreadsRun = true;
+#else
+constexpr bool kIdleThreadsRun = false;
+#endif
+
+// `count` consumers that pop until the queue is aborted on the last allowed
+// CPU, as SCHED_IDLE, next to a thread that keeps that CPU busy: they get
+// almost no CPU, so they are mostly preempted or in a yield while they wait
+// in Pop. Each item taken goes to `take`. The constructing thread (the
+// producer) keeps off that CPU until Join(); other threads of the test call
+// LeaveCpu() for that. Needs 4 allowed CPUs, so that the other
+// threads still have some to themselves on a loaded machine.
+// Join() (or the destructor) aborts the queue. sched_setaffinity(0, ...)
+// sets the calling thread's affinity: OHOS's libc has no
+// pthread_setaffinity_np.
+class StarvedConsumer {
+ public:
+  StarvedConsumer(BoundedBlockingQueue<int>& q, std::atomic<int>& got, int count = 1)
+      : StarvedConsumer(q, [&got](int) { ++got; }, count) {}
+  StarvedConsumer(BoundedBlockingQueue<int>& q, std::function<void(int)> take, int count)
+      : q_(q), take_(std::move(take)), count_(count) {
+    CPU_ZERO(&allowed_);
+    if (sched_getaffinity(0, sizeof(allowed_), &allowed_) != 0 || CPU_COUNT(&allowed_) < 4) {
+      failed_ = true;
+      return;
+    }
+    int cpu = CPU_SETSIZE - 1;
+    while (!CPU_ISSET(cpu, &allowed_)) --cpu;
+    CPU_ZERO(&one_);
+    CPU_SET(cpu, &one_);
+    rest_ = allowed_;
+    CPU_CLR(cpu, &rest_);
+    left_ = sched_setaffinity(0, sizeof(rest_), &rest_) == 0;
+    hog_ = std::thread([this] {
+      if (sched_setaffinity(0, sizeof(one_), &one_) != 0) failed_ = true;
+      ++ready_;
+      while (!stop_.load(std::memory_order_relaxed)) {
+      }
+    });
+    try {
+      for (int c = 0; c < count; ++c) {
+        consumers_.emplace_back([this] {
+          sched_param param{};
+          if (sched_setaffinity(0, sizeof(one_), &one_) != 0 ||
+              pthread_setschedparam(pthread_self(), SCHED_IDLE, &param) != 0) {
+            failed_ = true;
+          }
+          ++ready_;
+          int v = -1;
+          while (q_.Pop(v)) take_(v);
+        });
+      }
+    } catch (...) {
+      Join();
+      throw;
+    }
+  }
+  StarvedConsumer(const StarvedConsumer&) = delete;
+  StarvedConsumer& operator=(const StarvedConsumer&) = delete;
+  ~StarvedConsumer() { Join(); }
+
+  // False if there are fewer than 4 CPUs, or a thread could not be pinned or
+  // made SCHED_IDLE.
+  bool SetUp() {
+    return !failed_.load() && Eventually([this] { return ready_.load() == count_ + 1; }) && !failed_.load();
+  }
+
+  // Best effort: a thread left on that CPU only makes the test stricter.
+  void LeaveCpu() const {
+    if (!failed_.load()) sched_setaffinity(0, sizeof(rest_), &rest_);
+  }
+
+  // Called by the constructing thread.
+  void Join() {
+    q_.Abort();
+    stop_ = true;
+    if (hog_.joinable()) hog_.join();
+    for (auto& t : consumers_) t.join();
+    consumers_.clear();
+    if (left_) sched_setaffinity(0, sizeof(allowed_), &allowed_);
+    left_ = false;
+  }
+
+ private:
+  // Held while alive: waits until no other process (a parallel ctest run
+  // of this test binary) has its starved consumers and hog on the last
+  // CPU, where they would compete with these: then starved consumers there
+  // get the CPU now and then and take items late, with tbb too. Best
+  // effort: gives up waiting after kWait.
+  class CpuLock {
+   public:
+    CpuLock() {
+      constexpr auto kWait = std::chrono::minutes(2);
+      std::error_code ec;
+      const std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+      if (ec) return;
+      // Read-only, so that other users can open the file too (umask).
+      fd_ = open((dir / "ibmw_selfdev_starved_consumer.lock").c_str(), O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+                 0666);
+      const auto end = std::chrono::steady_clock::now() + kWait;
+      while (fd_ >= 0 && flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+        if ((errno != EWOULDBLOCK && errno != EINTR) || std::chrono::steady_clock::now() >= end) {
+          close(fd_);
+          fd_ = -1;
+        } else {
+          std::this_thread::sleep_for(10ms);
+        }
+      }
+    }
+    CpuLock(const CpuLock&) = delete;
+    CpuLock& operator=(const CpuLock&) = delete;
+    ~CpuLock() {
+      if (fd_ >= 0) close(fd_);  // releases the lock
+    }
+
+   private:
+    int fd_ = -1;
+  };
+
+  const CpuLock lock_;  // first: taken before, released after the rest
+  BoundedBlockingQueue<int>& q_;
+  const std::function<void(int)> take_;
+  const int count_;
+  cpu_set_t allowed_;  // the constructing thread's affinity
+  cpu_set_t one_;
+  cpu_set_t rest_;
+  bool left_ = false;  // whether that thread keeps off one_
+  std::atomic<bool> failed_{false};
+  std::atomic<int> ready_{0};
+  std::atomic<bool> stop_{false};
+  std::thread hog_;
+  std::vector<std::thread> consumers_;
+};
+
+// BQ-43: a starved consumer waiting in Pop does not keep the others, asleep
+// on other CPUs, from being woken: once a skipped wake held an item back,
+// pushes wake sleepers again (see SkipGate). The last push is a spare: the
+// starved consumer may have taken an item and not counted it yet.
+TEST(BoundedBlockingQueueTest, StarvedSpinnerDoesNotHoldBackItems) {
+  constexpr int kItems = 200;
+  BoundedBlockingQueue<int> q;
+  std::atomic<int> got{0};
+  StarvedConsumer starved(q, got);
+  std::vector<std::thread> consumers;
+  for (int c = 0; c < 3; ++c) {
+    consumers.emplace_back([&] {
+      starved.LeaveCpu();
+      int v = -1;
+      while (q.Pop(v)) ++got;
+    });
+  }
+  // EXPECT rather than ASSERT until the threads are joined.
+  const bool set_up = starved.SetUp();
+  bool all = false;
+  if (set_up) {
+    std::this_thread::sleep_for(kSettle);  // all consumers waiting
+    for (int i = 0; i <= kItems; ++i) {
+      EXPECT_TRUE(q.Push(i));
+      std::this_thread::sleep_for(500us);
+    }
+    all = Eventually([&] { return q.Empty() && got.load() >= kItems; }, 1s);
+  }
+  q.Abort();
+  starved.Join();
+  for (auto& t : consumers) t.join();
+  if (!set_up) GTEST_SKIP() << "needs 4 CPUs, a pinned thread and SCHED_IDLE";
+  EXPECT_TRUE(all) << kItems - got.load() << " items left queued";
+}
+
+// BQ-44: pushes wake sleepers although a starved consumer is counted as
+// spinning, at the latest after kBackstop. Here each of the other consumers
+// pops once and leaves, so nothing else would take the items.
+TEST(BoundedBlockingQueueTest, QuietQueueWakesSleepersDespiteStarvedSpinner) {
+  for (int trial = 0; trial < 20; ++trial) {
+    BoundedBlockingQueue<int> q;
+    std::atomic<int> got{0};
+    StarvedConsumer starved(q, got);
+    std::vector<std::thread> consumers;
+    for (int c = 0; c < 2; ++c) {
+      consumers.emplace_back([&] {
+        starved.LeaveCpu();
+        int v = -1;
+        if (q.Pop(v)) ++got;
+      });
+    }
+    // EXPECT rather than ASSERT until the threads are joined.
+    const bool set_up = starved.SetUp();
+    bool all = false;
+    if (set_up) {
+      std::this_thread::sleep_for(kSettle);  // all consumers waiting
+      EXPECT_TRUE(q.Push(1));
+      EXPECT_TRUE(q.Push(2));
+      all = Eventually([&] { return got.load() == 2; }, 200ms);
+    }
+    q.Abort();
+    starved.Join();
+    for (auto& t : consumers) t.join();
+    if (!set_up) GTEST_SKIP() << "needs 4 CPUs, a pinned thread and SCHED_IDLE";
+    ASSERT_TRUE(all) << "trial " << trial << ": " << 2 - got.load() << " items left queued";
+  }
+}
+
+// BQ-45: a starved consumer waiting in Pop does not hold back the items of
+// a producer that waits for each item to be taken before the next push, at
+// any pace: once a skipped wake held an item back, pushes wake sleepers
+// again (see SkipGate). Items still late (> 5 ms) are, but for that first
+// one, ones the starved consumer was woken for and took itself, as with tbb.
+TEST(BoundedBlockingQueueTest, StarvedSpinnerDoesNotStallPushAndWait) {
+  constexpr int kRounds = 100;
+  constexpr std::chrono::microseconds kGaps[] = {0us, 20us, 50us, 500us, 2000us};
+  constexpr int kLateAllowed = kRounds / 10;
+  BoundedBlockingQueue<int> q;
+  std::atomic<int> got{0};
+  StarvedConsumer starved(q, got);
+  std::vector<std::thread> consumers;
+  for (int c = 0; c < 3; ++c) {
+    consumers.emplace_back([&] {
+      starved.LeaveCpu();
+      int v = -1;
+      while (q.Pop(v)) ++got;
+    });
+  }
+  // EXPECT rather than ASSERT until the threads are joined.
+  const bool set_up = starved.SetUp();
+  int taken = 0;
+  int late = 0;
+  if (set_up) {
+    std::this_thread::sleep_for(kSettle);  // all consumers waiting
+    for (; taken < kRounds; ++taken) {
+      const auto start = std::chrono::steady_clock::now();
+      EXPECT_TRUE(q.Push(taken));
+      // Polled without sleeping, so that the next push can come while
+      // consumers still spin.
+      while (got.load() != taken + 1 && std::chrono::steady_clock::now() - start < 200ms) {
+      }
+      if (got.load() != taken + 1) break;
+      if (std::chrono::steady_clock::now() - start > 5ms) ++late;
+      std::this_thread::sleep_for(kGaps[taken % std::size(kGaps)]);
+    }
+  }
+  q.Abort();
+  starved.Join();
+  for (auto& t : consumers) t.join();
+  if (!set_up) GTEST_SKIP() << "needs 4 CPUs, a pinned thread and SCHED_IDLE";
+  EXPECT_EQ(taken, kRounds) << "item " << taken << " not taken within 200 ms";
+  EXPECT_LE(late, kLateAllowed) << late << " of " << kRounds << " items taken after more than 5 ms";
+}
+
+// BQ-46: nor those of a producer that pushes at a steady pace without
+// waiting, fed to three consumers or one: a skip whose item is still queued
+// when the next push comes (after kSkipGrace), or when a sleeper's kBackstop
+// ends, turns skips off (see SkipGate), and the starved consumer waits in
+// Pop mostly yielding (see kMinYields). Late: taken more than 2 ms after its
+// push; up to 10% (15% for one consumer if kIdleThreadsRun).
+TEST(BoundedBlockingQueueTest, StarvedSpinnerDoesNotStallSteadyPushes) {
+  struct Case {
+    std::chrono::microseconds gap;
+    int consumers;
+    int items;
+  };
+  for (const Case& c : {Case{500us, 3, 1000}, Case{3000us, 1, 700}}) {
+    BoundedBlockingQueue<int> q;
+    // Written before an item's push, read after its pop.
+    std::vector<std::chrono::steady_clock::time_point> pushed_at(c.items);
+    std::atomic<int> late{0};
+    const auto take = [&](int v) {
+      if (std::chrono::steady_clock::now() - pushed_at[v] > 2ms) ++late;
+    };
+    StarvedConsumer starved(q, take, 1);
+    std::vector<std::thread> consumers;
+    for (int i = 0; i < c.consumers; ++i) {
+      consumers.emplace_back([&] {
+        starved.LeaveCpu();
+        int v = -1;
+        while (q.Pop(v)) take(v);
+      });
+    }
+    const bool set_up = starved.SetUp();
+    if (set_up) {
+      std::this_thread::sleep_for(kSettle);  // all consumers waiting
+      for (int i = 0; i < c.items; ++i) {
+        pushed_at[i] = std::chrono::steady_clock::now();
+        EXPECT_TRUE(q.Push(i));
+        std::this_thread::sleep_for(c.gap);
+      }
+      EXPECT_TRUE(Eventually([&] { return q.Empty(); })) << q.Size() << " items left queued";
+    }
+    q.Abort();
+    starved.Join();
+    for (auto& t : consumers) t.join();
+    if (!set_up) GTEST_SKIP() << "needs 4 CPUs, a pinned thread and SCHED_IDLE";
+    const int allowed = c.items * (kIdleThreadsRun && c.consumers == 1 ? 15 : 10) / 100;
+    EXPECT_LE(late.load(), allowed)
+        << "gap " << c.gap.count() << " us, " << c.consumers << " consumers: " << late.load() << " of " << c.items
+        << " items late";
+  }
+}
+
+// BQ-47: nor those of bursts after a lull, with one or two starved consumers
+// on one CPU: a skip whose item is still queued when a sleeper's kBackstop
+// ends turns skips off (see SkipGate), and the starved consumers wait in
+// Pop mostly yielding, so that wakes go to consumers that run (see
+// kMinYields), and are passed on only for skipped items, also by a
+// signalled sleeper whose own item may be one (see PopUntil()). Late:
+// taken more than 5 ms after its push; up to 5% (15% if kIdleThreadsRun).
+TEST(BoundedBlockingQueueTest, StarvedSpinnerDoesNotDelayBursts) {
+  constexpr int kRounds = 40;
+  constexpr int kBurst = 5;
+  constexpr int kLateAllowed = kRounds * kBurst * (kIdleThreadsRun ? 3 : 1) / 20;
+  for (int starved_count : {1, 2}) {
+    BoundedBlockingQueue<int> q;
+    // Written before an item's push, read after its pop.
+    std::vector<std::chrono::steady_clock::time_point> pushed_at(kRounds * kBurst);
+    std::atomic<int> got{0};
+    std::atomic<int> late{0};
+    const auto take = [&](int v) {
+      if (std::chrono::steady_clock::now() - pushed_at[v] > 5ms) ++late;
+      ++got;
+    };
+    StarvedConsumer starved(q, take, starved_count);
+    std::vector<std::thread> consumers;
+    for (int c = 0; c < 3; ++c) {
+      consumers.emplace_back([&] {
+        starved.LeaveCpu();
+        int v = -1;
+        while (q.Pop(v)) take(v);
+      });
+    }
+    const bool set_up = starved.SetUp();
+    int pushed = 0;
+    if (set_up) {
+      std::this_thread::sleep_for(kSettle);  // all consumers waiting
+      for (int r = 0; r < kRounds; ++r) {
+        std::this_thread::sleep_for(30ms);  // sleepers settle, as in a lull
+        for (int b = 0; b < kBurst; ++b) {
+          pushed_at[pushed] = std::chrono::steady_clock::now();
+          EXPECT_TRUE(q.Push(pushed++));
+          if (b + 1 < kBurst) std::this_thread::sleep_for(200us);
+        }
+        const auto start = std::chrono::steady_clock::now();
+        while (got.load() != pushed && std::chrono::steady_clock::now() - start < 200ms) {
+        }
+        EXPECT_EQ(got.load(), pushed) << "round " << r << " not taken within 200 ms";
+      }
+    }
+    q.Abort();
+    starved.Join();
+    for (auto& t : consumers) t.join();
+    if (!set_up) GTEST_SKIP() << "needs 4 CPUs, a pinned thread and SCHED_IDLE";
+    EXPECT_LE(late.load(), kLateAllowed)
+        << starved_count << " starved: " << late.load() << " of " << pushed << " items late";
+  }
+}
 }  // namespace bounded_blocking_queue_test
