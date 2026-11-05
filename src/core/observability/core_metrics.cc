@@ -15,58 +15,56 @@
 #include <iterator>
 namespace ibmw::runtime::core::observability {
 namespace {
-std::string Key(std::string_view a, std::string_view b, std::string_view c = {}) {
-  return std::string(a) + '\x1f' + std::string(b) + '\x1f' + std::string(c);
+std::string Key(std::string_view first, std::string_view second, std::string_view third = {}) {
+  return std::string(first) + '\x1f' + std::string(second) + '\x1f' + std::string(third);
 }
 std::string FrameworkKey(std::string_view pkg, std::string_view module, std::string_view topic,
                          std::string_view type) {
   return Key(pkg, module, topic) + '\x1f' + std::string(type);
 }
-std::string Json(std::string_view v) {
-  std::string o = "\"";
-  for (unsigned char c : v) {
-    switch (c) {
+std::string Json(std::string_view text) {
+  std::string out = "\"";
+  for (unsigned char byte : text) {
+    switch (byte) {
       case '"':
-        o += "\\\"";
+        out += "\\\"";
         break;
       case '\\':
-        o += "\\\\";
+        out += "\\\\";
         break;
       case '\b':
-        o += "\\b";
+        out += "\\b";
         break;
       case '\f':
-        o += "\\f";
+        out += "\\f";
         break;
       case '\n':
-        o += "\\n";
+        out += "\\n";
         break;
       case '\r':
-        o += "\\r";
+        out += "\\r";
         break;
       case '\t':
-        o += "\\t";
+        out += "\\t";
         break;
       default:
-        if (c < 0x20) {
-          static constexpr char h[] = "0123456789abcdef";
-          o += "\\u00";
-          o += h[c >> 4];
-          o += h[c & 15];
+        if (byte < 0x20) {
+          static constexpr char kHexDigits[] = "0123456789abcdef";
+          out += "\\u00";
+          out += kHexDigits[byte >> 4];
+          out += kHexDigits[byte & 15];
         } else {
-          o += static_cast<char>(c);
+          out += static_cast<char>(byte);
         }
     }
   }
-  return o + '"';
+  return out + '"';
 }
 }  // namespace
 Registry::Registry() = default;
-Registry::~Registry() {
-  DestroyReporter();
-}
+Registry::~Registry() { DestroyReporter(); }
 void Registry::Reset() {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   logical_slots_.clear();
   driver_slots_.clear();
   pod_logical_slots_.clear();
@@ -85,56 +83,59 @@ void Registry::Reset() {
   frozen_.store(false, std::memory_order_release);
 }
 ObservationMode Runtime::ModeFromEnvironment() {
-  const char* v = std::getenv("IBMW_CORE_METRICS");
-  return v && std::strcmp(v, "counters") == 0 ? ObservationMode::kCounters : ObservationMode::kOff;
+  const char* value = std::getenv("IBMW_CORE_METRICS");
+  return value && std::strcmp(value, "counters") == 0 ? ObservationMode::kCounters
+                                                      : ObservationMode::kOff;
 }
-Registry::LogicalSlot* Registry::RegisterLogicalSlot(std::string_view t, std::string_view y,
-                                                     std::string_view p, std::string_view m) {
-  std::lock_guard l(mutex_);
+Registry::LogicalSlot* Registry::RegisterLogicalSlot(std::string_view topic, std::string_view type,
+                                                     std::string_view pkg,
+                                                     std::string_view module) {
+  std::lock_guard lock(mutex_);
   if (frozen_) return nullptr;
-  auto k = FrameworkKey(p, m, t, y);
-  if (auto i = logical_.find(k); i != logical_.end()) return i->second;
-  auto slot =
-      std::make_unique<LogicalSlot>(std::string(p), std::string(m), std::string(t), std::string(y));
-  auto r = slot.get();
+  auto key = FrameworkKey(pkg, module, topic, type);
+  if (auto found = logical_.find(key); found != logical_.end()) return found->second;
+  auto slot = std::make_unique<LogicalSlot>(std::string(pkg), std::string(module),
+                                            std::string(topic), std::string(type));
+  auto slot_ptr = slot.get();
   logical_storage_.push_back(std::move(slot));
-  logical_slots_.push_back(r);
-  logical_.emplace(std::move(k), r);
-  return r;
+  logical_slots_.push_back(slot_ptr);
+  logical_.emplace(std::move(key), slot_ptr);
+  return slot_ptr;
 }
-Registry::DriverSlot* Registry::RegisterDriverSlot(std::string_view t, std::string_view y,
-                                                   std::string_view d, std::string_view p,
-                                                   std::string_view m) {
-  std::lock_guard l(mutex_);
+Registry::DriverSlot* Registry::RegisterDriverSlot(std::string_view topic, std::string_view type,
+                                                   std::string_view driver, std::string_view pkg,
+                                                   std::string_view module) {
+  std::lock_guard lock(mutex_);
   if (frozen_) return nullptr;
-  auto k = FrameworkKey(p, m, t, y) + '\x1f' + std::string(d);
-  if (auto i = drivers_.find(k); i != drivers_.end()) return i->second;
-  auto slot = std::make_unique<DriverSlot>(std::string(p), std::string(m), std::string(t),
-                                           std::string(y), std::string(d));
-  auto r = slot.get();
+  auto key = FrameworkKey(pkg, module, topic, type) + '\x1f' + std::string(driver);
+  if (auto found = drivers_.find(key); found != drivers_.end()) return found->second;
+  auto slot =
+      std::make_unique<DriverSlot>(std::string(pkg), std::string(module), std::string(topic),
+                                   std::string(type), std::string(driver));
+  auto slot_ptr = slot.get();
   driver_storage_.push_back(std::move(slot));
-  driver_slots_.push_back(r);
-  drivers_.emplace(std::move(k), r);
-  return r;
+  driver_slots_.push_back(slot_ptr);
+  drivers_.emplace(std::move(key), slot_ptr);
+  return slot_ptr;
 }
-Registry::DriverSlot* Registry::RegisterLoanDriverSlot(std::string_view d) {
-  std::lock_guard l(mutex_);
+Registry::DriverSlot* Registry::RegisterLoanDriverSlot(std::string_view driver) {
+  std::lock_guard lock(mutex_);
   if (frozen_) return nullptr;
-  auto k = std::string(d);
-  if (auto i = loan_drivers_.find(k); i != loan_drivers_.end()) return i->second;
-  auto slot = std::make_unique<DriverSlot>("", "", "", "", std::string(d));
-  auto r = slot.get();
+  auto key = std::string(driver);
+  if (auto found = loan_drivers_.find(key); found != loan_drivers_.end()) return found->second;
+  auto slot = std::make_unique<DriverSlot>("", "", "", "", std::string(driver));
+  auto slot_ptr = slot.get();
   driver_storage_.push_back(std::move(slot));
-  driver_slots_.push_back(r);
-  loan_drivers_.emplace(std::move(k), r);
-  return r;
+  driver_slots_.push_back(slot_ptr);
+  loan_drivers_.emplace(std::move(key), slot_ptr);
+  return slot_ptr;
 }
 Registry::RegistrationMark Registry::MarkRegistration() const {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   return {logical_storage_.size(), driver_storage_.size()};
 }
 void Registry::RollbackRegistration(RegistrationMark mark) noexcept {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   if (mark.logical > logical_storage_.size() || mark.driver > driver_storage_.size()) return;
   for (size_t i = mark.logical; i < logical_storage_.size(); ++i) {
     auto* slot = logical_storage_[i].get();
@@ -153,179 +154,185 @@ void Registry::RollbackRegistration(RegistrationMark mark) noexcept {
   driver_slots_.resize(mark.driver);
   driver_storage_.resize(mark.driver);
 }
-Registry::PodLogicalSlot* Registry::RegisterPodLogicalSlot(std::string_view t, std::string_view y) {
-  std::lock_guard l(mutex_);
+Registry::PodLogicalSlot* Registry::RegisterPodLogicalSlot(std::string_view topic,
+                                                           std::string_view type) {
+  std::lock_guard lock(mutex_);
   if (frozen_) return nullptr;
-  auto k = Key(t, y);
-  if (auto i = pod_logical_.find(k); i != pod_logical_.end()) return i->second;
-  auto p = std::make_unique<PodLogicalSlot>(std::string(t), std::string(y));
-  auto r = p.get();
-  pod_logical_storage_.push_back(std::move(p));
-  pod_logical_slots_.push_back(r);
-  pod_logical_.emplace(std::move(k), r);
-  return r;
+  auto key = Key(topic, type);
+  if (auto found = pod_logical_.find(key); found != pod_logical_.end()) return found->second;
+  auto slot = std::make_unique<PodLogicalSlot>(std::string(topic), std::string(type));
+  auto slot_ptr = slot.get();
+  pod_logical_storage_.push_back(std::move(slot));
+  pod_logical_slots_.push_back(slot_ptr);
+  pod_logical_.emplace(std::move(key), slot_ptr);
+  return slot_ptr;
 }
-Registry::PodDriverSlot* Registry::RegisterPodDriverSlot(std::string_view t, std::string_view y,
-                                                         std::string_view d) {
-  std::lock_guard l(mutex_);
+Registry::PodDriverSlot* Registry::RegisterPodDriverSlot(std::string_view topic,
+                                                         std::string_view type,
+                                                         std::string_view driver) {
+  std::lock_guard lock(mutex_);
   if (frozen_) return nullptr;
-  auto k = Key(t, y, d);
-  if (auto i = pod_drivers_.find(k); i != pod_drivers_.end()) return i->second;
-  auto p = std::make_unique<PodDriverSlot>(std::string(t), std::string(y), std::string(d));
-  auto r = p.get();
-  pod_driver_storage_.push_back(std::move(p));
-  pod_driver_slots_.push_back(r);
-  pod_drivers_.emplace(std::move(k), r);
-  return r;
+  auto key = Key(topic, type, driver);
+  if (auto found = pod_drivers_.find(key); found != pod_drivers_.end()) return found->second;
+  auto slot =
+      std::make_unique<PodDriverSlot>(std::string(topic), std::string(type), std::string(driver));
+  auto slot_ptr = slot.get();
+  pod_driver_storage_.push_back(std::move(slot));
+  pod_driver_slots_.push_back(slot_ptr);
+  pod_drivers_.emplace(std::move(key), slot_ptr);
+  return slot_ptr;
 }
 std::shared_ptr<Registry::LoanedReceiveSlot> Registry::RegisterLoanedReceiveSlot(
-    std::string_view t, std::string_view y, std::string_view d) {
-  std::lock_guard l(mutex_);
+    std::string_view topic, std::string_view type, std::string_view driver) {
+  std::lock_guard lock(mutex_);
   if (frozen_) return {};
-  auto p = std::make_shared<LoanedReceiveSlot>(std::string(t), std::string(y), std::string(d));
-  loaned_receive_slots_.push_back(p);
-  return p;
+  auto slot = std::make_shared<LoanedReceiveSlot>(std::string(topic), std::string(type),
+                                                  std::string(driver));
+  loaned_receive_slots_.push_back(slot);
+  return slot;
 }
-bool Registry::RegisterLogical(std::string_view t, std::string_view y) {
-  return RegisterLogicalSlot(t, y) != nullptr;
+bool Registry::RegisterLogical(std::string_view topic, std::string_view type) {
+  return RegisterLogicalSlot(topic, type) != nullptr;
 }
-bool Registry::RegisterDriver(std::string_view t, std::string_view y, std::string_view d) {
-  return RegisterDriverSlot(t, y, d) != nullptr;
+bool Registry::RegisterDriver(std::string_view topic, std::string_view type,
+                              std::string_view driver) {
+  return RegisterDriverSlot(topic, type, driver) != nullptr;
 }
 void Registry::Freeze() {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   frozen_.store(true, std::memory_order_release);
 }
-void Registry::AddLogicalAttempt(LogicalSlot* p) noexcept {
-  if (p) p->attempted.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLogicalAttempt(LogicalSlot* slot) noexcept {
+  if (slot) slot->attempted.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLogicalRejected(LogicalSlot* p) noexcept {
-  if (p) p->rejected.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLogicalRejected(LogicalSlot* slot) noexcept {
+  if (slot) slot->rejected.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddSendAttempt(DriverSlot* p) noexcept {
-  if (p) p->attempted.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddSendAttempt(DriverSlot* slot) noexcept {
+  if (slot) slot->attempted.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddSendReturned(DriverSlot* p) noexcept {
-  if (p) p->returned.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddSendReturned(DriverSlot* slot) noexcept {
+  if (slot) slot->returned.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLoanAttempt(LogicalSlot* p) noexcept {
-  if (p) p->loan_attempted.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLoanAttempt(LogicalSlot* slot) noexcept {
+  if (slot) slot->loan_attempted.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLoanSucceeded(LogicalSlot* p) noexcept {
-  if (p) p->loan_succeeded.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLoanSucceeded(LogicalSlot* slot) noexcept {
+  if (slot) slot->loan_succeeded.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLoanFailed(LogicalSlot* p) noexcept {
-  if (p) p->loan_failed.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLoanFailed(LogicalSlot* slot) noexcept {
+  if (slot) slot->loan_failed.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLoanPublishCalled(DriverSlot* p) noexcept {
-  if (p) p->loan_publish_called.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLoanPublishCalled(DriverSlot* slot) noexcept {
+  if (slot) slot->loan_publish_called.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLoanReleaseCalled(DriverSlot* p) noexcept {
-  if (p) p->loan_release_called.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddLoanReleaseCalled(DriverSlot* slot) noexcept {
+  if (slot) slot->loan_release_called.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddPodLoanAttempt(PodLogicalSlot* p) noexcept {
-  if (p) p->attempted.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddPodLoanAttempt(PodLogicalSlot* slot) noexcept {
+  if (slot) slot->attempted.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddPodLoanSucceeded(PodLogicalSlot* p) noexcept {
-  if (p) p->succeeded.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddPodLoanSucceeded(PodLogicalSlot* slot) noexcept {
+  if (slot) slot->succeeded.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddPodLoanFailed(PodLogicalSlot* p) noexcept {
-  if (p) p->failed.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddPodLoanFailed(PodLogicalSlot* slot) noexcept {
+  if (slot) slot->failed.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddPodLoanPublishCalled(PodDriverSlot* p) noexcept {
-  if (p) p->publish_called.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddPodLoanPublishCalled(PodDriverSlot* slot) noexcept {
+  if (slot) slot->publish_called.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddPodLoanReleaseCalled(PodDriverSlot* p) noexcept {
-  if (p) p->release_called.fetch_add(1, std::memory_order_relaxed);
+void Registry::AddPodLoanReleaseCalled(PodDriverSlot* slot) noexcept {
+  if (slot) slot->release_called.fetch_add(1, std::memory_order_relaxed);
 }
-void Registry::AddLogicalAttempt(std::string_view t, std::string_view y) {
-  std::lock_guard l(mutex_);
-  auto i = logical_.find(FrameworkKey("", "", t, y));
-  if (i != logical_.end()) AddLogicalAttempt(i->second);
+void Registry::AddLogicalAttempt(std::string_view topic, std::string_view type) {
+  std::lock_guard lock(mutex_);
+  auto found = logical_.find(FrameworkKey("", "", topic, type));
+  if (found != logical_.end()) AddLogicalAttempt(found->second);
 }
-void Registry::AddLogicalRejected(std::string_view t, std::string_view y) {
-  std::lock_guard l(mutex_);
-  auto i = logical_.find(FrameworkKey("", "", t, y));
-  if (i != logical_.end()) AddLogicalRejected(i->second);
+void Registry::AddLogicalRejected(std::string_view topic, std::string_view type) {
+  std::lock_guard lock(mutex_);
+  auto found = logical_.find(FrameworkKey("", "", topic, type));
+  if (found != logical_.end()) AddLogicalRejected(found->second);
 }
-void Registry::AddSendAttempt(std::string_view t, std::string_view y, std::string_view d) {
-  std::lock_guard l(mutex_);
-  auto i = drivers_.find(FrameworkKey("", "", t, y) + '\x1f' + std::string(d));
-  if (i != drivers_.end()) AddSendAttempt(i->second);
+void Registry::AddSendAttempt(std::string_view topic, std::string_view type,
+                              std::string_view driver) {
+  std::lock_guard lock(mutex_);
+  auto found = drivers_.find(FrameworkKey("", "", topic, type) + '\x1f' + std::string(driver));
+  if (found != drivers_.end()) AddSendAttempt(found->second);
 }
-void Registry::AddSendReturned(std::string_view t, std::string_view y, std::string_view d) {
-  std::lock_guard l(mutex_);
-  auto i = drivers_.find(FrameworkKey("", "", t, y) + '\x1f' + std::string(d));
-  if (i != drivers_.end()) AddSendReturned(i->second);
+void Registry::AddSendReturned(std::string_view topic, std::string_view type,
+                               std::string_view driver) {
+  std::lock_guard lock(mutex_);
+  auto found = drivers_.find(FrameworkKey("", "", topic, type) + '\x1f' + std::string(driver));
+  if (found != drivers_.end()) AddSendReturned(found->second);
 }
 std::string Registry::SerializeJsonl(bool include_core, bool include_reporter,
                                      uint64_t first_sequence) const {
-  std::lock_guard l(mutex_);
-  std::ostringstream o;
-  uint64_t n = first_sequence;
+  std::lock_guard lock(mutex_);
+  std::ostringstream out;
+  uint64_t sequence = first_sequence;
   if (include_core) {
-    for (auto& i : logical_slots_) {
-      o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-        << ",\"kind\":\"logical_publish\",\"cumulative\":{\"pkg\":" << Json(i->pkg)
-        << ",\"module\":" << Json(i->module) << ",\"topic\":" << Json(i->topic)
-        << ",\"type\":" << Json(i->type) << ",\"attempted\":" << i->attempted.load()
-        << ",\"rejected\":" << i->rejected.load() << "},\"complete\":true}\n";
-      o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-        << ",\"kind\":\"logical_loan\",\"cumulative\":{\"pkg\":" << Json(i->pkg)
-        << ",\"module\":" << Json(i->module) << ",\"topic\":" << Json(i->topic)
-        << ",\"type\":" << Json(i->type) << ",\"loan_attempted\":" << i->loan_attempted.load()
-        << ",\"loan_succeeded\":" << i->loan_succeeded.load()
-        << ",\"loan_failed\":" << i->loan_failed.load() << "},\"complete\":true}\n";
+    for (auto& slot : logical_slots_) {
+      out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+          << ",\"kind\":\"logical_publish\",\"cumulative\":{\"pkg\":" << Json(slot->pkg)
+          << ",\"module\":" << Json(slot->module) << ",\"topic\":" << Json(slot->topic)
+          << ",\"type\":" << Json(slot->type) << ",\"attempted\":" << slot->attempted.load()
+          << ",\"rejected\":" << slot->rejected.load() << "},\"complete\":true}\n";
+      out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+          << ",\"kind\":\"logical_loan\",\"cumulative\":{\"pkg\":" << Json(slot->pkg)
+          << ",\"module\":" << Json(slot->module) << ",\"topic\":" << Json(slot->topic)
+          << ",\"type\":" << Json(slot->type)
+          << ",\"loan_attempted\":" << slot->loan_attempted.load()
+          << ",\"loan_succeeded\":" << slot->loan_succeeded.load()
+          << ",\"loan_failed\":" << slot->loan_failed.load() << "},\"complete\":true}\n";
     }
-    for (auto& i : pod_logical_slots_)
-      o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-        << ",\"kind\":\"logical_pod_loan\",\"cumulative\":{\"topic\":" << Json(i->topic)
-        << ",\"type\":" << Json(i->type) << ",\"loan_attempted\":" << i->attempted.load()
-        << ",\"loan_succeeded\":" << i->succeeded.load() << ",\"loan_failed\":" << i->failed.load()
-        << "},\"complete\":true}\n";
-    for (auto& i : pod_driver_slots_)
-      o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-        << ",\"kind\":\"source_driver_pod_loan\",\"cumulative\":{\"topic\":" << Json(i->topic)
-        << ",\"type\":" << Json(i->type) << ",\"driver\":" << Json(i->driver)
-        << ",\"loan_publish_called\":" << i->publish_called.load()
-        << ",\"loan_release_called\":" << i->release_called.load() << "},\"complete\":true}\n";
-    for (auto& i : loaned_receive_slots_)
-      o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-        << ",\"kind\":\"loaned_receive_callback\",\"cumulative\":{\"topic\":" << Json(i->topic)
-        << ",\"type\":" << Json(i->type) << ",\"driver\":" << Json(i->driver)
-        << ",\"callback_entered\":" << i->callback_entered.load()
-        << ",\"callback_completed\":" << i->callback_completed.load()
-        << ",\"callback_threw_std\":" << i->callback_threw_std.load()
-        << ",\"callback_threw_nonstd\":" << i->callback_threw_nonstd.load()
-        << ",\"release_called\":" << i->release_called.load() << "},\"complete\":true}\n";
-    for (auto& i : driver_slots_) {
-      if (i->topic.empty() && i->type.empty()) {
-        o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-          << ",\"kind\":\"source_driver_loan\",\"cumulative\":{\"driver\":" << Json(i->driver)
-          << ",\"loan_publish_called\":" << i->loan_publish_called.load()
-          << ",\"loan_release_called\":" << i->loan_release_called.load()
-          << "},\"complete\":true}\n";
+    for (auto& slot : pod_logical_slots_)
+      out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+          << ",\"kind\":\"logical_pod_loan\",\"cumulative\":{\"topic\":" << Json(slot->topic)
+          << ",\"type\":" << Json(slot->type) << ",\"loan_attempted\":" << slot->attempted.load()
+          << ",\"loan_succeeded\":" << slot->succeeded.load()
+          << ",\"loan_failed\":" << slot->failed.load() << "},\"complete\":true}\n";
+    for (auto& slot : pod_driver_slots_)
+      out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+          << ",\"kind\":\"source_driver_pod_loan\",\"cumulative\":{\"topic\":" << Json(slot->topic)
+          << ",\"type\":" << Json(slot->type) << ",\"driver\":" << Json(slot->driver)
+          << ",\"loan_publish_called\":" << slot->publish_called.load()
+          << ",\"loan_release_called\":" << slot->release_called.load() << "},\"complete\":true}\n";
+    for (auto& slot : loaned_receive_slots_)
+      out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+          << ",\"kind\":\"loaned_receive_callback\",\"cumulative\":{\"topic\":" << Json(slot->topic)
+          << ",\"type\":" << Json(slot->type) << ",\"driver\":" << Json(slot->driver)
+          << ",\"callback_entered\":" << slot->callback_entered.load()
+          << ",\"callback_completed\":" << slot->callback_completed.load()
+          << ",\"callback_threw_std\":" << slot->callback_threw_std.load()
+          << ",\"callback_threw_nonstd\":" << slot->callback_threw_nonstd.load()
+          << ",\"release_called\":" << slot->release_called.load() << "},\"complete\":true}\n";
+    for (auto& slot : driver_slots_) {
+      if (slot->topic.empty() && slot->type.empty()) {
+        out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+            << ",\"kind\":\"source_driver_loan\",\"cumulative\":{\"driver\":" << Json(slot->driver)
+            << ",\"loan_publish_called\":" << slot->loan_publish_called.load()
+            << ",\"loan_release_called\":" << slot->loan_release_called.load()
+            << "},\"complete\":true}\n";
       } else {
-        o << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << n++
-          << ",\"kind\":\"driver_send\",\"cumulative\":{\"pkg\":" << Json(i->pkg)
-          << ",\"module\":" << Json(i->module) << ",\"topic\":" << Json(i->topic)
-          << ",\"type\":" << Json(i->type) << ",\"driver\":" << Json(i->driver)
-          << ",\"attempted\":" << i->attempted.load() << ",\"returned\":" << i->returned.load()
-          << "},\"complete\":true}\n";
+        out << "{\"schema\":\"ibmw.core_metrics.v1\",\"snapshot_seq\":" << sequence++
+            << ",\"kind\":\"driver_send\",\"cumulative\":{\"pkg\":" << Json(slot->pkg)
+            << ",\"module\":" << Json(slot->module) << ",\"topic\":" << Json(slot->topic)
+            << ",\"type\":" << Json(slot->type) << ",\"driver\":" << Json(slot->driver)
+            << ",\"attempted\":" << slot->attempted.load()
+            << ",\"returned\":" << slot->returned.load() << "},\"complete\":true}\n";
       }
     }
   }
-  if (include_reporter) AppendReporterJsonlLocked(o, n);
-  return o.str();
+  if (include_reporter) AppendReporterJsonlLocked(out, sequence);
+  return out.str();
 }
-std::string Registry::SnapshotJsonl() const {
-  return SerializeJsonl(true, true, 1);
-}
+std::string Registry::SnapshotJsonl() const { return SerializeJsonl(true, true, 1); }
 std::string Registry::ReporterSnapshotJsonl(uint64_t first_sequence) const {
   return SerializeJsonl(false, true, first_sequence);
 }
 size_t Registry::StorageSizeForTesting() const {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   size_t size = logical_storage_.size() + driver_storage_.size() + pod_logical_storage_.size() +
                 pod_driver_storage_.size() + loaned_receive_slots_.size();
   size += ReporterStorageSizeLocked();
@@ -338,10 +345,10 @@ bool Registry::WriteSnapshot(const std::string& dir) const {
     const auto tmp = path.string() + ".tmp." +
                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     {
-      std::ofstream f(tmp, std::ios::trunc);
-      if (!f) return false;
-      f << SnapshotJsonl();
-      if (!f.good()) return false;
+      std::ofstream file(tmp, std::ios::trunc);
+      if (!file) return false;
+      file << SnapshotJsonl();
+      if (!file.good()) return false;
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);
@@ -356,8 +363,8 @@ bool Registry::WriteSnapshot(const std::string& dir) const {
 }
 bool Runtime::FinalizeSnapshot() {
   if (mode() != ObservationMode::kCounters) return true;
-  const char* d = std::getenv("IBMW_OBSERVABILITY_OUTPUT_DIR");
-  return registry_.WriteSnapshot(d && *d ? d : ".");
+  const char* output_dir = std::getenv("IBMW_OBSERVABILITY_OUTPUT_DIR");
+  return registry_.WriteSnapshot(output_dir && *output_dir ? output_dir : ".");
 }
 void Runtime::Initialize() {
   mode_.store(ModeFromEnvironment(), std::memory_order_release);
@@ -436,7 +443,7 @@ void Controller::Initialize(const void* identity) {
   }
 }
 void Controller::Start(const void* identity) {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   auto lifecycle = lifecycles_.find(identity);
   if (lifecycle == lifecycles_.end() || !lifecycle->second.initialized || lifecycle->second.started)
     return;
@@ -451,7 +458,7 @@ void Controller::Start(const void* identity) {
   }
 }
 bool Controller::FinalizeSnapshot(const void* identity) {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   auto lifecycle = lifecycles_.find(identity);
   if (lifecycle == lifecycles_.end()) return true;
   if (!lifecycle->second.started) {
@@ -477,15 +484,9 @@ bool Controller::FinalizeSnapshot(const void* identity) {
   runtime_.registry().Reset();
   return result;
 }
-void Controller::Initialize() {
-  Initialize(nullptr);
-}
-void Controller::Start() {
-  Start(nullptr);
-}
-bool Controller::FinalizeSnapshot() {
-  return FinalizeSnapshot(nullptr);
-}
+void Controller::Initialize() { Initialize(nullptr); }
+void Controller::Start() { Start(nullptr); }
+bool Controller::FinalizeSnapshot() { return FinalizeSnapshot(nullptr); }
 void Controller::ResetForTesting() {
   std::vector<std::shared_ptr<LoanedReceiveGate>> gates;
   std::vector<std::shared_ptr<CachedMetricsGate>> cached_gates;
@@ -527,11 +528,9 @@ void Controller::ResetForTesting() {
     cached_metric_gates_.clear();
   }
 }
-bool Controller::Enabled() const noexcept {
-  return runtime_.mode() == ObservationMode::kCounters;
-}
+bool Controller::Enabled() const noexcept { return runtime_.mode() == ObservationMode::kCounters; }
 bool Controller::ReporterAvailable() const noexcept {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   return Enabled() && (state_ == State::kInitialized || state_ == State::kStarted);
 }
 void Controller::InvalidateCachedEntries(const void* dispatcher) noexcept {
@@ -565,7 +564,7 @@ std::shared_ptr<CachedMetricsGate> Controller::GetCachedMetricsGate(const void* 
   return gate;
 }
 size_t Controller::StorageSizeForTesting() const {
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   return entry_storage_.size() + pod_entry_storage_.size() +
          runtime_.registry().StorageSizeForTesting();
 }
@@ -582,8 +581,7 @@ bool Controller::Register(const void* dispatcher, const transport::SendTypeWrapp
   const auto entry_storage_mark = entry_storage_.size();
   std::vector<const transport::TransportDriver*> added_loan_drivers;
   auto rollback = [&] {
-    for (auto* driver : added_loan_drivers)
-      loan_drivers_.erase(driver);
+    for (auto* driver : added_loan_drivers) loan_drivers_.erase(driver);
     runtime_.registry().RollbackRegistration(registry_mark);
     entry_storage_.resize(entry_storage_mark);
     auto it = entries_.find(dispatcher);
@@ -655,27 +653,27 @@ bool Controller::Register(const void* dispatcher, const transport::SendTypeWrapp
 }
 MetricsEntry* Controller::Find(const void* dispatcher,
                                const transport::SendTypeWrapper* wrapper) noexcept {
-  std::lock_guard l(mutex_);
-  auto d = entries_.find(dispatcher);
-  if (d == entries_.end()) return nullptr;
-  auto i = d->second.access.find(wrapper);
-  return i == d->second.access.end() ? nullptr : i->second;
+  std::lock_guard lock(mutex_);
+  auto entries_it = entries_.find(dispatcher);
+  if (entries_it == entries_.end()) return nullptr;
+  auto found = entries_it->second.access.find(wrapper);
+  return found == entries_it->second.access.end() ? nullptr : found->second;
 }
 MetricsEntry* Controller::Find(const void* dispatcher, std::string_view pkg,
                                std::string_view module, std::string_view topic,
                                std::string_view type) noexcept {
-  std::lock_guard l(mutex_);
-  auto d = entries_.find(dispatcher);
-  if (d == entries_.end()) return nullptr;
-  auto i = d->second.framework.find(
+  std::lock_guard lock(mutex_);
+  auto entries_it = entries_.find(dispatcher);
+  if (entries_it == entries_.end()) return nullptr;
+  auto found = entries_it->second.framework.find(
       Key{std::string(pkg), std::string(module), std::string(topic), std::string(type)});
-  return i == d->second.framework.end() ? nullptr : i->second;
+  return found == entries_it->second.framework.end() ? nullptr : found->second;
 }
 Registry::DriverSlot* Controller::FindLoanDriver(
     const transport::TransportDriver* driver) noexcept {
-  std::lock_guard l(mutex_);
-  auto i = loan_drivers_.find(driver);
-  return i == loan_drivers_.end() ? nullptr : i->second;
+  std::lock_guard lock(mutex_);
+  auto found = loan_drivers_.find(driver);
+  return found == loan_drivers_.end() ? nullptr : found->second;
 }
 Registry::DriverSlot* Controller::FindLoanDriver(
     const CachedMetricsGate& gate, const transport::TransportDriver* driver) noexcept {
@@ -686,15 +684,15 @@ Registry::DriverSlot* Controller::FindLoanDriver(
 void Controller::CacheLoanDriverSlots(const void* dispatcher,
                                       const std::vector<transport::TransportDriver*>& drivers) {
   if (!Enabled()) return;
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   auto gate = cached_metric_gates_.find(dispatcher);
   if (gate == cached_metric_gates_.end()) return;
   auto& slots = gate->second->loan_driver_slots;
   slots.clear();
   slots.reserve(drivers.size());
   for (auto* driver : drivers) {
-    auto i = loan_drivers_.find(driver);
-    if (i != loan_drivers_.end()) slots.emplace_back(driver, i->second);
+    auto found = loan_drivers_.find(driver);
+    if (found != loan_drivers_.end()) slots.emplace_back(driver, found->second);
   }
   if (!slots.empty()) cached_entry_dispatchers_.insert(dispatcher);
 }
@@ -704,7 +702,7 @@ bool Controller::RegisterPod(const void* dispatcher, const void* registration,
                              PodMetricsEntry** cached_entry) {
   if (cached_entry) *cached_entry = nullptr;
   if (!Enabled()) return true;
-  std::lock_guard l(mutex_);
+  std::lock_guard lock(mutex_);
   if (state_ != State::kInitialized || runtime_.registry().IsFrozen()) return true;
   auto& pod = entries_[dispatcher].pod;
   if (pod.find(registration) != pod.end()) return false;
@@ -721,16 +719,16 @@ bool Controller::RegisterPod(const void* dispatcher, const void* registration,
 }
 void Controller::UnregisterPod(const void* dispatcher, const void* registration) noexcept {
   if (!Enabled()) return;
-  std::lock_guard l(mutex_);
-  auto d = entries_.find(dispatcher);
-  if (d != entries_.end()) d->second.pod.erase(registration);
+  std::lock_guard lock(mutex_);
+  auto entries_it = entries_.find(dispatcher);
+  if (entries_it != entries_.end()) entries_it->second.pod.erase(registration);
 }
 PodMetricsEntry* Controller::FindPod(const void* dispatcher, const void* registration) noexcept {
-  std::lock_guard l(mutex_);
-  auto d = entries_.find(dispatcher);
-  if (d == entries_.end()) return nullptr;
-  auto i = d->second.pod.find(registration);
-  return i == d->second.pod.end() ? nullptr : i->second;
+  std::lock_guard lock(mutex_);
+  auto entries_it = entries_.find(dispatcher);
+  if (entries_it == entries_.end()) return nullptr;
+  auto found = entries_it->second.pod.find(registration);
+  return found == entries_it->second.pod.end() ? nullptr : found->second;
 }
 std::shared_ptr<Registry::LoanedReceiveSlot> Controller::RegisterLoanedReceive(
     const void* dispatcher, const void* registration, std::string_view topic, std::string_view type,
@@ -757,12 +755,12 @@ void Controller::UnregisterLoanedReceive(const void* dispatcher,
   const ReceiveRegistrationKey key{dispatcher, registration};
   {
     std::lock_guard lock(mutex_);
-    auto d = entries_.find(dispatcher);
-    if (d == entries_.end()) return;
-    auto i = d->second.loaned_receive.find(registration);
-    if (i == d->second.loaned_receive.end()) return;
-    gate = i->second.gate.lock();
-    d->second.loaned_receive.erase(i);
+    auto entries_it = entries_.find(dispatcher);
+    if (entries_it == entries_.end()) return;
+    auto found = entries_it->second.loaned_receive.find(registration);
+    if (found == entries_it->second.loaned_receive.end()) return;
+    gate = found->second.gate.lock();
+    entries_it->second.loaned_receive.erase(found);
     DrainState().draining_registrations.insert(key);
   }
   if (gate) gate->Disable();
@@ -791,11 +789,11 @@ void Controller::DisableLoanedReceive(const void* dispatcher) noexcept {
     }
     if (owner) {
       DrainState().disabled_dispatchers.insert(dispatcher);
-      auto d = entries_.find(dispatcher);
-      if (d != entries_.end()) {
-        for (auto& [_, entry] : d->second.loaned_receive)
+      auto entries_it = entries_.find(dispatcher);
+      if (entries_it != entries_.end()) {
+        for (auto& [_, entry] : entries_it->second.loaned_receive)
           if (auto gate = entry.gate.lock()) gates.push_back(std::move(gate));
-        d->second.loaned_receive.clear();
+        entries_it->second.loaned_receive.clear();
       }
       token->gates = gates;
     }
@@ -827,7 +825,5 @@ void Controller::DisableLoanedReceive(const void* dispatcher) noexcept {
     token->done.notify_all();
   }
 }
-Controller& CoreMetricsController() {
-  return Controller::Instance();
-}
+Controller& CoreMetricsController() { return Controller::Instance(); }
 }  // namespace ibmw::runtime::core::observability

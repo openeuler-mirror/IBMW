@@ -41,38 +41,43 @@ class Registry {
   Registry();
   ~Registry();
   struct LogicalSlot {
-    LogicalSlot(std::string p, std::string m, std::string t, std::string y)
-        : pkg(std::move(p)), module(std::move(m)), topic(std::move(t)), type(std::move(y)) {}
+    LogicalSlot(std::string pkg, std::string module, std::string topic, std::string type)
+        : pkg(std::move(pkg)),
+          module(std::move(module)),
+          topic(std::move(topic)),
+          type(std::move(type)) {}
     std::string pkg, module, topic, type;
     std::atomic<uint64_t> attempted{0}, rejected{0}, loan_attempted{0}, loan_succeeded{0},
         loan_failed{0};
   };
   struct DriverSlot {
-    DriverSlot(std::string p, std::string m, std::string t, std::string y, std::string d)
-        : pkg(std::move(p)),
-          module(std::move(m)),
-          topic(std::move(t)),
-          type(std::move(y)),
-          driver(std::move(d)) {}
+    DriverSlot(std::string pkg, std::string module, std::string topic, std::string type,
+               std::string driver)
+        : pkg(std::move(pkg)),
+          module(std::move(module)),
+          topic(std::move(topic)),
+          type(std::move(type)),
+          driver(std::move(driver)) {}
     std::string pkg, module, topic, type, driver;
     std::atomic<uint64_t> attempted{0}, returned{0}, loan_publish_called{0}, loan_release_called{0};
   };
   struct PodLogicalSlot {
-    PodLogicalSlot(std::string t, std::string y) : topic(std::move(t)), type(std::move(y)) {}
+    PodLogicalSlot(std::string topic, std::string type)
+        : topic(std::move(topic)), type(std::move(type)) {}
     std::string topic, type;
     std::atomic<uint64_t> attempted{0}, succeeded{0}, failed{0};
   };
   struct PodDriverSlot {
-    PodDriverSlot(std::string t, std::string y, std::string d)
-        : topic(std::move(t)), type(std::move(y)), driver(std::move(d)) {}
+    PodDriverSlot(std::string topic, std::string type, std::string driver)
+        : topic(std::move(topic)), type(std::move(type)), driver(std::move(driver)) {}
     std::string topic, type, driver;
     std::atomic<uint64_t> publish_called{0}, release_called{0};
   };
   // Loaned callback outcomes. Retained outstanding/limit accounting remains
   // transport-specific; ordinary OnMessage is intentionally out of scope.
   struct LoanedReceiveSlot {
-    LoanedReceiveSlot(std::string t, std::string y, std::string d)
-        : topic(std::move(t)), type(std::move(y)), driver(std::move(d)) {}
+    LoanedReceiveSlot(std::string topic, std::string type, std::string driver)
+        : topic(std::move(topic)), type(std::move(type)), driver(std::move(driver)) {}
     std::string topic, type, driver;
     std::atomic<uint64_t> callback_entered{0}, callback_completed{0}, callback_threw_std{0},
         callback_threw_nonstd{0}, release_called{0};
@@ -285,14 +290,15 @@ class Controller {
   enum class State { kUninitialized, kInitialized, kStarted, kStopped };
   struct Key {
     std::string pkg, module, topic, type;
-    bool operator==(const Key& x) const noexcept {
-      return pkg == x.pkg && module == x.module && topic == x.topic && type == x.type;
+    bool operator==(const Key& other) const noexcept {
+      return pkg == other.pkg && module == other.module && topic == other.topic &&
+             type == other.type;
     }
   };
   struct Hash {
-    size_t operator()(const Key& x) const noexcept {
-      return std::hash<std::string>{}(x.pkg) ^ (std::hash<std::string>{}(x.module) << 1) ^
-             (std::hash<std::string>{}(x.topic) << 2) ^ (std::hash<std::string>{}(x.type) << 3);
+    size_t operator()(const Key& key) const noexcept {
+      return std::hash<std::string>{}(key.pkg) ^ (std::hash<std::string>{}(key.module) << 1) ^
+             (std::hash<std::string>{}(key.topic) << 2) ^ (std::hash<std::string>{}(key.type) << 3);
     }
   };
   struct Entries {
