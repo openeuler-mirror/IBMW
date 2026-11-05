@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -81,6 +82,69 @@ std::filesystem::path WriteTemporaryBag() {
            << "  version: 1\n"
            << "  topics:\n"
            << "    - id: 1\n      topic: /playback_lock\n"
+           << "      msg_type: dummy:PlaybackMessage\n"
+           << "      serialization_type: cdr\n"
+           << "  files:\n    - path: data_0.mcap\n"
+           << "      start_timestamp: " << start << "\n";
+  return root;
+}
+
+// Even payloads on /playback_known, odd ones on a channel the summary lists
+// under another id, so the read finds a channel the map does not hold.
+std::filesystem::path WriteBagWithChannelMissingFromSummary() {
+  const auto root = std::filesystem::temp_directory_path() /
+                    ("ibmw-playback-channel-" + std::to_string(::getpid()));
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto mcap_path = root / "data_0.mcap";
+  mcap::McapWriter writer;
+  mcap::McapWriterOptions options("ibmw");
+  options.compression = mcap::Compression::None;  // the patch below finds the record
+  if (!writer.open(mcap_path.string(), options).ok()) return {};
+  mcap::Schema schema("PlaybackMessage", "omgidl",
+                      "struct PlaybackMessage { octet data; }");
+  writer.addSchema(schema);
+  mcap::Channel known("/playback_known", "cdr", schema.id);
+  mcap::Channel hidden("/playback_hidden", "cdr", schema.id);
+  writer.addChannel(known);
+  writer.addChannel(hidden);
+  const uint64_t start = ibmw::common::util::GetCurTimestampNs() + 1000000;
+  for (uint32_t sequence = 0; sequence < 8; ++sequence) {
+    const std::byte payload[] = {std::byte{static_cast<unsigned char>(sequence)}};
+    const auto status = writer.write(mcap::Message{
+        .channelId = sequence % 2 == 0 ? known.id : hidden.id,
+        .sequence = sequence,
+        .logTime = start + sequence * 1000000,
+        .publishTime = start + sequence * 1000000,
+        .dataSize = sizeof(payload),
+        .data = payload});
+    if (!status.ok()) return {};
+  }
+  writer.close();
+
+  // A channel record starts with its u16 id, the u16 schema id and the
+  // u32-prefixed topic; the last one is in the summary.
+  std::string record{static_cast<char>(hidden.id), '\0', static_cast<char>(schema.id), '\0'};
+  const uint32_t topic_size = hidden.topic.size();
+  record.append(reinterpret_cast<const char*>(&topic_size), sizeof(topic_size));
+  record += hidden.topic;
+  std::fstream file(mcap_path, std::ios::in | std::ios::out | std::ios::binary);
+  const std::string bytes{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+  const auto position = bytes.rfind(record);
+  if (position == std::string::npos || position == bytes.find(record)) return {};
+  file.clear();
+  file.seekp(static_cast<std::streamoff>(position));
+  file.put(99);
+  file.close();
+
+  std::ofstream metadata(root / "metadata.yaml");
+  metadata << "ibmw_bagfile_information:\n"
+           << "  version: 1\n"
+           << "  topics:\n"
+           << "    - id: 1\n      topic: /playback_known\n"
+           << "      msg_type: dummy:PlaybackMessage\n"
+           << "      serialization_type: cdr\n"
+           << "    - id: 2\n      topic: /playback_hidden\n"
            << "      msg_type: dummy:PlaybackMessage\n"
            << "      serialization_type: cdr\n"
            << "  files:\n    - path: data_0.mcap\n"
@@ -280,6 +344,49 @@ TEST(PlaybackActionLockRegression, SignalPlaybackRestarts) {
   EXPECT_EQ(take(), all);
   action.Shutdown();
   executor.Shutdown();
+  std::filesystem::remove_all(bag);
+}
+
+// EXT-032: a message of an unmapped channel is skipped, not published as a
+// topic, and the playback goes on.
+TEST(PlaybackActionLockRegression, SkipsMessagesOfAChannelMissingFromTheSummary) {
+  const auto bag = WriteBagWithChannelMissingFromSummary();
+  ASSERT_FALSE(bag.empty());
+  runtime::core::executor::ThreadPoolExecutor executor;
+  executor.Initialize("playback-channel-test", YAML::Load("{thread_num: 2}"));
+  executor.Start();
+  runtime::core::executor::ExecutorAccess access(&executor);
+  PlaybackAction action;
+  action.RegisterGetTypeSupportFunc([](std::string_view type) {
+    return type == "dummy:PlaybackMessage"
+               ? ibmw::util::TypeSupportRef(DummyTypeSupport())
+               : ibmw::util::TypeSupportRef();
+  });
+  action.RegisterGetExecutorFunc([&](std::string_view name) {
+    return name == "playback-channel-test"
+               ? ibmw::executor::ExecutorHandle(access.NativeHandle())
+               : ibmw::executor::ExecutorHandle();
+  });
+  action.Initialize(YAML::Load(
+      "{bag_path: '" + bag.string() +
+      "', mode: signal, executor: playback-channel-test, topic_meta_list: "
+      "[{topic: /playback_known, msg_type: dummy:PlaybackMessage}, "
+      "{topic: /playback_hidden, msg_type: dummy:PlaybackMessage}]}"));
+  action.InitExecutor();
+  std::mutex mutex;
+  std::vector<int> payloads;
+  action.RegisterPubRecordFunc([&](const PlaybackAction::OneRecord& record) {
+    const auto data = record.buffer_view_ptr->JoinToString();
+    std::lock_guard<std::mutex> lock(mutex);
+    payloads.push_back(static_cast<unsigned char>(data.at(0)));
+  });
+  action.Start();
+  ASSERT_TRUE(action.StartSignalPlayback(0, 0));
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));  // the bag lasts 8 ms
+  action.Shutdown();
+  executor.Shutdown();
+  std::sort(payloads.begin(), payloads.end());
+  EXPECT_EQ(payloads, (std::vector<int>{0, 2, 4, 6}));
   std::filesystem::remove_all(bag);
 }
 
