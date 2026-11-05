@@ -29,6 +29,7 @@ class RpcTimeoutTimer {
     thread_ = std::thread([state = state_] { Run(*state); });
     thread_id_.store(thread_.get_id());
   }
+  // Not concurrently with a Stop from another thread (as for any member).
   ~RpcTimeoutTimer() {
     Stop();
     // Destroyed by its own task: the thread ends after it, holding the state.
@@ -142,6 +143,7 @@ class RpcTimeoutTimer {
   std::mutex join_mutex_;  // thread_ is joined by whichever other thread stops first
   std::thread thread_;
   std::atomic<std::thread::id> thread_id_;  // set before any task can run
+  static_assert(std::atomic<std::thread::id>::is_always_lock_free);
   const ibmw_executor_base_t base_{
       .struct_size = sizeof(ibmw_executor_base_t),
       .type = [](void*) { return ibmw::util::ToIbmwStringView("dds_rpc_timeout"); },
