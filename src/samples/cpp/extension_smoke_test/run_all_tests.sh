@@ -25,11 +25,13 @@ KILL_SIGNAL="KILL"
 
 # Source ROS2 if available (disable nounset temporarily — ROS2 scripts use unset vars)
 set +u
-if [ -f /opt/ros/humble/setup.bash ]; then
-    source /opt/ros/humble/setup.bash
+if [ -f "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" ]; then
+    source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash"
+else
+    echo "warning: /opt/ros/${ROS_DISTRO:-humble}/setup.bash not found" >&2
 fi
 set -u
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/lib/$(uname -m)-linux-gnu:/opt/ros/${ROS_DISTRO:-humble}/lib:${LD_LIBRARY_PATH:-}"
 
 ###############################################################################
 # Counters

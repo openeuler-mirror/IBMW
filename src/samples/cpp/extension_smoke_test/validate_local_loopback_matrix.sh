@@ -15,9 +15,10 @@ if [ ! -x "$IBMW_BIN" ] && [ -x "$BUILD_DIR/ibmw" ]; then
 fi
 
 set +u
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" 2>/dev/null ||
+  echo "warning: /opt/ros/${ROS_DISTRO:-humble}/setup.bash not sourced" >&2
 set -u
-export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:/usr/lib/$(uname -m)-linux-gnu:${LD_LIBRARY_PATH:-}"
 
 mkdir -p "$TMP_DIR"
 

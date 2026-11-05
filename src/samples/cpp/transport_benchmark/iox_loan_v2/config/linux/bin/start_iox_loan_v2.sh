@@ -26,7 +26,7 @@ cd "${SCRIPT_DIR}"
 # extension is loaded from SCRIPT_DIR by the YAML config, while the binaries'
 # RUNPATH may point at the parent build directory; loading both copies would
 # create two independent PoshRuntime singletons in one process.
-export LD_LIBRARY_PATH="${SCRIPT_DIR}:${LD_LIBRARY_PATH:-}:/opt/ros/humble/lib"
+export LD_LIBRARY_PATH="${SCRIPT_DIR}:${LD_LIBRARY_PATH:-}:/opt/ros/${ROS_DISTRO:-humble}/lib"
 
 ROUDI_BIN="${SCRIPT_DIR}/iox-roudi"
 PUB_BIN="${SCRIPT_DIR}/iox_loan_v2_publisher_app"

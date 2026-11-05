@@ -103,13 +103,13 @@ ensure_ros2_env() {
   if [ -n "${ROS_DISTRO:-}" ]; then
     return 0
   fi
-  if [ -f /opt/ros/humble/setup.bash ]; then
+  if [ -f /opt/ros/${ROS_DISTRO:-humble}/setup.bash ]; then
     set +u
-    source /opt/ros/humble/setup.bash
+    source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
     set -u
     return 0
   fi
-  echo "[FAIL] ROS2 environment is not sourced and /opt/ros/humble/setup.bash is unavailable" >&2
+  echo "[FAIL] ROS2 environment is not sourced and /opt/ros/${ROS_DISTRO:-humble}/setup.bash is unavailable" >&2
   exit 1
 }
 
@@ -149,7 +149,7 @@ wait_for_server_ready() {
 
 ensure_ros2_env
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="/usr/lib/$(uname -m)-linux-gnu:${LD_LIBRARY_PATH:-}"
 
 echo "=========================================="
 echo "ROS2 client -> IBMW DDS-only server validation"

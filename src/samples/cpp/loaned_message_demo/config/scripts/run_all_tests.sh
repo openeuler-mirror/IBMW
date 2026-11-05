@@ -11,7 +11,8 @@ if [ ! -d "$BUILD_DIR" ]; then
   exit 1
 fi
 
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" 2>/dev/null ||
+  echo "warning: /opt/ros/${ROS_DISTRO:-humble}/setup.bash not sourced" >&2
 export LD_LIBRARY_PATH=$BUILD_DIR:$LD_LIBRARY_PATH
 
 echo "=========================================="

@@ -7,7 +7,7 @@ CFG_DIR="$SCRIPT_DIR/../cfg"
 BUILD_DIR="${BUILD_DIR:-$(cd "$SCRIPT_DIR/../../../../build" 2>/dev/null && pwd)}"
 
 if [ -z "$ROS_DISTRO" ]; then
-  echo "Error: ROS2 not sourced. Run: source /opt/ros/humble/setup.bash"
+  echo "Error: ROS2 not sourced. Run: source /opt/ros/${ROS_DISTRO:-humble}/setup.bash"
   exit 1
 fi
 

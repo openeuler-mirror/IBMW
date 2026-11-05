@@ -12,9 +12,10 @@ SUB_LOG="$TMP_DIR/loaned_msg_sub.log"
 PUB_LOG="$TMP_DIR/loaned_msg_pub.log"
 
 set +u
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" 2>/dev/null ||
+  echo "warning: /opt/ros/${ROS_DISTRO:-humble}/setup.bash not sourced" >&2
 set -u
-export LD_LIBRARY_PATH="$BUILD_DIR:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$BUILD_DIR:/usr/lib/$(uname -m)-linux-gnu:${LD_LIBRARY_PATH:-}"
 
 mkdir -p "$TMP_DIR"
 if [ ! -x "$BUILD_DIR/sub_only_app" ] || [ ! -x "$BUILD_DIR/plain_pub_only_app" ]; then

@@ -24,10 +24,10 @@ exec 9>"$LOCK_FILE"
 flock 9
 
 set +u
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
 set -u
 export AMENT_PREFIX_PATH="$BUILD_DIR/play_smoke_ros2_runtime:${AMENT_PREFIX_PATH:-}"
-export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/play_smoke_ros2_runtime/lib:/usr/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/play_smoke_ros2_runtime/lib:/usr/lib/$(uname -m)-linux-gnu:/opt/ros/${ROS_DISTRO:-humble}/lib:${LD_LIBRARY_PATH:-}"
 
 # Shared-memory transports built into this tree. The play_smoke_test target
 # writes one marker per built transport; a tree without either marker predates
