@@ -413,7 +413,7 @@ void OpenTelemetryExtension::TransportTraceFilter(
 
   // add context attributes
   auto [meta_key_vals_array, meta_key_vals_array_len] = ctx_ref.GetMetaKeyValsArray();
-  for (size_t ii = 0; ii < meta_key_vals_array_len; ii += 2) {
+  for (size_t ii = 0; ii + 1 < meta_key_vals_array_len; ii += 2) {
     auto key = ibmw::util::ToStdStringView(meta_key_vals_array[ii]);
     auto val = ibmw::util::ToStdStringView(meta_key_vals_array[ii + 1]);
     span->SetAttribute(key, val);
@@ -498,7 +498,7 @@ void OpenTelemetryExtension::RpcTraceFilter(
 
         // add context attributes
         auto [meta_key_vals_array, meta_key_vals_array_len] = ctx_ref.GetMetaKeyValsArray();
-        for (size_t ii = 0; ii < meta_key_vals_array_len; ii += 2) {
+        for (size_t ii = 0; ii + 1 < meta_key_vals_array_len; ii += 2) {
           auto key = ibmw::util::ToStdStringView(meta_key_vals_array[ii]);
           auto val = ibmw::util::ToStdStringView(meta_key_vals_array[ii + 1]);
           span->SetAttribute(key, val);
@@ -551,7 +551,7 @@ void OpenTelemetryExtension::TransportMetricsFilter(
   };
 
   auto [meta_key_vals_array, meta_key_vals_array_len] = ctx_ref.GetMetaKeyValsArray();
-  for (size_t ii = 0; ii < meta_key_vals_array_len; ii += 2) {
+  for (size_t ii = 0; ii + 1 < meta_key_vals_array_len; ii += 2) {
     auto key = ibmw::util::ToStdStringView(meta_key_vals_array[ii]);
     auto val = ibmw::util::ToStdStringView(meta_key_vals_array[ii + 1]);
     labels.emplace(key, val);
