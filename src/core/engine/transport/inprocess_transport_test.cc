@@ -395,6 +395,7 @@ void ExpectOwnContextPerSubscriber(const ibmw_type_support_base_t* ts, const std
     ASSERT_EQ(executor->Queued(), 3u);
     executor->Release();
     for (int i = 0; i < 500 && f.calls.load() < 3; ++i) std::this_thread::sleep_for(10ms);
+    std::lock_guard lock(mutex);
     EXPECT_EQ(contexts.size(), 3u);
   }
   ASSERT_EQ(f.calls.load(), 3);
@@ -417,6 +418,11 @@ TEST(InProcessTransportTest, SerializedDeliveryGivesEachSubscriberItsOwnContext)
 TEST(InProcessTransportTest, QueuedDeliveriesHoldDistinctContexts) {
   GatedExecutor executor;
   ExpectOwnContextPerSubscriber(IntTypeSupport<0>(), "pub_pkg", &executor);
+}
+
+TEST(InProcessTransportTest, QueuedSerializedDeliveriesHoldDistinctContexts) {
+  GatedExecutor executor;
+  ExpectOwnContextPerSubscriber(SerializableIntTypeSupport(), "sub_pkg", &executor);
 }
 
 }  // namespace
