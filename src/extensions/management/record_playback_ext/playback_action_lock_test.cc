@@ -382,7 +382,15 @@ TEST(PlaybackActionLockRegression, SkipsMessagesOfAChannelMissingFromTheSummary)
   });
   action.Start();
   ASSERT_TRUE(action.StartSignalPlayback(0, 0));
-  std::this_thread::sleep_for(std::chrono::milliseconds(500));  // the bag lasts 8 ms
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (std::chrono::steady_clock::now() < deadline) {
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (payloads.size() >= 4) break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));  // a wrong odd one would follow
   action.Shutdown();
   executor.Shutdown();
   std::sort(payloads.begin(), payloads.end());
