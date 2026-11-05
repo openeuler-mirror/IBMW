@@ -133,16 +133,30 @@ void DdsRpcDriver::Start() {
 }
 
 DdsRpcDriver::~DdsRpcDriver() {
-  // A timeout callback may still be in Shutdown on the timer thread.
+  // A timeout callback may still be in Shutdown, or after it on the timer thread.
+  if (state_.load() == State::kShutdown) WaitForShutdown();
   if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
+}
+
+// Not in a timeout task: the first Shutdown may be waiting for that task.
+void DdsRpcDriver::WaitForShutdown() const {
+  if (timeout_executor_ && timeout_executor_.IsInCurrentExecutor()) return;
+  shutdown_done_.wait(false);
 }
 
 void DdsRpcDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown) {
     // The first Shutdown may run in a timeout callback: wait for it.
-    if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
+    WaitForShutdown();
     return;
   }
+  struct Done {
+    std::atomic<bool>& flag;
+    ~Done() {
+      flag.store(true);
+      flag.notify_all();
+    }
+  } done{shutdown_done_};
 
   auto* participant = dds_bus_.GetParticipant();
 

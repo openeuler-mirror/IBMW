@@ -174,9 +174,12 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver,
  private:
   enum class State : uint32_t { kPreInit, kInit, kStart, kShutdown };
 
+  void WaitForShutdown() const;
+
   DdsBus& dds_bus_;
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
+  std::atomic<bool> shutdown_done_ = false;  // set when the first Shutdown returns
 
   const runtime::core::service::ServiceCatalog* service_catalog_ptr_ = nullptr;
 
