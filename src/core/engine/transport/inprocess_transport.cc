@@ -56,6 +56,12 @@ bool SameCopyImplementation(const ibmw::util::TypeSupportRef& pub, const ibmw::u
   return p_custom != nullptr && p_custom == s->custom_type_support_ptr(s->ctx);
 }
 
+// The package Context for its last subscriber, a copy for the others (COMM-037).
+std::shared_ptr<ibmw::transport::Context> SubscriberContext(
+    const std::shared_ptr<ibmw::transport::Context>& pkg_ctx_ptr, bool last) {
+  return last ? pkg_ctx_ptr : std::make_shared<ibmw::transport::Context>(*pkg_ctx_ptr);
+}
+
 constexpr auto kShutdownDrainTimeout = std::chrono::seconds(5);
 
 }  // namespace
@@ -254,14 +260,11 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
 
         auto tpl_sub_info = tpl_msg_handler_ptr->info;
 
-        // Create context under this pkg.
-        // NOTE: The context is shared across all module subscribers within the
-        // same package. This is safe for sequential (inline) execution, but when
-        // subscribe_executor_ref_ is set, concurrent callbacks may race on
-        // Context mutation if a subscriber filter (e.g. otp_trace) calls
-        // SetMetaValue. This is a pre-existing design trade-off; adding per-
-        // subscriber Context clones would eliminate the race at the cost of
-        // additional heap allocations.
+        // Create context under this pkg. Each module subscriber gets its own
+        // Context (COMM-037): a filter may call SetMetaValue, and with
+        // subscribe_executor_ref_ the callbacks run concurrently. The last
+        // subscriber takes this one, the others a copy made before it is handed
+        // out, so a single subscriber costs no extra allocation.
         auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
 
         const auto& meta_keys = msg_wrapper.ctx_ref.GetMetaKeys();
@@ -301,24 +304,27 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
           // Note: serialization_cache is intentionally omitted — on the copy
           // path the subscriber already has a direct msg_ptr and msg_cache_ptr,
           // so the cache is never consulted by CheckMsg() or downstream code.
+          const size_t handler_count = module_msg_handler_map_ptr->size();
+          size_t handler_idx = 0;
           for (const auto& msg_handler_itr : *module_msg_handler_map_ptr) {
             const auto* msg_handler_ptr = msg_handler_itr.second;
+            auto sub_ctx_ptr = SubscriberContext(ctx_ptr, ++handler_idx == handler_count);
 
             // Create MessageFrame under this pkg-module
             MessageFrame sub_msg_wrapper{
                 .info = msg_handler_ptr->info,
                 .msg_ptr = msg_ptr.get(),
-                .ctx_ref = ctx_ptr,
+                .ctx_ref = sub_ctx_ptr,
                 .msg_cache_ptr = msg_ptr};
 
             if (subscribe_executor_ref_) {
               subscribe_executor_ref_.Dispatch(
-                  [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
+                  [msg_handler_ptr, sub_ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
                    token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
-                    msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+                    msg_handler_ptr->callback(sub_msg_wrapper, [sub_ctx_ptr]() {}, nullptr);
                   });
             } else {
-              msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+              msg_handler_ptr->callback(sub_msg_wrapper, [sub_ctx_ptr]() {}, nullptr);
             }
           }
 
@@ -345,24 +351,25 @@ void InProcessTransport::Send(MessageFrame& msg_wrapper) noexcept {
             const auto* msg_handler_ptr = msg_handler_itr.second;
             ++handler_idx;
             const bool is_last = is_last_serialization_pkg && (handler_idx == handler_count);
+            auto sub_ctx_ptr = SubscriberContext(ctx_ptr, handler_idx == handler_count);
 
             // Create MessageFrame under this pkg-module
             MessageFrame sub_msg_wrapper{
                 .info = msg_handler_ptr->info,
                 .msg_ptr = nullptr,
-                .ctx_ref = ctx_ptr,
+                .ctx_ref = sub_ctx_ptr,
                 .serialization_cache = is_last
                     ? std::move(msg_wrapper.serialization_cache)
                     : msg_wrapper.serialization_cache};
 
             if (subscribe_executor_ref_) {
               subscribe_executor_ref_.Dispatch(
-                  [msg_handler_ptr, ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
+                  [msg_handler_ptr, sub_ctx_ptr, sub_msg_wrapper{std::move(sub_msg_wrapper)},
                    token = InflightToken(*inflight_, std::memory_order_relaxed)]() mutable {
-                    msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+                    msg_handler_ptr->callback(sub_msg_wrapper, [sub_ctx_ptr]() {}, nullptr);
                   });
             } else {
-              msg_handler_ptr->callback(sub_msg_wrapper, [ctx_ptr]() {}, nullptr);
+              msg_handler_ptr->callback(sub_msg_wrapper, [sub_ctx_ptr]() {}, nullptr);
               // Inline delivery is over: hand the cache back so the drivers
               // after this one do not serialize again.
               if (is_last) msg_wrapper.serialization_cache = std::move(sub_msg_wrapper.serialization_cache);

@@ -6,8 +6,9 @@
 //           that owns the handlers is released.
 // COMM-007: cross-package delivery by direct copy requires a shared type
 //           support implementation.
-// COMM-037: one package failing does not drop the others, and inline
-//           delivery leaves the serialization cache to the next driver.
+// COMM-037: one package failing does not drop the others, inline delivery
+//           leaves the serialization cache to the next driver, and the
+//           subscribers of one package do not share a Context.
 
 #include <gtest/gtest.h>
 
@@ -18,7 +19,9 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "cpp/executor/executor.h"
 #include "cpp/util/string.h"
@@ -345,6 +348,46 @@ TEST(InProcessTransportTest, InlineDeliveryKeepsSerializationCacheForNextDriver)
   EXPECT_NE(SerializeMsgWithCache(frame, "test"), nullptr);
   EXPECT_EQ(serialize_calls.load(), 1);
   f.transport.Shutdown();
+}
+
+// Each subscriber of a package sees the publisher's metadata in a Context of
+// its own: what one sets is not seen by the next (COMM-037).
+void ExpectOwnContextPerSubscriber(const ibmw_type_support_base_t* ts, const std::string& sub_pkg) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  std::vector<std::string> seen;
+  for (const char* module : {"a", "b", "c"}) {
+    auto handler = std::make_unique<MessageHandlerWrapper>();
+    handler->info = Info(sub_pkg, module, ts);
+    handler->callback = [&, module](MessageFrame& frame, std::function<void()>&&,
+                                    const internal::CallbackInvocationEnvelopeV1*) {
+      seen.emplace_back(std::string(frame.ctx_ref.GetMetaValue("pub_key")) + "|" +
+                        std::string(frame.ctx_ref.GetMetaValue("filter")));
+      frame.ctx_ref.SetMetaValue("filter", module);
+    };
+    ASSERT_TRUE(f.transport.OnMessage(*handler));
+    ASSERT_TRUE(f.catalog.OnMessage(std::move(handler)));
+  }
+  f.transport.Start();
+
+  int value = 7;
+  ibmw::transport::Context context;
+  context.SetMetaValue("pub_key", "v");
+  const auto pub_info = Info("pub_pkg", "pub", ts);
+  MessageFrame frame{.info = pub_info, .msg_ptr = &value, .ctx_ref = ibmw::transport::ContextRef(context)};
+  f.transport.Send(frame);
+  EXPECT_EQ(seen, (std::vector<std::string>{"v|", "v|", "v|"}));
+  EXPECT_EQ(context.GetMetaValue("filter"), "");
+  f.transport.Shutdown();
+}
+
+TEST(InProcessTransportTest, CopyDeliveryGivesEachSubscriberItsOwnContext) {
+  ExpectOwnContextPerSubscriber(IntTypeSupport<0>(), "pub_pkg");
+}
+
+TEST(InProcessTransportTest, SerializedDeliveryGivesEachSubscriberItsOwnContext) {
+  ExpectOwnContextPerSubscriber(SerializableIntTypeSupport(), "sub_pkg");
 }
 
 }  // namespace
