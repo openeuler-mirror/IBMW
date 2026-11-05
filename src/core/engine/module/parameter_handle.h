@@ -32,6 +32,10 @@ class ParameterHandle {
   }
   std::vector<std::string> ListParameter() const;
 
+  // Store a literal value, including an empty string. The legacy SetParameter
+  // overloads retain their empty-value deletion behavior for existing modules.
+  void SetParameterValue(std::string_view key, std::string value);
+
  private:
   std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_;
 

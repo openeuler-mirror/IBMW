@@ -153,20 +153,16 @@ CallOptions ParseCallOptions(const Invocation& in) {
   return out;
 }
 
-void AddCallOptions(Command& command) {
+void AddCallTransportOptions(Command& command, bool native_ros2) {
   using Mode = OptionValueMode;
-  command.AddArgument("<service>", "Full service/method name");
-  command.AddArgument("<type>", "'request_type -> response_type', or pkg/srv/Type for --ros2");
-  command.AddArgument("<request>", "One quoted JSON/YAML request object");
   command.AddOption("--dds", "-d", {}, "Call through DDS");
-  command.AddOption("--ros2", "-r", {}, "Call a native ROS 2 service");
+  if (native_ros2) command.AddOption("--ros2", "-r", {}, "Call a native ROS 2 service");
   command.AddOption("--zenoh", "-z", {}, "Call through Zenoh");
   for (const auto* b : {"http", "grpc", "mqtt"}) command.AddOption(std::string("--") + b, {}, "endpoint", std::string("Call through ") + b, Mode::kRequired);
   for (const auto& [name, description] : {
       std::pair{"--domain", "DDS/ROS 2 domain"}, {"--dds-domain", "DDS domain (overrides --domain)"},
       {"--ros-domain", "ROS 2 domain (otherwise --domain, ROS_DOMAIN_ID or 0)"},
       {"--zenoh-domain", "Zenoh limit_domain"}, {"--zenoh-config", "Zenoh native configuration file"},
-      {"--type-support", "Request/response TypeSupport library; repeatable"},
       {"--transport-library", "Override the selected extension library"},
       {"--serialization", "Wire serialization; defaults to a format supported by both types"},
       {"--timeout", "Response deadline in seconds (default: 5); requests are not retried"},
@@ -175,8 +171,18 @@ void AddCallOptions(Command& command) {
       {"--mqtt-server-id", "Optional MQTT server identifier"}, {"--mqtt-qos", "MQTT QoS 0, 1 or 2 (default: 2)"},
       {"--mqtt-truststore", "MQTT TLS CA certificate"}, {"--mqtt-client-cert", "MQTT TLS client certificate"},
       {"--mqtt-client-key", "MQTT TLS client private key"}})
-    command.AddOption(name, {}, "value", description, Mode::kRequired);
-  command.AddOption("--ros2-compatible", {}, {}, "DDS: use ROS 2 request/reply topic naming");
+    if (native_ros2 || std::string_view(name) != "--ros-domain")
+      command.AddOption(name, {}, "value", description, Mode::kRequired);
+  if (native_ros2) command.AddOption("--ros2-compatible", {}, {}, "DDS: use ROS 2 request/reply topic naming");
+}
+
+void AddCallOptions(Command& command) {
+  command.AddArgument("<service>", "Full service/method name");
+  command.AddArgument("<type>", "'request_type -> response_type', or pkg/srv/Type for --ros2");
+  command.AddArgument("<request>", "One quoted JSON/YAML request object");
+  AddCallTransportOptions(command);
+  command.AddOption("--type-support", {}, "library", "Request/response TypeSupport library; repeatable",
+                    OptionValueMode::kRequired);
   command.AddOption("--include-hidden-services", {}, {}, "Explicit calls already allow hidden service names");
 }
 }  // namespace ibmw::cli::service

@@ -1,54 +1,45 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
-# All rights reserved.
 
-# Get the current folder name
-string(REGEX REPLACE ".*/\(.*\)" "\\1" CUR_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-
-# Get namespace
-get_namespace(CUR_SUPERIOR_NAMESPACE)
-string(REPLACE "::" "_" CUR_SUPERIOR_NAMESPACE_UNDERLINE ${CUR_SUPERIOR_NAMESPACE})
-
-# Set target name
-set(CUR_TARGET_NAME ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR})
-set(CUR_TARGET_ALIAS_NAME ${CUR_SUPERIOR_NAMESPACE}::${CUR_DIR})
-
-# Set file collection
-file(GLOB_RECURSE src ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
-file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
-list(REMOVE_ITEM src ${test_files})
-
-# Add target
-add_library(${CUR_TARGET_NAME} SHARED)
-add_library(${CUR_TARGET_ALIAS_NAME} ALIAS ${CUR_TARGET_NAME})
-
-# Set source file of target
-target_sources(${CUR_TARGET_NAME} PRIVATE ${src})
-
-# Set include path of target
-target_include_directories(
-  ${CUR_TARGET_NAME}
-  PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>)
-
-# Set link libraries of target
-target_link_libraries(
-  ${CUR_TARGET_NAME}
-  PRIVATE ibmw::core::extension_api
-          ibmw::core::engine
-          nlohmann_json::nlohmann_json)
-
-# Add -Werror option
-include(AddWerror)
-add_werror(${CUR_TARGET_NAME})
-
-# Set installation of target
+add_library(ibmw_parameter_types SHARED)
+target_include_directories(ibmw_parameter_types PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(ibmw_parameter_types PUBLIC ibmw::api::cpp nlohmann_json::nlohmann_json)
+if(IBMW_BUILD_DDS_EXTENSION)
+  add_dds_idl_gencode_target(
+    TARGET_NAME ibmw_parameter_dds_gencode
+    IDL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/Parameter.idl
+    GENCODE_PATH ${CMAKE_CURRENT_BINARY_DIR}/gencode
+    INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+    WRAP_IDLS Parameter)
+  target_sources(ibmw_parameter_types PRIVATE parameter_dds_type_support.cc)
+  target_link_libraries(ibmw_parameter_types PRIVATE ibmw_parameter_dds_gencode ibmw::api::dds_type_support)
+else()
+  target_sources(ibmw_parameter_types PRIVATE parameter_type_support.cc)
+endif()
+add_werror(ibmw_parameter_types)
+set_target_properties(ibmw_parameter_types PROPERTIES INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib")
 if(IBMW_INSTALL)
-  install(TARGETS ${CUR_TARGET_NAME} LIBRARY DESTINATION bin)
+  install(TARGETS ibmw_parameter_types LIBRARY DESTINATION bin)
+  install(FILES Parameter.idl DESTINATION share/ibmw/parameter)
 endif()
 
-# Set test of target
-if(IBMW_BUILD_TESTS AND test_files)
-  add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
+if(IBMW_BUILD_PARAMETER_EXTENSION)
+  add_library(ibmw_extensions_parameter_ext SHARED global.cc parameter_extension.cc service.cc)
+  add_library(ibmw::extensions::parameter_ext ALIAS ibmw_extensions_parameter_ext)
+  target_include_directories(ibmw_extensions_parameter_ext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  target_link_libraries(ibmw_extensions_parameter_ext PRIVATE
+    ibmw::core::extension_api ibmw::core::engine ibmw_parameter_types)
+  set_target_properties(ibmw_extensions_parameter_ext PROPERTIES OUTPUT_NAME "ibmw_parameter_service"
+    INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib")
+  add_werror(ibmw_extensions_parameter_ext)
+  if(IBMW_INSTALL)
+    install(TARGETS ibmw_extensions_parameter_ext LIBRARY DESTINATION bin)
+  endif()
 endif()
 
-# Set misc of target
-set_target_properties(${CUR_TARGET_NAME} PROPERTIES OUTPUT_NAME "ibmw_parameter_service")
+if(IBMW_BUILD_TESTS)
+  add_executable(ibmw_parameter_service_test parameter_service_test.cc service.cc global.cc)
+  target_link_libraries(ibmw_parameter_service_test PRIVATE ibmw::core::engine ibmw_parameter_types GTest::gtest_main)
+  add_werror(ibmw_parameter_service_test)
+  add_test(NAME ibmw_parameter_service_test COMMAND ibmw_parameter_service_test)
+  set_tests_properties(ibmw_parameter_service_test PROPERTIES TIMEOUT 30)
+endif()

@@ -262,7 +262,7 @@ ibmw service call /add_two_ints example_interfaces/srv/AddTwoInts \
 每次调用必须且只能选择一个后端：`--dds`、`--ros2`、`--zenoh`、
 `--mqtt <broker-uri>`、`--http <host:port>` 或 `--grpc <host:port>`。
 HTTP 和 gRPC 地址也可使用 `http://host:port`，当前不提供 HTTPS。
-gRPC 方法名必须符合现有 Driver 的 `cdr:`、`dds:` 或 `ros2:` 前缀约定。
+gRPC 方法名支持 `cdr:`、`dds:`、`ros2:` 或 `json:` 前缀。
 使用 `--transport-library <path>` 可显式指定所选后端的运行时库。
 显式方法名允许调用隐藏服务；`--include-hidden-services` 也被接受。
 
@@ -294,6 +294,13 @@ Ctrl+C 后，服务端仍可能已执行请求。
 SIGINT/SIGTERM 分别返回 130/143。registry 只是发现来源，`local` 只在进程内通信，
 本命令不通过 registry 控制 socket 转发其他进程的纯 local 服务。需要显式选择
 服务端已经启用的网络 Driver 及其地址/domain；不会自动选择一个同名服务实例。
+
+### 查看和修改运行时参数
+
+`ibmw param list [module]`、`ibmw param get <module> <parameter_name>` 和
+`ibmw param set <module> <parameter_name> <value>` 通过集中式参数服务访问
+IBMW 字符串参数，连接选项沿用 `service call`。`set` 只修改运行时值。
+服务端配置、多实例命名和完整示例见 [参数命令](parameters.zh.md)。
 
 ### 查看本机模块
 

@@ -285,7 +285,7 @@ ibmw service call /add_two_ints example_interfaces/srv/AddTwoInts \
 Select exactly one backend: `--dds`, `--ros2`, `--zenoh`, `--mqtt <broker-uri>`,
 `--http <host:port>`, or `--grpc <host:port>`. HTTP and gRPC also accept
 `http://host:port`; HTTPS is not provided. gRPC method names follow the existing
-driver's `cdr:`, `dds:`, or `ros2:` prefix convention. Override the selected
+driver's `cdr:`, `dds:`, `ros2:`, or `json:` prefix convention. Override the selected
 extension with `--transport-library <path>`. Explicit calls allow hidden names;
 `--include-hidden-services` is also accepted.
 
@@ -327,6 +327,14 @@ and `local` is an in-process driver: call does not forward another process's
 local-only service through its registry control socket. Select an enabled network
 driver and supply its endpoint/domain explicitly; the command does not automatically
 choose among same-named service instances.
+
+### Runtime Parameters
+
+Use `ibmw param list [module]`, `ibmw param get <module> <parameter_name>`,
+and `ibmw param set <module> <parameter_name> <value>` to access IBMW string
+parameters through the centralized parameter service. Connection options reuse
+`service call`; `set` changes runtime memory only. See the
+[parameter CLI guide (中文)](parameters.zh.md) for deployment and examples.
 
 ### Listing Local Modules
 

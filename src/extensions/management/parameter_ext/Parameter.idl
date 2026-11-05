@@ -1,0 +1,55 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// Native DDS wire representation of the centralized IBMW parameter service.
+module ibmw { module protocols { module parameter_dds {
+  @final struct SetParameterReq {
+    string module_name;
+    string parameter_key;
+    string parameter_value;
+  };
+  @final struct SetParameterRsp {
+    unsigned long long code;
+    string msg;
+  };
+  @final struct GetParameterReq {
+    string module_name;
+    string parameter_key;
+  };
+  @final struct GetParameterRsp {
+    unsigned long code;
+    string msg;
+    string parameter_value;
+  };
+  @final struct ListParameterReq {
+    string module_name;
+  };
+  @final struct ListParameterRsp {
+    unsigned long code;
+    string msg;
+    sequence<string> parameter_keys;
+  };
+  @final struct DumpParameterReq {
+    sequence<string> module_names;
+  };
+  @final struct DumpParameterRsp {
+    unsigned long code;
+    string msg;
+    // Legacy arbitrary maps retain their JSON shape inside the DDS field.
+    string module_parameter_json;
+  };
+  @final struct LoadParameterReq {
+    // Legacy arbitrary maps retain their JSON shape inside the DDS field.
+    string module_parameter_json;
+  };
+  @final struct LoadParameterRsp {
+    unsigned long code;
+    string msg;
+  };
+  @final struct ListModulesReq {
+    boolean reserved;
+  };
+  @final struct ListModulesRsp {
+    unsigned long code;
+    string msg;
+    sequence<string> module_names;
+  };
+}; }; };

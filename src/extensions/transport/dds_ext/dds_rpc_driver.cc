@@ -297,6 +297,9 @@ bool DdsRpcDriver::RegisterServiceFunc(
     rdr_qos.history().kind = eprosima::fastdds::dds::KEEP_LAST_HISTORY_QOS;
     rdr_qos.history().depth = 10;
     rdr_qos.data_sharing().off();
+    // RPC strings/sequences can exceed the default-constructed type size.
+    // Let the DDS history pool grow its own buffers before codec serialization.
+    rdr_qos.endpoint().history_memory_policy = dds_rpc_rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
 
     eprosima::fastdds::dds::DataWriterQos wrt_qos;
     wrt_qos.reliability().kind = eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS;
@@ -304,6 +307,7 @@ bool DdsRpcDriver::RegisterServiceFunc(
     wrt_qos.history().kind = eprosima::fastdds::dds::KEEP_LAST_HISTORY_QOS;
     wrt_qos.history().depth = 10;
     wrt_qos.data_sharing().off();
+    wrt_qos.endpoint().history_memory_policy = dds_rpc_rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
 
     // Create listener
     auto listener = std::make_unique<ServerListener>(*this, *ep);
@@ -384,6 +388,7 @@ bool DdsRpcDriver::RegisterClientFunc(
     wrt_qos.history().kind = eprosima::fastdds::dds::KEEP_LAST_HISTORY_QOS;
     wrt_qos.history().depth = 10;
     wrt_qos.data_sharing().off();
+    wrt_qos.endpoint().history_memory_policy = dds_rpc_rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
 
     eprosima::fastdds::dds::DataReaderQos rdr_qos;
     rdr_qos.reliability().kind = eprosima::fastdds::dds::RELIABLE_RELIABILITY_QOS;
@@ -391,6 +396,7 @@ bool DdsRpcDriver::RegisterClientFunc(
     rdr_qos.history().kind = eprosima::fastdds::dds::KEEP_LAST_HISTORY_QOS;
     rdr_qos.history().depth = 10;
     rdr_qos.data_sharing().off();
+    rdr_qos.endpoint().history_memory_policy = dds_rpc_rtps::PREALLOCATED_WITH_REALLOC_MEMORY_MODE;
 
     // Create listener
     auto listener = std::make_unique<ClientListener>(*this, *ep);

@@ -3,13 +3,67 @@
 
 #pragma once
 
+#include <cstdint>
+#include <limits>
 #include <map>
+#include <utility>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 namespace ibmw::protocols::parameter_extension {
+
+namespace detail {
+// Validate before normalizing a response: absent fields must not become success.
+template <typename Response>
+Response ReadResponseStatus(const nlohmann::json& j) {
+  if (!j.is_object()) throw std::invalid_argument("Expected a response object.");
+  const auto& code = j.at("code");
+  if (!code.is_number_integer() ||
+      (!code.is_number_unsigned() && code.get<int64_t>() < 0) ||
+      code.get<uint64_t>() > std::numeric_limits<decltype(Response{}.code)>::max())
+    throw std::invalid_argument("Response code must be an unsigned integer in range.");
+  Response result;
+  code.get_to(result.code);
+  j.at("msg").get_to(result.msg);
+  return result;
+}
+}  // namespace detail
+
+inline constexpr char kServiceName[] = "ibmw.protocols.parameter_extension.ParameterService";
+
+struct ListModulesReq {
+  static constexpr const char* kTypeName =
+      "ibmw.protocols.parameter_extension.ListModulesReq";
+};
+inline void to_json(nlohmann::json& j, const ListModulesReq&) {
+  j = nlohmann::json::object();
+}
+inline void from_json(const nlohmann::json& j, ListModulesReq&) {
+  if (!j.is_object()) throw std::invalid_argument("Expected a ListModules request object.");
+}
+
+struct ListModulesRsp {
+  static constexpr const char* kTypeName =
+      "ibmw.protocols.parameter_extension.ListModulesRsp";
+  uint32_t code = 0;
+  std::string msg;
+  std::vector<std::string> module_names;
+};
+inline void to_json(nlohmann::json& j, const ListModulesRsp& v) {
+  j = nlohmann::json{{"code", v.code}, {"msg", v.msg}, {"module_names", v.module_names}};
+}
+inline void from_json(const nlohmann::json& j, ListModulesRsp& v) {
+  auto result = detail::ReadResponseStatus<ListModulesRsp>(j);
+  if (result.code == 0 || j.contains("module_names")) {
+    const auto& payload = j.at("module_names");
+    if (!payload.is_array()) throw std::invalid_argument("Invalid response module_names.");
+    payload.get_to(result.module_names);
+  }
+  v = std::move(result);
+}
 
 // --- SetParameter ---
 
@@ -48,8 +102,8 @@ inline void to_json(nlohmann::json& j, const SetParameterRsp& v) {
 }
 
 inline void from_json(const nlohmann::json& j, SetParameterRsp& v) {
-  if (j.contains("code")) j.at("code").get_to(v.code);
-  if (j.contains("msg")) j.at("msg").get_to(v.msg);
+  auto result = detail::ReadResponseStatus<SetParameterRsp>(j);
+  v = std::move(result);
 }
 
 // --- GetParameter ---
@@ -90,9 +144,13 @@ inline void to_json(nlohmann::json& j, const GetParameterRsp& v) {
 }
 
 inline void from_json(const nlohmann::json& j, GetParameterRsp& v) {
-  if (j.contains("code")) j.at("code").get_to(v.code);
-  if (j.contains("msg")) j.at("msg").get_to(v.msg);
-  if (j.contains("parameter_value")) j.at("parameter_value").get_to(v.parameter_value);
+  auto result = detail::ReadResponseStatus<GetParameterRsp>(j);
+  if (result.code == 0 || j.contains("parameter_value")) {
+    const auto& payload = j.at("parameter_value");
+    if (!payload.is_string()) throw std::invalid_argument("Invalid response parameter_value.");
+    payload.get_to(result.parameter_value);
+  }
+  v = std::move(result);
 }
 
 // --- ListParameter ---
@@ -129,9 +187,13 @@ inline void to_json(nlohmann::json& j, const ListParameterRsp& v) {
 }
 
 inline void from_json(const nlohmann::json& j, ListParameterRsp& v) {
-  if (j.contains("code")) j.at("code").get_to(v.code);
-  if (j.contains("msg")) j.at("msg").get_to(v.msg);
-  if (j.contains("parameter_keys")) j.at("parameter_keys").get_to(v.parameter_keys);
+  auto result = detail::ReadResponseStatus<ListParameterRsp>(j);
+  if (result.code == 0 || j.contains("parameter_keys")) {
+    const auto& payload = j.at("parameter_keys");
+    if (!payload.is_array()) throw std::invalid_argument("Invalid response parameter_keys.");
+    payload.get_to(result.parameter_keys);
+  }
+  v = std::move(result);
 }
 
 // --- ParameterMap (nested map type used by Dump/Load) ---

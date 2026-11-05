@@ -5,12 +5,18 @@ set(service_cli_sources
     service_command.cc service_cli_provider.cc
     discovery_options.cc discovery_query.cc
     list_command.cc type_command.cc find_command.cc
-    call_command.cc call_options.cc call_type_support.cc)
+    call_command.cc)
+
+# Shared by service call and the parameter service client.
+add_library(ibmw_cli_rpc_client STATIC call_client.cc call_options.cc call_type_support.cc)
+target_link_libraries(ibmw_cli_rpc_client PUBLIC ibmw::cli::command ibmw::core::engine)
+target_include_directories(ibmw_cli_rpc_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+add_werror(ibmw_cli_rpc_client)
 
 add_library(ibmw_service_cli_provider SHARED ${service_cli_sources})
 # Only call initializes an Engine; discovery commands keep their observer path.
 target_link_libraries(ibmw_service_cli_provider
-  PRIVATE ibmw::cli::command ibmw::core::engine)
+  PRIVATE ibmw_cli_rpc_client)
 set_target_properties(ibmw_service_cli_provider PROPERTIES OUTPUT_NAME "ibmw_service_cli")
 add_werror(ibmw_service_cli_provider)
 
@@ -85,7 +91,7 @@ if(IBMW_BUILD_TESTS)
   add_werror(ibmw_service_call_server_fixture)
   add_executable(ibmw_service_cli_test service_command_test.cc call_command_test.cc ${service_cli_sources})
   target_link_libraries(ibmw_service_cli_test
-    PRIVATE ibmw::cli::command ibmw::core::engine GTest::gtest_main)
+    PRIVATE ibmw_cli_rpc_client GTest::gtest_main)
   add_werror(ibmw_service_cli_test)
   add_dependencies(ibmw_service_cli_test ibmw_core_main ibmw_service_call_types_fixture)
   target_compile_definitions(ibmw_service_cli_test PRIVATE

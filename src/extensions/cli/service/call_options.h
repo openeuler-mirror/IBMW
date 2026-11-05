@@ -15,6 +15,7 @@ struct CallOptions {
   YAML::Node root;
 };
 void AddCallOptions(Command& command);
+void AddCallTransportOptions(Command& command, bool native_ros2 = true);
 CallOptions ParseCallOptions(const Invocation& invocation);
 std::string CallLibrary(std::string_view filename);
 }  // namespace ibmw::cli::service

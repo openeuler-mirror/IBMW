@@ -182,8 +182,9 @@ bool GrpcRpcDriver::RegisterServiceFunc(
     const auto& func_name = service_func_wrapper.info.func_name;
 
     MW_DEBUG("Register service func: {}", func_name);
-    if (!func_name.starts_with("cdr:") && !func_name.starts_with("dds:") && !func_name.starts_with("ros2:")) {
-      MW_ERROR("Service func name should start with 'cdr:', 'dds:' or 'ros2:'.");
+    if (!func_name.starts_with("cdr:") && !func_name.starts_with("dds:") &&
+        !func_name.starts_with("ros2:") && !func_name.starts_with("json:")) {
+      MW_ERROR("Service func name should start with 'cdr:', 'dds:', 'ros2:' or 'json:'.");
       return false;
     }
 

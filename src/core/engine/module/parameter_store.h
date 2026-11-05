@@ -39,6 +39,7 @@ class ParameterStore : public ISubsystem {
   std::list<std::pair<std::string, std::string>> GenInitializationReport() const override;
 
   ParameterHandle* GetParams(std::string_view module_name) const;
+  std::vector<std::string> ListModules() const;
 
  private:
   Options options_;

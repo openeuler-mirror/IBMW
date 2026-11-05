@@ -54,4 +54,10 @@ std::vector<std::string> ParameterHandle::ListParameter() const {
   return result;
 }
 
+void ParameterHandle::SetParameterValue(std::string_view key, std::string value) {
+  auto ptr = std::make_shared<std::string>(std::move(value));
+  std::lock_guard<std::mutex> lck(parameter_map_mutex_);
+  parameter_map_.insert_or_assign(std::string(key), std::move(ptr));
+}
+
 }  // namespace ibmw::runtime::core::parameter
