@@ -2,7 +2,8 @@
 // All rights reserved.
 
 // Regression tests for RpcClientTool::AbandonAll: every pending record gets
-// exactly one result, and timeouts firing afterwards are no-ops.
+// exactly one result, and timeouts firing afterwards are no-ops. A record
+// whose timeout cannot be scheduled is not kept (TRANS-049).
 
 #include <gtest/gtest.h>
 
@@ -10,6 +11,7 @@
 #include <atomic>
 #include <deque>
 #include <future>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -189,6 +191,28 @@ TEST(RpcClientToolTest, AbandonAllContainsHandlerExceptions) {
   });
   EXPECT_EQ(calls, 4);
   for (uint32_t i = 1; i <= 4; ++i) EXPECT_FALSE(tool.GetRecord(i));
+}
+
+// A record whose timeout cannot be scheduled would never end: it is not kept.
+TEST(RpcClientToolTest, RecordIsRolledBackWhenTheTimeoutCannotBeScheduled) {
+  static const ibmw_executor_base_t kThrowing{
+      .type = [](void*) { return ibmw::util::ToIbmwStringView("throwing"); },
+      .name = [](void*) { return ibmw::util::ToIbmwStringView("throwing"); },
+      .is_thread_safe = [](void*) { return true; },
+      .is_in_current_executor = [](void*) { return false; },
+      .supports_timed_dispatch = [](void*) { return true; },
+      .dispatch = [](void*, ibmw_function_base_t* task) { executor::Task dropped(task); },
+      .now = [](void*) -> uint64_t { return 0; },
+      .dispatch_at_ns =
+          [](void*, uint64_t, ibmw_function_base_t* task) {
+            executor::Task dropped(task);
+            throw std::bad_alloc();
+          },
+      .ctx = nullptr};
+  RpcClientTool<int> tool;
+  tool.RegisterTimeoutExecutor(executor::ExecutorHandle(&kThrowing));
+  EXPECT_FALSE(tool.Record(1, 1s, 10));
+  EXPECT_FALSE(tool.GetRecord(1));
 }
 
 }  // namespace

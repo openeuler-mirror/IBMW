@@ -64,21 +64,28 @@ class RpcClientTool {
       // locked the state keeps it alive while it runs (no check-then-use
       // race with the destructor).
       std::weak_ptr<State> weak_state = state_;
-      timeout_executor_.DispatchAfter(timeout, [weak_state = std::move(weak_state), req_id]() {
-        auto state = weak_state.lock();
-        if (!state) [[unlikely]]
-          return;
+      try {
+        timeout_executor_.DispatchAfter(timeout, [weak_state = std::move(weak_state), req_id]() {
+          auto state = weak_state.lock();
+          if (!state) [[unlikely]]
+            return;
 
-        // Pairs with AbandonAll(): either it sees this task or the task sees
-        // the closed flag (the counter lives on the timeout path only).
-        TimeoutTaskGuard running(*state);
-        if (state->closed.load()) [[unlikely]]
-          return;
+          // Pairs with AbandonAll(): either it sees this task or the task sees
+          // the closed flag (the counter lives on the timeout path only).
+          TimeoutTaskGuard running(*state);
+          if (state->closed.load()) [[unlikely]]
+            return;
 
-        auto msg_recorder_op = state->Take(req_id);
-        if (msg_recorder_op && state->timeout_handle) [[unlikely]]
-          state->timeout_handle(std::move(*msg_recorder_op));
-      });
+          auto msg_recorder_op = state->Take(req_id);
+          if (msg_recorder_op && state->timeout_handle) [[unlikely]]
+            state->timeout_handle(std::move(*msg_recorder_op));
+        });
+      } catch (...) {
+        // A record without its timeout would never end: give it back, the
+        // caller reports the call as failed.
+        state_->Take(req_id);
+        return false;
+      }
     }
 
     return true;
