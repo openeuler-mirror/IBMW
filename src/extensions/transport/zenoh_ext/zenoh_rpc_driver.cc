@@ -121,7 +121,15 @@ void ZenohRpcDriver::Shutdown() {
     for (const auto& keyexpr : sub_keyexprs_)
       if (keyexpr.starts_with(prefix)) zenoh_bus_ptr_->UnregisterSubscriber(keyexpr);
   }
-  client_tool_ptr_.reset();
+  // client_tool_ptr_ stays until destruction: a Call() past its state check
+  // still reaches it. Calls still waiting then get their result from the destructor.
+}
+
+ZenohRpcDriver::~ZenohRpcDriver() {
+  if (!client_tool_ptr_) return;
+  client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  });
 }
 
 bool ZenohRpcDriver::RegisterServiceFunc(

@@ -514,6 +514,28 @@ TEST_F(ZenohRpcDriverTest, ShutdownWaitsForTheHandlersAndRemovesThem) {
   EXPECT_FALSE(bus_->UnregisterSubscriber("rsp/" + Pattern("/test/b")));
 }
 
+// Shutdown keeps the client tool; a call still waiting gets its result, once.
+TEST_F(ZenohRpcDriverTest, CallStillWaitingGetsItsResultFromTheDestructor) {
+  auto& driver = NewDriver();
+  ASSERT_TRUE(driver.RegisterClientFunc({.info = infos_[0]}));
+  driver.Start();
+  std::vector<uint32_t> codes;
+  int req = 7, rsp = 0;
+  auto frame = std::make_shared<runtime::core::service::ServiceMessageFrame>(
+      runtime::core::service::ServiceMessageFrame{
+          .info = infos_[0], .req_ptr = &req, .rsp_ptr = &rsp, .ctx_ref = ibmw::rpc::ContextRef(ctx_)});
+  frame->callback = [&codes](ibmw::rpc::Status status) { codes.push_back(status.Code()); };
+  driver.Call(frame);
+  const std::weak_ptr<runtime::core::service::ServiceMessageFrame> recorded = frame;
+  frame.reset();
+  driver.Shutdown();
+  EXPECT_TRUE(codes.empty());
+  EXPECT_FALSE(recorded.expired());
+  driver_.reset();
+  EXPECT_EQ(codes, std::vector<uint32_t>{IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR});
+  EXPECT_TRUE(recorded.expired());
+}
+
 // Requests of 600 KiB outgrow the 1 KiB loan: each smaller loan goes back
 // to the 1 MiB pool, so this and the next requests still go through shm.
 TEST_F(ZenohRpcDriverTest, ClientLoansThatWereTooSmallGoBackToThePool) {

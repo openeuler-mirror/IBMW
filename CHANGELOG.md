@@ -68,6 +68,9 @@ details remain governed by the documentation for each release.
   its shared memory loan.
 - Zenoh: logging a custom native configuration reads only the bytes of the
   configuration string, which has no terminating NUL.
+- Zenoh RPC: the client tool is kept until the driver is destroyed, so a call
+  racing with `Shutdown()` no longer reaches a destroyed tool. Calls still
+  waiting then complete with `CLI_DRIVER_INTERNAL_ERROR` from the destructor.
 - Time manipulator: `SetTimeRatio` rejects NaN, infinite and out-of-range ratios
   (new `max_ratio` option, default 1000) and rounds valid ratios to the nearest
   integer step (N or 1/N). Rejected RPC calls return code 2 /

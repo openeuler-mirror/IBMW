@@ -45,7 +45,7 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
       : zenoh_bus_ptr_(zenoh_bus_ptr),
         limit_domain_(NormalizeLimitDomain(limit_domain)),
         key_suffix_(LimitDomainKeySuffix(limit_domain_)) {}
-  ~ZenohRpcDriver() = default;
+  ~ZenohRpcDriver();
 
   std::string_view Name() const noexcept override { return "zenoh"; }
 
