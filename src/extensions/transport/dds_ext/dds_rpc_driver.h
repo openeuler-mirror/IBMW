@@ -75,7 +75,7 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver,
 
  public:
   explicit DdsRpcDriver(DdsBus& dds_bus);
-  ~DdsRpcDriver() override = default;
+  ~DdsRpcDriver() override;
 
   std::string_view Name() const noexcept override { return "dds"; }
 

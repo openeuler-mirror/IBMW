@@ -132,9 +132,17 @@ void DdsRpcDriver::Start() {
              server_endpoints_.size(), client_endpoints_.size());
 }
 
+DdsRpcDriver::~DdsRpcDriver() {
+  // A timeout callback may still be in Shutdown on the timer thread.
+  if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
+}
+
 void DdsRpcDriver::Shutdown() {
-  if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
+  if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown) {
+    // The first Shutdown may run in a timeout callback: wait for it.
+    if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
     return;
+  }
 
   auto* participant = dds_bus_.GetParticipant();
 
