@@ -42,6 +42,54 @@ inline constexpr bool kThreadSanitizer = false;
 #else
 inline constexpr bool kThreadSanitizer = false;
 #endif
+
+// One wait's view of whether this thread gets little CPU, kept in a flag of
+// a table that threads share (see BoundedBlockingQueue::slow_). A flag
+// holds the mark of the thread that set it, or 0, so that a thread clears
+// only its own.
+template <int kBits>
+class SlowFlag {
+ public:
+  static_assert(kBits > 0 && kBits <= 16, "a flag index and a 7-bit mark from one hash");
+  using Flags = std::atomic<uint8_t>[1 << kBits];
+
+  // Thread ids are often addresses of thread structures a fixed stride
+  // apart (0x103000 on the OHOS board), so mixed by murmur3's finalizer:
+  // Fibonacci hashing put three such threads in two neighbouring flags of
+  // 64 there.
+  static uint64_t Mix(uint64_t id) {
+    id = (id ^ (id >> 33)) * 0xFF51AFD7ED558CCDu;
+    id = (id ^ (id >> 33)) * 0xC4CEB9FE1A85EC53u;
+    return id ^ (id >> 33);
+  }
+  static uint64_t ThreadHash() {
+    return Mix(static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+  }
+
+  // Picks the flag by the top bits of `hash`, the mark by the next 7.
+  // Until bound, Get() is false and Set() does nothing.
+  void Bind(Flags& flags, uint64_t hash = ThreadHash()) {
+    flag_ = &flags[hash >> (64 - kBits)];
+    mark_ = static_cast<uint8_t>(0x80 | ((hash >> (64 - kBits - 7)) & 0x7F));
+    slow_ = flag_->load(std::memory_order_relaxed) == mark_;
+  }
+  bool Get() const { return slow_; }
+  void Set(bool slow) {
+    if (flag_ == nullptr || slow == slow_) return;
+    slow_ = slow;
+    if (slow) {
+      flag_->store(mark_, std::memory_order_relaxed);
+    } else {
+      uint8_t mine = mark_;  // another thread's mark stays
+      flag_->compare_exchange_strong(mine, 0, std::memory_order_relaxed);
+    }
+  }
+
+ private:
+  std::atomic<uint8_t>* flag_ = nullptr;
+  uint8_t mark_ = 0;
+  bool slow_ = false;
+};
 }  // namespace detail
 
 // See IBMW_SELFDEV_BARRIER_NS in detail/asymmetric_barrier.h.
@@ -263,11 +311,13 @@ class BoundedBlockingQueue {
   // it woke from a sleep. It takes long over them, so it is mostly yielding
   // rather than asleep, and wakes go to sleepers that run; with no yields it
   // would sleep whenever it got the CPU and take wakes it cannot act on soon.
-  // Per thread, not a floor of the shared budget: that cost the sparse cases
-  // in queue_bench 10 to 25% more CPU on the OHOS board.
+  // Per thread and queue (see slow_), not a floor of the shared budget: that
+  // cost the sparse cases in queue_bench 10 to 25% more CPU on the OHOS board.
   static constexpr int kMinYields = 4;
   static constexpr Clock::duration kYieldStall = std::chrono::microseconds(50);
   static constexpr Clock::duration kWakeStall = std::chrono::milliseconds(1);
+  // log2 of the number of flags in slow_.
+  static constexpr int kSlowFlagBits = 6;
   // How long a pop sleeper sleeps at most while a pop waiter spins, so that
   // an item whose wake was skipped is taken that soon even if no spinner
   // gets the CPU (see Wake()).
@@ -916,9 +966,8 @@ class BoundedBlockingQueue {
     // A pop waiter is counted in pop_spinners_ until it is counted in
     // sleepers_ or stops waiting (see Wake()).
     YieldBudget* budget = kind == kPopSleeper ? &pop_yields_ : kind == kPushSleeper ? &push_yields_ : nullptr;
-    // Whether this thread gets little CPU (see kMinYields): per thread, and
-    // per element type (one variable per instantiation of this template).
-    static thread_local bool slow = false;
+    // Looked up after the spins, by a pop waiter only.
+    detail::SlowFlag<kSlowFlagBits> slow;
     // Yields from the budget, and in all; set after the spins.
     int budgeted = 0;
     int yields = 0;
@@ -940,7 +989,7 @@ class BoundedBlockingQueue {
       } else {
         const Clock::time_point before = Clock::now();
         std::this_thread::yield();
-        if (kind == kPopSleeper) slow = Clock::now() - before > kYieldStall;
+        slow.Set(Clock::now() - before > kYieldStall);
       }
       if (!blocked()) {
         if (budget != nullptr && n < kWaitSpins + budgeted) budget->Hit();
@@ -948,11 +997,12 @@ class BoundedBlockingQueue {
       }
       if (aborted()) return Woken::kAborted;
       if (n == kWaitSpins - 1) {
+        if (kind == kPopSleeper) slow.Bind(slow_);
         // While skips are off every push wakes a sleeper, as with tbb: then
         // yielding first only costs CPU (twice tbb's in the sparse cases).
         if (kind == kPopSleeper && skip_gate_.Off()) budget = nullptr;
         budgeted = budget != nullptr ? budget->Get() : kind == kFrontSleeper ? kFrontYields : 0;
-        yields = kind == kPopSleeper && slow ? std::max(budgeted, kMinYields) : budgeted;
+        yields = slow.Get() ? std::max(budgeted, kMinYields) : budgeted;
       }
       // A yield can take a whole time slice.
       if (n >= kWaitSpins && deadline != kNoDeadline && Clock::now() >= deadline) return Woken::kTimeout;
@@ -992,7 +1042,7 @@ class BoundedBlockingQueue {
       }
       if (kind == kPopSleeper && !blocked()) {
         const Clock::duration at(pop_signalled_.load(std::memory_order_relaxed));
-        if (at >= asleep) slow = Clock::now().time_since_epoch() - at > kWakeStall;
+        if (at >= asleep) slow.Set(Clock::now().time_since_epoch() - at > kWakeStall);
       }
     }
     return woken;
@@ -1224,6 +1274,16 @@ class BoundedBlockingQueue {
   std::condition_variable not_full_;
   // A lane turn, a lane head_turn or head_.popped moved.
   std::condition_variable progress_;
+  // Pop waiters' threads that get little CPU (see kMinYields): one flag per
+  // hash of the thread id, holding the mark of the thread that set it (0:
+  // none), so that a thread clears only its own (see detail::SlowFlag).
+  // Two such threads that share a flag take it in turns. A mark outlives
+  // its thread: one that reuses the id inherits it, for one wait. Per
+  // queue: a thread finds out anew at each. Not a thread_local: where TLS is emulated (OHOS: a
+  // call to __emutls_get_address per access), one made
+  // queue/4P4C/unbounded/std::function in queue_bench about 10% slower on
+  // the board.
+  alignas(64) std::atomic<uint8_t> slow_[1 << kSlowFlagBits] = {};
 };
 
 }  // namespace IBMW_SELFDEV_BARRIER_NS

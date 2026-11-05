@@ -1697,4 +1697,57 @@ TEST(BoundedBlockingQueueTest, StarvedSpinnerDoesNotDelayBursts) {
         << starved_count << " starved: " << late.load() << " of " << pushed << " items late";
   }
 }
+
+// BQ-48: a thread's flag that it gets little CPU (see kMinYields) is kept
+// for its next wait, and a thread that shares the flag but does not get
+// little CPU neither sees it nor clears it; one that does takes it over.
+TEST(BoundedBlockingQueueTest, SlowFlagIsKeptPerThread) {
+  using Flag = ibmw::selfdev::concurrent::detail::SlowFlag<6>;
+  Flag::Flags flags = {};
+  // Same flag (top 6 bits), other marks (next 7 bits); then another flag.
+  constexpr uint64_t kA = (5ull << 58) | (0x11ull << 51);
+  constexpr uint64_t kB = (5ull << 58) | (0x22ull << 51);
+  constexpr uint64_t kOther = (6ull << 58) | (0x11ull << 51);
+  const auto bound = [&flags](uint64_t hash) {
+    Flag f;
+    f.Bind(flags, hash);
+    return f;
+  };
+  Flag unbound;
+  unbound.Set(true);
+  EXPECT_FALSE(unbound.Get());
+  for (const auto& f : flags) EXPECT_EQ(f.load(), 0);
+
+  Flag a = bound(kA);
+  EXPECT_FALSE(a.Get());
+  a.Set(true);
+  EXPECT_TRUE(a.Get());
+  EXPECT_TRUE(bound(kA).Get());  // its next wait
+  EXPECT_FALSE(bound(kOther).Get());
+
+  Flag b = bound(kB);
+  EXPECT_FALSE(b.Get());
+  b.Set(false);
+  EXPECT_TRUE(bound(kA).Get());
+  b.Set(true);  // also slow: takes the flag over
+  EXPECT_FALSE(bound(kA).Get());
+  a.Set(false);  // a's next wait clears only its own mark
+  EXPECT_TRUE(bound(kB).Get());
+  b.Set(false);
+  EXPECT_FALSE(bound(kB).Get());
+  EXPECT_FALSE(bound(kA).Get());
+
+  Flag self;
+  self.Bind(flags);  // this thread's own hash
+  self.Set(true);
+  EXPECT_TRUE(bound(Flag::ThreadHash()).Get());
+
+  // Thread ids as on the OHOS board: addresses 0x103000 apart. Fibonacci
+  // hashing put them in 5 flags. Mix spreads these; an arbitrary 8 may
+  // still share flags.
+  std::vector<uint64_t> picked;
+  for (uint64_t k = 0; k < 8; ++k) picked.push_back(Flag::Mix(0x59fce89a60u + k * 0x103000u) >> 58);
+  std::sort(picked.begin(), picked.end());
+  EXPECT_EQ(std::unique(picked.begin(), picked.end()) - picked.begin(), 8);
+}
 }  // namespace bounded_blocking_queue_test
