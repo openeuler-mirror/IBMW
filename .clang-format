@@ -4,3 +4,5 @@ BasedOnStyle: Google
 ColumnLimit: 100
 # Include order is grouped by hand (own header, std, third party, project).
 SortIncludes: Never
+# The shared copyright line is 101 columns; keep it on one line.
+CommentPragmas: '^ Copyright \(c\)'

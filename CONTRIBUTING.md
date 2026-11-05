@@ -72,7 +72,9 @@ bash scripts/ci_check.sh --base <target-branch>   # add --skip-build for policy 
 Build and test parallelism defaults to 10 and 8 jobs (`IBMW_CI_JOBS`,
 `IBMW_CI_TEST_JOBS`). `.editorconfig` and `.clang-format` (clang-format 18)
 describe the existing style; apply them to the lines you change, for example
-with `git clang-format`, not to whole files.
+with `git clang-format`, not to whole files. Files listed in
+`scripts/clang_format_files.txt` must stay fully formatted; `ci_check.sh`
+checks them with clang-format 18 (set `CLANG_FORMAT` if it is not on `PATH`).
 
 ## 3. Commit and history policy
 

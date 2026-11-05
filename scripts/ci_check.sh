@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # Local merge gate (HYG-044): runs, one after another, the build, unit tests,
-# release hygiene, docs governance and generated-sample drift on the committed
-# tree, and commit-message validation of every commit on the branch. Steps run
+# release hygiene, docs governance, clang-format of the listed files and
+# generated-sample drift on the committed tree, and commit-message validation of every commit on the branch. Steps run
 # serially and parallelism is capped so the gate can run on a shared machine.
 #
 # Usage: scripts/ci_check.sh [--build-dir DIR] [--base REF] [--skip-build]
@@ -13,7 +13,8 @@
 #                    branch, else master, else main).
 #   --skip-build     Skip build and unit tests (policy checks only).
 # Environment: IBMW_CI_JOBS (build jobs, default 10), IBMW_CI_TEST_JOBS
-# (ctest jobs, default 8), IBMW_CI_CMAKE_ARGS (extra configure arguments).
+# (ctest jobs, default 8), IBMW_CI_CMAKE_ARGS (extra configure arguments),
+# CLANG_FORMAT (clang-format 18, default: clang-format on PATH).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,6 +61,10 @@ bash "$SCRIPT_DIR/tests/test_docs_governance.sh"
 bash "$SCRIPT_DIR/tests/test_release_hygiene.sh"
 bash "$SCRIPT_DIR/tests/test_commit_msg_hook.sh"
 bash "$SCRIPT_DIR/tests/test_check_python_package.sh"
+bash "$SCRIPT_DIR/tests/test_check_clang_format.sh"
+
+step "clang-format of the listed files (committed tree)"
+bash "$SCRIPT_DIR/check_clang_format.sh" --repo-root "$SCRATCH/tree"
 
 step "generated samples match the generator (committed tree)"
 python3 "$SCRATCH/tree/src/tools/ibmw_gen/tests/test_in_tree_samples_no_drift.py"
