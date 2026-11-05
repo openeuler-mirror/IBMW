@@ -100,6 +100,25 @@ TEST(RpcTimeoutTimerTest, StopFromATaskDoesNotJoinItself) {
   timer.reset();
 }
 
+// After a Stop from a task, a Stop from another thread still waits for the
+// task, and the thread id is not kept once the thread is gone.
+TEST(RpcTimeoutTimerTest, StopAfterSelfStopWaitsForTheTask) {
+  RpcTimeoutTimer timer;
+  auto handle = timer.Handle();
+  std::promise<void> self_stopped;
+  std::atomic<bool> finished{false};
+  handle.Dispatch([&] {
+    timer.Stop();
+    self_stopped.set_value();
+    std::this_thread::sleep_for(100ms);
+    finished = true;
+  });
+  ASSERT_EQ(self_stopped.get_future().wait_for(5s), std::future_status::ready);
+  timer.Stop();
+  EXPECT_TRUE(finished);
+  EXPECT_FALSE(handle.IsInCurrentExecutor());
+}
+
 // An "infinite" deadline does not wrap around to an immediate one.
 TEST(RpcTimeoutTimerTest, HugeDeadlineIsNotRunEarly) {
   RpcTimeoutTimer timer;

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -26,29 +27,35 @@ class RpcTimeoutTimer {
  public:
   RpcTimeoutTimer() : state_(std::make_shared<State>()) {
     thread_ = std::thread([state = state_] { Run(*state); });
-    thread_id_ = thread_.get_id();
+    thread_id_.store(thread_.get_id());
   }
-  ~RpcTimeoutTimer() { Stop(); }
+  ~RpcTimeoutTimer() {
+    Stop();
+    // Destroyed by its own task: the thread ends after it, holding the state.
+    std::lock_guard lock(join_mutex_);
+    if (thread_.joinable()) thread_.detach();
+  }
 
   RpcTimeoutTimer(const RpcTimeoutTimer&) = delete;
   RpcTimeoutTimer& operator=(const RpcTimeoutTimer&) = delete;
 
   ibmw::executor::ExecutorHandle Handle() const { return ibmw::executor::ExecutorHandle(&base_); }
 
-  // Waits for a running task; pending tasks are dropped. From a task (a
-  // timeout callback that shuts the driver down) the thread is not joined:
-  // it ends after the task, holding the state it uses.
+  // Waits for a running task; pending tasks are dropped. Called from a task
+  // (a timeout callback that shuts the driver down) it only stops the timer:
+  // the thread ends after the task, and a Stop from another thread waits
+  // for that.
   void Stop() noexcept {
     {
       std::lock_guard lock(state_->mutex);
       state_->stop = true;
     }
     state_->cv.notify_all();
-    if (thread_.joinable()) {
-      if (std::this_thread::get_id() == thread_id_) {
-        thread_.detach();
-      } else {
+    if (std::this_thread::get_id() != thread_id_.load()) {
+      std::lock_guard lock(join_mutex_);
+      if (thread_.joinable()) {
         thread_.join();
+        thread_id_.store(std::thread::id());  // ids are reused once the thread ended
       }
     }
     std::vector<Entry> dropped;
@@ -132,14 +139,16 @@ class RpcTimeoutTimer {
   }
 
   std::shared_ptr<State> state_;
+  std::mutex join_mutex_;  // thread_ is joined by whichever other thread stops first
   std::thread thread_;
-  std::thread::id thread_id_;  // set once, before any task can run
+  std::atomic<std::thread::id> thread_id_;  // set before any task can run
   const ibmw_executor_base_t base_{
       .struct_size = sizeof(ibmw_executor_base_t),
       .type = [](void*) { return ibmw::util::ToIbmwStringView("dds_rpc_timeout"); },
       .name = [](void*) { return ibmw::util::ToIbmwStringView("dds_rpc_timeout"); },
       .is_thread_safe = [](void*) { return true; },
-      .is_in_current_executor = [](void* ctx) { return std::this_thread::get_id() == Self(ctx)->thread_id_; },
+      .is_in_current_executor =
+          [](void* ctx) { return std::this_thread::get_id() == Self(ctx)->thread_id_.load(); },
       .supports_timed_dispatch = [](void*) { return true; },
       .dispatch = [](void* ctx, ibmw_function_base_t* task) { Self(ctx)->Add(SystemNowNs(), task); },
       .now = [](void*) { return SystemNowNs(); },
