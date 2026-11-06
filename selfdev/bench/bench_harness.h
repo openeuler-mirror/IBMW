@@ -5,6 +5,7 @@
 // Each case runs `warmup` untimed repetitions, then `reps` timed ones. A
 // repetition returns the number of operations it performed; the harness
 // reports ns/op (median, p10, p90 over repetitions) and ops/s at the median.
+// Compare() warms up both variants, then interleaves their repetitions.
 
 #pragma once
 
@@ -120,45 +121,79 @@ class Runner {
 
   /// `body` performs one repetition and returns its operation count.
   Result Run(const std::string& name, const std::function<Sample()>& body) {
-    Result r;
-    if (!Selected(name)) return r;
+    if (!Selected(name)) return {};
     for (int i = 0; i < opt_.warmup; ++i) (void)body();
-    std::vector<double> ns_per_op;
-    std::vector<double> csw_per_kop;
-    ns_per_op.reserve(static_cast<size_t>(opt_.reps));
-    csw_per_kop.reserve(static_cast<size_t>(opt_.reps));
+    Series s(opt_.reps);
+    for (int i = 0; i < opt_.reps; ++i) s.Add(body);
+    return s.Report(name);
+  }
+
+  /// Runs the selfdev and original variants of one scenario and prints the
+  /// median ratio (selfdev / original; < 1 means selfdev is faster). The
+  /// repetitions alternate, AB BA AB ..., so that a drift over the run (CPU
+  /// frequency, migration to another core, heap growth) does not fall on
+  /// one side: on the OHOS board the side run first was up to 1.5x slower.
+  void Compare(const std::string& scenario, const std::function<Sample()>& selfdev,
+               const std::function<Sample()>& original, const char* original_name) {
+    if (!Selected(scenario)) return;
+    for (int i = 0; i < opt_.warmup; ++i) {
+      (void)selfdev();
+      (void)original();
+    }
+    Series a(opt_.reps);
+    Series b(opt_.reps);
     for (int i = 0; i < opt_.reps; ++i) {
+      if (i % 2 == 0) {
+        a.Add(selfdev);
+        b.Add(original);
+      } else {
+        b.Add(original);
+        a.Add(selfdev);
+      }
+    }
+    const Result ra = a.Report(scenario + " [selfdev]");
+    const Result rb = b.Report(scenario + " [" + original_name + "]");
+    std::printf("%-58s ratio selfdev/%s = %.2f\n", scenario.c_str(), original_name,
+                rb.median_ns > 0 ? ra.median_ns / rb.median_ns : 0.0);
+    std::fflush(stdout);
+  }
+
+ private:
+  // Timed repetitions of one case.
+  class Series {
+   public:
+    explicit Series(int reps) {
+      ns_per_op_.reserve(static_cast<size_t>(reps));
+      csw_per_kop_.reserve(static_cast<size_t>(reps));
+    }
+
+    void Add(const std::function<Sample()>& body) {
       const double csw0 = VoluntaryCsw();
       const Stopwatch sw;
       const Sample s = body();
       const double ns = s.ns >= 0 ? s.ns : sw.ElapsedNs();
       const double ops = static_cast<double>(s.ops == 0 ? 1 : s.ops);
-      ns_per_op.push_back(ns / ops);
-      csw_per_kop.push_back((VoluntaryCsw() - csw0) * 1000.0 / ops);
+      ns_per_op_.push_back(ns / ops);
+      csw_per_kop_.push_back((VoluntaryCsw() - csw0) * 1000.0 / ops);
     }
-    r.median_ns = Percentile(ns_per_op, 0.5);
-    r.p10_ns = Percentile(ns_per_op, 0.1);
-    r.p90_ns = Percentile(ns_per_op, 0.9);
-    r.csw_per_kop = Percentile(csw_per_kop, 0.5);
-    std::printf("%-58s %12.1f %12.1f %12.1f %14.0f %10.2f\n", name.c_str(), r.median_ns, r.p10_ns, r.p90_ns,
-                r.median_ns > 0 ? 1e9 / r.median_ns : 0.0, r.csw_per_kop);
-    std::fflush(stdout);
-    return r;
-  }
 
-  /// Runs the selfdev and original variants of one scenario back to back and
-  /// prints the median ratio (selfdev / original; < 1 means selfdev is faster).
-  void Compare(const std::string& scenario, const std::function<Sample()>& selfdev,
-               const std::function<Sample()>& original, const char* original_name) {
-    if (!Selected(scenario)) return;
-    const Result a = Run(scenario + " [selfdev]", selfdev);
-    const Result b = Run(scenario + " [" + original_name + "]", original);
-    std::printf("%-58s ratio selfdev/%s = %.2f\n", scenario.c_str(), original_name,
-                b.median_ns > 0 ? a.median_ns / b.median_ns : 0.0);
-    std::fflush(stdout);
-  }
+    Result Report(const std::string& name) const {
+      Result r;
+      r.median_ns = Percentile(ns_per_op_, 0.5);
+      r.p10_ns = Percentile(ns_per_op_, 0.1);
+      r.p90_ns = Percentile(ns_per_op_, 0.9);
+      r.csw_per_kop = Percentile(csw_per_kop_, 0.5);
+      std::printf("%-58s %12.1f %12.1f %12.1f %14.0f %10.2f\n", name.c_str(), r.median_ns, r.p10_ns, r.p90_ns,
+                  r.median_ns > 0 ? 1e9 / r.median_ns : 0.0, r.csw_per_kop);
+      std::fflush(stdout);
+      return r;
+    }
 
- private:
+   private:
+    std::vector<double> ns_per_op_;
+    std::vector<double> csw_per_kop_;
+  };
+
   Options opt_;
 };
 
