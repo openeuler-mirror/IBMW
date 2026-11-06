@@ -4,7 +4,7 @@
 
 namespace {
 constexpr char kName[] = "doctor";
-constexpr char kDescription[] = "Check topic endpoint presence and DDS/ROS 2 QoS policies";
+constexpr char kDescription[] = "Check topics, DDS/ROS 2 QoS and runtime log levels";
 const ibmw_cli_command_v1_t kCommands[] = {{
     .name = {kName, sizeof(kName) - 1},
     .description = {kDescription, sizeof(kDescription) - 1},

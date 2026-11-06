@@ -17,6 +17,7 @@
 #include "engine/discovery/registry_discovery_provider.h"
 #include "topic_check.h"
 #include "qos_check.h"
+#include "log_doctor.h"
 
 namespace ibmw::cli::doctor {
 namespace {
@@ -90,13 +91,14 @@ void PrintResult(const TopicCheckResult& result, bool details) {
 
 int Run(const Invocation& invocation) {
   for (const auto& [name, values] : invocation.options) {
-    if (values.size() != 1) throw std::invalid_argument(name + " must be specified once.");
+    if (name != "--expect-level" && values.size() != 1) throw std::invalid_argument(name + " must be specified once.");
   }
   if (invocation.HasOption("--report") && invocation.HasOption("--report-failed")) {
     throw std::invalid_argument("--report and --report-failed are mutually exclusive.");
   }
   const auto timeout = ParseTimeout(invocation);
   const auto options = topic::ParseDiscoveryOptions(invocation);
+  const auto log_options = PrepareLogCheck(invocation, true);
   const auto snapshot = CollectTopics(options, timeout);
   const auto results = CheckTopics(snapshot, invocation.HasOption("--include-hidden-topics"));
   const auto qos_results = CheckQos(snapshot, invocation.HasOption("--include-hidden-topics"));
@@ -159,6 +161,11 @@ int Run(const Invocation& invocation) {
             << qos_unknown << " UNKNOWN, " << qos_skipped << " SKIP\n";
   unknown += qos_unknown;
   warnings += qos_warnings;
+  const auto logs = RunLogChecks(log_options, invocation);
+  unknown += logs.unknown;
+  warnings += logs.warnings;
+  std::cout << "Doctor checks: " << warnings << " WARN, " << unknown << " UNKNOWN\n";
+  if (logs.interrupted) return logs.interrupted;
   if (unknown != 0) return 2;
   return warnings != 0 && invocation.HasOption("--include-warnings") ? 1 : 0;
 }
@@ -169,19 +176,29 @@ int Run(const Invocation& invocation) {
 int RunDoctorCommand(int argc, const char* const* argv) {
   using namespace ibmw::cli;
   try {
-    Command command("ibmw doctor", "Check topic endpoint presence and DDS/ROS 2 QoS policies");
+    Command command("ibmw doctor", "Check topics, DDS/ROS 2 QoS and runtime log levels");
     bool invoked = false;
     command.SetHandler([&invoked](const Invocation& invocation) {
       invoked = true;
       return doctor::Run(invocation);
     });
     topic::AddDiscoveryOptions(command);
-    command.AddOption("--timeout", {}, "seconds", "Network discovery window, 0.01..60 seconds (default: 2)",
+    command.AddOption("--timeout", {}, "seconds", "Topic discovery window (default: 2), 0.01..60 seconds; explicit value also sets log RPC deadline",
                       OptionValueMode::kRequired);
-    command.AddOption("--report", {}, {}, "Print all topic and QoS policy results, including coverage gaps");
+    command.AddOption("--report", {}, {}, "Print all topic, QoS and log results, including coverage gaps");
     command.AddOption("--report-failed", {}, {}, "Print details for warnings and incomplete checks");
-    command.AddOption("--include-warnings", {}, {}, "Return failure (1) when topic or QoS warnings are found");
+    command.AddOption("--include-warnings", {}, {}, "Return failure (1) when topic, QoS or log warnings are found");
     command.AddOption("--include-hidden-topics", {}, {}, "Consider hidden topics as well");
+    doctor::AddLogDoctorOptions(command, true);
+    auto& log = command.AddSubcommand("log", "Check only runtime logger levels through the existing log service");
+    doctor::AddLogDoctorOptions(log, false);
+    log.SetHandler([&invoked](const Invocation& invocation) {
+      invoked = true;
+      return doctor::RunLogDoctor(invocation);
+    });
+    // The generic dispatcher displays help for an empty command with children.
+    // Doctor intentionally keeps its no-argument, run-all behavior.
+    if (argc <= 1) return doctor::Run({});
     std::vector<std::string> arguments;
     for (int index = 0; index < argc; ++index) arguments.emplace_back(argv[index]);
     std::vector<char*> mutable_argv;

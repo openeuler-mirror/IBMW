@@ -1,11 +1,13 @@
 <!-- Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame. -->
 
-# IBMW Doctor：Topic 与 QoS 检查
+# IBMW Doctor：Topic、QoS 与日志级别检查
 
 `ibmw doctor` 通过原有 CLI provider 机制执行诊断，包括
 **有发布者但没有观察到同名、同类型订阅者**的 topic，以及 **DDS/ROS 2
-端点之间的 QoS 策略兼容性和本机配置一致性**。MQTT、Zenoh 等后端不做
-QoS 检查；transport 断连、module 健康和日志级别不属于当前范围。
+端点之间的 QoS 策略兼容性和本机配置一致性**，以及**运行时日志级别与明确
+预期值的偏差**。`ibmw doctor` 默认调度全部已实现检查；`ibmw doctor log`
+只运行日志检查，两个入口共享相同的日志查询、判断和输出实现。
+MQTT、Zenoh 等后端不做 QoS 检查；transport 断连、module 健康尚未实现。
 
 ## 使用
 
@@ -20,6 +22,8 @@ ibmw doctor --dds --domain 10 --timeout 3
 ibmw doctor --ros2 --ros-domain 10 --timeout 3
 ibmw doctor --zenoh --zenoh-domain robot_a
 ibmw doctor --registry --dds --domain 10
+ibmw doctor --http 127.0.0.1:50080 --expect-level CameraModule=INFO --report
+ibmw doctor log --dds --domain 10 --expect-level CameraModule=INFO --report
 ```
 
 发现参数与 `ibmw topic list/info` 共用实现：默认只查看本机 registry；
@@ -29,8 +33,9 @@ ibmw doctor --registry --dds --domain 10
 显式 `--domain`/后端专用 domain 参数及 `ROS_DOMAIN_ID` 的优先级与 topic 命令相同。
 
 默认忽略隐藏 topic，使用 `--include-hidden-topics` 纳入检查。
-`--timeout` 为网络发现观察窗口（默认 2 秒，范围 0.01～60 秒），不表示
-对所有后端初始化/退出过程的硬性总超时；本机 registry 为即时快照。
+根命令的 `--timeout` 为网络发现观察窗口（默认 2 秒，范围 0.01～60 秒）；
+显式提供时也作为日志 RPC 响应超时。不提供时日志 RPC 使用原有 5 秒默认值。
+这不是对所有后端初始化/退出过程的硬性总超时；本机 registry 为即时快照。
 网络发现会创建临时观察者并产生发现流量，但不创建业务 publisher/subscriber，
 不会因 doctor 自己订阅而掩盖无订阅者问题。
 
@@ -69,7 +74,75 @@ Topic checks: 0 OK, 1 WARN, 0 UNKNOWN, 0 SKIP
 - 退出码 **0**：没有 `UNKNOWN`；默认告警不使命令失败，空图也不算故障。
 - 退出码 **1**：使用了 `--include-warnings`，且发现告警。
 - 退出码 **2**：参数错误或检查未完成；优先于告警退出码。
+- 日志 RPC 被 SIGINT/SIGTERM 中断时保留退出码 **130/143**。
 - 命令进入 doctor 前的 CLI 配置/插件加载错误沿用原有 host 的非零退出码。
+
+根命令分别输出 `Topic checks`、`QoS policy checks`、`Log level checks`，
+最后输出 `Doctor checks` 的总告警与未完成检查数。日志查询失败不会抹掉
+已经获得的 topic/QoS 结果；任何一类有 `UNKNOWN` 时总退出码为 2。
+
+## 日志级别检查
+
+```bash
+# 全部检查：topic/QoS 默认使用本机 registry，日志通过指定 HTTP 服务查询
+ibmw doctor --http 127.0.0.1:50080 --expect-level CameraModule=INFO --include-warnings
+
+# 只检查日志；连接参数沿用 ibmw log list 的 RPC 逻辑
+ibmw doctor log --dds --domain 10 --report
+ibmw doctor log --http 127.0.0.1:50080 --module CameraModule --expect-level CameraModule=INFO
+
+# 每个 logger 可以有不同的要求；级别不区分大小写
+ibmw doctor log --http 127.0.0.1:50080 \
+  --expect-level CameraModule=INFO --expect-level core=WARN --report
+
+# topic 检查 DDS/ROS 2，日志选择另一个明确的 RPC 服务
+ibmw doctor --dds --ros2 --domain 10 --http 127.0.0.1:50080 \
+  --log-backend http --service robot_a/logs --report
+```
+
+日志查询复用 `QueryLogLevels()` 和已有 `GetModuleLogLevel` RPC，只读取选定
+服务所属运行时已登记 logger 的实际阈值，不调用 `SetModuleLogLevel`。
+不修改 logger、启动配置或日志文件，也不分析日志正文是否包含 ERROR。
+查询成功不代表日志一定写入控制台或文件；输出后端还可能有额外过滤条件。
+
+支持现有日志 RPC 的 DDS、HTTP、gRPC、MQTT 和 Zenoh 后端，具体可用性取决于
+构建和部署。这里的 MQTT 仅作为已有日志查询的传输通道，不新增 MQTT QoS
+诊断。ROS 2 图和本机 registry 不直接提供日志查询接口或可靠的日志服务地址。
+日志服务部署和多实例命名参见 [日志命令](log-control.zh.md#服务选择和部署)。
+
+日志连接的选择规则：
+
+- 只选择一个支持的 RPC 后端时直接复用。例如 `--dds --domain 10` 同时用于
+  DDS topic/QoS 发现和日志 RPC，日志服务默认名称与 `ibmw log list` 相同。
+- 多个日志 RPC 后端同时选中时，使用 `--log-backend` 选其中一个；未指定则
+  日志检查为 `SKIP`，明确提示目标不唯一。不会依次尝试多个服务或合并实例。
+- 根命令的 `--all` 仍表示四种 topic 发现来源，并为日志提供 DDS/Zenoh 候选；
+  可以用 `--all --log-backend dds` 明确选择日志 RPC。
+- 无参数 `ibmw doctor` 仍执行三个检查类别。没有日志连接信息时输出日志
+  `SKIP` 和原因；已经选定后端但服务不可达、缺少扩展或响应不可信时为 `UNKNOWN`。
+- `--service` 指定日志服务基础名称；`--module` 将日志检查限定到一个 logger。
+  这些参数不改变 topic/QoS 范围。一个服务只代表其所属运行时，不代表整个域。
+- 日志专用子命令的 `--timeout` 沿用 RPC 响应超时（默认 5 秒，0.01～3600 秒）；
+  两个入口的 `--discovery-timeout` 都表示日志客户端就绪超时（默认 2 秒）。
+
+`--expect-level module=level` 可重复指定不同模块；重复指定同一模块、非法
+级别，以及指定 `--module` 后为其他模块设置预期值均为参数错误，在查询前拒绝。
+有效级别为 TRACE、DEBUG、INFO、WARN、ERROR、FATAL、OFF。
+比较采用相等判断，不假设所有模块都应当是 INFO，也不把 DEBUG/OFF 本身视为故障。
+当前只使用命令行明确给出的预期值，不自动读取 YAML 或推断启动时的级别。
+
+```text
+[WARN] log_level source=dds target="domain=10" service="ibmw.protocols.log_control_extension.LogControlService" module="CameraModule" actual="DEBUG" expected="INFO" baseline=command_line
+  Actual log level differs from the explicit expectation; confirm whether this is intentional debugging.
+Log level checks: 0 OK, 1 WARN, 0 UNKNOWN, 0 SKIP
+```
+
+日志结果按 logger 计数：匹配明确预期值为 `OK`，偏差为 `WARN`；未返回所要求的
+logger、返回非法级别/字段、查询失败为 `UNKNOWN`，不据此断言模块故障或 transport
+断连。无预期值时展示实际级别并将比较标为 `SKIP`；空服务也为 `SKIP`。
+无法完成整个请求时计一个查询级别的 `UNKNOWN`，不输出不可信的部分结果。
+默认输出日志 `WARN`、`UNKNOWN` 和带原因的 `SKIP`；`--report` 还显示 `OK`，
+`--report-failed` 仅显示 `WARN`/`UNKNOWN`。没有预期值的 `SKIP` 不算检查通过。
 
 ## QoS 策略覆盖
 
