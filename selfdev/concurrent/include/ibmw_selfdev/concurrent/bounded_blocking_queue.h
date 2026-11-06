@@ -1279,10 +1279,10 @@ class BoundedBlockingQueue {
   // none), so that a thread clears only its own (see detail::SlowFlag).
   // Two such threads that share a flag take it in turns. A mark outlives
   // its thread: one that reuses the id inherits it, for one wait. Per
-  // queue: a thread finds out anew at each. Not a thread_local: where TLS is emulated (OHOS: a
-  // call to __emutls_get_address per access), one made
-  // queue/4P4C/unbounded/std::function in queue_bench about 10% slower on
-  // the board.
+  // queue: a thread finds out anew at each. Not a thread_local: where TLS
+  // is emulated (OHOS: a call to __emutls_get_address per access), one
+  // made queue/4P4C/unbounded/std::function in queue_bench about 10%
+  // slower on the board.
   alignas(64) std::atomic<uint8_t> slow_[1 << kSlowFlagBits] = {};
 };
 
