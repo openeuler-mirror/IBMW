@@ -81,9 +81,18 @@ thread_local used to be duplicated per DSO under `RTLD_DEEPBIND`,
   `ibmw::selfdev::coro`.
 - `IBMW_SELFDEV_CORO_TLS_INITIAL_EXEC` (default ON on Linux with GCC/Clang,
   OFF on OHOS and elsewhere): initial-exec TLS for the slot, a plain
-  `%fs`-relative access. The library is then flagged `STATIC_TLS`; glibc's
-  static TLS reserve covers it when it is first loaded by `dlopen()`. Turn it
-  off for C libraries without such a reserve.
+  thread-pointer-relative access. The library is then flagged `STATIC_TLS`;
+  glibc's static TLS reserve covers it when it is first loaded by `dlopen()`.
+  Turn it off for C libraries without such a reserve. It only takes effect
+  with native TLS.
+- `IBMW_SELFDEV_CORO_NATIVE_TLS` (default ON on OHOS arm64-v8a, OFF
+  elsewhere): builds the library with `-fno-emulated-tls`, so the slot is a
+  native global-dynamic (TLSDESC) access instead of an `__emutls_get_address`
+  call; safe with `dlopen()`, users need not change their flags. Do not
+  combine it with `IBMW_SELFDEV_CORO_TLS_INITIAL_EXEC` on OHOS: musl's
+  `dlopen()` rejects initial-exec TLS (configure warns). The
+  `ibmw_selfdev_coro_native_tls` test checks that the library does not import
+  `__emutls_get_address`.
 
 ## Limitations
 
