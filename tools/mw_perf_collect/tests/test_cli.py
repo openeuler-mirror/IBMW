@@ -71,7 +71,7 @@ class CliTest(unittest.TestCase):
         (path / "validation.json").write_text(json.dumps({"valid_for_comparison": True}))
         return path
 
-    def _real_formal_run(self, root, lane, block="b1"):
+    def _real_formal_run(self, root, lane, block="b1", lanes="ABC", label=None):
         path = root / lane
         path.mkdir(parents=True)
         raw = path / "raw"
@@ -82,7 +82,8 @@ class CliTest(unittest.TestCase):
             "tx_bytes": 2, "rx_packets": 3, "tx_packets": 4}}}
         (raw / "process.jsonl").write_text(json.dumps(process) + "\n")
         (raw / "network.jsonl").write_text(json.dumps(network) + "\n")
-        label = {"A": "abc_ros2_4KB", "B": "abc_dds_4KB", "C": "iox_send_4KB"}[lane]
+        label = label or {"A": "abc_ros2_4KB", "B": "abc_dds_4KB", "C": "iox_send_4KB",
+                          "S": "shm_send_4KB"}[lane]
         csv_data = ("label,count,min_us,avg_us,stddev_us,p50_us,p90_us,p99_us,p999_us,max_us\n"
                     + f"{label},3000,1,2,1,1,2,3,4,5\n")
         (raw / "latency.csv").write_text(csv_data)
@@ -104,10 +105,11 @@ class CliTest(unittest.TestCase):
             "pid": 1, "pid_start_time_ticks": 2, "states": ["SAMPLE"],
             "sample_count": 1, "metrics_valid": True, "adapter_readiness": True,
             "sample_artifacts": core._sample_artifact_evidence(path),
-            "comparison_schema": "mw_perf.comparison-metadata.v1", "sequence_index": "ABC".index(lane),
+            "comparison_schema": "mw_perf.comparison-metadata.v2" if "S" in lanes
+                else "mw_perf.comparison-metadata.v1", "sequence_index": lanes.index(lane),
             "comparison_lane": lane, "comparison_block_id": block, "contract": "0" * 64,
             "profile": "profile", "workload": "workload", "resource_scope": "scope",
-            "order": ["A", "B", "C"], "resource_collection": {
+            "order": list(lanes), "resource_collection": {
                 "include_descendants": True, "network_interfaces": ["lo"]},
             "artifacts": {"latency": {"schema": "mw_perf.latency.csv.v1", "required": True,
                 "status": "supported", "label": label, "record_count": 3000,
@@ -602,6 +604,360 @@ class CliTest(unittest.TestCase):
                 self.assertTrue(any(code.startswith(("RESOURCE_TAMPERED:", "RESOURCE_MISSING:"))
                                     for code in validation["failure_codes"]), mutation)
                 target.write_bytes(original)
+
+    def _plan_v2(self, root, blocks, lanes=("A", "B", "S"), order=None):
+        plan = root / "plan-v2.json"
+        plan.write_text(json.dumps({"schema": "mw_perf.comparison-plan.v2", "schema_version": 2,
+            "lanes": list(lanes), "contract": "0" * 64, "profile": "profile",
+            "workload": "workload", "resource_scope": "scope",
+            "order": list(order or lanes), "blocks": blocks}))
+        return plan
+
+    def _block(self, runs, block_id="b1"):
+        return {"block_id": block_id, "runs": [{"lane": lane, "path": str(path)}
+                                               for lane, path in runs]}
+
+    def _compare(self, root, plan):
+        code = main(["compare", "--plan", str(plan), "--output", str(root / "out")])
+        return code, json.loads((root / "out/comparison.json").read_text())
+
+    def _abs_runs(self, root, lanes="ABS"):
+        return [(lane, self._real_formal_run(root / "b1", lane, lanes=lanes)) for lane in lanes]
+
+    def test_compare_v2_accepts_abs_block_with_real_validation_and_labels(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, 0, result["failure_codes"])
+            self.assertTrue(result["valid_for_comparison"])
+            self.assertEqual(result["schema"], "mw_perf.comparison-result.v2")
+            self.assertEqual(result["schema_version"], 2)
+            self.assertEqual(result["lanes"], ["A", "B", "S"])
+            self.assertEqual(result["order"], ["A", "B", "S"])
+            self.assertEqual(result["valid_blocks"], ["b1"])
+            lanes = result["blocks"][0]["lanes"]
+            self.assertEqual(sorted(lanes), ["A", "B", "S"])
+            self.assertEqual(lanes["S"]["label"], "shm_send_4KB")
+            self.assertEqual(lanes["S"]["run_id"], "S")
+            self.assertEqual(result["schema_audit"]["schemas"]["comparison_plan"]["schema_file"],
+                             "schemas/comparison-plan.schema.v2.json")
+
+    def test_compare_v2_order_is_a_permutation_of_declared_lanes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root, "SAB")
+            plan = self._plan_v2(root, [self._block(runs)], order="SAB")
+            code, result = self._compare(root, plan)
+            self.assertEqual(code, 0, result["failure_codes"])
+            self.assertEqual(result["lanes"], ["A", "B", "S"])
+            self.assertEqual(result["order"], ["S", "A", "B"])
+
+    def test_compare_v2_accepts_declared_abc_set_with_v1_runs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = [(lane, self._real_formal_run(root / "b1", lane)) for lane in "ABC"]
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)], "ABC"))
+            self.assertEqual(code, 0, result["failure_codes"])
+            self.assertEqual(result["lanes"], ["A", "B", "C"])
+
+    def test_compare_v2_rejects_c_lane_in_s_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            runs[2] = ("C", self._real_formal_run(root / "b1", "C"))
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            reasons = result["invalid_blocks"][0]["reasons"]
+            for reason in ("LANE_INVALID", "LANES_MISSING:S", "LANES_NOT_EXACTLY_ABS",
+                           "ORDER_SEQUENCE_MISMATCH"):
+                self.assertIn(reason, reasons)
+            self.assertIn("PLAN_SCHEMA:$.blocks[0].runs[2].lane:enum", result["failure_codes"])
+
+    def test_compare_v2_rejects_s_lane_in_declared_abc_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            code, result = self._compare(root, self._plan_v2(
+                root, [self._block(runs)], "ABC", order="ABS"))
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertIn("PLAN_SCHEMA:$.order[2]:enum", result["failure_codes"])
+            reasons = result["invalid_blocks"][0]["reasons"]
+            self.assertIn("LANE_INVALID", reasons)
+            self.assertIn("LANES_MISSING:C", reasons)
+
+    def test_compare_v2_rejects_missing_s(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)[:2]
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertEqual(result["invalid_blocks"][0]["reasons"],
+                             ["LANES_MISSING:S", "LANES_NOT_EXACTLY_ABS", "ORDER_SEQUENCE_MISMATCH"])
+            self.assertEqual(result["valid_blocks"], [])
+
+    def test_compare_v2_rejects_duplicate_lane(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            runs[2] = ("A", self._real_formal_run(root / "b2", "A", lanes="ABS"))
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            reasons = result["invalid_blocks"][0]["reasons"]
+            self.assertIn("LANE_DUPLICATE:A", reasons)
+            self.assertIn("LANES_MISSING:S", reasons)
+            self.assertIn("LANES_NOT_EXACTLY_ABS", reasons)
+
+    def test_compare_v2_rejects_block_sequence_and_manifest_order_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs[::-1])]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertEqual(result["invalid_blocks"][0]["reasons"], ["ORDER_SEQUENCE_MISMATCH"])
+            plan = self._plan_v2(root, [self._block(runs[::-1])], order="SBA")
+            code, result = self._compare(root, plan)
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertEqual(result["invalid_blocks"][0]["reasons"],
+                             [f"ORDER_MISMATCH:{lane}" for lane in "ABS"])
+
+    def test_compare_v2_rejects_abc_run_reused_in_s_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            runs[0] = ("A", self._real_formal_run(root / "abc", "A"))
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            reasons = result["invalid_blocks"][0]["reasons"]
+            self.assertIn("ORDER_MISMATCH:A", reasons)
+            self.assertIn("ORDER_INCONSISTENT", reasons)
+
+    def test_compare_v2_keeps_integrity_checks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            manifest_path = runs[2][1] / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["comparison_lane"] = "A"
+            manifest_path.write_text(json.dumps(manifest))
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            reasons = result["invalid_blocks"][0]["reasons"]
+            self.assertIn("LANE_MISMATCH:S", reasons)
+            self.assertIn("VALIDATION_STALE_OR_TAMPERED:S", reasons)
+            self.assertIn("RUN_NOT_VALID_FOR_COMPARISON:S", reasons)
+
+    def test_compare_v2_fails_closed_on_undeclared_lane_set(self):
+        for lanes in (["A", "B"], ["A", "C", "S"], ["B", "A", "S"], ["A", "B", "C", "S"], "ABS", None):
+            with self.subTest(lanes), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                runs = self._abs_runs(root)
+                plan = self._plan_v2(root, [self._block(runs)], order="ABS")
+                value = json.loads(plan.read_text())
+                value["lanes"] = lanes
+                plan.write_text(json.dumps(value))
+                code, result = self._compare(root, plan)
+                self.assertEqual(code, core.EXIT_INVALID)
+                self.assertIn("PLAN_LANES_INVALID", result["failure_codes"])
+                self.assertEqual(result["valid_blocks"], [])
+
+    def test_compare_v2_empty_block_with_undeclared_lane_set_is_not_valid(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # order=[] matches the empty run list, so only the block-level
+            # PLAN_LANES_INVALID keeps this block out of valid_blocks.
+            plan = self._plan_v2(root, [{"block_id": "b1", "runs": []}], lanes=["A"], order=[])
+            value = json.loads(plan.read_text()); value["order"] = []
+            plan.write_text(json.dumps(value))
+            code, result = self._compare(root, plan)
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertEqual(result["valid_blocks"], [])
+            self.assertEqual(result["invalid_blocks"][0]["reasons"], ["PLAN_LANES_INVALID"])
+
+    def test_compare_v1_still_rejects_s(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            plan = self._plan(root, [self._block(runs)])
+            code, result = self._compare(root, plan)
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertEqual(result["schema"], "mw_perf.comparison-result.v1")
+            self.assertNotIn("lanes", result)
+            reasons = result["invalid_blocks"][0]["reasons"]
+            self.assertIn("LANE_INVALID", reasons)
+            self.assertIn("LANES_MISSING:C", reasons)
+            self.assertIn("LANES_NOT_EXACTLY_ABC", reasons)
+            self.assertIn("PLAN_SCHEMA:$.blocks[0].runs[2].lane:enum", result["failure_codes"])
+            value = json.loads(plan.read_text())
+            value["order"] = ["A", "B", "S"]
+            plan.write_text(json.dumps(value))
+            _, result = self._compare(root, plan)
+            self.assertIn("PLAN_SCHEMA:$.order[2]:enum", result["failure_codes"])
+
+    def test_compare_v1_and_legacy_output_bytes_are_unchanged(self):
+        # SHA-256 of comparison.json written by the code before plan v2 (HEAD
+        # 9db410c) for the same fixtures, with the temporary root as <ROOT>.
+        golden = {"formal": "afa785e5c0bdb32059464cd762903371cb7628418cf4039ec7b07b7b6f1ad102",
+                  "legacy": "95f090879face59e3a76b2bb0b97c83fb59b799b11df3c6d956c1557ea12049f"}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = [(lane, self._real_formal_run(root / "b1", lane)) for lane in "ABC"]
+            plan = root / "plan.json"
+            plan.write_text(json.dumps({"schema": "mw_perf.comparison-plan.v1", "schema_version": 1,
+                "contract": "0" * 64, "profile": "profile", "workload": "workload",
+                "resource_scope": "scope", "order": ["A", "B", "C"],
+                "blocks": [{"block_id": "b1", "runs": [{"lane": lane, "path": str(path)}
+                                                       for lane, path in runs]}]}))
+            legacy = root / "legacy.json"
+            legacy.write_text(json.dumps({"runs": [str(path) for _, path in runs]}))
+            for name, source in (("formal", plan), ("legacy", legacy)):
+                output = root / f"{name}-out"
+                self.assertEqual(main(["compare", "--plan", str(source), "--output", str(output)]), 0)
+                data = (output / "comparison.json").read_bytes().replace(str(root).encode(), b"<ROOT>")
+                self.assertEqual(hashlib.sha256(data).hexdigest(), golden[name], data.decode())
+
+    def test_legacy_compare_rejects_runs_without_v1_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = [self._real_formal_run(root / "abc", lane) for lane in "ABC"]
+            runs.append(self._real_formal_run(root / "abs", "S", lanes="ABS"))
+            legacy = root / "legacy.json"
+            legacy.write_text(json.dumps({"runs": [str(path) for path in runs]}))
+            code, result = self._compare(root, legacy)
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertFalse(result["valid_for_comparison"])
+            self.assertEqual(result["failure_codes"], ["COMPARISON_METADATA_VERSION_UNSUPPORTED"])
+            self.assertEqual([row["run_id"] for row in result["runs"]], ["A", "B", "C"])
+
+    def test_compare_fails_closed_on_unknown_formal_plan_schema(self):
+        for schema in ("mw_perf.comparison-plan.v3", "mw_perf.comparison-plan.v2x"):
+            with self.subTest(schema), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                runs = [(lane, self._real_formal_run(root / "b1", lane)) for lane in "ABC"]
+                plan = root / "plan.json"
+                plan.write_text(json.dumps({"schema": schema, "lanes": ["A", "B", "C"],
+                    "runs": [str(path) for _, path in runs],
+                    "blocks": [self._block(runs)]}))
+                code, result = self._compare(root, plan)
+                self.assertEqual(code, core.EXIT_INVALID)
+                self.assertFalse(result["valid_for_comparison"])
+                self.assertEqual(result["failure_codes"], ["PLAN_SCHEMA_UNSUPPORTED"])
+
+    def test_compare_v2_binds_lane_to_label(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runs = self._abs_runs(root)
+            runs[2] = ("S", self._real_formal_run(root / "b2", "S", lanes="ABS",
+                                                  label="iox_send_4KB"))
+            self.assertTrue(core.validate_dir(runs[2][1])["valid_for_comparison"])
+            code, result = self._compare(root, self._plan_v2(root, [self._block(runs)]))
+            self.assertEqual(code, core.EXIT_INVALID)
+            self.assertEqual(result["invalid_blocks"][0]["reasons"], ["LABEL_MISMATCH:S"])
+            # v1 output never carried labels and keeps its old verdict.
+            runs = [(lane, self._real_formal_run(root / "v1", lane,
+                                                 label="abc_dds_4KB" if lane == "A" else None))
+                    for lane in "ABC"]
+            code, result = self._compare(root, self._plan(root, [self._block(runs)]))
+            self.assertEqual(code, 0, result["failure_codes"])
+
+    def test_compare_v2_audit_follows_lane_set(self):
+        for lanes, result_file in (("ABS", "result.schema.v2.json"), ("ABC", "result.schema.v1.json")):
+            with self.subTest(lanes), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                runs = self._abs_runs(root, lanes)
+                code, result = self._compare(root, self._plan_v2(root, [self._block(runs)], lanes))
+                self.assertEqual(code, 0, result["failure_codes"])
+                schemas = result["schema_audit"]["schemas"]
+                self.assertEqual(schemas["comparison_result"]["schema_file"], "schemas/" + result_file)
+                self.assertEqual(schemas["comparison_plan"]["schema_file"],
+                                 "schemas/comparison-plan.schema.v2.json")
+
+    def test_v1_evidence_schemas_stay_frozen_for_archived_validations(self):
+        # validation.json embeds these digests; changing one makes every
+        # archived A/B/C run VALIDATION_STALE_OR_TAMPERED.
+        frozen = {"schemas/result.schema.v1.json":
+                      "4895699463484942340973dc6bf370b9c6a1c03dda3848b72fdfb4cc0156d16f",
+                  "schemas/validation.schema.v1.json":
+                      "2a859e48c5a6e89b26d62b9ff2019fcab6ec120450cdb0801b8380823099e95d",
+                  "schemas/comparison-plan.schema.v1.json":
+                      "b3c3fe804c3c7ef9897837abc4f756d9c79301eaf293ef00598799ffa7ffeb69"}
+        for relative, digest in frozen.items():
+            self.assertEqual(core._RESOURCE_SHA256[relative], digest)
+        with tempfile.TemporaryDirectory() as td:
+            run = self._real_formal_run(Path(td), "A")
+            audit = core.validate_dir(run)["schema_audit"]["schemas"]["result"]
+            self.assertEqual(audit["schema_file"], "schemas/result.schema.v1.json")
+            self.assertEqual(audit["schema_sha256"], frozen["schemas/result.schema.v1.json"])
+
+    def test_s_run_audit_names_its_own_result_schema(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = self._real_formal_run(Path(td), "S", lanes="ABS")
+            validation = core.validate_dir(run)
+            self.assertTrue(validation["valid_for_comparison"], validation["failure_codes"])
+            self.assertEqual(validation["schema_audit"]["schemas"]["result"]["schema_file"],
+                             "schemas/result.schema.v2.json")
+
+    def test_metadata_version_binds_lane_and_order(self):
+        cases = (("mw_perf.comparison-metadata.v1", "S", ["A", "B", "S"]),
+                 ("mw_perf.comparison-metadata.v1", "S", ["A", "B", "C"]),
+                 ("mw_perf.comparison-metadata.v1", "A", ["A", "B", "S"]),
+                 ("mw_perf.comparison-metadata.v2", "C", ["A", "B", "C"]),
+                 ("mw_perf.comparison-metadata.v2", "S", ["A", "B", "C"]),
+                 ("mw_perf.comparison-metadata.v2", "C", ["A", "B", "S"]),
+                 ("mw_perf.comparison-metadata.v2", "S", ["A", "C", "S"]),
+                 ("mw_perf.comparison-metadata.v2", "S", ["A", "B", "B"]),
+                 ("mw_perf.comparison-metadata.v2", "S", ["A", "B"]),
+                 ("mw_perf.comparison-metadata.v2", ["S"], ["A", "B", "S"]),
+                 (["mw_perf.comparison-metadata.v2"], "S", ["A", "B", "S"]),
+                 ("mw_perf.comparison-metadata.v3", "S", ["A", "B", "S"]))
+        for schema, lane, order in cases:
+            with self.subTest(schema=schema, lane=lane, order=order), \
+                 tempfile.TemporaryDirectory() as td:
+                run = self._real_formal_run(Path(td), "S", lanes="ABS")
+                manifest = json.loads((run / "manifest.json").read_text())
+                manifest.update(comparison_schema=schema, comparison_lane=lane, order=order)
+                (run / "manifest.json").write_text(json.dumps(manifest))
+                validation = core.validate_dir(run)
+                self.assertFalse(validation["valid_for_comparison"])
+                self.assertIn("COMPARISON_METADATA", validation["failure_codes"])
+
+    def test_comparison_plan_v2_schema(self):
+        root = Path(core.__file__).parent / "schemas"
+        schema = json.loads((root / "comparison-plan.schema.v2.json").read_text())
+        plan = {"schema": "mw_perf.comparison-plan.v2", "schema_version": 2,
+            "lanes": ["A", "B", "S"], "contract": "contract", "profile": "profile",
+            "workload": "workload", "resource_scope": "scope", "order": ["S", "A", "B"],
+            "blocks": [{"block_id": "b1", "runs": [{"lane": lane, "path": "/run/" + lane}
+                                                   for lane in "SAB"]}]}
+        self.assertEqual(core._schema_errors(plan, schema), [])
+        for field, value in (("lanes", ["A", "B", "C", "S"]), ("lanes", ["S", "A", "B"]),
+                             ("order", ["A", "B", "C"]), ("order", ["A", "B", "B"]),
+                             ("schema_version", 1), ("schema", "mw_perf.comparison-plan.v1")):
+            self.assertTrue(core._schema_errors({**plan, field: value}, schema), (field, value))
+        invalid = {name: value for name, value in plan.items() if name != "lanes"}
+        self.assertIn("$.lanes:required", core._schema_errors(invalid, schema))
+        v1 = json.loads((root / "comparison-plan.schema.v1.json").read_text())
+        self.assertTrue(core._schema_errors({**plan, "schema": "mw_perf.comparison-plan.v1",
+                                             "schema_version": 1}, v1))
+
+    def test_result_schema_versions_split_lane_sets(self):
+        root = Path(core.__file__).parent / "schemas"
+        v1 = json.loads((root / "result.schema.v1.json").read_text())
+        v2 = json.loads((root / "result.schema.v2.json").read_text())
+        with tempfile.TemporaryDirectory() as td:
+            s_run = self._real_formal_run(Path(td) / "s", "S", lanes="ABS")
+            c_run = self._real_formal_run(Path(td) / "c", "C")
+            s_manifest = json.loads((s_run / "manifest.json").read_text())
+            c_manifest = json.loads((c_run / "manifest.json").read_text())
+        fields = ("comparison_schema", "order", "comparison_lane")
+        def comparison(value):
+            return {name: value[name] for name in fields}
+        probe = {"properties": {name: v2["properties"][name] for name in fields}}
+        self.assertEqual(core._schema_errors(comparison(s_manifest), probe), [])
+        self.assertTrue(core._schema_errors(comparison(c_manifest), probe))
+        probe = {"properties": {name: v1["properties"][name] for name in fields}}
+        self.assertEqual(core._schema_errors(comparison(c_manifest), probe), [])
+        self.assertTrue(core._schema_errors(comparison(s_manifest), probe))
 
     def test_resource_registry_matches_installed_json_resources(self):
         root = Path(core.__file__).parent

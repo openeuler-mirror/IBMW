@@ -113,8 +113,10 @@ endif()
 # --------------------------------------------------------------------------
 # FastCDR and FastDDS are always needed when the project was built with
 # DDS/protocol support, as they underpin the type system and schema targets.
+# The iceoryx and shm extensions export dds_types as well.
 if(@IBMW_BUILD_PROTOCOLS@ OR @IBMW_BUILD_DDS_EXTENSION@ OR
-   @IBMW_BUILD_ROS2_TYPES@ OR @IBMW_BUILD_ICEORYX_EXTENSION@)
+   @IBMW_BUILD_ROS2_TYPES@ OR @IBMW_BUILD_ICEORYX_EXTENSION@ OR
+   @IBMW_BUILD_SHM_EXTENSION@)
   set(_IBMW_BUILT_DDS_PROVIDER "@IBMW_DDS_PROVIDER@")
   if(DEFINED IBMW_DDS_PROVIDER AND
      NOT "${IBMW_DDS_PROVIDER}" STREQUAL "${_IBMW_BUILT_DDS_PROVIDER}")

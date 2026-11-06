@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
       std::cerr << "iceoryx driver not found in TransportBus\n";
       return -1;
     }
-    sub.SetIceoryxDriver(driver);
+    sub.SetDriver(driver);
 
     std::cout << "PERF_SUBSCRIBER_READY" << std::endl;
     auto stopped = engine.AsyncStart();

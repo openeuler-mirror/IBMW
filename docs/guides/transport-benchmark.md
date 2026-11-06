@@ -8,10 +8,20 @@ making an application decision.
 ## Build and run
 
 The `full` preset does not enable benchmarks; benchmarks also depend on examples
-and Iceoryx. Run the commands below from the repository root. The benchmark gate
-requires `IBMW_BUILD_EXAMPLES=ON` and `IBMW_BUILD_ICEORYX_EXTENSION=ON`; DDS
-benchmarks additionally require `IBMW_BUILD_DDS_EXTENSION=ON`, and the DDS
-endpoint for topology interop additionally requires `IBMW_BUILD_ROS2_TYPES=ON`.
+and a shared-memory extension. Run the commands below from the repository root.
+The benchmark gate requires `IBMW_BUILD_EXAMPLES=ON` and at least one of
+`IBMW_BUILD_ICEORYX_EXTENSION=ON` and `IBMW_BUILD_SHM_EXTENSION=ON` (the
+self-developed shared-memory transport); each sample skips itself when its
+transport is off. DDS benchmarks additionally require
+`IBMW_BUILD_DDS_EXTENSION=ON`, and the DDS endpoint for topology interop
+additionally requires `IBMW_BUILD_ROS2_TYPES=ON`. The benchmark payloads are
+CDR-serialized, so every combination needs Fast DDS/Fast CDR.
+
+On a Linux host, with only `IBMW_BUILD_SHM_EXTENSION` you get the `shm_send`, `shm_loan_v2`,
+`shm_loaned_pod` and `shm_loaned_ctx` samples and no iceoryx build. They are not
+in the sweep's default list; select them with
+`IBMW_BENCH_SAMPLES="shm_send shm_loaned_pod ..."`. Method and results (in
+Chinese): [selfdev/shm/docs/对标基准.md](../../selfdev/shm/docs/对标基准.md).
 
 ```bash
 cmake -S . -B ./build \

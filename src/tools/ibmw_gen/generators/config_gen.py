@@ -27,14 +27,19 @@ def _has_type(modules: list[str], module_map: dict, mod_type: str) -> bool:
 
 # ── Module type taxonomy (messaging) ────────────────────────────────────────
 
+# direct_shm_* publish through the shm messaging driver, so their topics
+# need the messaging block like any other messaging module.
 _MSG_TYPES_ALL = {"publisher", "subscriber",
                   "ros2_interop_publisher", "ros2_interop_subscriber",
                   "direct_ros2_publisher", "direct_ros2_subscriber",
+                  "direct_shm_publisher", "direct_shm_subscriber",
                   "loaned_publisher", "loaned_subscriber"}
 _MSG_PUB_TYPES = {"publisher", "ros2_interop_publisher",
-                  "direct_ros2_publisher", "loaned_publisher"}
+                  "direct_ros2_publisher", "direct_shm_publisher",
+                  "loaned_publisher"}
 _MSG_SUB_TYPES = {"subscriber", "ros2_interop_subscriber",
-                  "direct_ros2_subscriber", "loaned_subscriber"}
+                  "direct_ros2_subscriber", "direct_shm_subscriber",
+                  "loaned_subscriber"}
 
 
 def _collect_topics(modules: list[str], module_map: dict) -> dict[str, set[str]]:
@@ -117,16 +122,6 @@ def _collect_ros2_rpc_remaps(modules: list[str], module_map: dict, mod_type: str
     return remaps
 
 
-_MSG_TYPES_ALL = {"publisher", "subscriber",
-                  "ros2_interop_publisher", "ros2_interop_subscriber",
-                  "direct_ros2_publisher", "direct_ros2_subscriber",
-                  "loaned_publisher", "loaned_subscriber"}
-_MSG_PUB_TYPES = {"publisher", "ros2_interop_publisher",
-                  "direct_ros2_publisher", "loaned_publisher"}
-_MSG_SUB_TYPES = {"subscriber", "ros2_interop_subscriber",
-                  "direct_ros2_subscriber", "loaned_subscriber"}
-
-
 def _needs_messaging(modules: list[str], module_map: dict) -> bool:
     """Check if any module needs messaging infrastructure."""
     for mod_name in modules:
@@ -148,13 +143,29 @@ def _has_any_transport(modules: list[str], module_map: dict, transport: str) -> 
 def _get_messaging_driver(modules: list[str], module_map: dict) -> str:
     """Determine the primary messaging driver for an app's modules.
 
-    Priority: iceoryx > dds > local. The driver chosen here is wired into
+    Priority: iceoryx > shm > dds > local. The driver chosen here is wired into
     every topic's `enable_drivers:` list. (For mixed-transport apps the
     user must hand-edit the generated cfg or use multiple apps.)
+
+    iceoryx and shm in one app is an error: the shm driver serves the same
+    URLs as iceoryx (it is its drop-in replacement), and the priority would
+    silently move the shm modules onto iceoryx.
     """
     drivers = {module_map.get(m, {}).get("transport") for m in modules}
+    if "iceoryx" in drivers and "shm" in drivers:
+        by_transport = {
+            t: sorted(m for m in modules if module_map.get(m, {}).get("transport") == t)
+            for t in ("iceoryx", "shm")
+        }
+        raise ValueError(
+            "An app cannot mix iceoryx and shm modules (iceoryx: "
+            f"{', '.join(by_transport['iceoryx'])}; shm: {', '.join(by_transport['shm'])}). "
+            "The shm transport replaces iceoryx on the same topics; put the modules "
+            "in separate apps or move them to one transport.")
     if "iceoryx" in drivers:
         return "iceoryx"
+    if "shm" in drivers:
+        return "shm"
     if "dds" in drivers:
         return "dds"
     return "local"
@@ -230,7 +241,7 @@ def _gen_extensions_section(project: dict, mod_names: list[str],
                             module_map: dict) -> list[str]:
     """Generate the ibmw.extensions section if needed.
 
-    Automatically adds DDS / iceoryx extension when any module uses the
+    Automatically adds DDS / iceoryx / shm extension when any module uses the
     corresponding transport. Also merges user-specified extensions from
     the YAML. ROS2-compatible DDS topic/type options are emitted under
     ibmw.messaging.drivers[].options, which is consumed by DdsTransportDriver.
@@ -238,6 +249,7 @@ def _gen_extensions_section(project: dict, mod_names: list[str],
     lines = []
     has_dds = _has_any_transport(mod_names, module_map, "dds")
     has_iceoryx = _has_any_transport(mod_names, module_map, "iceoryx")
+    has_shm = _has_any_transport(mod_names, module_map, "shm")
 
     # Check if any module in this app uses ros2 RPC transport
     has_ros2_rpc = any(
@@ -252,18 +264,22 @@ def _gen_extensions_section(project: dict, mod_names: list[str],
     # Auto-add extensions if not already specified by user
     dds_ext_needed = has_dds
     iceoryx_ext_needed = has_iceoryx
+    shm_ext_needed = has_shm
     dds_ext_found = False
     iceoryx_ext_found = False
+    shm_ext_found = False
     ros2_ext_found = False
     for ext in user_ext:
         if ext.get("name") == "dds_extension":
             dds_ext_found = True
         if ext.get("name") == "iceoryx_extension":
             iceoryx_ext_found = True
+        if ext.get("name") == "shm_extension":
+            shm_ext_found = True
         if ext.get("name") == "ros2_extension":
             ros2_ext_found = True
 
-    if (not dds_ext_needed and not iceoryx_ext_needed
+    if (not dds_ext_needed and not iceoryx_ext_needed and not shm_ext_needed
             and not has_ros2_rpc and not user_ext):
         return lines
 
@@ -288,6 +304,18 @@ def _gen_extensions_section(project: dict, mod_names: list[str],
         items.insert(0, {
             "name": "iceoryx_extension",
             "path": "libibmw_iceoryx_transport.so",
+            "options": ext_opts if ext_opts else None,
+        })
+
+    # Auto-add the shm extension. No daemon is needed; options come from
+    # project shm_driver.extension_options (shm_extension keys such as
+    # shm_init_size, domain, max_bytes_per_publisher), defaults otherwise.
+    if shm_ext_needed and not shm_ext_found:
+        shm_driver = project.get("shm_driver", {})
+        ext_opts = dict(shm_driver.get("extension_options", {}))
+        items.insert(0, {
+            "name": "shm_extension",
+            "path": "libibmw_shm_transport.so",
             "options": ext_opts if ext_opts else None,
         })
 
@@ -589,6 +617,10 @@ def _gen_config(app: dict, project: dict, is_pkg: bool,
             # Declare the type only; iceoryx driver defaults
             # are reasonable. Users can hand-edit options when needed.
             lines.append("      - type: iceoryx")
+        elif driver == "shm":
+            # Declare the type only, as for iceoryx; the driver name is
+            # shm_extension's default driver_name.
+            lines.append("      - type: shm")
         else:
             lines.append("      - type: local")
 

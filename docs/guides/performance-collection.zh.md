@@ -302,6 +302,42 @@ SUT 必须正常走 Engine shutdown 才会生成 final `metrics.jsonl`。collect
 
 Core Metrics 的 formal host 性能门已在既定 host capability/合同上通过，但 counters 仍不应在生产环境中默认打开，也不能用内部计数替代 A/B/C 公共外部指标或外推到 OHOS。
 
+### 8.2.1 shm 传输的 Core Metrics 性能门禁
+
+只构建自研 shm 传输（不构建 iceoryx）时，用 `scripts/core_metrics_shm_perf.py` 代替 `scripts/core_metrics_perf.py`。两者参数相同、判定代码相同，区别是协议 `core-metrics-shm-lossless-v1`、通道 `shm_loaned_ctx`、kind `direct_shm_loan`，不需要 RouDi。
+
+```bash
+source /opt/ros/humble/setup.bash
+export LD_LIBRARY_PATH=/opt/ros/humble/lib
+# 先做守恒诊断（约 5 分钟，含两次沙箱构建；不给验收结论）
+python3 scripts/core_metrics_shm_perf.py --output /path/to/empty-diag --jobs 10 \
+  --dependency-source-pool /path/to/deps-pool --diagnostic-conservation
+# 完整验收（24 块 × 3 模式，每次 60 s，约 2 小时）
+python3 scripts/core_metrics_shm_perf.py --output /path/to/empty-run --jobs 10 \
+  --dependency-source-pool /path/to/deps-pool
+```
+
+- 输出目录必须是新的空目录，且不能位于仓库根或任一快照根（`cmake`、`src`、`scripts`、`tools`、`selfdev` 等）之下，所需空间约 300 MB（两个构建树与源码、依赖快照）。
+- 依赖源码池按 `scripts/contracts/core-metrics-shm-dependencies-v1.json` 校验，内容不一致即停止。
+- 绑定 CPU 25、26、27；每次试验使用私有 `/tmp/ishm*` 根并在结束后删除，不写 `/dev/shm`。
+- 结果只在 shm 协议内比较 off/out/counters，不要与 iceoryx 门禁的数值对比（进程数与冻结负载不同）。
+
+**干扰核算（shm 门禁）。** 本机常有他人负载。`scripts/core_metrics_shm_perf.py` 只判定运行本门禁进程的 CPU：E2E 为 26（订阅）和 27（发布），micro 为 27。CPU 25 和共享 L2 的 24 只作为上下文记录。
+
+E2E 在门禁自己的 CPU 采样窗口内（不含预热与冷却）约每秒取一个原始样本。每 CPU 的 foreign = max(`/proc/schedstat` 运行时间 − 本门禁进程在该 CPU 上的 utime+stime, 逐任务扫描归因的外来时间)。样本按原始计数封存，加载时重新推导并校验首尾相接。不用 `/proc/stat` 作被减数，因为它的忙时是 tick 采样：本通道 5750 批/秒恰为每 tick 23 批，读数会在 0.06–2.04 核之间混叠。
+
+判为受干扰的条件（阈值在验收前由本机噪声数据确定，并登记在计划中）：
+
+- 两 CPU 窗口均值之和 > 0.02 核；
+- 或任一 CPU 的 1 s 样本 > 0.10 核：无突发试验最大 0.039 核，最小的外来突发 0.12 核；
+- 或出现 `accounting_deficit`、`sampler_gap`。
+
+micro 用紧贴基准运行的专用窗口：foreign = CPU 27 的运行时间 − 基准 rusage（扣除登记的 1 ms 启动余量后判 deficit），再加 CPU 27 的 run delay。超过基准时长的 1% 即受干扰。
+
+受干扰的试验 `quality_valid=false`，所在通道结论为 INCONCLUSIVE。通道之间仍按 FAIL > INCONCLUSIVE > PASS 合并。`summary.json` 给出 `e2e_reason`/`micro_reason`，只有总结论为 INCONCLUSIVE 时才有顶层 `reason: interference`。每次试验前要求 2 s 安静窗口，最长等待 10 min。
+
+2026-11-05 的主机验收结果为 `FAIL (E2E INCONCLUSIVE, micro FAIL)`：E2E 72 次中 38 次受干扰；micro 90 次均 clean，其 FAIL 在 iceoryx 构建上同样出现（counters/off 10.86），来自每次 add 一次原子读改写（约 5 ns）对 0.024 ns 预算的超出，与传输和干扰无关。主机结果不外推到 OHOS，性能结论建议在 OHOS 设备上测得，并同样检查环境干扰。
+
 ### 8.3 OHOS remote capture candidate
 
 OHOS 上 host collector 的 inherited FD 不能穿过 HDC。需要验证设备端 DDS exact capture 时，可分别启用默认关闭的 native agent 与 production candidate：
@@ -364,7 +400,7 @@ importer 严格验证 canonical USTAR、request challenge、archive/tree hash、
 
 ### 10.1 通用 collector 边界
 
-`compare` 只消费已经具备比较元数据的运行目录。除有效的单轮 validation 外，每个 manifest 还必须由上游集成流程在生成时写入一致的 `scenario_contract_hash`、resource profile、comparison block、sequence index 和 order policy。当前通用 `run` 不会自动生成这些 block/order 元数据；版本化 `mw_perf.comparison-plan.v1` 会 fail-closed 检查每个 block 恰好包含 A、B、C 各一个 lane，并校验 block/lane identity、合同与 scope/order 元数据、run/path 唯一性及 validation 新鲜度。未声明该 schema 的旧 `runs` plan 仅保留 MVP 兼容。因此不能把任意三个普通 run 直接交给 `compare`，也不要通过手工修改 manifest 绕过 provenance。
+`compare` 只消费已经具备比较元数据的运行目录。除有效的单轮 validation 外，每个 manifest 还必须由上游集成流程在生成时写入一致的 `scenario_contract_hash`、resource profile、comparison block、sequence index 和 order policy。当前通用 `run` 不会自动生成这些 block/order 元数据；版本化 `mw_perf.comparison-plan.v1` 会 fail-closed 检查每个 block 恰好包含 A、B、C 各一个 lane，并校验 block/lane identity、合同与 scope/order 元数据、run/path 唯一性及 validation 新鲜度。未声明该 schema 的旧 `runs` plan 仅保留 MVP 兼容。含 shm 通道 S 的比较使用 `mw_perf.comparison-plan.v2`，通道集合为 A、B、C 或 A、B、S，并校验每条通道的 latency 标签，见 `tools/mw_perf_collect/README.md` 与 `src/samples/cpp/transport_benchmark/abc_interop/README.md`。因此不能把任意三个普通 run 直接交给 `compare`，也不要通过手工修改 manifest 绕过 provenance。
 
 对于已经由集成流程生成的目录，将路径写入 plan：
 
@@ -610,3 +646,94 @@ $COLLECTOR report runs/ibmw-core/<run-id>
 ```
 
 该样例的publisher固定运行约7秒，`sample_seconds`必须覆盖其完成时间。collector会验证artifact、finalization和provenance，但当前不会验证该样例的业务完成语义；用户还必须检查`subscriber.log`中的`RETAINED_E2E_SUBSCRIBER_PASS`和publisher完成证据。预期结果是External P0 artifact完整、`raw/core_metrics.jsonl`为`supported`、source/archive hash一致且三层validity均为true。若只要外部指标，将`IBMW_CORE_METRICS`设为`off`并移除required `core_metrics`。
+
+### 15.1 shm 版（`shm_retained_loan_e2e`）
+
+自研 shm 传输有同样的 E2E 验证器。`shm_retained_loan_e2e` 编译同一份 `retained_loan_e2e.cc`（定义 `IBMW_RETAINED_E2E_SHM`），负载与 iceoryx 版相同。它直接链接 shm_ext（`libibmw_shm_transport.so`），不需要 RouDi。Reporter V1 的 kind 为 `direct_shm_loan`、`retained_shm_receive`，driver 标签为 `shm`。iceoryx 版目标、helper 与 `assert_metrics.py` 不变。构建：
+
+```bash
+cmake -S . -B <build-dir> \
+  -DIBMW_BUILD_SHM_EXTENSION=ON \
+  -DIBMW_BUILD_SHM_RETAINED_LOAN_E2E=ON \
+  -DIBMW_ENABLE_CORE_METRICS=ON \
+  -DIBMW_ENABLE_REPORTER_V1=ON
+cmake --build <build-dir> --target shm_retained_loan_e2e --parallel
+```
+
+managed helper 为 `run_shm_metrics_managed.sh direct|retained <build-dir> <metrics-dir>`，没有 RouDi 参数。每次运行用 `mktemp -d /tmp/ibR.XXXXXX` 创建私有 `IBMW_SHM_ROOT`，并设置唯一的 `IBMW_SHM_DOMAIN`。helper 在创建该目录之前就装好 TERM/INT/HUP 处理；收到这些信号后结束子进程并删除该目录，不使用 `/dev/shm`。SIGKILL 杀死 helper 时无法清理，该目录会留下。publisher 在后台运行并被等待，所以发布期间的停止请求不用等它结束。只有在 leader 的前台 `sleep 1` 期间，只发给 leader 的信号才最多晚 1 s 处理；collector 对进程组发的 TERM 会直接结束这个 sleep。
+
+helper 的退出码：
+
+- 正常停止时为 0。子进程以 0 或 129/130/143（停止请求造成）结束都算正常。
+- publisher 非零退出时，helper 立即以同一退出码退出。
+- direct 或 subscriber 以其他退出码结束时，helper 在停止时把失败写到 stderr，并以第一个失败的退出码退出。
+- 创建私有目录期间被停止时为 2。
+
+配置与上例相比只有以下不同：
+
+```json
+{
+  "sut": {
+    "mode": "managed",
+    "command": [
+      "/bin/sh",
+      "src/samples/cpp/retained_loan_e2e/run_shm_metrics_managed.sh",
+      "retained",
+      "<build-dir>",
+      "/tmp/ibmw-perf-collection/retained-shm-core"
+    ],
+    "working_directory": "."
+  },
+  "scenario_contract": {
+    "id": "ibmw-retained-loan-shm-e2e-v1",
+    "deployment": "single_host_cross_process",
+    "transport": "shm",
+    "path": "retained_receive",
+    "measurement_lane": "normalized_benchmark"
+  },
+  "adapters": {
+    "ibmw": {
+      "root": ".",
+      "build_dir": "<build-dir>",
+      "core_metrics": {"directory": "/tmp/ibmw-perf-collection/retained-shm-core", "required": true},
+      "provenance": {
+        "required": true,
+        "sut_executable": "<build-dir>/shm_retained_loan_e2e",
+        "artifact_binaries": [
+          "<build-dir>/shm_retained_loan_e2e",
+          "<build-dir>/libibmw_shm_transport.so"
+        ],
+        "runtime_images": [
+          {"role": "e2e", "name": "shm_retained_loan_e2e", "source": "exe", "expected_path": "<build-dir>/shm_retained_loan_e2e"},
+          {"role": "transport", "name": "shm", "source": "maps", "expected_path": "<build-dir>/libibmw_shm_transport.so"}
+        ]
+      }
+    }
+  }
+}
+```
+
+`run`、`collectors` 与上例相同，`sample_seconds` 同样要覆盖 publisher 约 7 秒的运行时间。collector 的 ibmw adapter 不区分传输：provenance required 时，`runtime_images` 不能为空；每一项都必须出现在 `artifact_binaries` 中，并在采样进程的 `/proc/<pid>/exe` 或 `/proc/<pid>/maps` 中被观察到。shm 版没有 RouDi 项。shm_ext 是可执行文件的 `DT_NEEDED` 共享库，所以 transport 项用 `maps` 声明 `libibmw_shm_transport.so`。去掉这一项和对应的 artifact 也合法，但那样 provenance 就不记录传输库。运行结束后要做三项检查，缺一不可。
+
+1. 检查 manifest 的 `sut_returncode` 是否为 0。collector 不会因 helper 非零退出而判定运行无效：实测 publisher 失败时，`sut_returncode` 为 3，但 `run_status` 仍是 `completed`，valid_for_collection/metric/comparison 均为 true，也没有失败规则。失败原因在 `logs/sut.stderr.log` 中。
+2. 检查 `subscriber.log` 中的 `RETAINED_E2E_SUBSCRIBER_PASS` 与 `publisher.log` 中的 `RETAINED_E2E_PUBLISHER_DONE`。门禁本身发现不了被截断的运行：`sample_seconds` 太短、发布期间就被停止时，实测 delivered 只有 17、18，门禁仍然通过，只有缺失的 `RETAINED_E2E_PUBLISHER_DONE` 能说明问题。
+3. 运行门禁：
+
+```bash
+python3 src/samples/cpp/retained_loan_e2e/assert_shm_metrics.py retained \
+  /tmp/ibmw-perf-collection/retained-shm-core/metrics.jsonl
+```
+
+`assert_shm_metrics.py [--driver NAME] [--check-run] direct|retained metrics.jsonl` 包含 `assert_metrics.py` 的全部检查，并且更严格：
+
+- direct 的 attempt 3、success 2、fail 1、publish 1、release 1 取自 `direct.shm.metrics.json` 并逐项精确比较，internal_retry 须大于 0。
+- retained 要求 receive_delivered ≥ 2，callback_entered ≤ receive_delivered。release token 分配失败的样本会被归还而不进回调，所以这里不要求相等。
+- `--check-run` 用于 `check_shm_metrics.sh`：订阅端在第一次恢复回调后就退出，因此额外要求 receive_delivered = callback_entered = 2，且 limit_drop < 120。实测为 23–24；归还延迟到 7 s 超时的竞争曾得到 229。managed 运行的订阅端一直存活到 TERM，完整运行实测 delivered 为 216，不能加 `--check-run`。
+- 该 kind 的每条记录的 driver 标签都必须是 `shm`；shm 以 `driver_name: iceoryx` 原位替换时，用 `--driver iceoryx` 指定。
+- 每条记录的 value 必须是非负的普通 int，布尔值、浮点数、字符串都被拒绝。有 `cumulative.value` 时它必须等于 value。该 kind 的记录只能属于一个 topic/type。
+- 真实文件每个 metric 只有一条记录。同一 metric 有多条记录时，只当作累计序列接受：snapshot_seq 互不相同，值不下降（计量值 `outstanding_current` 除外），检查最后一个快照的值。其他重复一律拒绝。
+- 失败时以 `SystemExit` 返回非零，不依赖 `assert`，所以在 `python -O` 下依然有效。
+
+场景契约见 `direct.shm.metrics.json`、`retained.shm.metrics.json`。
+
+不用 collector 时，`check_shm_metrics.sh <build-dir> <work-dir>` 依次运行 direct 与 retained 负载。它不设 `MW_PERF_MANAGED`，所以进程自行退出，并在关闭时写出最终快照 `metrics.jsonl`。脚本检查 PASS 标记并运行 `assert_shm_metrics.py --check-run`，任一失败即返回非零。负载都在后台运行并被等待，因此脚本收到 TERM/INT/HUP（如 ctest 超时）时会结束子进程、删除私有根并返回非零。唯一的前台命令是 publisher 之前的 `sleep 1`，此时最多晚 1 s 处理。SIGKILL 杀死脚本时无法清理。开启 `IBMW_BUILD_TESTS` 与 `IBMW_ENABLE_REPORTER_V1` 时，它注册为 ctest `shm_retained_loan_e2e_metrics`。

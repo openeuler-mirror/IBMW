@@ -3,7 +3,7 @@
 
 if(NOT IBMW_BUILD_DDS_EXTENSION OR
    NOT IBMW_BUILD_PROTOCOLS OR
-   NOT IBMW_BUILD_ICEORYX_EXTENSION OR
+   NOT (IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) OR
    NOT IBMW_BUILD_MQTT_EXTENSION OR
    NOT IBMW_BUILD_ZENOH_EXTENSION OR
    NOT IBMW_BUILD_NET_EXTENSION OR
@@ -115,6 +115,33 @@ add_custom_command(
   DEPENDS ${FIXTURE_TARGET})
 add_custom_target(${FIXTURE_TARGET}_bags DEPENDS ${PLAY_SMOKE_FIXTURE_STAMP})
 
+# The shared-memory transport case runs for every shm transport in this build.
+# Markers in the build root tell validate_play_smoke.sh which cases are
+# required; configs of transports that are not built are removed so a reused
+# build directory cannot keep a stale case.
+set(PLAY_SMOKE_SHM_TRANSPORT_TARGETS)
+set(PLAY_SMOKE_SHM_TRANSPORT_COMMANDS)
+foreach(transport iceoryx shm)
+  string(TOUPPER ${transport} transport_upper)
+  if(IBMW_BUILD_${transport_upper}_EXTENSION)
+    list(APPEND PLAY_SMOKE_SHM_TRANSPORT_COMMANDS
+         COMMAND ${CMAKE_COMMAND} -E touch
+                 ${CMAKE_BINARY_DIR}/play_smoke_${transport}_required)
+  else()
+    list(APPEND PLAY_SMOKE_SHM_TRANSPORT_COMMANDS
+         COMMAND ${CMAKE_COMMAND} -E rm -f
+                 ${CMAKE_BINARY_DIR}/play_smoke_${transport}_required
+                 ${CMAKE_BINARY_DIR}/play_smoke_cfg/play_smoke_${transport}_player.yaml
+                 ${CMAKE_BINARY_DIR}/play_smoke_cfg/play_smoke_${transport}_subscriber.yaml)
+  endif()
+endforeach()
+if(IBMW_BUILD_ICEORYX_EXTENSION)
+  list(APPEND PLAY_SMOKE_SHM_TRANSPORT_TARGETS ibmw_extensions_iceoryx_ext iox-roudi)
+endif()
+if(IBMW_BUILD_SHM_EXTENSION)
+  list(APPEND PLAY_SMOKE_SHM_TRANSPORT_TARGETS ibmw_extensions_shm_ext)
+endif()
+
 add_custom_target(
   ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -139,6 +166,7 @@ add_custom_target(
           $<TARGET_FILE:example_ros2__rosidl_typesupport_introspection_cpp>
           ${CMAKE_BINARY_DIR}/play_smoke_ros2_runtime/lib/
   COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/play_smoke_required
+  ${PLAY_SMOKE_SHM_TRANSPORT_COMMANDS}
   COMMAND chmod +x ${CMAKE_BINARY_DIR}/validate_play_smoke.sh
   DEPENDS ibmw::core::main
           ${PKG_TARGET}
@@ -149,8 +177,7 @@ add_custom_target(
           example_ros2__rosidl_typesupport_introspection_cpp
           ibmw_schema_common_ts
           ibmw_dds_extension
-          ibmw_extensions_iceoryx_ext
-          iox-roudi
+          ${PLAY_SMOKE_SHM_TRANSPORT_TARGETS}
           ibmw_extensions_mqtt_ext
           ibmw_extensions_zenoh_ext
           ibmw_extensions_net_ext

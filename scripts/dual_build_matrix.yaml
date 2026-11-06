@@ -5,6 +5,10 @@
 # 7 entries (DDS, ROS2, ICEORYX, ZENOH, MQTT, NET each individually OFF;
 # plus an all-off entry). LOCAL has no extension flag, so 7 = 6 + 1.
 # The all-on baseline is run by Gate 4 separately and is NOT a matrix entry.
+# The self-developed shm transport (IBMW_BUILD_SHM_EXTENSION) is OFF in
+# BASE_FLAGS, so the 7 entries above are unchanged; shm_only (shm replaces
+# iceoryx) and shm_both (shm next to iceoryx) turn it on, and the r8_shm_*
+# entries pin the shm copies of the r8_validation samples.
 #
 # Per-entry fields:
 #   name             — short label (also used as build-dir leaf)
@@ -97,6 +101,20 @@ entries:
       - "dds_rpc_demo"
       - "multi_driver_demo"
 
+  - name: shm_only
+    cmake_flags:
+      - "-DIBMW_BUILD_ICEORYX_EXTENSION=OFF"
+      - "-DIBMW_BUILD_SHM_EXTENSION=ON"
+    ctest_exclude: "iceoryx"
+    smoke_excludes: ["iceoryx_*", "multi_driver_demo*"]
+    excluded_samples: ["iceoryx_inproc_demo", "iceoryx_interproc_demo", "transport_benchmark/iox*", "multi_driver_demo", "record_demo", "record_smoke_test", "play_smoke_test", "retained_loan_e2e"]
+
+  - name: shm_both
+    cmake_flags: ["-DIBMW_BUILD_SHM_EXTENSION=ON"]
+    ctest_exclude: ""
+    smoke_excludes: []
+    excluded_samples: []
+
   # r8_validation per-target entries.
   # The two _ok samples must build cleanly under all-on flags. The two
   # _fail samples are negative gates: _mixed_api_fail trips the
@@ -106,7 +124,7 @@ entries:
   # expected, see run_dual_build_matrix.sh:run_entry).
   # All four entries enable IBMW_BUILD_R8_FAIL_SAMPLES=ON and run only
   # the per-target build (no ctest, no smoke); features.h expectation
-  # is the all-on baseline (1 1 1 1 1 1).
+  # is the all-on baseline (1 1 1 1 1 1 0: selfdev shm off).
   - name: r8_iceoryx_publisher_ok
     cmake_flags: ["-DIBMW_BUILD_R8_FAIL_SAMPLES=ON"]
     ctest_exclude: ""
@@ -136,6 +154,52 @@ entries:
     excluded_samples: []
     extra_targets: ["r8_validation_direct_iceoryx_no_anchor_fail"]
     expect_scan_path_fail: "src/samples/cpp/r8_validation/direct_iceoryx_no_anchor_fail/standalone/"
+
+  # shm copies of the four r8_validation samples, built without iceoryx so
+  # they cannot lean on iceoryx_ext. _mixed_api_fail trips the
+  # IbmwR82SlotMixCheck<> static_assert of shm_ext/shm_transport_driver.h;
+  # _no_anchor_fail builds and must fail the --scan-path R1 check.
+  - name: r8_shm_publisher_ok
+    cmake_flags:
+      - "-DIBMW_BUILD_ICEORYX_EXTENSION=OFF"
+      - "-DIBMW_BUILD_SHM_EXTENSION=ON"
+      - "-DIBMW_BUILD_R8_FAIL_SAMPLES=ON"
+    ctest_exclude: ""
+    smoke_excludes: []
+    excluded_samples: []
+    extra_targets: ["r8_validation_direct_shm_publisher_ok"]
+
+  - name: r8_shm_subscriber_ok
+    cmake_flags:
+      - "-DIBMW_BUILD_ICEORYX_EXTENSION=OFF"
+      - "-DIBMW_BUILD_SHM_EXTENSION=ON"
+      - "-DIBMW_BUILD_R8_FAIL_SAMPLES=ON"
+    ctest_exclude: ""
+    smoke_excludes: []
+    excluded_samples: []
+    extra_targets: ["r8_validation_direct_shm_subscriber_ok"]
+
+  - name: r8_shm_mixed_api_fail
+    cmake_flags:
+      - "-DIBMW_BUILD_ICEORYX_EXTENSION=OFF"
+      - "-DIBMW_BUILD_SHM_EXTENSION=ON"
+      - "-DIBMW_BUILD_R8_FAIL_SAMPLES=ON"
+    ctest_exclude: ""
+    smoke_excludes: []
+    excluded_samples: []
+    expect_target_build_fail: true
+    extra_targets: ["r8_validation_direct_shm_mixed_api_fail"]
+
+  - name: r8_shm_no_anchor_fail
+    cmake_flags:
+      - "-DIBMW_BUILD_ICEORYX_EXTENSION=OFF"
+      - "-DIBMW_BUILD_SHM_EXTENSION=ON"
+      - "-DIBMW_BUILD_R8_FAIL_SAMPLES=ON"
+    ctest_exclude: ""
+    smoke_excludes: []
+    excluded_samples: []
+    extra_targets: ["r8_validation_direct_shm_no_anchor_fail"]
+    expect_scan_path_fail: "src/samples/cpp/r8_validation/direct_shm_no_anchor_fail/standalone/"
 
   - name: r12_runtime_use_fail
     cmake_flags: []

@@ -3,7 +3,7 @@
 
 if(NOT IBMW_BUILD_DDS_EXTENSION OR
    NOT IBMW_BUILD_PROTOCOLS OR
-   NOT IBMW_BUILD_ICEORYX_EXTENSION OR
+   NOT (IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) OR
    NOT IBMW_BUILD_MQTT_EXTENSION OR
    NOT IBMW_BUILD_ZENOH_EXTENSION OR
    NOT IBMW_BUILD_NET_EXTENSION OR
@@ -82,6 +82,32 @@ target_link_libraries(
           rosgraph_msgs::rosgraph_msgs__rosidl_typesupport_introspection_cpp)
 set_target_properties(${TS_TARGET} PROPERTIES OUTPUT_NAME record_smoke_ts)
 
+# The shared-memory transport case runs for every shm transport in this build.
+# Markers in the build root tell validate_record_smoke.sh which cases are
+# required; configs of transports that are not built are removed so a reused
+# build directory cannot keep a stale case.
+set(RECORD_SMOKE_SHM_TRANSPORT_TARGETS)
+set(RECORD_SMOKE_SHM_TRANSPORT_COMMANDS)
+foreach(transport iceoryx shm)
+  string(TOUPPER ${transport} transport_upper)
+  if(IBMW_BUILD_${transport_upper}_EXTENSION)
+    list(APPEND RECORD_SMOKE_SHM_TRANSPORT_COMMANDS
+         COMMAND ${CMAKE_COMMAND} -E touch
+                 ${CMAKE_BINARY_DIR}/record_smoke_${transport}_required)
+  else()
+    list(APPEND RECORD_SMOKE_SHM_TRANSPORT_COMMANDS
+         COMMAND ${CMAKE_COMMAND} -E rm -f
+                 ${CMAKE_BINARY_DIR}/record_smoke_${transport}_required
+                 ${CMAKE_BINARY_DIR}/cfg/record_smoke_${transport}.yaml)
+  endif()
+endforeach()
+if(IBMW_BUILD_ICEORYX_EXTENSION)
+  list(APPEND RECORD_SMOKE_SHM_TRANSPORT_TARGETS ibmw_extensions_iceoryx_ext iox-roudi)
+endif()
+if(IBMW_BUILD_SHM_EXTENSION)
+  list(APPEND RECORD_SMOKE_SHM_TRANSPORT_TARGETS ibmw_extensions_shm_ext)
+endif()
+
 add_custom_target(
   ${CUR_SUPERIOR_NAMESPACE_UNDERLINE}_${CUR_DIR}_build_all ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -106,6 +132,7 @@ add_custom_target(
           ${CMAKE_BINARY_DIR}/validate_record_smoke.sh
   COMMAND ${CMAKE_COMMAND} -E touch
           ${CMAKE_BINARY_DIR}/record_smoke_required
+  ${RECORD_SMOKE_SHM_TRANSPORT_COMMANDS}
   COMMAND chmod +x ${CMAKE_BINARY_DIR}/validate_record_smoke.sh
   DEPENDS ibmw::core::main
           ${PKG_TARGET}
@@ -115,8 +142,7 @@ add_custom_target(
           example_ros2__rosidl_typesupport_introspection_cpp
           ibmw_schema_common_ts
           ibmw_dds_extension
-          ibmw_extensions_iceoryx_ext
-          iox-roudi
+          ${RECORD_SMOKE_SHM_TRANSPORT_TARGETS}
           ibmw_extensions_mqtt_ext
           ibmw_extensions_zenoh_ext
           ibmw_extensions_net_ext

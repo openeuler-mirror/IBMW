@@ -60,6 +60,7 @@ ibmw/
     |  |  mqtt_ext/       #     MQTT
      |  |  ros2_ext/       #     ROS2 **(deprecated)**
     |  |  iceoryx_ext/    #     Iceoryx (shared memory)
+    |  |  shm_ext/        #     Self-developed shared memory (selfdev/shm, no RouDi)
     |  |  zenoh_ext/      #     Zenoh
     |  rpc/
     |  |  grpc_ext/       #     gRPC

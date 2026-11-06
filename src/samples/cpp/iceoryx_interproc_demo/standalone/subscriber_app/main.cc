@@ -15,6 +15,15 @@
 
 using namespace ibmw::runtime::core;
 
+// shm_interproc_demo builds this file unchanged over the self-developed shm transport
+// and overrides the two banner strings below (see shm_interproc_demo/CMakeLists.txt).
+#ifndef IBMW_DEMO_TITLE
+#define IBMW_DEMO_TITLE "IBMW Iceoryx Interproc Demo"
+#endif
+#ifndef IBMW_DEMO_TRANSPORT_NOTE
+#define IBMW_DEMO_TRANSPORT_NOTE "NOTE: requires iox-roudi daemon to be running."
+#endif
+
 Engine* global_core_ptr = nullptr;
 
 void SignalHandler(int sig) {
@@ -29,8 +38,8 @@ int32_t main(int32_t argc, char** argv) {
   signal(SIGINT, SignalHandler);
   signal(SIGTERM, SignalHandler);
 
-  std::cout << "IBMW Iceoryx Interproc Demo (Subscriber) start." << std::endl;
-  std::cout << "NOTE: requires iox-roudi daemon to be running." << std::endl;
+  std::cout << IBMW_DEMO_TITLE " (Subscriber) start." << std::endl;
+  std::cout << IBMW_DEMO_TRANSPORT_NOTE << std::endl;
 
   try {
     Engine core;
@@ -59,6 +68,6 @@ int32_t main(int32_t argc, char** argv) {
     return -1;
   }
 
-  std::cout << "IBMW Iceoryx Interproc Demo (Subscriber) exit." << std::endl;
+  std::cout << IBMW_DEMO_TITLE " (Subscriber) exit." << std::endl;
   return 0;
 }

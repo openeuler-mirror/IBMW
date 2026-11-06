@@ -1,43 +1,25 @@
 ═══════════════════════════════════════════════════════════
- IBMW Red-Line Check (R1-R11)  mode=report
+ IBMW Red-Line Check (R1-R12)  mode=report
  repo: <repository-root>
- user-facing files scanned: 321
- timestamp: 2026-04-28 12:46:22
+ user-facing files scanned: 358
+ timestamp: 2026-11-04 17:25:50
 ═══════════════════════════════════════════════════════════
 ── [R1] (HIGH) user-facing 不得 include transport-private header ──
+R1: src/samples/cpp/r8_validation/direct_shm_no_anchor_fail/standalone/main.cc:23:#include "shm_ext/shm_transport_driver.h"
+R1: src/samples/cpp/r8_validation/direct_iceoryx_no_anchor_fail/standalone/main.cc:24:#include "iceoryx_ext/iceoryx_transport_driver.h"
 ── [R2] (HIGH) user-facing 不得引用 transport-specific 命名空间 ──
-R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/subscriber_module/subscriber_module.cc:20:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
-R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:66:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:78:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.cc:38:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.cc:50:  bool ok = ibmw::extensions::iceoryx_extension::RegisterRawPodSubscriber(
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:45:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:53:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:54:  std::shared_ptr<ibmw::extensions::iceoryx_extension::IoxRawPodPublisher>
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.cc:54:  raw_pub_ = ibmw::extensions::iceoryx_extension::CreateRawPodPublisher(
-R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:65:      ibmw::extensions::dds_extension::DdsTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:84:    std::shared_ptr<ibmw::extensions::dds_extension::Ros2StylePublisher<PlainT>>
-R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:89:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.cc:134:    slot.typed_pub = ibmw::extensions::dds_extension::                         \
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:47:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:57:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:61:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:81:        ibmw::extensions::iceoryx_extension::IoxCtxMetaTypedPublisher<PlainT>>
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:86:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.cc:105:    slot.typed_pub = ibmw::extensions::iceoryx_extension::                     \
-R2: src/samples/cpp/ros2_interop_demo/managed/subscriber_module/subscriber_module.cc:15:  bool success = ibmw::ros2::transport::OnMessage<std_msgs::msg::String>(
-R2: src/samples/cpp/ros2_interop_demo/managed/publisher_module/publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<std_msgs::msg::String>(
-R2: src/samples/cpp/ros2_interop_demo/managed/publisher_module/publisher_module.cc:54:    ibmw::ros2::transport::Send(
-R2: src/samples/cpp/ros2_point_demo/managed/point_publisher_module/point_publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<geometry_msgs::msg::Point>(
-R2: src/samples/cpp/ros2_point_demo/managed/point_publisher_module/point_publisher_module.cc:57:    ibmw::ros2::transport::Send(
-R2: src/samples/cpp/ros2_point_demo/managed/point_subscriber_module/point_subscriber_module.cc:15:  bool success = ibmw::ros2::transport::OnMessage<geometry_msgs::msg::Point>(
+R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.h:31:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
+R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.h:47:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
 R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.cc:8:namespace dds_ext = ibmw::extensions::dds_extension;
 R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.cc:17:    ibmw::ros2::transport::RegisterSendType<geometry_msgs::msg::Point>(
 R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.cc:22:    ibmw::ros2::transport::RegisterSendType<std_msgs::msg::String>(
-R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.h:31:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
-R2: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.h:47:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<std_msgs::msg::String>(
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:33:        ibmw::extensions::dds_extension::create_publisher_with_driver_config<
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:76:      ibmw::ros2::transport::Send<std_msgs::msg::String>(
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:117:    ibmw::ros2::transport::Send<std_msgs::msg::String>(
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:33:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:43:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
+R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:45:  using StringPublisher = ibmw::extensions::dds_extension::Ros2StylePublisher<std_msgs::msg::String>;
 R2: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:33:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
 R2: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:42:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
 R2: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:44:  using PointPublisher = ibmw::extensions::dds_extension::Ros2StylePublisher<geometry_msgs::msg::Point>;
@@ -45,94 +27,122 @@ R2: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_pub
 R2: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.cc:32:    loaned_publisher_ = ibmw::extensions::dds_extension::create_publisher_with_driver_config<
 R2: src/samples/cpp/loaned_message_demo/managed/subscriber_module/subscriber_module.cc:14:    bool success = ibmw::ros2::transport::OnMessage<geometry_msgs::msg::Point>(
 R2: src/samples/cpp/loaned_message_demo/managed/subscriber_module/subscriber_module.cc:27:    bool success = ibmw::ros2::transport::OnMessage<std_msgs::msg::String>(
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:33:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:43:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:45:  using StringPublisher = ibmw::extensions::dds_extension::Ros2StylePublisher<std_msgs::msg::String>;
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<std_msgs::msg::String>(
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:33:        ibmw::extensions::dds_extension::create_publisher_with_driver_config<
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:76:      ibmw::ros2::transport::Send<std_msgs::msg::String>(
-R2: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.cc:117:    ibmw::ros2::transport::Send<std_msgs::msg::String>(
-R2: src/samples/cpp/ros2_interop_demo/ros2_interop_demo_gen/src/subscriber_module/subscriber_module.cc:15:  bool success = ibmw::ros2::transport::OnMessage<std_msgs::msg::String>(
+R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:66:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:82:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.cc:38:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
+R2: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/subscriber_module/subscriber_module.cc:20:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
+R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:65:      ibmw::extensions::dds_extension::DdsTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:84:    std::shared_ptr<ibmw::extensions::dds_extension::Ros2StylePublisher<PlainT>>
+R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:89:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.cc:134:    slot.typed_pub = ibmw::extensions::dds_extension::                         \
+R2: src/samples/cpp/transport_benchmark/shm_loan_v2/managed/publisher_module/publisher_module.cc:21:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::shm_extension::ShmTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.h:58:  ibmw::extensions::shm_extension::ShmTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.h:59:  std::unique_ptr<ibmw::extensions::shm_extension::ShmRawPodPublisher>
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.cc:53:  raw_pub_ = ibmw::extensions::shm_extension::CreateShmRawPodPublisher(
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::shm_extension::ShmTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:50:  ibmw::extensions::shm_extension::ShmTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.h:56:    std::unique_ptr<ibmw::extensions::shm_extension::ShmCtxMetaTypedPublisher<PlainT>> typed_pub;
+R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.cc:25:  return std::string("dds:") + ibmw::dds::DdsTypeName<T>::get();
+R2: src/samples/cpp/transport_benchmark/shm_loaned_ctx/managed/publisher_module/publisher_module.cc:79:      ibmw::extensions::shm_extension::CreateShmCtxMetaTypedPublisher<ALIAS>(  \
+R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:61:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:81:        ibmw::extensions::iceoryx_extension::IoxCtxMetaTypedPublisher<PlainT>>
+R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:86:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.cc:108:    slot.typed_pub = ibmw::extensions::iceoryx_extension::                     \
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:58:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:59:  std::shared_ptr<ibmw::extensions::iceoryx_extension::IoxRawPodPublisher>
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.cc:53:  raw_pub_ = ibmw::extensions::iceoryx_extension::CreateRawPodPublisher(
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:50:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.cc:50:  bool ok = ibmw::extensions::iceoryx_extension::RegisterRawPodSubscriber(
+R2: src/samples/cpp/ros2_interop_demo/managed/publisher_module/publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<std_msgs::msg::String>(
+R2: src/samples/cpp/ros2_interop_demo/managed/publisher_module/publisher_module.cc:54:    ibmw::ros2::transport::Send(
+R2: src/samples/cpp/ros2_interop_demo/managed/subscriber_module/subscriber_module.cc:15:  bool success = ibmw::ros2::transport::OnMessage<std_msgs::msg::String>(
+R2: src/samples/cpp/ros2_point_demo/managed/point_publisher_module/point_publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<geometry_msgs::msg::Point>(
+R2: src/samples/cpp/ros2_point_demo/managed/point_publisher_module/point_publisher_module.cc:57:    ibmw::ros2::transport::Send(
+R2: src/samples/cpp/ros2_point_demo/managed/point_subscriber_module/point_subscriber_module.cc:15:  bool success = ibmw::ros2::transport::OnMessage<geometry_msgs::msg::Point>(
 R2: src/samples/cpp/ros2_interop_demo/ros2_interop_demo_gen/src/publisher_module/publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<std_msgs::msg::String>(
 R2: src/samples/cpp/ros2_interop_demo/ros2_interop_demo_gen/src/publisher_module/publisher_module.cc:53:    ibmw::ros2::transport::Send(
+R2: src/samples/cpp/ros2_interop_demo/ros2_interop_demo_gen/src/subscriber_module/subscriber_module.cc:17:  bool success = ibmw::ros2::transport::OnMessage<std_msgs::msg::String>(
 R2: src/samples/cpp/ros2_point_demo/ros2_point_demo_gen/src/point_publisher_module/point_publisher_module.cc:15:  bool success = ibmw::ros2::transport::RegisterSendType<geometry_msgs::msg::Point>(
 R2: src/samples/cpp/ros2_point_demo/ros2_point_demo_gen/src/point_publisher_module/point_publisher_module.cc:53:    ibmw::ros2::transport::Send(
-R2: src/samples/cpp/ros2_point_demo/ros2_point_demo_gen/src/point_subscriber_module/point_subscriber_module.cc:15:  bool success = ibmw::ros2::transport::OnMessage<geometry_msgs::msg::Point>(
-R2: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:27:namespace iox_ext = ibmw::extensions::iceoryx_extension;
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/publisher_app/main.cc:24:namespace iox_ext = ibmw::extensions::iceoryx_extension;
-R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/subscriber_app/main.cc:16:namespace iox_ext = ibmw::extensions::iceoryx_extension;
-R2: src/samples/cpp/transport_benchmark/dds_loaned/standalone/publisher_app/main.cc:25:namespace dds_ext = ibmw::extensions::dds_extension;
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:24:namespace iox_ext = ibmw::extensions::iceoryx_extension;
-R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:16:namespace iox_ext = ibmw::extensions::iceoryx_extension;
+R2: src/samples/cpp/ros2_point_demo/ros2_point_demo_gen/src/point_subscriber_module/point_subscriber_module.cc:17:  bool success = ibmw::ros2::transport::OnMessage<geometry_msgs::msg::Point>(
 R2: src/samples/cpp/loaned_message_demo/standalone/config_test_app/main.cc:16:namespace dds_ext = ibmw::extensions::dds_extension;
+R2: src/samples/cpp/loaned_message_demo/standalone/plain_pub_only_app/main.cc:16:namespace dds_ext = ibmw::extensions::dds_extension;
 R2: src/samples/cpp/loaned_message_demo/standalone/nonplain_pub_only_app/main.cc:16:namespace dds_ext = ibmw::extensions::dds_extension;
 R2: src/samples/cpp/loaned_message_demo/standalone/loaned_message_app/main.cc:18:namespace dds_ext = ibmw::extensions::dds_extension;
-R2: src/samples/cpp/loaned_message_demo/standalone/plain_pub_only_app/main.cc:16:namespace dds_ext = ibmw::extensions::dds_extension;
+R2: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:27:namespace iox_ext = ibmw::extensions::iceoryx_extension;
+R2: src/samples/cpp/transport_benchmark/dds_loaned/standalone/publisher_app/main.cc:25:namespace dds_ext = ibmw::extensions::dds_extension;
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/standalone/subscriber_app/main.cc:16:namespace shm_ext = ibmw::extensions::shm_extension;
+R2: src/samples/cpp/transport_benchmark/shm_loaned_pod/standalone/publisher_app/main.cc:24:namespace shm_ext = ibmw::extensions::shm_extension;
+R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:18:namespace iox_ext = ibmw::extensions::iceoryx_extension;
+R2: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:27:namespace iox_ext = ibmw::extensions::iceoryx_extension;
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/subscriber_app/main.cc:16:namespace iox_ext = ibmw::extensions::iceoryx_extension;
+R2: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/publisher_app/main.cc:24:namespace iox_ext = ibmw::extensions::iceoryx_extension;
 ── [R3] (HIGH) user-facing 类不得持 *TransportDriver* 成员 ──
-R3: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:66:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:78:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:45:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:53:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R3: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:65:      ibmw::extensions::dds_extension::DdsTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:89:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_{nullptr};
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:47:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/subscriber_module/subscriber_module.h:57:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:61:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:86:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R3: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.h:31:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
 R3: src/samples/cpp/loaned_message_demo/managed/config_test_module/config_test_module.h:47:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
-R3: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:33:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
-R3: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:42:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
 R3: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:33:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
 R3: src/samples/cpp/loaned_message_demo/managed/nonplain_publisher_module/nonplain_publisher_module.h:43:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
-R3: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:59:    iox_ext::IceoryxTransportDriver* driver = nullptr;
-R3: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:62:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/publisher_app/main.cc:56:    iox_ext::IceoryxTransportDriver* driver = nullptr;
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/publisher_app/main.cc:59:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/subscriber_app/main.cc:48:    iox_ext::IceoryxTransportDriver* driver = nullptr;
-R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/subscriber_app/main.cc:51:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
-R3: src/samples/cpp/transport_benchmark/dds_loaned/standalone/publisher_app/main.cc:57:    dds_ext::DdsTransportDriver* driver = nullptr;
-R3: src/samples/cpp/transport_benchmark/dds_loaned/standalone/publisher_app/main.cc:60:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:56:    iox_ext::IceoryxTransportDriver* driver = nullptr;
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:59:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:48:    iox_ext::IceoryxTransportDriver* driver = nullptr;
-R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:51:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:33:  void SetDdsDriver(ibmw::extensions::dds_extension::DdsTransportDriver* driver) {
+R3: src/samples/cpp/loaned_message_demo/managed/plain_publisher_module/plain_publisher_module.h:42:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_ = nullptr;
+R3: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:66:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:82:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R3: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:65:      ibmw::extensions::dds_extension::DdsTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.h:89:  ibmw::extensions::dds_extension::DdsTransportDriver* driver_{nullptr};
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::shm_extension::ShmTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/publisher_module/publisher_module.h:58:  ibmw::extensions::shm_extension::ShmTransportDriver* driver_{nullptr};
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::shm_extension::ShmTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/managed/subscriber_module/subscriber_module.h:50:  ibmw::extensions::shm_extension::ShmTransportDriver* driver_{nullptr};
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:61:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/managed/publisher_module/publisher_module.h:86:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:41:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/publisher_module/publisher_module.h:58:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:35:      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/managed/subscriber_module/subscriber_module.h:50:  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
 R3: src/samples/cpp/loaned_message_demo/standalone/config_test_app/main.cc:54:    dds_ext::DdsTransportDriver* driver = nullptr;
 R3: src/samples/cpp/loaned_message_demo/standalone/config_test_app/main.cc:57:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
+R3: src/samples/cpp/loaned_message_demo/standalone/plain_pub_only_app/main.cc:50:    dds_ext::DdsTransportDriver* driver = nullptr;
+R3: src/samples/cpp/loaned_message_demo/standalone/plain_pub_only_app/main.cc:53:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
 R3: src/samples/cpp/loaned_message_demo/standalone/nonplain_pub_only_app/main.cc:50:    dds_ext::DdsTransportDriver* driver = nullptr;
 R3: src/samples/cpp/loaned_message_demo/standalone/nonplain_pub_only_app/main.cc:53:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
 R3: src/samples/cpp/loaned_message_demo/standalone/loaned_message_app/main.cc:64:    dds_ext::DdsTransportDriver* driver = nullptr;
 R3: src/samples/cpp/loaned_message_demo/standalone/loaned_message_app/main.cc:67:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
-R3: src/samples/cpp/loaned_message_demo/standalone/plain_pub_only_app/main.cc:50:    dds_ext::DdsTransportDriver* driver = nullptr;
-R3: src/samples/cpp/loaned_message_demo/standalone/plain_pub_only_app/main.cc:53:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:59:    iox_ext::IceoryxTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:62:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/dds_loaned/standalone/publisher_app/main.cc:57:    dds_ext::DdsTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/dds_loaned/standalone/publisher_app/main.cc:60:        driver = dynamic_cast<dds_ext::DdsTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/standalone/subscriber_app/main.cc:48:    shm_ext::ShmTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/standalone/subscriber_app/main.cc:51:        driver = dynamic_cast<shm_ext::ShmTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/standalone/publisher_app/main.cc:56:    shm_ext::ShmTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/shm_loaned_pod/standalone/publisher_app/main.cc:59:        driver = dynamic_cast<shm_ext::ShmTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:44:    iox_ext::IceoryxTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:49:        driver = static_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/subscriber_app/main.cc:51:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:66:    iox_ext::IceoryxTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:71:        driver = static_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loaned_ctx/standalone/publisher_app/main.cc:73:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/subscriber_app/main.cc:48:    iox_ext::IceoryxTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/subscriber_app/main.cc:51:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/publisher_app/main.cc:56:    iox_ext::IceoryxTransportDriver* driver = nullptr;
+R3: src/samples/cpp/transport_benchmark/iox_loaned_pod/standalone/publisher_app/main.cc:59:        driver = dynamic_cast<iox_ext::IceoryxTransportDriver*>(td);
 ── [R4] (HIGH) user-facing 不得 override SetDriver(driver_name) 做字符串匹配 ──
 ── [R5] (MEDIUM) 用户 yaml 不得含 transport-specific 字段 ──
-R5: src/samples/cpp/loaned_message_demo/loaned_message_demo_gen/loaned_message_demo.ibmw.yaml:40:    zero_copy_config: auto
-R5: src/samples/cpp/loaned_message_demo/loaned_message_demo.ibmw.yaml:40:    zero_copy_config: auto
-R5: src/samples/cpp/loaned_message_demo/loaned_message_demo_iceoryx_gen/loaned_message_demo_iceoryx.ibmw.yaml:50:    zero_copy_config: strict
-R5: src/samples/cpp/loaned_message_demo/loaned_message_demo_iceoryx.ibmw.yaml:50:    zero_copy_config: strict
 ── [R7] (CRITICAL) user-facing + pkg_main.h 不得 export 含 driver_name 字符串的 set_driver ──
 ── [R9] (HIGH) user-facing 不得直接调 EnsurePodTopic / RegisterType / typesupport_register ──
 R9: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:26://   2) driver_->EnsurePodTopic(topic, prefixed_msg_type, hint) -- so
-R9: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.h:63:  // The iceoryx driver is needed only for the one-time EnsurePodTopic()
 R9: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.cc:95:    if (!driver_->EnsurePodTopic(kTopic, msg_type, (N))) {                     \
 R9: src/samples/cpp/transport_benchmark/iox_loan_v2/managed/publisher_module/publisher_module.cc:97:             "PublisherModule: EnsurePodTopic<" LBL "> failed");               \
 R9: src/samples/cpp/transport_benchmark/dds_loaned/managed/publisher_module/publisher_module.cc:81:  // type.register_type() against the FastDDS Participant and creates
-R9: src/samples/cpp/transport_benchmark/iox_loan_v2/standalone/publisher_app/main.cc:10:// injected into the module so PublisherModule can call EnsurePodTopic()
-── [R11] (REPORT-ONLY) yaml 不得按 transport 分裂 module_type（strict） ──
+R9: src/samples/cpp/transport_benchmark/shm_loan_v2/managed/publisher_module/publisher_module.h:10:// EnsurePodTopic(); here SenderRef::RegisterLoanedPodTopic() goes through the
+── [R11] (HIGH) yaml 不得按 transport 分裂 module_type（strict） ──
 ── [R8] (HIGH) user-facing 不得在无 IBMW_HAS_* 守卫的代码区同时使用 LoanedSample<> + SenderAccess<>::Send( ──
-── [R12] (REPORT-ONLY) user-facing 不得把 IBMW_HAS_* 当作运行时表达式（strict） ──
-
-── [R11] (REPORT-ONLY) yaml module_type transport-split ──
-
-── [R12] (REPORT-ONLY) IBMW_HAS_* used as runtime expression ──
+── [R12] (HIGH) user-facing 不得把 IBMW_HAS_* 当作运行时表达式（STRICT） ──
+R12: src/samples/cpp/r12_validation/r12_runtime_use_fail/standalone/main.cc:34:  if (IBMW_HAS_DDS) {
 
 ═══════════════════════════════════════════════════════════
  Summary
-   R1-R9+R8 violations : 110
-   R11 (report-only)   : 0
-   R12 (report-only)   : 0
+   R1-R12 violations   : 130
 ═══════════════════════════════════════════════════════════
 [--report] exit 0 regardless of violations.

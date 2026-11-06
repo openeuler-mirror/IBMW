@@ -22,8 +22,15 @@
 #include "cpp/transport/loaned_sample.h"
 #include "cpp/transport/loaned_subscriber.h"
 #include "engine/transport/transport_bus.h"
+#ifdef IBMW_RETAINED_E2E_SHM
+// shm_retained_loan_e2e: the same workloads on the self-developed shm driver
+// (no RouDi; IBMW_SHM_ROOT / IBMW_SHM_DOMAIN select the discovery root).
+#include "shm_ext/shm_bus.h"
+#include "shm_ext/shm_transport_driver.h"
+#else
 #include "iceoryx_ext/iceoryx_bus.h"
 #include "iceoryx_ext/iceoryx_transport_driver.h"
+#endif
 #ifdef IBMW_ENABLE_CORE_METRICS
 #include "observability/core_metrics.h"
 #endif
@@ -41,7 +48,11 @@ void WaitForCollectorStop() {
 
 using namespace std::chrono_literals;
 namespace core_transport = ibmw::runtime::core::transport;
+#ifdef IBMW_RETAINED_E2E_SHM
+namespace shm_ext = ibmw::extensions::shm_extension;
+#else
 namespace iox_ext = ibmw::extensions::iceoryx_extension;
+#endif
 
 constexpr std::string_view kTopic = "/ibmw/e2e/frame_bundle";
 constexpr std::string_view kMessageType = "ibmw.realsense/FrameBundleV1";
@@ -123,13 +134,21 @@ bool IsValid(const FrameBundle& frame, size_t size) noexcept {
 YAML::Node MakeConfig(bool publisher) {
   YAML::Node root;
   YAML::Node driver;
+#ifdef IBMW_RETAINED_E2E_SHM
+  driver["type"] = "shm";
+#else
   driver["type"] = "iceoryx";
+#endif
   driver["options"] = YAML::Node(YAML::NodeType::Map);
   root["drivers"].push_back(driver);
 
   YAML::Node topic;
   topic["topic"] = std::string(kTopic);
+#ifdef IBMW_RETAINED_E2E_SHM
+  topic["enable_drivers"].push_back("shm");
+#else
   topic["enable_drivers"].push_back("iceoryx");
+#endif
   topic["enable_filters"] = YAML::Node(YAML::NodeType::Sequence);
   root[publisher ? "publishers" : "subscribers"].push_back(topic);
   return root;
@@ -140,9 +159,17 @@ struct Runtime {
 #ifdef IBMW_ENABLE_CORE_METRICS
     ibmw::runtime::core::observability::CoreMetricsController().Initialize(this);
 #endif
+#ifdef IBMW_RETAINED_E2E_SHM
+    shm_ext::ShmBusOptions bus_options;
+    bus_options.runtime_name = std::string(runtime_id);
+    shm_bus.Initialize(bus_options);
+    auto concrete_driver =
+        std::make_unique<shm_ext::ShmTransportDriver>(shm_bus, "shm");
+#else
     iceoryx_bus.Initialize(sizeof(FrameBundle), runtime_id);
     auto concrete_driver =
         std::make_unique<iox_ext::IceoryxTransportDriver>(iceoryx_bus);
+#endif
     auto* concrete_ptr = concrete_driver.get();
     driver = concrete_ptr;
     std::unique_ptr<core_transport::TransportDriver> driver =
@@ -182,9 +209,15 @@ struct Runtime {
 #endif
   }
 
+#ifdef IBMW_RETAINED_E2E_SHM
+  shm_ext::ShmBus shm_bus;
+  core_transport::TransportBus transport_bus;
+  shm_ext::ShmTransportDriver* driver = nullptr;
+#else
   iox_ext::IceoryxBus iceoryx_bus;
   core_transport::TransportBus transport_bus;
   iox_ext::IceoryxTransportDriver* driver = nullptr;
+#endif
   bool shutdown = false;
 };
 
@@ -310,7 +343,15 @@ int RunSubscriber() {
               state.callback_thread = std::this_thread::get_id();
               state.held_sequence = frame.sequence;
               state.held_loan.emplace(std::move(loan));
+#ifdef IBMW_RETAINED_E2E_SHM
+              // The main thread and the releaser wait on this cv. notify_one
+              // may wake only the main thread; the releaser then holds the
+              // loan until its 7 s timeout, close to the publisher's end, so
+              // recovery after the release is not guaranteed.
+              state.cv.notify_all();
+#else
               state.cv.notify_one();
+#endif
             } else if (state.released.load()) {
               ++state.callbacks_after_release;
               state.cv.notify_one();

@@ -77,11 +77,14 @@ option(IBMW_INSTALL "Enable installation of IBMW." ON)
 cmake_dependent_option(IBMW_BUILD_EXAMPLES "IBMW build examples." OFF "IBMW_BUILD_RUNTIME" OFF)
 
 # Multi-transport end-to-end benchmark suite (src/samples/cpp/transport_benchmark).
-# Compares iceoryx / DDS (FastDDS) / native net_extension paths across seven
-# pub/sub sample pairs. Gated on iceoryx extension because 3 of 7 samples need
-# it; DDS extension should also be enabled to build all 7 samples. Off by
-# default to keep regular CI builds light.
-cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+# Compares iceoryx / self-developed shm / DDS (FastDDS) / native net_extension
+# paths across the pub/sub sample pairs. Gated on a shared-memory extension
+# (iceoryx or shm): each lane skips itself when its transport is off, so a
+# shm-only Linux build gets the shm_* lanes without iceoryx (the OHOS cross build
+# of the benchmark tree has only iox_loaned_ctx). The DDS extension should
+# also be enabled to build the DDS lanes. Off by default to keep regular CI
+# builds light.
+cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION" OFF)
 if(CMAKE_CROSSCOMPILING)
   set(_IBMW_ROS2_SAMPLE_DEFAULT OFF)
 else()
@@ -98,8 +101,9 @@ unset(_IBMW_ROS2_SAMPLE_DEFAULT)
 # IbmwR82SlotMixCheck<> static_assert; no_anchor_fail produces a fresh R1
 # violation). Gated OFF so default CI keeps building clean. The Gate 9
 # dual-build matrix opts in via -DIBMW_BUILD_R8_FAIL_SAMPLES=ON and asserts
-# expected build failures.
-cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deliberate-fail samples (used by Gate 9 dual-build matrix)." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+# expected build failures. Each shared-memory transport (iceoryx, shm) brings
+# its own pair of fail samples.
+cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deliberate-fail samples (used by Gate 9 dual-build matrix)." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION" OFF)
 
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
@@ -118,7 +122,9 @@ cmake_dependent_option(IBMW_BUILD_NET_EXTENSION "IBMW build net extension." OFF 
 cmake_dependent_option(IBMW_BUILD_MQTT_EXTENSION "IBMW build mqtt extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ZENOH_EXTENSION "IBMW build zenoh extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ICEORYX_EXTENSION "IBMW build iceoryx extension." OFF "IBMW_BUILD_RUNTIME" OFF)
+cmake_dependent_option(IBMW_BUILD_SHM_EXTENSION "IBMW build self-developed zero-copy shm extension (iceoryx replacement, no RouDi)." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_RETAINED_LOAN_E2E "IBMW build retained-loan iceoryx E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+cmake_dependent_option(IBMW_BUILD_SHM_RETAINED_LOAN_E2E "IBMW build retained-loan shm E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_SHM_EXTENSION" OFF)
 option(IBMW_ICEORYX_USE_PACKAGE "Use a prebuilt target iceoryx package instead of FetchContent." OFF)
 cmake_dependent_option(IBMW_BUILD_OPENTELEMETRY_EXTENSION "IBMW build opentelemetry extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ECHO_EXTENSION "IBMW build echo extension." OFF "IBMW_BUILD_RUNTIME" OFF)
@@ -310,8 +316,12 @@ endif()
 # ============================================================================
 include(NamespaceTool)
 
+# The benchmark payloads are CDR-serialized (bench_payload links dds_types).
+# dds_types is also built for iceoryx and its replacement, the shm extension
+# (src/extensions/CMakeLists.txt).
 if(IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_DDS_EXTENSION OR
-   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION)
+   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION OR
+   IBMW_BUILD_SHM_EXTENSION OR IBMW_BUILD_BENCHMARKS)
   # Resolve the explicitly selected DDS provider before loading code-generation
   # helpers. Those helpers must never perform an independent provider search.
   include(GetFastDDS)
@@ -491,6 +501,11 @@ if(IBMW_BUILD_RUNTIME)
       "IBMW_BUILD_RETAINED_LOAN_E2E requires IBMW_BUILD_ICEORYX_EXTENSION")
   endif()
 
+  if(IBMW_BUILD_SHM_RETAINED_LOAN_E2E AND NOT IBMW_BUILD_SHM_EXTENSION)
+    message(FATAL_ERROR
+      "IBMW_BUILD_SHM_RETAINED_LOAN_E2E requires IBMW_BUILD_SHM_EXTENSION")
+  endif()
+
   if(IBMW_BUILD_MQTT_EXTENSION)
     include(GetPahoMqttC)
   endif()
@@ -547,9 +562,18 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # ============================================================================
 # Add subdirectory
 # ============================================================================
-if(IBMW_BUILD_RUNTIME OR IBMW_EXECUTOR_USE_SELFDEV_CORO)
+# Self-developed components must exist before src/ links them.
+if(IBMW_BUILD_SHM_EXTENSION)
+  # OHOS runs a Linux kernel (musl userland); CMake reports it as "OHOS".
+  if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|OHOS)$")
+    message(FATAL_ERROR "IBMW_BUILD_SHM_EXTENSION requires a Linux kernel (memfd/futex/epoll).")
+  endif()
+  set(IBMW_SELFDEV_SHM ON)
+endif()
+if(IBMW_BUILD_RUNTIME OR IBMW_EXECUTOR_USE_SELFDEV_CORO OR IBMW_SELFDEV_SHM)
   add_subdirectory(selfdev)
 endif()
+
 add_subdirectory(src)
 add_subdirectory(tools)
 
@@ -698,6 +722,7 @@ list(
   IBMW_BUILD_MQTT_EXTENSION
   IBMW_BUILD_ZENOH_EXTENSION
   IBMW_BUILD_ICEORYX_EXTENSION
+  IBMW_BUILD_SHM_EXTENSION
   IBMW_BUILD_OPENTELEMETRY_EXTENSION
   IBMW_BUILD_ECHO_EXTENSION
   IBMW_BUILD_ROS2_EXTENSION

@@ -58,6 +58,7 @@ ibmw/
     |  |  mqtt_ext/       #     MQTT
     |  |  ros2_ext/       #     ROS2 **(已废弃)**
     |  |  iceoryx_ext/    #     Iceoryx（共享内存）
+    |  |  shm_ext/        #     自研共享内存（selfdev/shm，无需 RouDi）
     |  |  zenoh_ext/      #     Zenoh
     |  rpc/
     |  |  grpc_ext/       #     gRPC

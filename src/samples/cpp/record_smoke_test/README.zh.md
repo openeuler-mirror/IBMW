@@ -5,7 +5,7 @@
 
 测试脚本会自动完成以下工作：
 
-1. 启动 Iceoryx RouDi 和 MQTT Broker；
+1. 启动 MQTT Broker；构建了 Iceoryx 时还会启动 Iceoryx RouDi（自研 shm 无需守护进程）；
 2. 根据独立 YAML 启动测试 Runtime；
 3. 启动 `ibmw bag record` 并录制消息；
 4. 停止 recorder 和 Runtime；
@@ -16,8 +16,13 @@
 
 ## 构建
 
-该测试需要同时启用 DDS、Iceoryx、MQTT、Zenoh、ROS2、Net 和
-record/playback extension。`ros2` preset 已包含除 Zenoh 外的所需选项：
+该测试需要同时启用 DDS、MQTT、Zenoh、ROS2、Net、record/playback extension，
+以及至少一种共享内存 transport：Iceoryx（`IBMW_BUILD_ICEORYX_EXTENSION`）或自研 shm
+（`IBMW_BUILD_SHM_EXTENSION`）。构建了哪一种就运行哪一种的用例，两者都构建时两个用例
+都运行。构建目标会在构建目录写入 `record_smoke_iceoryx_required` /
+`record_smoke_shm_required` 标记，测试脚本据此决定运行哪些共享内存用例；只有构建了
+Iceoryx 时才需要 `iox-roudi`。shm 用例默认使用本次运行私有的 `IBMW_SHM_ROOT`
+（运行结束后删除），调用方已设置 `IBMW_SHM_ROOT` 时沿用调用方的值。`ros2` preset 已包含除 Zenoh 外的所需选项：
 
 ```bash
 cd <IBMW_ROOT>
@@ -113,7 +118,8 @@ Local、TCP、UDP、HTTP 还会检查测试 Runtime 的 subscriber 接收日志�
 |-----------|---------------------|--------------------|--------------------------|
 | Local | Runtime publisher + Runtime subscriber；recorder Tap | `auto`（实际为 CDR） | bag 中有 Local topic 的消息；Runtime subscriber 收到消息 |
 | DDS | Runtime publisher；recorder 原生序列化订阅 | `cdr` | recorder 原生订阅采集到 DDS topic 并写入 bag |
-| Iceoryx | Runtime publisher；recorder 缓存类型订阅 | `cdr` | recorder 独立订阅采集到 Iceoryx topic 并写入 bag |
+| Iceoryx（仅构建 Iceoryx 时） | Runtime publisher；recorder 缓存类型订阅 | `cdr` | recorder 独立订阅采集到 Iceoryx topic 并写入 bag |
+| shm（仅构建自研 shm 时） | Runtime publisher；recorder 缓存类型订阅 | `cdr` | recorder 独立订阅采集到 shm topic 并写入 bag |
 | MQTT | Runtime publisher；recorder 缓存类型订阅 | `cdr` | recorder 独立订阅采集到 MQTT topic 并写入 bag |
 | Zenoh | Runtime publisher；recorder 原生序列化订阅 | `cdr` | recorder 原生订阅采集到 Zenoh topic 并写入 bag |
 | ROS2 | Runtime publisher；recorder 原生序列化订阅 | `ros2` | recorder 原生订阅采集到 ROS2 topic 并写入 bag，序列化格式为 `ros2` |

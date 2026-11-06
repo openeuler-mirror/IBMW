@@ -1,0 +1,50 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# shm_loaned_ctx publisher process configuration (self-developed shm transport,
+# driver_name "iceoryx", no RouDi).
+# The publisher module hard-codes the topic; subscriber.yaml selects the same
+# one through bench_options.topic.
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          driver_name: iceoryx
+          shm_init_size: 4096
+          runtime_id: "shm_loaned_ctx_pub"
+
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: iceoryx
+        options:
+          listener_thread_name: "shm_pub_listen"
+    publishers:
+      - topic: "shm_bench_ctx_topic"
+        enable_drivers: [iceoryx]
+
+  modules:
+    modules:
+      - name: ShmLoanedCtxPublisherModule
+        log_level: INFO
+
+ShmLoanedCtxPublisherModule:
+  bench_options:
+    payload_bytes: 1024
+    hz: 100
+    duration_sec: 30
+    label: shm_loaned_ctx_1KB
+    warmup_messages: 50

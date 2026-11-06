@@ -174,11 +174,17 @@ def generate_cmake(project: dict) -> str:
     loaned_subscriber_packages = project.get("_loaned_subscriber_packages", [])
     has_direct_iceoryx = project.get("_has_direct_iceoryx", False)
     direct_iceoryx_packages = project.get("_direct_iceoryx_packages", [])
-    needs_ros2_whole_archive = has_ros2_interop or has_direct_iceoryx
+    # direct_shm_* need the same ROS2 deps but no iceoryx_posh (shm_ext
+    # has no third-party runtime dependency).
+    has_direct_shm = project.get("_has_direct_shm", False)
+    direct_shm_packages = project.get("_direct_shm_packages", [])
+    needs_ros2_whole_archive = (has_ros2_interop or has_direct_iceoryx
+                                or has_direct_shm)
     ros2_msg_packages = sorted(set(ros2_interop_packages)
                                | set(loaned_publisher_packages)
                                | set(loaned_subscriber_packages)
-                               | set(direct_iceoryx_packages))
+                               | set(direct_iceoryx_packages)
+                               | set(direct_shm_packages))
     # Only explicit direct iceoryx modules compile against the implementation.
     needs_iceoryx_posh_top = has_direct_iceoryx
 
@@ -220,7 +226,7 @@ def generate_cmake(project: dict) -> str:
     if needs_ros2_whole_archive:
         lines.append("# --------------------------------------------------------------------------")
         lines.append("# Helper: force whole-archive link for ros2_types_impl static registrars.")
-        lines.append("# Used by ros2_interop_* and direct_iceoryx_* modules.")
+        lines.append("# Used by ros2_interop_*, direct_iceoryx_* and direct_shm_* modules.")
         lines.append("# --------------------------------------------------------------------------")
         lines.append("function(ibmw_whole_archive_link TARGET LIB)")
         lines.append("  if(APPLE)")
@@ -235,10 +241,10 @@ def generate_cmake(project: dict) -> str:
         lines.append("")
 
     # ROS2 message packages (e.g. geometry_msgs, sensor_msgs) needed by
-    # ros2_interop / loaned_* / direct_iceoryx_* modules.
+    # ros2_interop / loaned_* / direct_iceoryx_* / direct_shm_* modules.
     if ros2_msg_packages:
         lines.append("# --------------------------------------------------------------------------")
-        lines.append("# ROS2 message packages required by ros2_interop / loaned_* / direct_iceoryx_* modules.")
+        lines.append("# ROS2 message packages required by ros2_interop / loaned_* / direct_iceoryx_* / direct_shm_* modules.")
         lines.append("# --------------------------------------------------------------------------")
         lines.append("find_package(ament_cmake REQUIRED)")
         for pkg in ros2_msg_packages:
@@ -588,6 +594,20 @@ def generate_cmake(project: dict) -> str:
             # else: no other module type uses iceoryx today; future module
             # types should add their own branch here.
 
+        elif transport == "shm":
+            # Same module types as iceoryx (direct_shm_*, loaned_*); the
+            # direct path links shm_ext itself, which needs no iceoryx_posh.
+            if mod.get("_is_direct_shm"):
+                deps.append("ibmw::extensions::shm_ext")
+                deps.append("ibmw::extensions::ros2_types")
+                for pkg in mod.get("ros2_packages", []):
+                    deps.append(f"${{{pkg}_TARGETS}}")
+            elif (mod.get("_is_loaned_publisher") or
+                  mod.get("_is_loaned_subscriber")):
+                deps.append("ibmw::api::ros2_type_support")
+                for pkg in mod.get("ros2_packages", []):
+                    deps.append(f"${{{pkg}_TARGETS}}")
+
         elif transport == "json":
             deps.append("nlohmann_json::nlohmann_json")
             if mod.get("ros2_import_json_types_header") and mod.get("ros2_import_json_types_include_dir"):
@@ -628,7 +648,8 @@ def generate_cmake(project: dict) -> str:
 
         # Only interop and explicitly direct modules rely on the static
         # ros2_types registrar library.
-        if mod.get("_is_ros2_interop") or mod.get("_is_direct_iceoryx"):
+        if (mod.get("_is_ros2_interop") or mod.get("_is_direct_iceoryx")
+                or mod.get("_is_direct_shm")):
             lines.append(f"ibmw_whole_archive_link({snake_name} ibmw_extensions_ros2_types_impl)")
 
         lines.append("")
