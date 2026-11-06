@@ -16,6 +16,7 @@
 #include "discovery_options.h"
 #include "engine/discovery/registry_discovery_provider.h"
 #include "topic_check.h"
+#include "qos_check.h"
 
 namespace ibmw::cli::doctor {
 namespace {
@@ -98,6 +99,7 @@ int Run(const Invocation& invocation) {
   const auto options = topic::ParseDiscoveryOptions(invocation);
   const auto snapshot = CollectTopics(options, timeout);
   const auto results = CheckTopics(snapshot, invocation.HasOption("--include-hidden-topics"));
+  const auto qos_results = CheckQos(snapshot, invocation.HasOption("--include-hidden-topics"));
   size_t ok = 0, warnings = 0, unknown = 0, skipped = 0;
   const bool report = invocation.HasOption("--report");
   const bool details = report || invocation.HasOption("--report-failed");
@@ -125,10 +127,38 @@ int Run(const Invocation& invocation) {
                        source.observed_at->time_since_epoch()).count() << '\n';
     }
     std::cout << "Network discovery window: " << timeout.count() << " ms (registry is a local snapshot).\n";
-    std::cout << "Scope: selected sources only; this check does not establish QoS compatibility or delivery.\n";
+    std::cout << "Scope: selected sources only; topic presence and per-policy QoS checks do not prove delivery.\n";
   }
   std::cout << "Topic checks: " << ok << " OK, " << warnings << " WARN, "
             << unknown << " UNKNOWN, " << skipped << " SKIP\n";
+  size_t qos_ok = 0, qos_warnings = 0, qos_unknown = 0, qos_skipped = 0;
+  for (const auto& result : qos_results) {
+    switch (result.status) {
+      case CheckStatus::kOk: ++qos_ok; break;
+      case CheckStatus::kWarning: ++qos_warnings; break;
+      case CheckStatus::kUnknown: ++qos_unknown; break;
+      case CheckStatus::kSkipped: ++qos_skipped; break;
+    }
+    if (!report && result.status != CheckStatus::kWarning && result.status != CheckStatus::kUnknown) continue;
+    std::cout << '[' << StatusName(result.status) << "] qos topic=" << std::quoted(result.topic)
+              << " source=" << discovery::BackendName(result.source.backend)
+              << " domain=" << std::quoted(result.source.domain)
+              << " instance=" << std::quoted(result.source.instance_id)
+              << " driver=" << std::quoted(result.driver) << " type=" << std::quoted(result.type)
+              << " policy=" << result.policy << '\n';
+    if (!result.publisher.empty()) std::cout << "  publisher=" << std::quoted(result.publisher) << '\n';
+    if (!result.subscriber.empty()) std::cout << "  subscriber=" << std::quoted(result.subscriber) << '\n';
+    if (!result.offered.empty()) {
+      if (!result.publisher.empty() && !result.subscriber.empty()) {
+        std::cout << "  offered=" << std::quoted(result.offered) << " requested=" << std::quoted(result.requested) << '\n';
+      } else std::cout << "  value=" << std::quoted(result.offered) << '\n';
+    }
+    std::cout << "  " << result.message << '\n';
+  }
+  std::cout << "QoS policy checks: " << qos_ok << " OK, " << qos_warnings << " WARN, "
+            << qos_unknown << " UNKNOWN, " << qos_skipped << " SKIP\n";
+  unknown += qos_unknown;
+  warnings += qos_warnings;
   if (unknown != 0) return 2;
   return warnings != 0 && invocation.HasOption("--include-warnings") ? 1 : 0;
 }
@@ -139,7 +169,7 @@ int Run(const Invocation& invocation) {
 int RunDoctorCommand(int argc, const char* const* argv) {
   using namespace ibmw::cli;
   try {
-    Command command("ibmw doctor", "Check topics for publishers without subscribers (topic checks only)");
+    Command command("ibmw doctor", "Check topic endpoint presence and DDS/ROS 2 QoS policies");
     bool invoked = false;
     command.SetHandler([&invoked](const Invocation& invocation) {
       invoked = true;
@@ -148,9 +178,9 @@ int RunDoctorCommand(int argc, const char* const* argv) {
     topic::AddDiscoveryOptions(command);
     command.AddOption("--timeout", {}, "seconds", "Network discovery window, 0.01..60 seconds (default: 2)",
                       OptionValueMode::kRequired);
-    command.AddOption("--report", {}, {}, "Print all topic check results and observation scope");
+    command.AddOption("--report", {}, {}, "Print all topic and QoS policy results, including coverage gaps");
     command.AddOption("--report-failed", {}, {}, "Print details for warnings and incomplete checks");
-    command.AddOption("--include-warnings", {}, {}, "Return failure (1) when topic warnings are found");
+    command.AddOption("--include-warnings", {}, {}, "Return failure (1) when topic or QoS warnings are found");
     command.AddOption("--include-hidden-topics", {}, {}, "Consider hidden topics as well");
     std::vector<std::string> arguments;
     for (int index = 0; index < argc; ++index) arguments.emplace_back(argv[index]);

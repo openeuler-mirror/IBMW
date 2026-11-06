@@ -4,7 +4,7 @@
 add_library(ibmw_discovery_dds SHARED dds_discovery_provider.cc)
 target_include_directories(ibmw_discovery_dds PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_SOURCE_DIR}/src/core)
 target_link_libraries(ibmw_discovery_dds PRIVATE ibmw::core::extension_api
-  ${IBMW_FASTDDS_PROVIDER_TARGET} ${IBMW_FASTCDR_PROVIDER_TARGET})
+  ${IBMW_FASTDDS_PROVIDER_TARGET} ${IBMW_FASTCDR_PROVIDER_TARGET} nlohmann_json::nlohmann_json)
 set_target_properties(ibmw_discovery_dds PROPERTIES
   OUTPUT_NAME ibmw_discovery_dds LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
   INSTALL_RPATH "$ORIGIN/../lib;$ORIGIN")

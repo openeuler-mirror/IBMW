@@ -16,8 +16,8 @@ matches your task.
   runtime parameters through the selected RPC backend.
 - [Log CLI (中文)](guides/log-control.zh.md) — list registered loggers and change
   their runtime levels through the selected RPC backend.
-- [Doctor CLI (中文)](guides/doctor.zh.md) — check topics for publishers without
-  subscribers and report discovery failures separately.
+- [Doctor CLI (中文)](guides/doctor.zh.md) — check topic endpoint presence and
+  DDS/ROS 2 QoS policies, with explicit discovery and coverage diagnostics.
 - [Cross-compilation](guides/cross-compilation.md) — AArch64 Linux and scoped
   OHOS target-prefix workflows.
 - [OHOS Xiaoyi Humble Cross-build Guide](guides/ohos-xiaoyi-humble-cross-build-guide.zh.md)

@@ -86,6 +86,9 @@ class Ros2TransportDriver : public runtime::core::transport::TransportDriver {
     ros2_node_ptr_ = ros2_node_ptr;
   }
 
+  ibmw::transport::QosDescriptor EndpointQos(
+      std::string_view topic, std::string_view msg_type, bool publisher) const noexcept;
+
  private:
   static bool CheckRosMsg(std::string_view msg_type) {
     return (msg_type.substr(0, 5) == "ros2:");

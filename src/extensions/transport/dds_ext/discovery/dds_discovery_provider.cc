@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "../fastdds_compat.h"
+#include "../detail/qos_observation.h"
 #include <fastdds/dds/domain/DomainParticipant.hpp>
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
 #include <fastdds/dds/domain/DomainParticipantListener.hpp>
@@ -24,57 +25,6 @@ std::string GuidString(const rtps::GUID_t& guid) {
   std::ostringstream stream;
   stream << guid;
   return stream.str();
-}
-
-std::string Reliability(const auto& qos) {
-  switch (qos.kind) {
-    case dds::RELIABLE_RELIABILITY_QOS: return "reliable";
-    case dds::BEST_EFFORT_RELIABILITY_QOS: return "best_effort";
-  }
-  return {};
-}
-
-std::string Durability(const auto& qos) {
-  switch (qos.kind) {
-    case dds::VOLATILE_DURABILITY_QOS: return "volatile";
-    case dds::TRANSIENT_LOCAL_DURABILITY_QOS: return "transient_local";
-    case dds::TRANSIENT_DURABILITY_QOS: return "transient";
-    case dds::PERSISTENT_DURABILITY_QOS: return "persistent";
-  }
-  return {};
-}
-
-std::string Liveliness(const auto& qos) {
-  switch (qos.kind) {
-    case dds::AUTOMATIC_LIVELINESS_QOS: return "automatic";
-    case dds::MANUAL_BY_PARTICIPANT_LIVELINESS_QOS: return "manual_by_participant";
-    case dds::MANUAL_BY_TOPIC_LIVELINESS_QOS: return "manual_by_topic";
-  }
-  return {};
-}
-
-std::string DescribeDuration(const auto& duration) {
-  if (duration.is_infinite()) return "infinite";
-  return std::to_string(duration.seconds) + " s " + std::to_string(duration.nanosec) + " ns";
-}
-
-ibmw::transport::QosDescriptor DescribeQos(
-    const dds::ReliabilityQosPolicy& reliability, const dds::DurabilityQosPolicy& durability,
-    const dds::LivelinessQosPolicy& liveliness, const dds::OwnershipQosPolicy& ownership,
-    const dds::DeadlineQosPolicy& deadline, const dds::LifespanQosPolicy* lifespan) {
-  ibmw::transport::QosDescriptor result;
-  result.policies["reliability"] = Reliability(reliability);
-  result.policies["durability"] = Durability(durability);
-  result.policies["liveliness"] = Liveliness(liveliness);
-  result.policies["deadline"] = DescribeDuration(deadline.period);
-  result.policies["liveliness_lease_duration"] = DescribeDuration(liveliness.lease_duration);
-  // Lifespan is a writer policy; a reader's default is not an observation.
-  if (lifespan) result.policies["lifespan"] = DescribeDuration(lifespan->duration);
-  switch (ownership.kind) {
-    case dds::SHARED_OWNERSHIP_QOS: result.policies["ownership"] = "shared"; break;
-    case dds::EXCLUSIVE_OWNERSHIP_QOS: result.policies["ownership"] = "exclusive"; break;
-  }
-  return result;
 }
 
 class Provider final : public DiscoveryProvider, private dds::DomainParticipantListener {
@@ -161,8 +111,7 @@ class Provider final : public DiscoveryProvider, private dds::DomainParticipantL
       } else {
         Update(info.guid, info.participant_guid, info.topic_name.c_str(), info.type_name.c_str(),
                EndpointRole::kPublisher,
-               DescribeQos(info.reliability, info.durability, info.liveliness, info.ownership,
-                           info.deadline, &info.lifespan));
+               ibmw::extensions::dds_extension::detail::observation::Discovery(info, true));
       }
     });
   }
@@ -176,8 +125,7 @@ class Provider final : public DiscoveryProvider, private dds::DomainParticipantL
       } else {
         Update(info.guid, info.participant_guid, info.topic_name.c_str(), info.type_name.c_str(),
                EndpointRole::kSubscriber,
-               DescribeQos(info.reliability, info.durability, info.liveliness, info.ownership,
-                           info.deadline, nullptr));
+               ibmw::extensions::dds_extension::detail::observation::Discovery(info, false));
       }
     });
   }
@@ -187,10 +135,7 @@ class Provider final : public DiscoveryProvider, private dds::DomainParticipantL
     const auto& endpoint = info.info;
     const rtps::GUID_t participant(endpoint.guid().guidPrefix, rtps::c_EntityId_RTPSParticipant);
     Update(endpoint.guid(), participant, endpoint.topicName().c_str(), endpoint.typeName().c_str(), role,
-           DescribeQos(endpoint.m_qos.m_reliability, endpoint.m_qos.m_durability,
-                       endpoint.m_qos.m_liveliness, endpoint.m_qos.m_ownership,
-                       endpoint.m_qos.m_deadline,
-                       role == EndpointRole::kPublisher ? &endpoint.m_qos.m_lifespan : nullptr));
+           ibmw::extensions::dds_extension::detail::observation::Discovery(endpoint, role == EndpointRole::kPublisher));
   }
   void on_participant_discovery(dds::DomainParticipant*, rtps::ParticipantDiscoveryInfo&& info) override {
     OnDiscovery([&] {

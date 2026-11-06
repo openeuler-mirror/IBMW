@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "extension_api/ibmw_discovery_provider.h"
+#include "../detail/qos_observation.h"
 
 #include <array>
 #include <memory>
@@ -25,31 +26,6 @@ std::string GidString(const std::array<uint8_t, RMW_GID_STORAGE_SIZE>& gid) {
   for (const auto byte : gid) {
     result += hex[byte >> 4];
     result += hex[byte & 0x0f];
-  }
-  return result;
-}
-
-std::string DescribeDuration(const rmw_time_t& duration) {
-  constexpr rmw_time_t infinite = RMW_DURATION_INFINITE;
-  if (duration.sec == infinite.sec && duration.nsec == infinite.nsec) return "infinite";
-  if (duration.sec == 0 && duration.nsec == 0) return "unspecified";
-  return std::to_string(duration.sec) + " s " + std::to_string(duration.nsec) + " ns";
-}
-
-ibmw::transport::QosDescriptor DescribeQos(const rmw_qos_profile_t& qos) {
-  ibmw::transport::QosDescriptor result;
-  const auto add = [&](const char* name, const char* value) {
-    if (value) result.policies[name] = value;
-  };
-  add("reliability", rmw_qos_reliability_policy_to_str(qos.reliability));
-  add("durability", rmw_qos_durability_policy_to_str(qos.durability));
-  add("liveliness", rmw_qos_liveliness_policy_to_str(qos.liveliness));
-  add("history", rmw_qos_history_policy_to_str(qos.history));
-  result.policies["deadline"] = DescribeDuration(qos.deadline);
-  result.policies["lifespan"] = DescribeDuration(qos.lifespan);
-  result.policies["liveliness_lease_duration"] = DescribeDuration(qos.liveliness_lease_duration);
-  if (qos.history == RMW_QOS_POLICY_HISTORY_KEEP_LAST && qos.depth != 0) {
-    result.policies["depth"] = std::to_string(qos.depth);
   }
   return result;
 }
@@ -120,7 +96,7 @@ class Provider final : public DiscoveryProvider {
                               .topic_name = topic, .type_name = info.topic_type()};
     // RMW GIDs are opaque: do not infer a participant GUID or DDS wire names.
     if (serialization) result.serialization_type = serialization;
-    result.qos = DescribeQos(info.qos_profile().get_rmw_qos_profile());
+    result.qos = ibmw::extensions::ros2_extension::detail::DescribeQos(info.qos_profile().get_rmw_qos_profile());
     result.available_drivers = {"ros2"};
     result.hidden = topic.starts_with('_') || topic.find("/_") != std::string::npos;
     return result;

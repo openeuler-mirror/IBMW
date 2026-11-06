@@ -364,6 +364,7 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   };
 
   struct SerializedSubscriberInfo {
+    runtime::core::transport::TopicDescriptor descriptor;
     eprosima::fastdds::dds::Topic* topic = nullptr;
     eprosima::fastdds::dds::DataReader* reader = nullptr;
     eprosima::fastdds::dds::TypeSupport native_type_support;
@@ -429,11 +430,11 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   std::unordered_map<std::string, PublisherInfo> publisher_map_;
   // topic_name -> SubscriberInfo
   std::unordered_map<std::string, SubscriberInfo> subscriber_map_;
-  std::mutex serialized_subscriber_mutex_;
+  mutable std::mutex serialized_subscriber_mutex_;
   std::unordered_map<uint64_t, SerializedSubscriberInfo>
       serialized_subscriber_map_;
   std::atomic<uint64_t> next_serialized_subscriber_handle_{1};
-  std::mutex serialized_publisher_mutex_;
+  mutable std::mutex serialized_publisher_mutex_;
   std::unordered_map<uint64_t, SerializedPublisherInfo>
       serialized_publisher_map_;
   std::atomic<uint64_t> next_serialized_publisher_handle_{1};

@@ -1,7 +1,7 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 
 # Reuse topic discovery argument semantics without linking another CLI provider.
-set(doctor_cli_sources doctor_command.cc doctor_cli_provider.cc topic_check.cc
+set(doctor_cli_sources doctor_command.cc doctor_cli_provider.cc topic_check.cc qos_check.cc
     ../topic/discovery_options.cc)
 add_library(ibmw_doctor_cli_provider SHARED ${doctor_cli_sources})
 target_include_directories(ibmw_doctor_cli_provider PRIVATE ../topic)
