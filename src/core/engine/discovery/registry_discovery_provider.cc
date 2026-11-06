@@ -21,9 +21,18 @@ void RegistryDiscoveryProvider::Start(const DiscoveryOptions& options) {
 DiscoverySnapshot RegistryDiscoveryProvider::Query(
     std::chrono::steady_clock::time_point deadline) {
   static_cast<void>(deadline);
+  return QueryImpl(true);
+}
+
+DiscoverySnapshot RegistryDiscoveryProvider::QueryReadOnly() {
+  return QueryImpl(false);
+}
+
+DiscoverySnapshot RegistryDiscoveryProvider::QueryImpl(bool cleanup_stale) {
   if (!registry_) throw std::logic_error("Registry discovery has not been started.");
   ibmw::runtime::core::runtime_graph::TopicGraph graph;
-  runtimes_ = registry_->DiscoverLocalRuntimes();
+  runtimes_ = cleanup_stale ? registry_->DiscoverLocalRuntimes()
+                            : registry_->InspectLocalRuntimes();
   graph.ReplaceRuntimes(runtimes_);
 
   DiscoverySnapshot result;

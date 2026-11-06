@@ -18,6 +18,8 @@ class RuntimeRegistry {
       : registry_path_(ibmw::extension::RuntimeRegistryDirectory(registry_path)) {}
 
   std::vector<RuntimeRegistration> DiscoverLocalRuntimes() const;
+  // Same live-runtime validation, without removing stale registrations/sockets.
+  std::vector<RuntimeRegistration> InspectLocalRuntimes() const;
   std::vector<TopicAdvertisement> FindTopic(
       std::string_view topic_name) const;
 
@@ -26,6 +28,7 @@ class RuntimeRegistry {
   }
 
  private:
+  std::vector<RuntimeRegistration> DiscoverLocalRuntimesImpl(bool cleanup_stale) const;
   static bool IsProcessAlive(int64_t pid) noexcept;
 
   std::filesystem::path registry_path_;

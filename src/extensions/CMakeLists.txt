@@ -93,6 +93,7 @@ endif()
 
 # CLI providers are built after their runtime dependencies.
 add_subdirectory(cli/topic)
+add_subdirectory(cli/doctor)
 add_subdirectory(cli/module)
 add_subdirectory(cli/service)
 add_subdirectory(cli/param)

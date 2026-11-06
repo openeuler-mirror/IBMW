@@ -15,6 +15,8 @@ class RegistryDiscoveryProvider final : public DiscoveryProvider {
   void Start(const DiscoveryOptions& options) override;
   DiscoverySnapshot Query(
       std::chrono::steady_clock::time_point deadline) override;
+  // Diagnostic queries must not clean up the state they are inspecting.
+  DiscoverySnapshot QueryReadOnly();
   void Stop() noexcept override;
 
   // Registry control-plane details from the most recent Query. These stay out
@@ -23,6 +25,7 @@ class RegistryDiscoveryProvider final : public DiscoveryProvider {
   Runtimes() const noexcept { return runtimes_; }
 
  private:
+  DiscoverySnapshot QueryImpl(bool cleanup_stale);
   DiscoverySource source_;
   std::optional<ibmw::runtime::core::runtime_graph::RuntimeRegistry> registry_;
   std::vector<ibmw::runtime::core::runtime_graph::RuntimeRegistration> runtimes_;
