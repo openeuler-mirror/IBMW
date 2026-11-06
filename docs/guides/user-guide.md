@@ -336,6 +336,13 @@ parameters through the centralized parameter service. Connection options reuse
 `service call`; `set` changes runtime memory only. See the
 [parameter CLI guide (中文)](parameters.zh.md) for deployment and examples.
 
+### Runtime Log Levels
+
+Use `ibmw log list [module]` to list registered loggers and their current levels,
+and `ibmw log set <module> <level>` to change an existing logger (`core` selects
+the framework logger). Connection options reuse `service call`; no Runtime Agent
+or startup-file changes are involved. See the [log CLI guide (中文)](log-control.zh.md).
+
 ### Listing Local Modules
 
 `ibmw module list` uses RuntimeRegistry to list modules registered by live local runtimes

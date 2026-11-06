@@ -1,0 +1,8 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// Maps are JSON objects inside CDR strings, retaining the existing JSON schema.
+module ibmw { module protocols { module log_control_dds {
+  struct GetModuleLogLevelReq { sequence<string> module_names; };
+  struct GetModuleLogLevelRsp { unsigned long code; string msg; string module_log_level_json; };
+  struct SetModuleLogLevelReq { string module_log_level_json; };
+  struct SetModuleLogLevelRsp { unsigned long code; string msg; };
+}; }; };

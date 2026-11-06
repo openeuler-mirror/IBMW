@@ -53,9 +53,8 @@ endif()
 
 # ── Observability extensions ─────────────────────────────────────────
 
-if(IBMW_BUILD_LOG_CONTROL_EXTENSION)
-  add_subdirectory(observability/log_control_ext)
-endif()
+# Log protocol types are also needed by the CLI when the server is disabled.
+add_subdirectory(observability/log_control_ext)
 
 if(IBMW_BUILD_TOPIC_LOGGER_EXTENSION)
   add_subdirectory(observability/topic_logger_ext)
@@ -97,6 +96,7 @@ add_subdirectory(cli/topic)
 add_subdirectory(cli/module)
 add_subdirectory(cli/service)
 add_subdirectory(cli/param)
+add_subdirectory(cli/log)
 if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
   add_subdirectory(cli/bag)
 endif()

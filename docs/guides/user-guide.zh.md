@@ -302,6 +302,13 @@ SIGINT/SIGTERM 分别返回 130/143。registry 只是发现来源，`local` 只�
 IBMW 字符串参数，连接选项沿用 `service call`。`set` 只修改运行时值。
 服务端配置、多实例命名和完整示例见 [参数命令](parameters.zh.md)。
 
+### 查看和修改运行时日志级别
+
+`ibmw log list [module]` 列出所选日志服务中的 logger 名称及当前级别，
+`ibmw log set <module> <level>` 修改已有 logger 的级别；`core` 表示框架日志。
+连接选项沿用 `service call`，不依赖 Runtime Agent，也不修改启动配置。
+服务端配置、后端选择及示例见 [日志命令](log-control.zh.md)。
+
 ### 查看本机模块
 
 `ibmw module list` 通过 RuntimeRegistry 列出本机同一用户的有效运行时中登记的模块，

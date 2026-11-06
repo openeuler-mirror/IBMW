@@ -14,6 +14,8 @@ matches your task.
   dependency, discovery, and cleanup problems.
 - [Parameter CLI (中文)](guides/parameters.zh.md) — list, read, and update IBMW
   runtime parameters through the selected RPC backend.
+- [Log CLI (中文)](guides/log-control.zh.md) — list registered loggers and change
+  their runtime levels through the selected RPC backend.
 - [Cross-compilation](guides/cross-compilation.md) — AArch64 Linux and scoped
   OHOS target-prefix workflows.
 - [OHOS Xiaoyi Humble Cross-build Guide](guides/ohos-xiaoyi-humble-cross-build-guide.zh.md)
