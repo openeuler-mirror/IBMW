@@ -17,6 +17,7 @@
 
 #include "ibmw_selfdev/coro/concepts.h"
 #include "ibmw_selfdev/coro/export.h"
+#include "ibmw_selfdev/coro/task.h"
 
 namespace ibmw::selfdev::coro {
 
@@ -39,13 +40,18 @@ struct DetachedDriver {
 template <class A>
 DetachedDriver SpawnDriver(AsyncScope* scope, A a);
 
+// spawn() runs a Task, or an rvalue that converts to one (On(s, a)), as is,
+// without a DetachedDriver frame around it.
+template <class A>
+concept SpawnsAsTask = !std::is_lvalue_reference_v<A> && std::is_convertible_v<A&&, Task<AwaitValue<std::decay_t<A>>>>;
+
 }  // namespace detail
 
 /// Tracks spawned work and lets callers wait for all of it.
 /// Names (spawn/complete/cleanup) match unifex::async_scope.
-class AsyncScope {
+class AsyncScope : private detail::DetachedSink {
  public:
-  AsyncScope() = default;
+  AsyncScope() noexcept : DetachedSink{&AsyncScope::SinkDone} {}
 
   /// All spawned work must have finished (await complete() first). Checked
   /// in every build mode: running work would touch the destroyed scope, so
@@ -70,9 +76,14 @@ class AsyncScope {
   bool spawn(A&& a) {
     if (!TryAddTask()) return false;
     try {
-      detail::SpawnDriver<std::decay_t<A>>(this, static_cast<A&&>(a));
+      if constexpr (detail::SpawnsAsTask<A>) {
+        SpawnTask(Task<AwaitValue<std::decay_t<A>>>(static_cast<A&&>(a)));
+      } else {
+        detail::SpawnDriver<std::decay_t<A>>(this, static_cast<A&&>(a));
+      }
     } catch (...) {
-      // Frame allocation or copying `a` failed; the body never ran.
+      // Building the frame (allocating it, or copying, moving or converting
+      // `a`) failed; the body never ran.
       TaskDone();
       throw;
     }
@@ -123,6 +134,19 @@ class AsyncScope {
  private:
   template <class A>
   friend detail::DetachedDriver detail::SpawnDriver(AsyncScope* scope, A a);
+
+  // Runs `task` until its first suspension; when it finishes, it destroys
+  // its frame and calls TaskDone().
+  template <class T>
+  void SpawnTask(Task<T> task) noexcept {
+    auto h = std::move(task).Release();
+    // Also enforced in release builds, as for co_await of an empty Task.
+    if (!h) std::terminate();
+    static_cast<detail::TaskPromiseBase&>(h.promise()).Detach(this);
+    h.resume();
+  }
+
+  static void SinkDone(DetachedSink* sink) noexcept { static_cast<AsyncScope*>(sink)->TaskDone(); }
 
   static constexpr uint64_t kOpen = 1;
   static constexpr uint64_t kOne = 2;

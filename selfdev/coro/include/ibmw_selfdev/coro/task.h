@@ -19,6 +19,8 @@ namespace ibmw::selfdev::coro {
 template <class T = void>
 class Task;
 
+class AsyncScope;
+
 namespace detail {
 
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -54,6 +56,13 @@ struct StartRecord {
 // resumes (stack overflow in long loops). Exposed for tests and diagnostics.
 IBMW_SELFDEV_CORO_API StartRecord*& CurrentStartRecord() noexcept;
 
+// Told when a detached task (TaskPromiseBase::Detach()) has finished. A
+// function pointer rather than a virtual call keeps it a plain aggregate that
+// AsyncScope embeds as a base.
+struct DetachedSink {
+  void (*on_done)(DetachedSink* self) noexcept;
+};
+
 class TaskPromiseBase {
  public:
   // How the parent is resumed when the task finishes:
@@ -70,16 +79,48 @@ class TaskPromiseBase {
   //    frames, so nothing waits and no atomics are needed. Visibility of
   //    continuation_ to the completing thread comes from whatever handed the
   //    task over (executor queue, RPC callback, ...).
+  //  - Detached (AsyncScope::spawn, see Detach()): there is no parent; the
+  //    final awaiter destroys the frame, then tells the sink.
   struct FinalAwaiter {
     FinalAwaiter() noexcept = default;
     bool await_ready() const noexcept { return false; }
 
     template <class Promise>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<Promise> h) noexcept {
-      return static_cast<TaskPromiseBase&>(h.promise()).Finish();
+      // Only a detached task has no continuation: the awaited path pays no
+      // extra load or branch beyond this null test.
+      const std::coroutine_handle<> next = static_cast<TaskPromiseBase&>(h.promise()).Finish();
+      if (next) return next;
+      FinishDetached(h);
+      return std::noop_coroutine();
     }
 
     void await_resume() const noexcept {}
+
+   private:
+    // Out of line so that await_suspend above stays small where it is
+    // inlined into every Task body.
+    template <class Promise>
+    IBMW_SELFDEV_CORO_NOINLINE static void FinishDetached(std::coroutine_handle<Promise> h) noexcept {
+      Promise& p = h.promise();
+      DetachedSink* const sink = static_cast<TaskPromiseBase&>(p).detached_;
+      // A null continuation without Detach() is a frame resumed by hand.
+      if (sink == nullptr) std::terminate();
+      // Nobody takes the result. Same as unifex::async_scope::spawn: an
+      // escaping error is fatal. Rethrown inside a handler so that the
+      // terminate handler can report it.
+      if (p.Failed()) {
+        try {
+          p.RethrowError();
+        } catch (...) {
+          std::terminate();
+        }
+      }
+      // The frame goes first: whoever on_done() wakes may tear down what it
+      // refers to.
+      h.destroy();
+      sink->on_done(sink);
+    }
   };
 
   std::suspend_always initial_suspend() const noexcept { return {}; }
@@ -95,15 +136,29 @@ class TaskPromiseBase {
   IBMW_SELFDEV_CORO_API IBMW_SELFDEV_CORO_NOPLT bool Start(std::coroutine_handle<> self, std::coroutine_handle<> awaiting) noexcept;
 
  private:
+  friend class coro::AsyncScope;
+
+  // For a task run without an awaiter (AsyncScope::spawn), before it is
+  // first resumed: when it finishes, its frame is destroyed, then
+  // sink->on_done(sink) is called on the finishing thread. An exception
+  // escaping the task calls std::terminate().
+  void Detach(DetachedSink* sink) noexcept {
+    continuation_ = {};
+    detached_ = sink;
+  }
+
   // Called by FinalAwaiter. Inside the Start() that launched this task on
   // this thread: marks its record and returns noop. Otherwise returns the
-  // continuation (symmetric transfer on the completing thread).
+  // continuation (symmetric transfer on the completing thread), which is
+  // null only for a detached task.
   IBMW_SELFDEV_CORO_API IBMW_SELFDEV_CORO_NOPLT std::coroutine_handle<> Finish() noexcept;
 
   std::coroutine_handle<> continuation_ = std::noop_coroutine();
   // Record of the Start() that launched this task; dangling once that
   // Start() returned, and then only compared, never dereferenced.
   const StartRecord* start_ = nullptr;
+  // Set by Detach(); the frame then has no awaiter.
+  DetachedSink* detached_ = nullptr;
 };
 
 template <class T>
@@ -118,6 +173,10 @@ class TaskPromise final : public TaskPromiseBase {
   }
 
   void unhandled_exception() noexcept { result_.template emplace<2>(std::current_exception()); }
+
+  bool Failed() const noexcept { return result_.index() == 2; }
+
+  [[noreturn]] void RethrowError() const { std::rethrow_exception(std::get<2>(result_)); }
 
   T TakeResult() {
     if (result_.index() == 2) std::rethrow_exception(std::get<2>(result_));
@@ -137,6 +196,10 @@ class TaskPromise<void> final : public TaskPromiseBase {
   void return_void() const noexcept {}
 
   void unhandled_exception() noexcept { error_ = std::current_exception(); }
+
+  bool Failed() const noexcept { return static_cast<bool>(error_); }
+
+  [[noreturn]] void RethrowError() const { std::rethrow_exception(error_); }
 
   void TakeResult() {
     if (error_) std::rethrow_exception(error_);
@@ -189,7 +252,11 @@ class [[nodiscard]] Task {
 
  private:
   friend class detail::TaskPromise<T>;
+  friend class AsyncScope;
   using Handle = std::coroutine_handle<promise_type>;
+
+  // Takes ownership of the frame; the Task becomes invalid.
+  Handle Release() && noexcept { return std::exchange(handle_, {}); }
 
   class Awaiter {
    public:
