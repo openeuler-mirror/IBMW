@@ -342,7 +342,9 @@ ModuleBus 在准备模块访问接口及执行 `Setup()`、`Run()` 时记录每�
 进程内通过 `GetModuleLifecycleStatuses()` 获取按模块名排序的线程安全值快照；
 Runtime Agent 提供只读 `ListModuleLifecycle` 请求，C++ 客户端对应
 `RuntimeGraphAgentClient::ListModuleLifecycle()`。查询不会调用模块回调或修改登记文件。
-本接口尚未接入 `module list/info` 或 `doctor` 命令。
+`ibmw doctor module` 已使用本接口检查初始化和启动结果，根命令 `ibmw doctor`
+也包含此检查；`module list/info` 保持原有行为。用法及查询范围见
+[Doctor 模块生命周期检查](doctor.zh.md#模块生命周期检查)。
 
 每条记录包含 `module_name`、`package_path`、`kind`、`initialize`、`start`、
 `failure` 和 `updated_at_unix_ms`。阶段结果分别为 `not_attempted`（尚未执行）、

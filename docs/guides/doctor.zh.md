@@ -1,13 +1,14 @@
 <!-- Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame. -->
 
-# IBMW Doctor：Topic、QoS 与日志级别检查
+# IBMW Doctor：Topic、QoS、模块生命周期与日志级别检查
 
 `ibmw doctor` 通过原有 CLI provider 机制执行诊断，包括
 **有发布者但没有观察到同名、同类型订阅者**的 topic，以及 **DDS/ROS 2
-端点之间的 QoS 策略兼容性和本机配置一致性**，以及**运行时日志级别与明确
-预期值的偏差**。`ibmw doctor` 默认调度全部已实现检查；`ibmw doctor log`
-只运行日志检查，两个入口共享相同的日志查询、判断和输出实现。
-MQTT、Zenoh 等后端不做 QoS 检查；transport 断连、module 健康尚未实现。
+端点之间的 QoS 策略兼容性和本机配置一致性**、**已记录的模块初始化和启动
+失败**，以及**运行时日志级别与明确预期值的偏差**。`ibmw doctor` 默认调度
+全部已实现检查；`ibmw doctor module` 只检查模块生命周期结果，
+`ibmw doctor log` 只检查日志。子命令和根命令共享对应的查询、判断和输出实现。
+MQTT、Zenoh 等后端不做 QoS 检查；transport 断连、模块运行中业务健康尚未实现。
 
 ## 使用
 
@@ -23,6 +24,8 @@ ibmw doctor --ros2 --ros-domain 10 --timeout 3
 ibmw doctor --zenoh --zenoh-domain robot_a
 ibmw doctor --registry --dds --domain 10
 ibmw doctor --http 127.0.0.1:50080 --expect-level CameraModule=INFO --report
+ibmw doctor module --report
+ibmw doctor module --runtime robot_a --include-warnings
 ibmw doctor log --dds --domain 10 --expect-level CameraModule=INFO --report
 ```
 
@@ -35,6 +38,7 @@ ibmw doctor log --dds --domain 10 --expect-level CameraModule=INFO --report
 默认忽略隐藏 topic，使用 `--include-hidden-topics` 纳入检查。
 根命令的 `--timeout` 为网络发现观察窗口（默认 2 秒，范围 0.01～60 秒）；
 显式提供时也作为日志 RPC 响应超时。不提供时日志 RPC 使用原有 5 秒默认值。
+该参数不控制模块查询；模块查询复用 Runtime Agent 客户端原有的 socket 超时。
 这不是对所有后端初始化/退出过程的硬性总超时；本机 registry 为即时快照。
 网络发现会创建临时观察者并产生发现流量，但不创建业务 publisher/subscriber，
 不会因 doctor 自己订阅而掩盖无订阅者问题。
@@ -71,15 +75,68 @@ Topic checks: 0 OK, 1 WARN, 0 UNKNOWN, 0 SKIP
 观察者配置以及逻辑名/原始 wire 名分别统计，不把它们合并成一个成功结果。
 重复的端点身份只计数一次。来源部分失败时，保留其他来源的独立检查结果。
 
-- 退出码 **0**：没有 `UNKNOWN`；默认告警不使命令失败，空图也不算故障。
+- 退出码 **0**：没有 `UNKNOWN` 或模块查询错误；默认告警不使命令失败，空图也不算故障。
 - 退出码 **1**：使用了 `--include-warnings`，且发现告警。
 - 退出码 **2**：参数错误或检查未完成；优先于告警退出码。
 - 日志 RPC 被 SIGINT/SIGTERM 中断时保留退出码 **130/143**。
 - 命令进入 doctor 前的 CLI 配置/插件加载错误沿用原有 host 的非零退出码。
 
-根命令分别输出 `Topic checks`、`QoS policy checks`、`Log level checks`，
-最后输出 `Doctor checks` 的总告警与未完成检查数。日志查询失败不会抹掉
-已经获得的 topic/QoS 结果；任何一类有 `UNKNOWN` 时总退出码为 2。
+根命令分别输出 `Topic checks`、`QoS policy checks`、`Module lifecycle checks`、
+`Log level checks`，最后输出 `Doctor checks` 的总告警与未完成检查数。
+模块查询错误另列 `module query errors`，不计入模块告警或 `UNKNOWN`。
+某个查询失败不会抹掉已经获得的其他检查结果；有 `UNKNOWN` 或模块查询错误时
+总退出码为 2。
+
+## 模块生命周期检查
+
+```bash
+# 全部检查；模块部分读取本机 Runtime Agent 的生命周期记录
+ibmw doctor --report
+
+# 只检查模块，不执行 topic/QoS 发现或日志 RPC
+ibmw doctor module --report
+ibmw doctor module --registry-path "$IBMW_REGISTRY_PATH" --runtime robot_a --include-warnings
+ibmw doctor module --report-failed
+
+# topic 同时检查 registry 和 DDS，模块仍从指定本机 registry 查询
+ibmw doctor --registry --dds --registry-path "$IBMW_REGISTRY_PATH" --report
+```
+
+实现先通过只读 `InspectLocalRuntimes()` 获取本机有效运行时，再调用现有
+`RuntimeGraphAgentClient::ListModuleLifecycle()`。不会调用模块回调，也不修改
+`ibmw module list/info` 的行为或输出。
+
+每个模块分别检查两个已记录阶段：初始化（访问接口配置及受管模块的 `Setup()`）
+和启动（受管模块的 `Run()`）。`failed` 为 `WARN`，输出失败阶段和记录中的原因；
+`succeeded` 为 `OK`。尚未执行、正在执行的阶段为 `SKIP`，不推断卡死。
+app context 没有受管 `Run()` 回调，其启动阶段为不适用的 `SKIP`。
+记录的时间戳是最后一次阶段变化的时间，不是心跳；成功不代表当前业务健康。
+
+```text
+[WARN] module runtime="robot_a" pid=1234 module="CameraModule" kind=managed phase=start
+  Recorded start failed. Reason: Module Run() returned false.
+Module lifecycle checks: 1 OK, 1 WARN, 0 SKIP
+```
+
+默认输出 `WARN` 和带原因的 `SKIP`；`--report` 还输出 `OK`、记录时间戳和范围；
+`--report-failed` 仅输出 `WARN`。汇总按阶段计数，不是模块数。无有效运行时或
+返回空记录时输出覆盖范围的 `SKIP`，不表示全部模块检查通过。默认告警退出码为 0，
+加 `--include-warnings` 后为 1。
+
+读取失败、不支持查询或响应数据无效时，向 stderr 输出普通 CLI 查询错误，
+退出码为 2；不输出 `[UNKNOWN] module`，也不将查询问题判定为模块故障。
+其他运行时的记录仍会继续检查。显式指定的 `--runtime` 不存在时同样是查询错误。
+
+模块检查始终使用本机 registry，不随 topic 网络发现后端改变。`--runtime`
+仅筛选模块检查；根命令已有的 `--module` 仍只筛选日志 logger。
+根命令沿用 topic 参数规则：只选网络发现时不能单独传 `--registry-path`，需同时
+选择 `--registry` 或 `--all`；模块专用子命令可直接传 `--registry-path`。
+
+查询依赖已开始服务的 Runtime Agent。当前 Engine 顺序中，初始化或启动失败
+可能发生在 Agent 开始服务之前，此时记录只能由宿主通过进程内接口读取，doctor
+无法取得；本次不增加落盘或启动失败后的服务机制。进程退出后也不能查询这些
+内存记录。检查不涵盖业务异常、心跳、卡死或“预期模块未出现”。完整的基础接口
+与记录范围见[模块生命周期记录](user-guide.zh.md#模块生命周期记录基础接口)。
 
 ## 日志级别检查
 
@@ -118,7 +175,7 @@ ibmw doctor --dds --ros2 --domain 10 --http 127.0.0.1:50080 \
   日志检查为 `SKIP`，明确提示目标不唯一。不会依次尝试多个服务或合并实例。
 - 根命令的 `--all` 仍表示四种 topic 发现来源，并为日志提供 DDS/Zenoh 候选；
   可以用 `--all --log-backend dds` 明确选择日志 RPC。
-- 无参数 `ibmw doctor` 仍执行三个检查类别。没有日志连接信息时输出日志
+- 无参数 `ibmw doctor` 执行四个检查类别。没有日志连接信息时输出日志
   `SKIP` 和原因；已经选定后端但服务不可达、缺少扩展或响应不可信时为 `UNKNOWN`。
 - `--service` 指定日志服务基础名称；`--module` 将日志检查限定到一个 logger。
   这些参数不改变 topic/QoS 范围。一个服务只代表其所属运行时，不代表整个域。

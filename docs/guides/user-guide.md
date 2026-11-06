@@ -382,8 +382,10 @@ The existing RuntimeRegistry mechanism handles stale registrations after process
 sorted by module name, of initialization and start attempts. Runtime Agent exposes
 the read-only `ListModuleLifecycle` request, available through
 `RuntimeGraphAgentClient::ListModuleLifecycle()`. Queries neither invoke module
-callbacks nor change registration files. The API is not yet wired into the
-`module list/info` or `doctor` commands.
+callbacks nor change registration files. `ibmw doctor module` uses this API to
+check recorded initialization/start results; bare `ibmw doctor` includes the same
+checks. `module list/info` retain their existing behavior. See the
+[Doctor guide (中文)](doctor.zh.md#模块生命周期检查) for usage and query scope.
 
 Each record contains `module_name`, `package_path`, `kind`, `initialize`, `start`,
 `failure`, and `updated_at_unix_ms`. Phase results are `not_attempted`,

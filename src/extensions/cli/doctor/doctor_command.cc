@@ -18,6 +18,7 @@
 #include "topic_check.h"
 #include "qos_check.h"
 #include "log_doctor.h"
+#include "module_doctor.h"
 
 namespace ibmw::cli::doctor {
 namespace {
@@ -99,6 +100,7 @@ int Run(const Invocation& invocation) {
   const auto timeout = ParseTimeout(invocation);
   const auto options = topic::ParseDiscoveryOptions(invocation);
   const auto log_options = PrepareLogCheck(invocation, true);
+  const auto module_options = PrepareModuleCheck(invocation);
   const auto snapshot = CollectTopics(options, timeout);
   const auto results = CheckTopics(snapshot, invocation.HasOption("--include-hidden-topics"));
   const auto qos_results = CheckQos(snapshot, invocation.HasOption("--include-hidden-topics"));
@@ -161,12 +163,16 @@ int Run(const Invocation& invocation) {
             << qos_unknown << " UNKNOWN, " << qos_skipped << " SKIP\n";
   unknown += qos_unknown;
   warnings += qos_warnings;
+  const auto modules = RunModuleChecks(module_options, invocation);
+  warnings += modules.warnings;
   const auto logs = RunLogChecks(log_options, invocation);
   unknown += logs.unknown;
   warnings += logs.warnings;
-  std::cout << "Doctor checks: " << warnings << " WARN, " << unknown << " UNKNOWN\n";
+  std::cout << "Doctor checks: " << warnings << " WARN, " << unknown << " UNKNOWN";
+  if (modules.query_errors) std::cout << "; module query errors: " << modules.query_errors;
+  std::cout << '\n';
   if (logs.interrupted) return logs.interrupted;
-  if (unknown != 0) return 2;
+  if (unknown != 0 || modules.query_errors != 0) return 2;
   return warnings != 0 && invocation.HasOption("--include-warnings") ? 1 : 0;
 }
 
@@ -176,7 +182,7 @@ int Run(const Invocation& invocation) {
 int RunDoctorCommand(int argc, const char* const* argv) {
   using namespace ibmw::cli;
   try {
-    Command command("ibmw doctor", "Check topics, DDS/ROS 2 QoS and runtime log levels");
+    Command command("ibmw doctor", "Check topics, DDS/ROS 2 QoS, module lifecycle results and runtime log levels");
     bool invoked = false;
     command.SetHandler([&invoked](const Invocation& invocation) {
       invoked = true;
@@ -185,11 +191,18 @@ int RunDoctorCommand(int argc, const char* const* argv) {
     topic::AddDiscoveryOptions(command);
     command.AddOption("--timeout", {}, "seconds", "Topic discovery window (default: 2), 0.01..60 seconds; explicit value also sets log RPC deadline",
                       OptionValueMode::kRequired);
-    command.AddOption("--report", {}, {}, "Print all topic, QoS and log results, including coverage gaps");
+    command.AddOption("--report", {}, {}, "Print all topic, QoS, module and log results, including coverage gaps");
     command.AddOption("--report-failed", {}, {}, "Print details for warnings and incomplete checks");
-    command.AddOption("--include-warnings", {}, {}, "Return failure (1) when topic, QoS or log warnings are found");
+    command.AddOption("--include-warnings", {}, {}, "Return failure (1) when topic, QoS, module or log warnings are found");
     command.AddOption("--include-hidden-topics", {}, {}, "Consider hidden topics as well");
     doctor::AddLogDoctorOptions(command, true);
+    doctor::AddModuleDoctorOptions(command, true);
+    auto& module = command.AddSubcommand("module", "Check only recorded module initialization/start results");
+    doctor::AddModuleDoctorOptions(module, false);
+    module.SetHandler([&invoked](const Invocation& invocation) {
+      invoked = true;
+      return doctor::RunModuleDoctor(invocation);
+    });
     auto& log = command.AddSubcommand("log", "Check only runtime logger levels through the existing log service");
     doctor::AddLogDoctorOptions(log, false);
     log.SetHandler([&invoked](const Invocation& invocation) {
