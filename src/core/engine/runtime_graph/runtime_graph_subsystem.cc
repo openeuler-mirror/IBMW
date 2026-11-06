@@ -300,6 +300,9 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
   tap_server_->Start();
   agent_ = std::make_unique<RuntimeGraphAgent>(RuntimeGraphAgent::Options{
       .registration = registration_, .registry_path = options_.registry_path});
+  agent_->SetListModuleLifecycleHandler([this] {
+    return engine_->GetModuleBus().GetModuleLifecycleStatuses();
+  });
   agent_->SetStartTapHandler(start_tap_handler_ ? start_tap_handler_ :
       RuntimeGraphAgent::StartTapHandler([this](const auto& advertisement) {
         return tap_server_->StartSession(advertisement);

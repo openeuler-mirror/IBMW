@@ -376,6 +376,40 @@ requesting an upgrade and restart, retain available results, and return 1. In th
 case, count mode only counts runtimes that provide module information.
 The existing RuntimeRegistry mechanism handles stale registrations after process exit.
 
+### Module Lifecycle Records (Foundation API)
+
+`ModuleBus::GetModuleLifecycleStatuses()` returns a thread-safe value snapshot,
+sorted by module name, of initialization and start attempts. Runtime Agent exposes
+the read-only `ListModuleLifecycle` request, available through
+`RuntimeGraphAgentClient::ListModuleLifecycle()`. Queries neither invoke module
+callbacks nor change registration files. The API is not yet wired into the
+`module list/info` or `doctor` commands.
+
+Each record contains `module_name`, `package_path`, `kind`, `initialize`, `start`,
+`failure`, and `updated_at_unix_ms`. Phase results are `not_attempted`,
+`in_progress`, `succeeded`, `failed`, or `not_applicable`. A failure contains
+`phase` and `reason`; the timestamp is the last recorded transition in Unix
+milliseconds, not a heartbeat. `managed` modules cover packages and direct
+registration: initialization includes CoreAccess configuration and `Setup()`,
+while start observes `Run()`. For `app_context` entries created by `CreateModule()`,
+initialization only prepares CoreAccess and start is always `not_applicable`.
+
+False callback results and exceptions reaching ModuleBus are recorded without
+changing failure propagation. Exceptions already converted to `false` by the
+C++ module wrapper appear as callback failures; their details remain in the log.
+Records are created when individual module initialization begins. Disabled modules,
+earlier package loading/creation/metadata failures, and modules not reached after
+an initialization failure are not covered. Records survive module cleanup until
+ModuleBus destruction; retrying a failed app-context initialization replaces that
+name's previous attempt. Success describes the recorded operation, not current
+execution or business health.
+
+Cross-process queries require an enabled, serving Agent. Engine initialization
+or module start can fail before the Agent begins serving; those records are only
+available to the host through the in-process API. This version does not persist
+failures across process exit or detect business faults/hangs. Older Agents and
+Agents without the handler report unsupported queries rather than an empty list.
+
 ### Inspecting Module Interfaces
 
 `ibmw module info <module>` shows a registered module's name, runtime ID, PID,

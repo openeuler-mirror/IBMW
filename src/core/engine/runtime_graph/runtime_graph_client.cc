@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "base/exception.h"
+#include "engine/runtime_graph/module_lifecycle.h"
 #include "engine/runtime_graph/runtime_protocol.h"
 
 namespace ibmw::runtime::core::runtime_graph {
@@ -34,6 +35,18 @@ std::vector<TopicAdvertisement> RuntimeGraphAgentClient::ListTopics() const {
   std::vector<TopicAdvertisement> result;
   for (const auto& item : Call("ListTopics")) {
     result.emplace_back(TopicAdvertisementFromJson(item));
+  }
+  return result;
+}
+
+std::vector<ibmw::extension::ModuleLifecycleStatus>
+RuntimeGraphAgentClient::ListModuleLifecycle() const {
+  const auto response = Call("ListModuleLifecycle");
+  MW_ASSERT(response.is_array(), "Invalid module lifecycle response: expected an array.");
+  std::vector<ibmw::extension::ModuleLifecycleStatus> result;
+  result.reserve(response.size());
+  for (const auto& item : response) {
+    result.push_back(ModuleLifecycleStatusFromJson(item));
   }
   return result;
 }

@@ -4,7 +4,9 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "engine/module/core_access.h"
 #include "engine/module/package_loader.h"
 #include "engine/core_types.h"
+#include "extension_api/ibmw_module_lifecycle.h"
 
 #include "yaml-cpp/yaml.h"
 
@@ -74,6 +77,10 @@ class ModuleBus : public ISubsystem {
   const std::vector<std::string>& GetModuleNameList() const;
   const std::vector<const util::ModuleDetailInfo*>& GetModuleDetailInfoList() const;
 
+  // Thread-safe value snapshot, sorted by module name. Available even after
+  // initialization/start failure or shutdown; does not invoke module callbacks.
+  std::vector<ibmw::extension::ModuleLifecycleStatus> GetModuleLifecycleStatuses() const;
+
   /**
    * @brief Broadcast a transport driver pointer to every module known to
    *        this bus. Targets BOTH:
@@ -105,6 +112,13 @@ class ModuleBus : public ISubsystem {
 
   std::optional<Options::ModuleOptions> GetModuleOptions(std::string_view module_name);
   void InitModule(ModuleWrapper* module_wrapper_ptr);
+  void RunLifecyclePhase(const std::string& module_name,
+                         ibmw::extension::ModuleLifecyclePhase phase,
+                         const std::function<void()>& operation);
+  void UpdateLifecycleResult(const std::string& module_name,
+                             ibmw::extension::ModuleLifecyclePhase phase,
+                             ibmw::extension::ModuleLifecycleResult result,
+                             std::string reason = {});
 
  private:
   Options options_;
@@ -125,6 +139,11 @@ class ModuleBus : public ISubsystem {
 
   // Information query class variables
   std::vector<const util::ModuleDetailInfo*> module_detail_info_vec_;
+
+  // Independent of ModuleWrapper ownership so failed initialization and
+  // shutdown cannot discard the observations. Never lock across module code.
+  mutable std::mutex lifecycle_mutex_;
+  std::map<std::string, ibmw::extension::ModuleLifecycleStatus> lifecycle_statuses_;
 };
 
 }  // namespace ibmw::runtime::core::module

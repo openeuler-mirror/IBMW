@@ -336,6 +336,37 @@ ibmw module list --registry-path "$IBMW_REGISTRY_PATH"
 旧版本注册文件缺少模块列表时，命令提示升级并重启对应运行时，保留其他可用结果并返回 1；
 计数模式此时只统计提供模块信息的运行时。进程退出后的过期记录由现有 RuntimeRegistry 机制处理。
 
+### 模块生命周期记录（基础接口）
+
+ModuleBus 在准备模块访问接口及执行 `Setup()`、`Run()` 时记录每个模块的结果。
+进程内通过 `GetModuleLifecycleStatuses()` 获取按模块名排序的线程安全值快照；
+Runtime Agent 提供只读 `ListModuleLifecycle` 请求，C++ 客户端对应
+`RuntimeGraphAgentClient::ListModuleLifecycle()`。查询不会调用模块回调或修改登记文件。
+本接口尚未接入 `module list/info` 或 `doctor` 命令。
+
+每条记录包含 `module_name`、`package_path`、`kind`、`initialize`、`start`、
+`failure` 和 `updated_at_unix_ms`。阶段结果分别为 `not_attempted`（尚未执行）、
+`in_progress`（执行中）、`succeeded`（成功）、`failed`（失败）或
+`not_applicable`（不适用）；失败信息包含 `phase` 和 `reason`。
+时间戳为最近一次记录状态变化的 Unix 毫秒时间，不是心跳。
+
+`kind=managed` 包括包加载和直接注册的模块；初始化涵盖访问接口配置及 `Setup()`，
+启动对应 `Run()`。`kind=app_context` 表示 `CreateModule()` 创建的运行上下文：
+初始化结果只表示访问接口配置结果，`start` 始终为 `not_applicable`，不会虚构启动成功。
+失败返回值、传播到 ModuleBus 的标准或非标准异常都会记录；原有失败传播行为保持不变。
+C++ 模块包装层已捕获并转成 `false` 的异常只能记录回调失败，详细原因仍以原日志为准。
+
+记录在进入单个模块初始化时建立。禁用的模块，以及在此之前发生的包加载、模块创建、
+元信息读取等失败不在本接口覆盖范围内；初始化中断后尚未处理的模块也不会生成记录。
+记录独立于模块对象保存，关闭后仍能通过进程内接口查询，但只保留到 ModuleBus 销毁。
+同名 App 上下文初始化失败后重试时，以本次尝试覆盖上次记录。
+阶段成功仅表示该次框架操作成功，不表示模块当前仍在运行或业务健康。
+
+Runtime Agent 必须启用并已开始服务才能从其他进程查询。当前 Engine 的初始化、启动
+顺序意味着模块失败可能早于 Agent 开始服务，此时只能由宿主通过进程内接口读取记录。
+本版本不提供失败落盘、进程退出后查询、运行中健康上报或卡死检测。
+旧 Agent 或未设置生命周期查询能力的 Agent 返回不支持错误，不会伪装为空模块列表。
+
 ### 查看模块通信接口
 
 `ibmw module info <module>` 显示已登记模块的名称、运行时 ID、PID，以及发布和订阅的话题与消息类型。

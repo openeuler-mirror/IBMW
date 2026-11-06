@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "base/exception.h"
+#include "engine/runtime_graph/module_lifecycle.h"
 #include "engine/runtime_graph/runtime_protocol.h"
 #include "engine/runtime_graph/runtime_directory.h"
 
@@ -154,6 +155,12 @@ void RuntimeGraphAgent::SetStopPlaybackHandler(StopPlaybackHandler handler) {
   MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
             "Set handlers before Start.");
   stop_playback_handler_ = std::move(handler);
+}
+
+void RuntimeGraphAgent::SetListModuleLifecycleHandler(ListModuleLifecycleHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
+            "Set handlers before Start.");
+  list_module_lifecycle_handler_ = std::move(handler);
 }
 
 void RuntimeGraphAgent::Initialize() {
@@ -351,6 +358,12 @@ nlohmann::json RuntimeGraphAgent::HandleRequest(
     result = nlohmann::json::array();
     for (const auto& topic : options_.registration.topics) {
       result.push_back(TopicAdvertisementToJson(topic));
+    }
+  } else if (method == "ListModuleLifecycle") {
+    MW_ASSERT(list_module_lifecycle_handler_, "Runtime does not support ListModuleLifecycle.");
+    result = nlohmann::json::array();
+    for (const auto& status : list_module_lifecycle_handler_()) {
+      result.push_back(ModuleLifecycleStatusToJson(status));
     }
   } else if (method == "GetTopicDescriptor") {
     result = TopicAdvertisementToJson(FindTopic(params));

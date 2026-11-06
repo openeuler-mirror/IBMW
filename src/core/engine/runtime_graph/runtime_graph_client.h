@@ -17,6 +17,8 @@ class RuntimeGraphAgentClient {
       : control_socket_(std::move(control_socket)) {}
 
   std::vector<TopicAdvertisement> ListTopics() const;
+  // Live read-only snapshot; unsupported agents report an error, not an empty list.
+  std::vector<ibmw::extension::ModuleLifecycleStatus> ListModuleLifecycle() const;
   TopicAdvertisement GetTopicDescriptor(
       std::string_view topic,
       std::string_view publisher_id = {}) const;
