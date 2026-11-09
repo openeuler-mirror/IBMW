@@ -15,3 +15,8 @@ endif()
 if(IBMW_BUILD_CLI_TOOLS)
   add_subdirectory(ibmw_cli)
 endif()
+
+# Standalone regression suite; independent of the Python CLI packaging option.
+if(IBMW_BUILD_TESTS AND IBMW_BUILD_RUNTIME)
+  add_subdirectory(ibmw_diag)
+endif()
