@@ -21,7 +21,9 @@ target_compile_definitions(ibmw_selfdev_coro PRIVATE IBMW_SELFDEV_CORO_BUILDING)
 # SONAME libibmw_selfdev_coro.so.1. Bump SOVERSION on any change to the
 # exported symbols or to the layout of the types they take (TaskPromiseBase,
 # StartRecord, AsyncScope): packages built against the old headers would
-# otherwise load the new library.
+# otherwise load the new library. A toolchain that sets
+# CMAKE_PLATFORM_NO_VERSIONED_SONAME (cmake/toolchains/ohos-arm64-v8a.cmake)
+# ignores SOVERSION: the SONAME is the plain libibmw_selfdev_coro.so there.
 set_target_properties(ibmw_selfdev_coro PROPERTIES
   VERSION 1.0.0
   SOVERSION 1

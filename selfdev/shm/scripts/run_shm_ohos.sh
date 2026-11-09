@@ -35,12 +35,16 @@
 #   dyn-bench  run three benches interleaved DYN_BENCH_ROUNDS times: static (static
 #            musl + c++_static), pie (plugin sources compiled in, device libc +
 #            libc++_shared.so) and so (linked against the plugin .so). pie vs static
-#            is the libc/libc++ effect, so vs pie the shared-object effect. Results go
+#            is the libc/libc++ effect, so vs pie the shared-object effect (pie and
+#            so also load the selfdev coro library, static uses libunifex; the
+#            bench does not use the executor). Results go
 #            to a new logs/dyn-bench-<time>/ each run; loadavg and leftover ibmw
 #            processes are logged before every round (no pass/fail on the numbers)
 #   dyn-clean  remove DYN_DEVICE_DIR and DYN_DEVICE_ROOT from the device
 #   hap      dyn-build hap-build hap-device (the tests inside an application process)
-#   hap-build  build the test HAP into OUT/hap/unsigned.hap: the plugin, the
+#   hap-build  (fails while the dyn trees use the shared selfdev coro library,
+#            which the HAP does not package yet)
+#            build the test HAP into OUT/hap/unsigned.hap: the plugin, the
 #            runner and the EXT tests as shared objects (dyn trees with
 #            IBMW_BUILD_SHM_EXT_HAP_CHECK), the NAPI module that starts them as
 #            native child processes, the ArkTS test runner (es2abc) and the
@@ -145,7 +149,9 @@
 #   PERF_ENV_ARGS       more perf_env.py arguments (--max-foreign, --quiet-cpu-busy, ...)
 #
 # build/qemu/device/bench/bench-ext use fully static binaries (-static,
-# c++_static), which do not exercise the device's dynamic linker. The SDK
+# c++_static), which do not exercise the device's dynamic linker, and since the
+# selfdev coro library is shared only, libunifex instead of it
+# (IBMW_EXECUTOR_USE_SELFDEV_CORO=OFF; shm and shm_ext do not use the executor). The SDK
 # libc.so is only a link stub, but a PIE linked against it runs with the
 # device's /lib/ld-musl-aarch64.so.1; the dyn-* stages use that: the core and
 # selfdev archives (STATIC targets, built -fPIC) are linked into the plugin
@@ -204,6 +210,12 @@ PLUGIN_SO="${DYN}/rt/libibmw_shm_transport.so"
 RUN_AS="${OUT}/run_as"
 METRICS_TREE="${DYN}/metrics"
 HAP="${OUT}/hap"
+# The selfdev coroutine library (selfdev/coro) is always shared: in a tree
+# configured with the default IBMW_EXECUTOR_USE_SELFDEV_CORO=ON the plugin and
+# the executables that use the IBMW API need it next to libc++_shared.so. The
+# OHOS toolchain file sets CMAKE_PLATFORM_NO_VERSIONED_SONAME, so SOVERSION does
+# not apply: file name, SONAME and DT_NEEDED are all the plain .so.
+CORO_LIB=libibmw_selfdev_coro.so
 HAP_BUNDLE="${HAP_BUNDLE:-com.ibmw.shmhap}"
 HAP_SIGN="${HAP_SIGN:-debug}"
 SDK_ROOT="$(dirname "${SDK}")"
@@ -454,10 +466,15 @@ ohos_patch_tree() {
     "$1/CMakeLists.txt" "$1/src/extensions/CMakeLists.txt"
 }
 
-# common: toolchain and static linking for a copied tree <src>.
+# common: toolchain and static linking for a copied tree <src>. -static cannot
+# link the shared selfdev coro library, so selfdev coro is off: the ext tree's
+# executor uses libunifex (ext_cmake_args passes its source), the standalone
+# core tree builds no executor. The dynamic stages (dyn-*, metrics-*) keep the
+# default selfdev coro. A tree without the option ignores it.
 common_cmake_args() {
   common=(-G Ninja -DCMAKE_TOOLCHAIN_FILE="$1/cmake/toolchains/ohos-arm64-v8a.cmake"
-    -DOHOS_SDK_NATIVE_ROOT="${SDK}" -DOHOS_STL=c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=ON)
+    -DOHOS_SDK_NATIVE_ROOT="${SDK}" -DOHOS_STL=c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=ON
+    -DIBMW_EXECUTOR_USE_SELFDEV_CORO=OFF)
 }
 
 # ext_args: minimal IBMW, runtime + shm_ext only.
@@ -491,8 +508,9 @@ stage_build() {
 
   common_cmake_args "${SRC}"
   # Core library: -Wall -Wextra -Wshadow -Werror from ibmw_selfdev_warnings.
+  # Only shm: the other selfdev components have their own tests.
   cmake -S "${SRC}/selfdev" -B "${OUT}/core" "${common[@]}" -DCMAKE_BUILD_TYPE=Release \
-    -DIBMW_SELFDEV_SHM=ON -DIBMW_SELFDEV_SHM_BENCH=ON -Dgoogletest_LOCAL_SOURCE="${DEPS_DIR}/googletest-src" \
+    -DIBMW_SELFDEV_CRASH_HANDLER=OFF -DIBMW_SELFDEV_CONCURRENT=OFF -DIBMW_SELFDEV_SHM=ON -DIBMW_SELFDEV_SHM_BENCH=ON -Dgoogletest_LOCAL_SOURCE="${DEPS_DIR}/googletest-src" \
     >"${LOGS}/core.configure.log" 2>&1 || { tail -20 "${LOGS}/core.configure.log"; return 1; }
   cmake --build "${OUT}/core" -j "${JOBS}" >"${LOGS}/core.build.log" 2>&1 || { tail -40 "${LOGS}/core.build.log"; return 1; }
 
@@ -705,9 +723,10 @@ dyn_make() {
     { tail -40 "${LOGS}/dyn-${name}.build.log"; return 1; }
 }
 
-# TLS access in the plugin .so and in the static bench: which runtime or
-# relocation each one uses, and the code of ShmOperationGate::TryAcquire, the
-# hot path that reads the ThreadStripe() thread_local.
+# TLS access in the plugin .so, the static bench and the selfdev coro library
+# (when the tree uses it): which runtime or relocation each one uses, and the
+# code of ShmOperationGate::TryAcquire, the hot path that reads the
+# ThreadStripe() thread_local (none in the coro library).
 tls_report() {
   local f bin=("${SDK}/llvm/bin/llvm-objdump" -d --no-show-raw-insn)
   local readelf="${SDK}/llvm/bin/llvm-readelf" nm="${SDK}/llvm/bin/llvm-nm"
@@ -721,9 +740,10 @@ tls_report() {
     echo "__tls_get_addr relocations: $("${readelf}" -rW "${f}" | grep -c '__tls_get_addr')"
     echo "TLSDESC relocations: $("${readelf}" -rW "${f}" | grep -c 'TLSDESC')"
     echo "TLS_TPREL (initial-exec) relocations: $("${readelf}" -rW "${f}" | grep -c 'TLS_TPREL')"
-    echo "mrs tpidr_el0 (direct thread-pointer reads): $("${bin[@]}" "${f}" | grep -c 'mrs.*tpidr_el0')"
+    echo "mrs tpidr_el0 (direct thread-pointer reads): $("${bin[@]}" "${f}" | grep -ci 'mrs.*tpidr_el0')"
     echo "shm_ext thread_locals:"
     "${nm}" -C "${f}" | grep -E '__emutls_v\..*(t_stripe|t_current_subscription|t_listener_thread_ready|TopicKey)' | sed 's/^/  /'
+    [[ "$(basename "${f}")" == "${CORO_LIB}" ]] && continue
     echo "ShmOperationGate::TryAcquire:"
     "${bin[@]}" --disassemble-symbols=_ZN4ibmw10extensions13shm_extension16ShmOperationGate10TryAcquireEv "${f}" |
       grep -E '^\s+[0-9a-f]+:' | sed -n '1,24s/^/  /p'
@@ -749,7 +769,8 @@ stage_dyn-build() {
   dyn_cmake test c++_shared -DIBMW_BUILD_TESTS=ON || return 1
   dyn_make test ibmw_extensions_shm_ext_test ibmw_shm_ext_peer || return 1
   # static: the bench as bench-ext builds it, the base of dyn-bench.
-  dyn_cmake static c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON || return 1
+  dyn_cmake static c++_static -DCMAKE_EXE_LINKER_FLAGS=-static -DIBMW_BUILD_TESTS=OFF -DIBMW_BUILD_SHM_EXT_BENCH=ON \
+    -DIBMW_EXECUTOR_USE_SELFDEV_CORO=OFF || return 1
   dyn_make static ibmw_shm_ext_bench || return 1
 
   local readelf="${SDK}/llvm/bin/llvm-readelf" f
@@ -768,7 +789,15 @@ stage_dyn-build() {
   "${readelf}" -dW "${DYN}/rt/ibmw_shm_ext_bench" | grep 'NEEDED.*libibmw_shm_transport' >/dev/null &&
     { echo "pie bench links the plugin"; return 1; }
   "${readelf}" -lW "${DYN}/static/ibmw_shm_ext_bench" | grep INTERP >/dev/null && { echo "static bench is dynamic"; return 1; }
-  tls_report "${PLUGIN_SO}" "${DYN}/static/ibmw_shm_ext_bench" >"${LOGS}/dyn-tls.txt"
+  local coro=()
+  local st=0
+  coro_needed "${PLUGIN_SO}" || st=$?
+  ((st == 2)) && return 1
+  if ((st == 0)); then
+    [[ -f "${DYN}/rt/${CORO_LIB}" ]] || { echo "plugin links ${CORO_LIB}, missing from ${DYN}/rt"; return 1; }
+    coro=("${DYN}/rt/${CORO_LIB}")
+  fi
+  tls_report "${PLUGIN_SO}" "${DYN}/static/ibmw_shm_ext_bench" "${coro[@]}" >"${LOGS}/dyn-tls.txt"
   echo "dyn-build OK (TLS report: ${LOGS}/dyn-tls.txt)"
 }
 
@@ -785,6 +814,29 @@ dyn_push() {
   [[ "$(hdc shell "stat -c %s ${to} 2>/dev/null" | tr -d '\r')" == "${size}" ]] || { fail "push ${to}"; return 1; }
 }
 
+# coro_needed <elf>: whether <elf> links the selfdev coro library (awk reads
+# all of readelf's output: no SIGPIPE under pipefail). A readelf failure is
+# reported and returns 2, so that callers failing on it are not skipped.
+coro_needed() {
+  local dyn
+  dyn="$("${SDK}/llvm/bin/llvm-readelf" -dW "$1")" || { fail "llvm-readelf -d $1"; return 2; }
+  awk -v l="[${CORO_LIB}]" '/\(NEEDED\)/ && index($0, l) {f = 1} END {exit !f}' <<<"${dyn}"
+}
+
+# dyn_push_coro <tree> <elf>: the selfdev coro library of a dyn tree when <elf>,
+# the plugin of that tree, links it (a tree configured with
+# IBMW_EXECUTOR_USE_SELFDEV_CORO=OFF has none). Decided from the plugin, not
+# from the file, so a missing library fails in dyn_push instead of being
+# skipped. The uninstrumented rt copy also serves the test tree: same sources.
+dyn_push_coro() {
+  [[ -f "$2" ]] || { fail "missing $2 (run dyn-build)"; return 1; }
+  local st=0
+  coro_needed "$2" || st=$?
+  ((st == 2)) && return 1
+  ((st == 1)) && return 0
+  dyn_push "$1/${CORO_LIB}"
+}
+
 stage_dyn-device() {
   hdc list targets | grep -qv '\[Empty\]' || { fail "no hdc device"; return 1; }
   device_path_ok "${DYN_DEVICE_DIR}" "${DYN_DEVICE_ROOT}" || return 1
@@ -795,6 +847,7 @@ stage_dyn-device() {
     "${DYN}/test/ibmw_shm_ext_peer"; do
     dyn_push "${f}" || return 1
   done
+  dyn_push_coro "${DYN}/rt" "${PLUGIN_SO}" || return 1
   device_rm "${DYN_DEVICE_ROOT}/r" >/dev/null || return 1
   hdc shell "mkdir -p ${DYN_DEVICE_ROOT}/r/s ${DYN_DEVICE_ROOT}/r/sync" >/dev/null
   dyn_runner_check dyn-runner "${DYN_DEVICE_ROOT}/r" ""
@@ -867,6 +920,7 @@ stage_dyn-uid() {
     "${DYN}/test/ibmw_shm_ext_peer" "${RUN_AS}"; do
     dyn_push "${f}" || return 1
   done
+  dyn_push_coro "${DYN}/rt" "${PLUGIN_SO}" || return 1
   # A new directory per run, so the logs of a failed run are kept.
   local runs
   runs="dyn-uid-$(date +%Y%m%d-%H%M%S)"
@@ -930,6 +984,7 @@ stage_dyn-bench() {
   dyn_push "${DYN}/static/ibmw_shm_ext_bench" bench_static || return 1
   dyn_push "${DYN}/rt/ibmw_shm_ext_bench" bench_pie || return 1
   dyn_push "${DYN}/rt/ibmw_shm_ext_bench_so" bench_so || return 1
+  dyn_push_coro "${DYN}/rt" "${PLUGIN_SO}" || return 1
   # A new directory per run: earlier results stay where the docs cite them.
   local runs="${LOGS}/dyn-bench-$(date +%Y%m%d-%H%M%S)" round label others stop=0
   mkdir -p "${runs}"
@@ -949,6 +1004,7 @@ stage_dyn-bench() {
     echo "# ${runs}: ${DYN_BENCH_ROUNDS} rounds, ${BENCH_ARGS}, CPUs ${BENCH_CPUS}"
     echo "# static = -static (SDK musl, c++_static); pie = plugin sources compiled in, device libc + libc++_shared.so;"
     echo "# so = linked against libibmw_shm_transport.so"
+    echo "# pie and so also load the selfdev coro library, static uses libunifex (the bench does not use the executor)"
     echo; echo "## pie vs static (libc/libc++)"; bench_summary "${DYN_BENCH_ROUNDS}" "${runs}" static pie
     echo; echo "## so vs pie (shared object)"; bench_summary "${DYN_BENCH_ROUNDS}" "${runs}" pie so
   } >"${runs}/summary.txt"
@@ -991,6 +1047,12 @@ hap_bundle_ok() {
 
 stage_hap-build() {
   [[ -f "${PLUGIN_SO}" && -d "${DYN}/test" ]] || { fail "hap-build: run dyn-build first"; return 1; }
+  # Not packaged yet: the bundle does not include the coro library and a HAP
+  # with it has not been run on a device.
+  local st=0
+  coro_needed "${PLUGIN_SO}" || st=$?
+  ((st == 2)) && return 1
+  ((st == 0)) && { fail "hap-build: the HAP does not package ${CORO_LIB} yet; the dyn trees use selfdev coro"; return 1; }
   hap_bundle_ok || return 1
   # Added to the dyn-build trees and kept in their caches; the option only
   # adds targets, later dyn-build runs build what they built before.
@@ -1243,6 +1305,13 @@ metrics_push() {
   dyn_push "$@"
 }
 
+# One copy for both trees of metrics-bench: the coro library does not depend on
+# the metrics options.
+metrics_push_coro() {
+  local DYN_DEVICE_DIR="${METRICS_DEVICE_DIR}"
+  dyn_push_coro "${METRICS_TREE}" "${METRICS_TREE}/libibmw_shm_transport.so"
+}
+
 stage_metrics-build() {
   dyn_sync_src || return 1
   # The arm without Reporter V1 and core metrics, as dyn-build builds it.
@@ -1316,6 +1385,7 @@ stage_metrics-device() {
     "${HERE}/../../../src/samples/cpp/retained_loan_e2e/check_shm_metrics.sh" "${RUN_AS}"; do
     metrics_push "${f}" || return 1
   done
+  metrics_push_coro || return 1
   local runs="${LOGS}/metrics-device-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "${runs}"
   device_wait_idle metrics-device-root || { fail "metrics-device: the guard gave up"; return 1; }
@@ -1351,6 +1421,7 @@ stage_metrics-bench() {
   metrics_push "${LIBCXX_SHARED}" || return 1
   metrics_push "${DYN}/rt/ibmw_shm_ext_bench" bench_out || return 1
   metrics_push "${METRICS_TREE}/ibmw_shm_ext_bench" bench_met || return 1
+  metrics_push_coro || return 1
   local runs="${LOGS}/metrics-bench-$(date +%Y%m%d-%H%M%S)" round i label bench envs st stop=0 metrics out="${METRICS_DEVICE_ROOT}/o"
   local arms=(out off counters) passed=0 failed=0 have
   mkdir -p "${runs}"

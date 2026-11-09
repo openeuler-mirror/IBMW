@@ -37,6 +37,10 @@ if(IBMW_BUILD_TESTS)
     SRCS test/bounded_blocking_queue_test.cc
          test/concurrent_hash_map_test.cc
     LIBS ibmw::selfdev::concurrent)
+  # The starved-consumer cases take items within time limits (BQ-43..44) and
+  # count items taken more than a few ms late (BQ-45..47); next to other tests
+  # (the multi-process shm tests) a loaded host makes them late too.
+  set_tests_properties(ibmw_selfdev_concurrent_test PROPERTIES RUN_SERIAL TRUE)
   # Wraps the global operator new (operator new(std::size_t), mangled
   # _Znwm) to fail allocations on demand. Not replaced: Clang links its
   # sanitizer runtimes, which define it too, whole-archive.
