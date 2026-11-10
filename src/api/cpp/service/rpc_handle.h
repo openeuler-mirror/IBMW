@@ -19,11 +19,7 @@
 #include "cpp/util/function.h"
 #include "cpp/util/string.h"
 
-#if defined(_MSC_VER) && !defined(__clang__)
-  #define IBMW_RPC_AWAIT_SUSPEND_NOINLINE __declspec(noinline)
-#else
-  #define IBMW_RPC_AWAIT_SUSPEND_NOINLINE __attribute__((noinline))
-#endif
+#define IBMW_RPC_AWAIT_SUSPEND_NOINLINE __attribute__((noinline))
 
 namespace ibmw::rpc {
 

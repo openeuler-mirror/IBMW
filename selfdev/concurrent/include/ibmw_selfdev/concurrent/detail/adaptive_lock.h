@@ -6,10 +6,6 @@
 #include <atomic>
 #include <mutex>
 
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-  #include <immintrin.h>
-#endif
-
 namespace ibmw::selfdev::concurrent::detail {
 
 /// Spin-wait hint for the current CPU (no-op where none is known).
@@ -18,8 +14,6 @@ inline void CpuRelax() noexcept {
   __builtin_ia32_pause();
 #elif defined(__aarch64__) || defined(__arm__)
   asm volatile("yield" ::: "memory");
-#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-  _mm_pause();
 #endif
 }
 

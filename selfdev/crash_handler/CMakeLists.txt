@@ -14,7 +14,7 @@ set_target_properties(ibmw_selfdev_crash_handler PROPERTIES POSITION_INDEPENDENT
 ibmw_selfdev_warnings(ibmw_selfdev_crash_handler)
 ibmw_selfdev_install(ibmw_selfdev_crash_handler ibmw::selfdev::crash_handler)
 
-if(IBMW_BUILD_TESTS AND NOT WIN32)
+if(IBMW_BUILD_TESTS)
   ibmw_selfdev_add_test(ibmw_selfdev_crash_handler_test
     SRCS test/crash_handler_test.cc
     LIBS ibmw::selfdev::crash_handler)

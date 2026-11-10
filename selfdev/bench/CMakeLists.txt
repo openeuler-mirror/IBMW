@@ -66,7 +66,7 @@ if(IBMW_EXECUTOR_USE_SELFDEV_CORO)
   endif()
 endif()
 
-if(IBMW_SELFDEV_CRASH_HANDLER AND NOT WIN32)
+if(IBMW_SELFDEV_CRASH_HANDLER)
   if(IBMW_SELFDEV_BENCH_BACKWARD_SOURCE)
     # backward-cpp is header only. Two variants: the resolver available
     # without extra libraries (backtrace_symbols / dladdr), and libdw, which

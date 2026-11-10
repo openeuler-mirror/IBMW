@@ -11,7 +11,6 @@ namespace ibmw::selfdev::crash {
 inline constexpr size_t kMaxFrames = 128;
 
 /// Signals caught by default, same set as backward-cpp make_default_signals().
-/// Empty on Windows.
 std::vector<int> DefaultSignals();
 
 /// Called after the report has been written to output_fd. `report` is NUL
@@ -91,8 +90,7 @@ struct Options {
 /// installed), when the alternate stack could not be allocated, installed or
 /// disabled (the handlers are still installed), or when more than 64
 /// distinct signals were given (the rest are not installed). IsInstalled()
-/// is true when at least one handler was installed. Not supported on
-/// Windows (returns false).
+/// is true when at least one handler was installed.
 ///
 /// Known limitations:
 ///  - The alternate signal stack is installed for the calling thread only;
@@ -138,7 +136,7 @@ bool IsInstalled() noexcept;
 /// while reading an entry prints that address as a bare pc instead of a
 /// possibly torn module name. At most 256 modules are recorded; when more
 /// are loaded the raw part starts with "*** module table full: N modules not
-/// recorded (their frames show bare pcs)". No-op on Windows.
+/// recorded (their frames show bare pcs)".
 void RefreshModules() noexcept;
 
 /// Captures the calling thread's stack, skipping the first `skip` frames

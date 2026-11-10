@@ -10,25 +10,13 @@
 // (including modules loaded with RTLD_DEEPBIND, or linked with -Bsymbolic /
 // version scripts) uses the same slot and scope. Only symbols marked
 // IBMW_SELFDEV_CORO_API are exported (src/libibmw_selfdev_coro.map).
-#if defined(_WIN32)
-  #if defined(IBMW_SELFDEV_CORO_BUILDING)
-    #define IBMW_SELFDEV_CORO_API __declspec(dllexport)
-  #else
-    #define IBMW_SELFDEV_CORO_API __declspec(dllimport)
-  #endif
-#else
-  #define IBMW_SELFDEV_CORO_API __attribute__((visibility("default")))
-#endif
+#define IBMW_SELFDEV_CORO_API __attribute__((visibility("default")))
 
 // For await_suspend bodies that keep running after publishing the coroutine
 // handle: keeps their locals on their own stack frame. Clang before 19 may
 // place the locals of an await_suspend inlined into the coroutine in the
 // coroutine frame, which another thread may already have destroyed.
-#if defined(_MSC_VER) && !defined(__clang__)
-  #define IBMW_SELFDEV_CORO_NOINLINE __declspec(noinline)
-#else
-  #define IBMW_SELFDEV_CORO_NOINLINE __attribute__((noinline))
-#endif
+#define IBMW_SELFDEV_CORO_NOINLINE __attribute__((noinline))
 
 // Calls from other DSOs into Start()/Finish() (two per co_await): GCC's noplt
 // calls through the GOT directly instead of through a PLT stub.

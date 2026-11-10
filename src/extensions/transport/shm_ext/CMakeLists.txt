@@ -82,7 +82,7 @@ add_werror(${CUR_TARGET_NAME})
 # and thread_locals with destructors (registered via __cxa_thread_atexit) run
 # in threads outside the plugin. musl unmaps on dlclose (SIGSEGV in
 # ibmw_shm_ctl on the OHOS device). The engine never unloads extensions anyway.
-if(NOT APPLE AND NOT WIN32)
+if(NOT APPLE)
   target_link_options(${CUR_TARGET_NAME} PRIVATE "LINKER:-z,nodelete")
 endif()
 

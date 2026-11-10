@@ -17,7 +17,6 @@ target_include_directories(
          $<INSTALL_INTERFACE:include>)
 target_link_libraries(ibmw_selfdev_coro PUBLIC Threads::Threads)
 target_compile_features(ibmw_selfdev_coro PUBLIC cxx_std_20)
-target_compile_definitions(ibmw_selfdev_coro PRIVATE IBMW_SELFDEV_CORO_BUILDING)
 # SONAME libibmw_selfdev_coro.so.1. Bump SOVERSION on any change to the
 # exported symbols or to the layout of the types they take (TaskPromiseBase,
 # StartRecord, AsyncScope): packages built against the old headers would

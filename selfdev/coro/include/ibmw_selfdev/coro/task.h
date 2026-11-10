@@ -23,13 +23,8 @@ class AsyncScope;
 
 namespace detail {
 
-#if defined(_MSC_VER) && !defined(__clang__)
-  #define IBMW_SELFDEV_CORO_OPAQUE __declspec(noinline)
-  #define IBMW_SELFDEV_CORO_BARRIER() ((void)0)
-#else
-  #define IBMW_SELFDEV_CORO_OPAQUE [[gnu::noinline]]
-  #define IBMW_SELFDEV_CORO_BARRIER() asm volatile("" ::: "memory")
-#endif
+#define IBMW_SELFDEV_CORO_OPAQUE [[gnu::noinline]]
+#define IBMW_SELFDEV_CORO_BARRIER() asm volatile("" ::: "memory")
 
 // Thread identity that survives coroutine suspension. Clang treats
 // pthread_self() (behind std::this_thread::get_id()) as a const function and

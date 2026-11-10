@@ -10,25 +10,18 @@
 #include <cstring>
 #include <mutex>
 
-#if defined(_WIN32)
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
-  #include <windows.h>
-#else
-  #include <cxxabi.h>
-  #include <dlfcn.h>
-  #if !defined(__APPLE__)
-    #include <link.h>
-  #endif
-  #include <pthread.h>
-  #include <signal.h>
-  #include <sys/socket.h>
-  #include <sys/syscall.h>
-  #include <ucontext.h>
-  #include <unistd.h>
-  #include <unwind.h>
+#include <cxxabi.h>
+#include <dlfcn.h>
+#if !defined(__APPLE__)
+  #include <link.h>
 #endif
+#include <pthread.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
+#include <unistd.h>
+#include <unwind.h>
 
 namespace ibmw::selfdev::crash {
 
@@ -124,11 +117,6 @@ void CopyTail(char* dst, size_t cap, const char* src) noexcept {
 }
 
 void PutSymbolized(Writer& w, const void* pc, bool demangle) noexcept {
-#if defined(_WIN32)
-  (void)w;
-  (void)pc;
-  (void)demangle;
-#else
   Dl_info info;
   std::memset(&info, 0, sizeof(info));
   if (dladdr(pc, &info) == 0 || info.dli_fname == nullptr) return;
@@ -151,7 +139,6 @@ void PutSymbolized(Writer& w, const void* pc, bool demangle) noexcept {
   w.Put("+0x");
   w.PutHex(addr - reinterpret_cast<uintptr_t>(info.dli_saddr), 1);
   w.PutChar(')');
-#endif
 }
 
 void PutFrame(Writer& w, size_t index, const void* pc, bool symbolize, bool demangle) noexcept {
@@ -167,14 +154,12 @@ void PutFrame(Writer& w, size_t index, const void* pc, bool symbolize, bool dema
 
 const char* SignalName(int signo) noexcept {
   switch (signo) {
-#if !defined(_WIN32)
     case SIGBUS: return "SIGBUS";
     case SIGQUIT: return "SIGQUIT";
     case SIGSYS: return "SIGSYS";
     case SIGTRAP: return "SIGTRAP";
     case SIGXCPU: return "SIGXCPU";
     case SIGXFSZ: return "SIGXFSZ";
-#endif
     case SIGABRT: return "SIGABRT";
     case SIGFPE: return "SIGFPE";
     case SIGILL: return "SIGILL";
@@ -199,24 +184,6 @@ size_t FormatStack(char* buf, size_t buf_size, const void* const* frames, size_t
   for (size_t i = 0; i < count; ++i) PutFrame(w, i, frames[i], symbolize, demangle);
   return w.Len();
 }
-
-#if defined(_WIN32)
-
-std::vector<int> DefaultSignals() { return {}; }
-
-size_t CaptureStack(void** frames, size_t max_frames, size_t skip) noexcept {
-  if (frames == nullptr || max_frames == 0) return 0;
-  // +1 skips CaptureStack itself.
-  return RtlCaptureStackBackTrace(static_cast<DWORD>(skip + 1), static_cast<DWORD>(max_frames),
-                                  frames, nullptr);
-}
-
-bool Install(const Options&) { return false; }
-void Uninstall() noexcept {}
-bool IsInstalled() noexcept { return false; }
-void RefreshModules() noexcept {}
-
-#else
 
 namespace {
 
@@ -1118,7 +1085,5 @@ void RefreshModules() noexcept {
   std::lock_guard<std::mutex> lock(g_install_mu);
   RefreshModuleTable();
 }
-
-#endif
 
 }  // namespace ibmw::selfdev::crash
