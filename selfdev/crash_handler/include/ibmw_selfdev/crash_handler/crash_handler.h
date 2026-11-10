@@ -148,7 +148,7 @@ void RefreshModules() noexcept;
 size_t CaptureStack(void** frames, size_t max_frames, size_t skip = 0) noexcept;
 
 /// Formats one frame as
-///   "#03 pc 0x000055d0c1a2b3c4  /path/to/module+0x1b3c4 (symbol+0x24)\n".
+///   "#03 pc 0x000055d0c1a2b3c4  /system/lib64/libfoo.so+0x1b3c4 (symbol+0x24)\n".
 /// Output is always NUL terminated and truncated to fit. Returns the number
 /// of bytes written, excluding the NUL. Allocation free unless demangle is set.
 size_t FormatFrame(char* buf, size_t buf_size, size_t index, const void* pc,

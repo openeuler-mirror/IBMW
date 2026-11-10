@@ -125,7 +125,7 @@ class OutputGuard(unittest.TestCase):
             link=Path(d)/"link";link.symlink_to(ROOT/"selfdev")
             self.rejected(["--output",str(link/"evidence")])
     def test_accepts_outside_and_sibling_names(self):
-        self.assertIsNone(shm.check_output_outside_sources(["--output","/home/oee/evidence"]))
+        self.assertIsNone(shm.check_output_outside_sources(["--output","/var/tmp/evidence"]))
         self.assertIsNone(shm.check_output_outside_sources(["--output",str(ROOT/"build-core-metrics-shm")]))
         self.assertIsNone(shm.check_output_outside_sources(["--output",str(ROOT/"selfdev-evidence")]))
         self.assertIsNone(shm.check_output_outside_sources([]))

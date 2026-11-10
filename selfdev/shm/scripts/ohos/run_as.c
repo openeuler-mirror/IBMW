@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 // Runs a command as an ordinary uid: run_as <uid> <gid> <deny_dir> <cmd> [args...]
 // run_as --caps prints the ids and capabilities of the calling process and
 // exits: run as <cmd> it shows what an exec'ed file from the same directory gets.

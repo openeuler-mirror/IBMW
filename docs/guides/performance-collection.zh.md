@@ -310,11 +310,11 @@ Core Metrics 的 formal host 性能门已在既定 host capability/合同上通�
 source /opt/ros/humble/setup.bash
 export LD_LIBRARY_PATH=/opt/ros/humble/lib
 # 先做守恒诊断（约 5 分钟，含两次沙箱构建；不给验收结论）
-python3 scripts/core_metrics_shm_perf.py --output /path/to/empty-diag --jobs 10 \
-  --dependency-source-pool /path/to/deps-pool --diagnostic-conservation
+python3 scripts/core_metrics_shm_perf.py --output <空目录-诊断> --jobs 10 \
+  --dependency-source-pool <依赖源码池> --diagnostic-conservation
 # 完整验收（24 块 × 3 模式，每次 60 s，约 2 小时）
-python3 scripts/core_metrics_shm_perf.py --output /path/to/empty-run --jobs 10 \
-  --dependency-source-pool /path/to/deps-pool
+python3 scripts/core_metrics_shm_perf.py --output <空目录-验收> --jobs 10 \
+  --dependency-source-pool <依赖源码池>
 ```
 
 - 输出目录必须是新的空目录，且不能位于仓库根或任一快照根（`cmake`、`src`、`scripts`、`tools`、`selfdev` 等）之下，所需空间约 300 MB（两个构建树与源码、依赖快照）。

@@ -488,7 +488,7 @@ IBMW_CRASH_SEQLOCK_READER bool CopyModule(uintptr_t pc, ModuleEntry* out) noexce
   return true;
 }
 
-// "  /path/to/module+0x1b3c4 [base 0x000055d0c1a10000]" from the module table
+// "  /system/lib64/libfoo.so+0x1b3c4 [base 0x000055d0c1a10000]" from the module table
 // only (async-signal-safe, no loader lock), or `missing` when no module
 // contains addr.
 void PutModuleOf(Writer& w, uintptr_t addr, const char* missing) noexcept {
@@ -523,7 +523,7 @@ IBMW_CRASH_SEQLOCK_READER void PutModuleTableFull(Writer& w) noexcept {
   w.Put(" modules not recorded (their frames show bare pcs)\n");
 }
 
-// "#03 pc 0x000055d0c1a2b3c4  /path/to/module+0x1b3c4 [base 0x000055d0c1a10000]"
+// "#03 pc 0x000055d0c1a2b3c4  /system/lib64/libfoo.so+0x1b3c4 [base 0x000055d0c1a10000]"
 void PutRawFrame(Writer& w, size_t index, const void* pc) noexcept {
   w.PutChar('#');
   w.PutDec(static_cast<long long>(index), 2);

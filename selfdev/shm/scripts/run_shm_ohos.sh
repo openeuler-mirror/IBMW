@@ -97,7 +97,7 @@
 #
 # Environment:
 #   OUT                 outputs (default: <repo>/build-ohos-shm)
-#   OHOS_SDK_NATIVE_ROOT SDK native dir (default: /home/oee/xiaoyi/ohos-sdk/18/native)
+#   OHOS_SDK_NATIVE_ROOT SDK native dir (required, e.g. <ohos-sdk>/18/native)
 #   DEPS_DIR            FetchContent sources (default: <repo>/../deps)
 #   DEVICE_DIR          binaries on the device (default: /data/local/tmp/ibmw_shm)
 #   DEVICE_TMP          test root; keep it short, the service directory is limited
@@ -162,7 +162,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
 OUT="${OUT:-${REPO}/build-ohos-shm}"
-SDK="${OHOS_SDK_NATIVE_ROOT:-/home/oee/xiaoyi/ohos-sdk/18/native}"
+SDK="${OHOS_SDK_NATIVE_ROOT:?set OHOS_SDK_NATIVE_ROOT to the OpenHarmony SDK native directory}"
 DEPS_DIR="${DEPS_DIR:-$(dirname "${REPO}")/deps}"
 DEVICE_DIR="${DEVICE_DIR:-/data/local/tmp/ibmw_shm}"
 DEVICE_TMP="${DEVICE_TMP:-/data/local/tmp/s}"

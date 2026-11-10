@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 // Probes the kernel features selfdev shm depends on. Prints one line per feature.
 #define _GNU_SOURCE
 #include <errno.h>
