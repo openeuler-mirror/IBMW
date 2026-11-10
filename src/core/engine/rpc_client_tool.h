@@ -144,21 +144,33 @@ class RpcClientTool {
 
 #if defined(IBMW_SELFDEV_CONCURRENT)
     // handle runs outside the shard locks: collect the ids, then take each.
+    auto complete = [this, &handle](uint32_t req_id) {
+      auto msg_recorder_op = state_->Take(req_id);
+      if (!msg_recorder_op) return;
+      try {
+        handle(std::move(*msg_recorder_op));
+      } catch (...) {
+      }
+    };
     std::vector<uint32_t> req_ids;
     try {
       state_->client_msg_recorder_map.ForEach(
           [&req_ids](uint32_t req_id, const MsgRecorder&) { req_ids.push_back(req_id); });
     } catch (...) {
-      // Out of memory: the records not collected are still dropped below.
-    }
-    for (uint32_t req_id : req_ids) {
-      auto msg_recorder_op = state_->Take(req_id);
-      if (!msg_recorder_op) continue;
-      try {
-        handle(std::move(*msg_recorder_op));
-      } catch (...) {
+      // Out of memory: find the records one at a time instead (a full scan
+      // each, cold path), bounded so a handle that records again cannot
+      // keep this going.
+      req_ids.clear();
+      for (size_t left = state_->client_msg_recorder_map.Size(); left > 0; --left) {
+        std::optional<uint32_t> any;
+        state_->client_msg_recorder_map.ForEach([&any](uint32_t req_id, const MsgRecorder&) {
+          if (!any) any = req_id;
+        });
+        if (!any) break;
+        complete(*any);
       }
     }
+    for (uint32_t req_id : req_ids) complete(req_id);
     state_->client_msg_recorder_map.Clear();
 #else
     for (auto& item : state_->client_msg_recorder_map) {
