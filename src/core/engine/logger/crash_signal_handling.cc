@@ -55,16 +55,48 @@ CrashSignalHandling::CrashSignalHandling() {
   // The raw report also goes to stderr (async-signal-safe) in case logging
   // itself is what crashed.
   options.output_fd = STDERR_FILENO;
-  selfdev_instances_.fetch_add(1);
+  if (instances_.fetch_add(1) == 0) {
+    // Install() replaces the calling thread's alternate stack; the last
+    // owner puts this one back.
+    (void)sigaltstack(nullptr, &selfdev_previous_alt_stack_);
+    selfdev_alt_stack_thread_ = std::this_thread::get_id();
+  }
   (void)ibmw::selfdev::crash::Install(options);
+  stack_t installed{};
+  if (sigaltstack(nullptr, &installed) == 0 && (installed.ss_flags & SS_DISABLE) == 0) {
+    selfdev_alt_stack_ = installed.ss_sp;
+  }
+  util::EnableAltSignalStacks(true);  // executor threads started from now on
+  #else
+  instances_.fetch_add(1);
   #endif
 }
 
 CrashSignalHandling::~CrashSignalHandling() {
+  // The handler, the logger and the executor alternate stacks are
+  // process-wide: the last owner releases them, an earlier one leaves them
+  // to the owners still alive.
+  if (instances_.fetch_sub(1) != 1) return;
   #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  util::EnableAltSignalStacks(false);
   // Restores the actions from before Install() where the handler is still
   // ours, so no crash reports through a logger that is gone.
-  if (selfdev_instances_.fetch_sub(1) == 1) ibmw::selfdev::crash::Uninstall();
+  ibmw::selfdev::crash::Uninstall();
+  // The selfdev stack itself is never freed (another thread may still be on
+  // it); only the installing thread can switch back.
+  stack_t current{};
+  if (selfdev_alt_stack_ != nullptr && std::this_thread::get_id() == selfdev_alt_stack_thread_ &&
+      sigaltstack(nullptr, &current) == 0 && current.ss_sp == selfdev_alt_stack_ &&
+      (current.ss_flags & SS_DISABLE) == 0) {
+    if ((selfdev_previous_alt_stack_.ss_flags & SS_DISABLE) != 0) {
+      stack_t off{};
+      off.ss_flags = SS_DISABLE;
+      (void)sigaltstack(&off, nullptr);
+    } else {
+      (void)sigaltstack(&selfdev_previous_alt_stack_, nullptr);
+    }
+  }
+  selfdev_alt_stack_ = nullptr;
   #endif
   SetLogger(nullptr);
 }
@@ -79,11 +111,15 @@ void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept { std:
 
 CrashSignalHandling::CrashSignalHandling() {
   InstallHandlers(DefaultSignals());
+  instances_.fetch_add(1);
   util::EnableAltSignalStacks(true);  // executor threads started from now on
 }
 
 CrashSignalHandling::~CrashSignalHandling() {
-  util::EnableAltSignalStacks(false);
+  // The logger and the executor alternate stacks are process-wide: only the
+  // last owner releases them. Each owner puts back its own handlers.
+  const bool last = instances_.fetch_sub(1) == 1;
+  if (last) util::EnableAltSignalStacks(false);
   for (auto it = previous_actions_.rbegin(); it != previous_actions_.rend(); ++it) {
     struct sigaction current;
     // SA_RESETHAND or a later installer may have replaced ours: keep that.
@@ -92,7 +128,7 @@ CrashSignalHandling::~CrashSignalHandling() {
       (void)sigaction(it->first, &it->second, nullptr);
     }
   }
-  SetLogger(nullptr);
+  if (last) SetLogger(nullptr);
 
   if (!alt_stack_) return;
   // The alternate stack belongs to the installing thread. Free it only when
@@ -308,9 +344,11 @@ void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
   (void)p;
 }
 
-CrashSignalHandling::CrashSignalHandling() = default;
+CrashSignalHandling::CrashSignalHandling() { instances_.fetch_add(1); }
 
-CrashSignalHandling::~CrashSignalHandling() { SetLogger(nullptr); }
+CrashSignalHandling::~CrashSignalHandling() {
+  if (instances_.fetch_sub(1) == 1) SetLogger(nullptr);
+}
 
 void CrashSignalHandling::HandleSignal(int, siginfo_t*, void*) {}
 

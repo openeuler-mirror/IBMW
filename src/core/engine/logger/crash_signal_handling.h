@@ -108,9 +108,15 @@ class CrashSignalHandling {
   inline static std::atomic<const CrashFlushHook*> crash_flush_hook_{nullptr};
   // Crash handlers between loading the hook and returning from it.
   inline static std::atomic<int> crash_flush_readers_{0};
+  // Live instances: the last one detaches the logger (and, for the selfdev
+  // handler, uninstalls it).
+  inline static std::atomic<int> instances_{0};
 #if defined(IBMW_SELFDEV_CRASH_HANDLER)
-  // The selfdev handler is process-wide: the last instance uninstalls it.
-  inline static std::atomic<int> selfdev_instances_{0};
+  // Alternate stack of the thread that created the first instance, before
+  // and after Install(); written by the first instance, read by the last.
+  inline static stack_t selfdev_previous_alt_stack_{};
+  inline static void* selfdev_alt_stack_ = nullptr;
+  inline static std::thread::id selfdev_alt_stack_thread_;
 #else
   std::unique_ptr<char, FreeDeleter> alt_stack_{nullptr};
   stack_t previous_alt_stack_{};

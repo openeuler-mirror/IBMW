@@ -34,6 +34,20 @@ namespace {
 
 void CustomHandler(int) {}
 
+// Report lines of the configured handler: the raw report starts with the
+// signal line, then the pc line, then one line per frame.
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
+constexpr const char* kSignalLine = "*** IBMW crash: signal 11 (SIGSEGV)";
+constexpr const char* kPcLine = "\n*** pc 0x";
+constexpr const char* kFaultAddr10 = ", code 1, fault addr 0x0000000000000010,";  // SEGV_MAPERR
+constexpr const char* kFrameLine = "\n#00 pc 0x";
+#else
+constexpr const char* kSignalLine = "IBMW crash signal: 11\n";
+constexpr const char* kPcLine = "\nIBMW crash pc: 0x";
+constexpr const char* kFaultAddr10 = " addr: 0x10 code: 0x1\n";  // SEGV_MAPERR
+constexpr const char* kFrameLine = ")[0x";                         // backtrace_symbols_fd()
+#endif
+
 TEST(CrashSignalHandlingTest, DestructorRestoresHandlersAndAltStack) {
   struct sigaction custom {};
   custom.sa_handler = &CustomHandler;
@@ -76,6 +90,19 @@ TEST(CrashSignalHandlingTest, DestructorDetachesLogger) {
   EXPECT_EQ(logger.use_count(), 1);
 }
 
+// The logger is process-wide: destroying one owner keeps it for the others.
+TEST(CrashSignalHandlingTest, LastOwnerDetachesLogger) {
+  auto logger = std::make_shared<ibmw::common::util::LoggerWrapper>();
+  auto first = std::make_unique<CrashSignalHandling>();
+  auto second = std::make_unique<CrashSignalHandling>();
+  CrashSignalHandling::SetLogger(logger);
+  first.reset();
+  EXPECT_EQ(&CrashSignalHandling::GetLogger(), logger.get());
+  second.reset();
+  EXPECT_NE(&CrashSignalHandling::GetLogger(), logger.get());
+  EXPECT_EQ(logger.use_count(), 1);
+}
+
 // A crash after the owner is gone takes the default action and no longer
 // runs the IBMW handler.
 TEST(CrashSignalHandlingTest, CrashAfterDestructionUsesPreviousHandler) {
@@ -102,7 +129,7 @@ TEST(CrashSignalHandlingTest, CrashAfterDestructionUsesPreviousHandler) {
   ASSERT_EQ(waitpid(child, &status, 0), child);
   ASSERT_TRUE(WIFSIGNALED(status));
   EXPECT_EQ(WTERMSIG(status), SIGSEGV);
-  EXPECT_EQ(output.find("IBMW crash signal"), std::string::npos) << output;
+  EXPECT_EQ(output.find("IBMW crash"), std::string::npos) << output;
 }
 
 // The symbolizing part ends the process at once here, as a hang there would:
@@ -134,10 +161,11 @@ TEST(CrashSignalHandlingTest, RawTraceIsWrittenBeforeTheSymbolizedReport) {
   ASSERT_EQ(waitpid(child, &status, 0), child);
   ASSERT_TRUE(WIFEXITED(status)) << output;
   EXPECT_EQ(WEXITSTATUS(status), 42) << output;  // the symbolizing part was reached
-  EXPECT_NE(output.find("IBMW crash signal: 11\nIBMW crash pc: 0x"), std::string::npos) << output;
-  EXPECT_NE(output.find(" addr: 0x10 code: 0x1\n"), std::string::npos) << output;  // SEGV_MAPERR
-  // backtrace_symbols_fd(): one "...[0x...]" line per frame, the test among them.
-  EXPECT_NE(output.find("[0x"), std::string::npos) << output;
+  EXPECT_EQ(output.find(kSignalLine), 0u) << output;
+  EXPECT_NE(output.find(kPcLine), std::string::npos) << output;
+  EXPECT_NE(output.find(kFaultAddr10), std::string::npos) << output;
+  // One line per frame, the test binary among them.
+  EXPECT_NE(output.find(kFrameLine), std::string::npos) << output;
   EXPECT_NE(output.find("ibmw_core_engine_test"), std::string::npos) << output;
 }
 
@@ -235,9 +263,9 @@ TEST(CrashSignalHandlingTest, StackOverflowOnWorkerThreadIsReported) {
   ASSERT_EQ(waitpid(child, &status, 0), child);
   ASSERT_TRUE(WIFSIGNALED(status));
   EXPECT_EQ(WTERMSIG(status), SIGSEGV);
-  EXPECT_NE(output.find("IBMW crash signal: 11"), std::string::npos) << output.substr(0, 512);
-  EXPECT_NE(output.find("IBMW crash pc: 0x"), std::string::npos) << output.substr(0, 512);
-  EXPECT_NE(output.find(")[0x"), std::string::npos) << output.substr(0, 2048);  // backtrace() frames
+  EXPECT_NE(output.find(kSignalLine), std::string::npos) << output.substr(0, 512);
+  EXPECT_NE(output.find(kPcLine), std::string::npos) << output.substr(0, 512);
+  EXPECT_NE(output.find(kFrameLine), std::string::npos) << output.substr(0, 2048);
 }
 
 }  // namespace
