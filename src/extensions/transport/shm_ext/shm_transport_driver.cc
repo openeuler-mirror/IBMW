@@ -346,7 +346,7 @@ bool ShmTransportDriver::OnMessage(const transport::MessageHandlerWrapper& messa
                                                           std::function<void()>&& release) {
       const auto validated_pkg_size = ValidateEncodedPayloadSize(payload, payload_size);
       if (!validated_pkg_size) {
-        MW_WARN("Discard malformed shm transport chunk: size {}.", payload_size);
+        MW_WARN_INTERVAL(1000, "Discard malformed shm transport chunk: size {}.", payload_size);
         if (release) release();
         return;
       }
@@ -372,9 +372,9 @@ bool ShmTransportDriver::OnMessage(const transport::MessageHandlerWrapper& messa
         msg_handler_tool->DoMessageCallback(ctx_ptr, serialization_type,
                                             static_cast<const void*>(remaining_buf.data()), remaining_buf.size());
       } catch (const std::exception& e) {
-        MW_WARN("Handle shm transport msg failed, exception info: {}", e.what());
+        MW_WARN_INTERVAL(1000, "Handle shm transport msg failed, exception info: {}", e.what());
       } catch (...) {
-        MW_WARN("Handle shm transport msg failed with an unknown exception.");
+        MW_WARN_INTERVAL(1000, "Handle shm transport msg failed with an unknown exception.");
       }
       if (release) release();
     };

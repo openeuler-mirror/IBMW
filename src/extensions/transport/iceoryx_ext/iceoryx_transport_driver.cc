@@ -299,8 +299,8 @@ bool IceoryxTransportDriver::OnMessage(
           const auto validated_pkg_size =
               internal::ValidateEncodedPayloadSize(payload, payload_size);
           if (!validated_pkg_size) {
-            MW_WARN("Discard malformed iceoryx transport chunk: size {}.",
-                    payload_size);
+            MW_WARN_INTERVAL(1000, "Discard malformed iceoryx transport chunk: size {}.",
+                             payload_size);
             if (release) release();
             return;
           }
@@ -351,9 +351,9 @@ bool IceoryxTransportDriver::OnMessage(
                 static_cast<const void*>(remaining_buf.data()),
                 remaining_buf.size());
           } catch (const std::exception& e) {
-            MW_WARN("Handle Iceoryx transport msg failed, exception info: {}", e.what());
+            MW_WARN_INTERVAL(1000, "Handle Iceoryx transport msg failed, exception info: {}", e.what());
           } catch (...) {
-            MW_WARN("Handle Iceoryx transport msg failed with an unknown exception.");
+            MW_WARN_INTERVAL(1000, "Handle Iceoryx transport msg failed with an unknown exception.");
           }
           if (release) release();
         };

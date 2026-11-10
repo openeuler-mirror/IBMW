@@ -268,7 +268,7 @@ bool ZenohTransportDriver::OnMessage(
                 ctx_ptr, serialization_type, static_cast<const void*>(remaining_buf.data()), remaining_buf.size());
 
           } catch (const std::exception& e) {
-            MW_WARN("Handle Zenoh transport msg failed, exception info: {}", e.what());
+            MW_WARN_INTERVAL(1000, "Handle Zenoh transport msg failed, exception info: {}", e.what());
           }
         };
 
