@@ -177,13 +177,13 @@ void RotateFileLoggerDriver::Flush() noexcept {
   try {
     if (!log_executor_) return;
     if (log_executor_.IsInCurrentExecutor()) {
-      FlushOnLogExecutor();
+      FlushStreams();
       return;
     }
     auto done = std::make_shared<std::promise<void>>();
     auto flushed = done->get_future();
     log_executor_.Dispatch([this, done] {
-      FlushOnLogExecutor();
+      FlushStreams();
       done->set_value();
     });
     // A stalled log executor must not hold up the shutdown.
@@ -192,7 +192,7 @@ void RotateFileLoggerDriver::Flush() noexcept {
   }
 }
 
-void RotateFileLoggerDriver::FlushOnLogExecutor() noexcept {
+void RotateFileLoggerDriver::FlushStreams() noexcept {
   if (ofs_.is_open()) ofs_.flush();
   if (file_ != nullptr) (void)fflush(file_);
 }

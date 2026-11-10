@@ -54,14 +54,7 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
   bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept override {
     if (!run_flag_.load()) return false;
     // Runs after the queued writes, on the thread that owns ofs_ / file_.
-    auto flush = [this]() {
-      if (options_.enable_sync) {
-        if (file_ != nullptr) (void)fflush(file_);
-      } else if (ofs_.is_open()) {
-        ofs_.flush();
-      }
-    };
-    return FlushOnLogExecutor(log_executor_, std::move(flush), deadline);
+    return FlushOnLogExecutor(log_executor_, [this]() { FlushStreams(); }, deadline);
   }
 
   void RegisterGetExecutorFunc(
@@ -75,7 +68,8 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
 
  private:
   bool OpenNewFile();
-  void FlushOnLogExecutor() noexcept;
+  // Writes out ofs_ / file_; only on the log executor.
+  void FlushStreams() noexcept;
   void CleanLogFile();
   uint32_t GetNextIndex();
   bool CheckLog(const LogDataWrapper& log_data_wrapper);
