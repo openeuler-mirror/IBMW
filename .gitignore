@@ -96,7 +96,6 @@ local.cmake
 .envrc
 .omc/
 .opencode/
-selfdev/
 
 # ---- Generated regen tmp ----------------------------------------------------
 *.regen.tmp
@@ -115,3 +114,5 @@ selfdev/
 # The log CLI source directory is not a colcon log output directory.
 !src/extensions/cli/log/
 !src/extensions/cli/log/**
+# Test fixtures in JSONL (the `*.jsonl` rule is for run output).
+!scripts/tests/fixtures/*.jsonl
