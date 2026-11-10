@@ -6,6 +6,7 @@
 #include <atomic>
 #include <csignal>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -81,14 +82,10 @@ class CrashSignalHandling {
   // Receives the demangled report from ibmw::selfdev::crash and logs it.
   static void ReportToLog(const char* report, size_t len, void* user_data);
 #else
-  struct FreeDeleter {
-    void operator()(char* p) const noexcept;
-  };
-
   static void HandleSignal(int signo, siginfo_t* info, void* _ctx);
   static void SigHandler(int signo, siginfo_t* info, void* _ctx);
-  void EnsureAltStack();
-  void InstallHandlers(const std::vector<int>& signals);
+  static void EnsureAltStack();
+  static void InstallHandlers(const std::vector<int>& signals);
 #endif
 
  private:
@@ -108,20 +105,23 @@ class CrashSignalHandling {
   inline static std::atomic<const CrashFlushHook*> crash_flush_hook_{nullptr};
   // Crash handlers between loading the hook and returning from it.
   inline static std::atomic<int> crash_flush_readers_{0};
-  // Live instances: the last one detaches the logger (and, for the selfdev
-  // handler, uninstalls it).
-  inline static std::atomic<int> instances_{0};
+  // The handlers, the alternate stack and the logger are process-wide: the
+  // first live instance installs them, the last one releases them. Guards
+  // the count and the state below (constructors and destructors only).
+  inline static std::mutex lifecycle_mu_;
+  inline static int instances_ = 0;
 #if defined(IBMW_SELFDEV_CRASH_HANDLER)
   // Alternate stack of the thread that created the first instance, before
-  // and after Install(); written by the first instance, read by the last.
+  // and after Install().
   inline static stack_t selfdev_previous_alt_stack_{};
   inline static void* selfdev_alt_stack_ = nullptr;
   inline static std::thread::id selfdev_alt_stack_thread_;
 #else
-  std::unique_ptr<char, FreeDeleter> alt_stack_{nullptr};
-  stack_t previous_alt_stack_{};
-  std::thread::id alt_stack_thread_;
-  std::vector<std::pair<int, struct sigaction>> previous_actions_;
+  // Raw: a static owner would free it at exit while it may still be in use.
+  inline static char* alt_stack_ = nullptr;
+  inline static stack_t previous_alt_stack_{};
+  inline static std::thread::id alt_stack_thread_;
+  inline static std::vector<std::pair<int, struct sigaction>> previous_actions_;
 #endif
 };
 

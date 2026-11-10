@@ -48,6 +48,8 @@ void CrashSignalHandling::ReportToLog(const char* report, size_t len, void*) {
 }
 
 CrashSignalHandling::CrashSignalHandling() {
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (instances_++ != 0) return;
   #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
   ibmw::selfdev::crash::Options options;
   options.alt_stack_size = 1024 * 1024 * 8;  // same as the backward-cpp path
@@ -55,28 +57,23 @@ CrashSignalHandling::CrashSignalHandling() {
   // The raw report also goes to stderr (async-signal-safe) in case logging
   // itself is what crashed.
   options.output_fd = STDERR_FILENO;
-  if (instances_.fetch_add(1) == 0) {
-    // Install() replaces the calling thread's alternate stack; the last
-    // owner puts this one back.
-    (void)sigaltstack(nullptr, &selfdev_previous_alt_stack_);
-    selfdev_alt_stack_thread_ = std::this_thread::get_id();
-  }
+  // Install() replaces the calling thread's alternate stack; the last owner
+  // puts this one back.
+  (void)sigaltstack(nullptr, &selfdev_previous_alt_stack_);
+  selfdev_alt_stack_thread_ = std::this_thread::get_id();
   (void)ibmw::selfdev::crash::Install(options);
   stack_t installed{};
   if (sigaltstack(nullptr, &installed) == 0 && (installed.ss_flags & SS_DISABLE) == 0) {
     selfdev_alt_stack_ = installed.ss_sp;
   }
   util::EnableAltSignalStacks(true);  // executor threads started from now on
-  #else
-  instances_.fetch_add(1);
   #endif
 }
 
 CrashSignalHandling::~CrashSignalHandling() {
-  // The handler, the logger and the executor alternate stacks are
-  // process-wide: the last owner releases them, an earlier one leaves them
-  // to the owners still alive.
-  if (instances_.fetch_sub(1) != 1) return;
+  // An earlier owner leaves everything to the owners still alive.
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (--instances_ != 0) return;
   #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
   util::EnableAltSignalStacks(false);
   // Restores the actions from before Install() where the handler is still
@@ -107,19 +104,18 @@ std::vector<int> DefaultSignals() {
   return backward::SignalHandling::make_default_signals();
 }
 
-void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept { std::free(p); }
-
 CrashSignalHandling::CrashSignalHandling() {
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (instances_++ != 0) return;
   InstallHandlers(DefaultSignals());
-  instances_.fetch_add(1);
   util::EnableAltSignalStacks(true);  // executor threads started from now on
 }
 
 CrashSignalHandling::~CrashSignalHandling() {
-  // The logger and the executor alternate stacks are process-wide: only the
-  // last owner releases them. Each owner puts back its own handlers.
-  const bool last = instances_.fetch_sub(1) == 1;
-  if (last) util::EnableAltSignalStacks(false);
+  // An earlier owner leaves everything to the owners still alive.
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (--instances_ != 0) return;
+  util::EnableAltSignalStacks(false);
   for (auto it = previous_actions_.rbegin(); it != previous_actions_.rend(); ++it) {
     struct sigaction current;
     // SA_RESETHAND or a later installer may have replaced ours: keep that.
@@ -128,17 +124,21 @@ CrashSignalHandling::~CrashSignalHandling() {
       (void)sigaction(it->first, &it->second, nullptr);
     }
   }
-  if (last) SetLogger(nullptr);
+  previous_actions_.clear();
+  SetLogger(nullptr);
 
-  if (!alt_stack_) return;
+  if (alt_stack_ == nullptr) return;
   // The alternate stack belongs to the installing thread. Free it only when
   // that thread can switch back to its previous one; otherwise the kernel
   // may still use it, so it stays allocated for the process lifetime.
   stack_t current{};
   if (std::this_thread::get_id() != alt_stack_thread_ || sigaltstack(nullptr, &current) != 0 ||
-      current.ss_sp != alt_stack_.get() || sigaltstack(&previous_alt_stack_, nullptr) != 0) {
-    (void)alt_stack_.release();
+      current.ss_sp != alt_stack_ || sigaltstack(&previous_alt_stack_, nullptr) != 0) {
+    alt_stack_ = nullptr;  // leaked on purpose
+    return;
   }
+  std::free(alt_stack_);
+  alt_stack_ = nullptr;
 }
 
 namespace {
@@ -294,17 +294,18 @@ CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
 
 void CrashSignalHandling::EnsureAltStack() {
   const size_t stack_size = util::kCrashAltStackSize;
-  alt_stack_.reset(static_cast<char*>(std::malloc(stack_size)));
-  if (!alt_stack_) {
+  alt_stack_ = static_cast<char*>(std::malloc(stack_size));
+  if (alt_stack_ == nullptr) {
     return;
   }
 
   stack_t ss;
-  ss.ss_sp = alt_stack_.get();
+  ss.ss_sp = alt_stack_;
   ss.ss_size = stack_size;
   ss.ss_flags = 0;
   if (sigaltstack(&ss, &previous_alt_stack_) < 0) {
-    alt_stack_.reset();  // never installed
+    std::free(alt_stack_);  // never installed
+    alt_stack_ = nullptr;
     return;
   }
   alt_stack_thread_ = std::this_thread::get_id();
@@ -340,14 +341,14 @@ std::vector<int> DefaultSignals() {
   return {};
 }
 
-void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
-  (void)p;
+CrashSignalHandling::CrashSignalHandling() {
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  ++instances_;
 }
 
-CrashSignalHandling::CrashSignalHandling() { instances_.fetch_add(1); }
-
 CrashSignalHandling::~CrashSignalHandling() {
-  if (instances_.fetch_sub(1) == 1) SetLogger(nullptr);
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (--instances_ == 0) SetLogger(nullptr);
 }
 
 void CrashSignalHandling::HandleSignal(int, siginfo_t*, void*) {}
