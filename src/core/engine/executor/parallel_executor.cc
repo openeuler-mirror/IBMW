@@ -169,7 +169,11 @@ void ParallelExecutor::Shutdown() {
   const auto* prev_executor = tl_current_executor_;
   tl_current_executor_ = this;
   ibmw::executor::Task task;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  while (qu_.TryPop(task)) {  // still drains after Abort()
+#else
   while (qu_.try_pop(task)) {
+#endif
     task();
     --queue_task_num_;
   }
