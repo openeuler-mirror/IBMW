@@ -13,9 +13,16 @@
 #include <thread>
 #include <utility>
 
+#include <vector>
+
+#include "base/ibmw_config.h"
 #include "cpp/executor/executor.h"
 
-#include "tbb/concurrent_hash_map.h"
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  #include "ibmw_selfdev/concurrent/concurrent_hash_map.h"
+#else
+  #include "tbb/concurrent_hash_map.h"
+#endif
 
 namespace ibmw::runtime::core::util {
 
@@ -53,7 +60,11 @@ class RpcClientTool {
   }
 
   bool Record(uint32_t req_id, std::chrono::nanoseconds timeout, MsgRecorder&& msg_recorder) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    bool ret = state_->client_msg_recorder_map.Emplace(req_id, std::move(msg_recorder));
+#else
     bool ret = state_->client_msg_recorder_map.emplace(req_id, std::move(msg_recorder));
+#endif
 
     if (!ret) [[unlikely]]
       return false;
@@ -131,6 +142,25 @@ class RpcClientTool {
     const int self = InTimeoutHandle::Current() == state_.get() ? 1 : 0;
     while (state_->running_timeout_tasks.load() != self) std::this_thread::yield();
 
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    // handle runs outside the shard locks: collect the ids, then take each.
+    std::vector<uint32_t> req_ids;
+    try {
+      state_->client_msg_recorder_map.ForEach(
+          [&req_ids](uint32_t req_id, const MsgRecorder&) { req_ids.push_back(req_id); });
+    } catch (...) {
+      // Out of memory: the records not collected are still dropped below.
+    }
+    for (uint32_t req_id : req_ids) {
+      auto msg_recorder_op = state_->Take(req_id);
+      if (!msg_recorder_op) continue;
+      try {
+        handle(std::move(*msg_recorder_op));
+      } catch (...) {
+      }
+    }
+    state_->client_msg_recorder_map.Clear();
+#else
     for (auto& item : state_->client_msg_recorder_map) {
       try {
         handle(std::move(item.second));
@@ -138,17 +168,40 @@ class RpcClientTool {
       }
     }
     state_->client_msg_recorder_map.clear();
+#endif
   }
 
  private:
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  using ClientMsgRecorderMap = ibmw::selfdev::concurrent::ConcurrentHashMap<uint32_t, MsgRecorder>;
+  // Few requests are in flight per client and every client has its own map:
+  // 64 shards keep the shard headers at ~8 KiB per client instead of the
+  // default ~64 KiB.
+  static constexpr size_t kRecorderShards = 64;
+#else
   using ClientMsgRecorderMap = tbb::concurrent_hash_map<uint32_t, MsgRecorder>;
+#endif
 
   struct State {
     TimeoutHandle timeout_handle;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    ClientMsgRecorderMap client_msg_recorder_map{kRecorderShards};
+#else
     ClientMsgRecorderMap client_msg_recorder_map;
+#endif
     std::atomic<bool> closed{false};
     std::atomic<int> running_timeout_tasks{0};
 
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    // Find and erase under one shard lock: a timeout racing the response for
+    // the same req_id gets the record exactly once.
+    std::optional<MsgRecorder> Take(uint32_t req_id) { return client_msg_recorder_map.Take(req_id); }
+
+    template <typename Pred>
+    std::optional<MsgRecorder> TakeIf(uint32_t req_id, Pred&& matches) {
+      return client_msg_recorder_map.TakeIf(req_id, std::forward<Pred>(matches));
+    }
+#else
     std::optional<MsgRecorder> Take(uint32_t req_id) {
       typename ClientMsgRecorderMap::accessor ac;
       bool find_ret = client_msg_recorder_map.find(ac, req_id);
@@ -179,6 +232,7 @@ class RpcClientTool {
 
       return result;
     }
+#endif
   };
 
   class TimeoutTaskGuard {
