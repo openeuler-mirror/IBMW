@@ -155,4 +155,4 @@ void ShmExtension::RegisterShmTransportDriver() {
 
 }  // namespace ibmw::extensions::shm_extension
 
-IBMW_EXT_ENTRY_V2(ibmw::extensions::shm_extension::ShmExtension)
+IBMW_EXT_ENTRY(ibmw::extensions::shm_extension::ShmExtension)

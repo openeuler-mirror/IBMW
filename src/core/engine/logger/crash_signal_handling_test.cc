@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -39,7 +40,9 @@ void CustomHandler(int) {}
 #if defined(IBMW_SELFDEV_CRASH_HANDLER)
 constexpr const char* kSignalLine = "*** IBMW crash: signal 11 (SIGSEGV)";
 constexpr const char* kPcLine = "\n*** pc 0x";
-constexpr const char* kFaultAddr10 = ", code 1, fault addr 0x0000000000000010,";  // SEGV_MAPERR
+// SEGV_MAPERR; addresses are printed 2 * sizeof(uintptr_t) digits wide.
+constexpr const char* kFaultAddr10 = sizeof(uintptr_t) == 8 ? ", code 1, fault addr 0x0000000000000010,"
+                                                            : ", code 1, fault addr 0x00000010,";
 constexpr const char* kFrameLine = "\n#00 pc 0x";
 #else
 constexpr const char* kSignalLine = "IBMW crash signal: 11\n";

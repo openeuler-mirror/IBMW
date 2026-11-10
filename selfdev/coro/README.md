@@ -75,7 +75,7 @@ thread_local used to be duplicated per DSO under `RTLD_DEEPBIND`,
 - Only the `IBMW_SELFDEV_CORO_API` functions are exported (version script
   `src/libibmw_selfdev_coro.map`); the `ibmw_selfdev_coro_exports` test
   compares `nm -D --defined-only` of the library with `test/exports.txt`.
-- Installed with `ibmw` (`lib/`, Windows DLL in `bin/`); executables built by
+- Installed with `ibmw` (`lib/`); executables built by
   the IBMW project get `$ORIGIN/../lib` in their install RPATH. Downstream
   projects get the library through `find_package(ibmw)` and
   `ibmw::selfdev::coro`.
