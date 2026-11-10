@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <climits>
-#include <cstdio>
 #include <cstring>
 
 #include "impl.h"
@@ -56,9 +55,7 @@ namespace detail {
 
 namespace {
 
-void Log(const char* what, const std::string& url) {
-  std::fprintf(stderr, "[ibmw_shm] subscriber %s: %s\n", url.c_str(), what);
-}
+void Log(const char* what, const std::string& url) { detail::Log("subscriber", what, url); }
 
 // A full listen backlog (connect: EAGAIN) is retried after 1, 2, 4 ... ms,
 // at most 500 ms apart: about 4 s in all.
@@ -371,7 +368,7 @@ void SubscriberImpl::HandleMessage(const std::shared_ptr<SubConn>& conn, const u
     std::memcpy(&rm, data, std::min(len, sizeof(rm)));
     // No allocation here (noexcept, see RG-40..42).
     const char* reason = len >= sizeof(rm) && rm.reason <= 0xff ? ErrorName(static_cast<Error>(rm.reason)) : "?";
-    std::fprintf(stderr, "[ibmw_shm] subscriber %s: rejected by publisher: %s\n", url_.c_str(), reason);
+    detail::Log("subscriber", "rejected by publisher", url_, reason);
   }
   HandleHangup(conn);
 }

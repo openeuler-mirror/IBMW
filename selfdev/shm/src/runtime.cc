@@ -108,6 +108,31 @@ std::string DefaultRoot() {
 
 }  // namespace
 
+void Log(const char* side, const char* what, const std::string& url, const char* reason) noexcept {
+  constexpr uint32_t kLogLinesPerSecond = 10;
+  static std::atomic<uint64_t> window_start_s{0};
+  static std::atomic<uint32_t> lines_in_window{0};
+  static std::atomic<uint64_t> dropped{0};
+  const uint64_t now_s = NowNs() / 1'000'000'000;
+  uint64_t start = window_start_s.load(std::memory_order_relaxed);
+  if (now_s != start && window_start_s.compare_exchange_strong(start, now_s, std::memory_order_relaxed)) {
+    lines_in_window.store(0, std::memory_order_relaxed);
+  }
+  if (lines_in_window.fetch_add(1, std::memory_order_relaxed) >= kLogLinesPerSecond) {
+    dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  const uint64_t n = dropped.exchange(0, std::memory_order_relaxed);
+  const char* sep = reason != nullptr ? ": " : "";
+  if (reason == nullptr) reason = "";
+  if (n != 0) {
+    std::fprintf(stderr, "[ibmw_shm] %s %s: %s%s%s (%" PRIu64 " earlier lines dropped)\n", side, url.c_str(), what, sep,
+                 reason, n);
+  } else {
+    std::fprintf(stderr, "[ibmw_shm] %s %s: %s%s%s\n", side, url.c_str(), what, sep, reason);
+  }
+}
+
 std::vector<std::string> ForeignServiceDirs(const std::string& root, const std::string& owner,
                                             const std::string& domain) {
   std::vector<std::string> out;

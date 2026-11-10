@@ -88,9 +88,7 @@ uint32_t InitialChunks(uint32_t class_shift) noexcept {
 
 bool IsPowerOfTwo(uint32_t v) noexcept { return v != 0 && (v & (v - 1)) == 0; }
 
-void Log(const char* what, const std::string& url) {
-  std::fprintf(stderr, "[ibmw_shm] publisher %s: %s\n", url.c_str(), what);
-}
+void Log(const char* what, const std::string& url) { detail::Log("publisher", what, url); }
 
 uint32_t CountBits(const std::vector<std::vector<uint64_t>>& outstanding) noexcept {
   uint32_t n = 0;

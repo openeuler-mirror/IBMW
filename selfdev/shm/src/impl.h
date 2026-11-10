@@ -26,6 +26,11 @@
 
 namespace ibmw::selfdev::shm::detail {
 
+// Writes "[ibmw_shm] <side> <url>: <what>[: <reason>]" to stderr. Peers can
+// trigger these, so at most kLogLinesPerSecond lines a second are written;
+// the next one written says how many were dropped. Does not allocate.
+void Log(const char* side, const char* what, const std::string& url, const char* reason = nullptr) noexcept;
+
 // ============================================================ publisher side
 
 // One pool segment: `count` chunks of `stride` bytes (header + payload class).
