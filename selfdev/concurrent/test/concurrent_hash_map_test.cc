@@ -44,6 +44,19 @@ TEST(ConcurrentHashMapTest, Take) {
   EXPECT_FALSE(m.Take(7).has_value());
 }
 
+// HM-02b: TakeIf leaves the value in place when the predicate rejects it.
+TEST(ConcurrentHashMapTest, TakeIf) {
+  ConcurrentHashMap<uint32_t, std::string> m;
+  ASSERT_TRUE(m.Emplace(7, "seven"));
+  EXPECT_FALSE(m.TakeIf(7, [](const std::string& v) { return v == "eight"; }).has_value());
+  EXPECT_TRUE(m.Contains(7));
+  EXPECT_FALSE(m.TakeIf(8, [](const std::string&) { return true; }).has_value());
+  auto v = m.TakeIf(7, [](const std::string& s) { return s == "seven"; });
+  ASSERT_TRUE(v.has_value());
+  EXPECT_EQ(*v, "seven");
+  EXPECT_FALSE(m.Contains(7));
+}
+
 // HM-03
 TEST(ConcurrentHashMapTest, EraseContainsGet) {
   ConcurrentHashMap<std::string, int> m;

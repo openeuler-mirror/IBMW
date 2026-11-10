@@ -5,7 +5,7 @@ Header-only concurrent containers; replace the two oneTBB types IBMW uses.
 | Type | Replaces | Notes |
 |---|---|---|
 | `BoundedBlockingQueue<T>` | `tbb::concurrent_bounded_queue<T>` | ticketed queue: one atomic ticket per item, items spread over 8 lanes of 16-cell blocks, so producers (and consumers, when `T` moves without throwing) take no lock; a thread that must wait (empty, full, or an item still being written) spins briefly and then sleeps on a condition variable, and wakers only signal registered sleepers; `Push`/`Emplace` block when full, `Pop` blocks when empty; `Abort()` wakes all waiters and makes later blocking calls fail (sticky until `Reset()`) |
-| `ConcurrentHashMap<K, V>` | `tbb::concurrent_hash_map<K, V>` | sharded `unordered_map` (power-of-two shards, 512 by default, cache-line aligned); value-returning API (`Emplace`, `InsertOrAssign`, `Take`, `Get`, `Erase`) plus `Visit` / `ForEach` under the shard lock; each shard keeps up to two freed nodes for reuse |
+| `ConcurrentHashMap<K, V>` | `tbb::concurrent_hash_map<K, V>` | sharded `unordered_map` (power-of-two shards, 512 by default, cache-line aligned); value-returning API (`Emplace`, `InsertOrAssign`, `Take`, `TakeIf`, `Get`, `Erase`) plus `Visit` / `ForEach` under the shard lock; each shard keeps up to two freed nodes for reuse |
 
 ```cpp
 #include "ibmw_selfdev/concurrent/bounded_blocking_queue.h"

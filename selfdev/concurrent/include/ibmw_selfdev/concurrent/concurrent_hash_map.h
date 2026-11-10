@@ -94,6 +94,20 @@ class ConcurrentHashMap {
     return out;
   }
 
+  /// Take() only if pred(const Value&) holds, checked under the same shard
+  /// lock; otherwise the value stays. pred must not access this map.
+  template <class Pred>
+  std::optional<Value> TakeIf(const Key& key, Pred&& pred) {
+    Shard& s = ShardFor(key);
+    std::unique_lock<detail::AdaptiveMutex> lock(s.mu);
+    auto it = s.map.find(key);
+    if (it == s.map.end() || !pred(std::as_const(it->second))) return std::nullopt;
+    std::optional<Value> out(std::move(it->second));
+    auto node = s.map.extract(it);
+    lock.unlock();
+    return out;
+  }
+
   /// The value is destroyed after the shard lock is released.
   bool Erase(const Key& key) {
     Shard& s = ShardFor(key);
