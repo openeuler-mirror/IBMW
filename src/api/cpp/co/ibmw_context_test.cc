@@ -13,7 +13,9 @@
 
 #include "cpp/co/ibmw_context.h"
 
-#ifndef IBMW_EXECUTOR_USE_STDEXEC
+// The receiver/operation-state path only exists in the unifex backend; the
+// stdexec and selfdev coroutine backends have no connect().
+#if !defined(IBMW_EXECUTOR_USE_STDEXEC) && !defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
 
 namespace ibmw::co {
 namespace {
@@ -100,4 +102,4 @@ TEST(IbmwExecutorReceiverLifetime, ScheduleAtDoesNotLeakReceiver) {
 }  // namespace
 }  // namespace ibmw::co
 
-#endif  // IBMW_EXECUTOR_USE_STDEXEC
+#endif  // !IBMW_EXECUTOR_USE_STDEXEC && !IBMW_EXECUTOR_USE_SELFDEV_CORO
