@@ -35,6 +35,14 @@ namespace {
 
 void CustomHandler(int) {}
 
+// Handlers are not installed on OHOS (same gate as crash_signal_handling.cc);
+// tests that need them installed are skipped there.
+#if defined(__OHOS__) || defined(__OHOS)
+#define SKIP_WITHOUT_CRASH_HANDLERS() GTEST_SKIP() << "crash handlers are not installed on OHOS"
+#else
+#define SKIP_WITHOUT_CRASH_HANDLERS() (void)0
+#endif
+
 // Report lines of the configured handler: the raw report starts with the
 // signal line, then the pc line, then one line per frame.
 #if defined(IBMW_SELFDEV_CRASH_HANDLER)
@@ -52,6 +60,7 @@ constexpr const char* kFrameLine = ")[0x";                         // backtrace_
 #endif
 
 TEST(CrashSignalHandlingTest, DestructorRestoresHandlersAndAltStack) {
+  SKIP_WITHOUT_CRASH_HANDLERS();
   struct sigaction custom {};
   custom.sa_handler = &CustomHandler;
   sigemptyset(&custom.sa_mask);
@@ -138,6 +147,7 @@ TEST(CrashSignalHandlingTest, CrashAfterDestructionUsesPreviousHandler) {
 // The handlers are process-wide too: an earlier owner's destructor leaves
 // them to the owner still alive, whose crash is still reported.
 TEST(CrashSignalHandlingTest, CrashAfterEarlierOwnerIsGoneIsStillReported) {
+  SKIP_WITHOUT_CRASH_HANDLERS();
   int fds[2];
   ASSERT_EQ(pipe(fds), 0);
   const pid_t child = fork();
@@ -169,6 +179,7 @@ TEST(CrashSignalHandlingTest, CrashAfterEarlierOwnerIsGoneIsStillReported) {
 // The symbolizing part ends the process at once here, as a hang there would:
 // what was written before it is the raw part.
 TEST(CrashSignalHandlingTest, RawTraceIsWrittenBeforeTheSymbolizedReport) {
+  SKIP_WITHOUT_CRASH_HANDLERS();
   int fds[2];
   ASSERT_EQ(pipe(fds), 0);
   const pid_t child = fork();
@@ -206,6 +217,7 @@ TEST(CrashSignalHandlingTest, RawTraceIsWrittenBeforeTheSymbolizedReport) {
 // Even writing the report can block (stderr a full pipe nobody reads): the
 // watchdog still ends the process with the original signal (~10 s).
 TEST(CrashSignalHandlingTest, BlockedStderrStillEndsTheProcess) {
+  SKIP_WITHOUT_CRASH_HANDLERS();
   const pid_t child = fork();
   ASSERT_GE(child, 0);
   if (child == 0) {
@@ -247,6 +259,7 @@ bool CurrentThreadHasAltStack() {
 }
 
 TEST(CrashSignalHandlingTest, ExecutorThreadsGetAltStackOnlyWhileInstalled) {
+  SKIP_WITHOUT_CRASH_HANDLERS();
   const auto worker_has_alt_stack = [] {
     executor::ThreadPoolExecutor executor;
     executor.Initialize("alt-stack-test", YAML::Load("{thread_num: 1}"));
@@ -272,6 +285,7 @@ TEST(CrashSignalHandlingTest, ExecutorThreadsGetAltStackOnlyWhileInstalled) {
 }
 
 TEST(CrashSignalHandlingTest, StackOverflowOnWorkerThreadIsReported) {
+  SKIP_WITHOUT_CRASH_HANDLERS();
   int fds[2];
   ASSERT_EQ(pipe(fds), 0);
   const pid_t child = fork();
