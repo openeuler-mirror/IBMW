@@ -90,6 +90,10 @@ void SyncDirectory(const std::filesystem::path& directory) {
   const int result = ::fsync(fd);
   const int error = errno;
   ::close(fd);
+  // Some file systems (vfat, some FUSE and Android/OHOS storage layers) cannot
+  // sync a directory (ENOTSUP is EOPNOTSUPP on Linux); the file itself was
+  // synced, so the rename stays atomic.
+  if (result != 0 && (error == EINVAL || error == EOPNOTSUPP)) return;
   MW_ASSERT(result == 0, "Cannot sync directory '{}': {}.", directory.string(), std::strerror(error));
 }
 
