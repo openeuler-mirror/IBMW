@@ -77,7 +77,7 @@ inline RuntimeFileDescriptor OpenRuntimeDirectory(
 // on the bytes read, not on st_size, which may change or be 0 (procfs).
 inline std::optional<std::string> ReadRuntimeFileBelow(int fd, size_t max_size) {
   std::string data;
-  char buffer[64 * 1024];
+  char buffer[8 * 1024];  // also safe on small (musl 128 KiB) thread stacks
   while (true) {
     const ssize_t received = ::read(fd, buffer, sizeof(buffer));
     if (received < 0 && errno == EINTR) continue;
