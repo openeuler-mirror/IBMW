@@ -10,6 +10,7 @@
 #include <iterator>
 #include <stdexcept>
 
+#include <sys/auxv.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -19,10 +20,11 @@ namespace ibmw::discovery {
 
 namespace {
 
-// The override for tests and development setups. secure_getenv ignores it in
-// setuid processes.
+// The override for tests and development setups, ignored in setuid processes
+// as secure_getenv does (which OHOS musl does not declare).
 const char* PluginDirectoryOverride() {
-  const char* value = ::secure_getenv("IBMW_DISCOVERY_PLUGIN_DIR");
+  if (::getauxval(AT_SECURE) != 0) return nullptr;
+  const char* value = std::getenv("IBMW_DISCOVERY_PLUGIN_DIR");
   return value && *value ? value : nullptr;
 }
 
