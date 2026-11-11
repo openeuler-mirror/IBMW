@@ -11,10 +11,10 @@
 #include <stdexcept>
 
 #include <sys/auxv.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "engine/discovery/registry_discovery_provider.h"
+#include "engine/dynamic_lib.h"
 
 namespace ibmw::discovery {
 
@@ -29,20 +29,15 @@ const char* PluginDirectoryOverride() {
 }
 
 // An overridden plugin must not let another user plant code, for example
-// through an environment kept by sudo: its directory and the library belong to
-// this user or root and are not world writable. Group write is accepted for
-// user private groups (umask 002).
-void RequireTrustedPlugin(const std::filesystem::path& path) {
-  for (const auto& item : {path.parent_path(), path}) {
-    struct stat status {};
-    if (::stat(item.c_str(), &status) != 0 ||
-        (status.st_uid != ::geteuid() && status.st_uid != 0) ||
-        (status.st_mode & S_IWOTH) != 0) {
-      throw std::runtime_error("Untrusted discovery plugin '" + path.string() + "': '" +
-                               item.string() +
-                               "' must belong to the current user or root and not be world writable.");
-    }
+// through an environment kept by sudo: the same rule as every library loaded by
+// path (CORE-017). Returns the checked path, which is the one to load.
+std::filesystem::path RequireTrustedPlugin(const std::filesystem::path& path) {
+  std::string checked;
+  const auto untrusted = ibmw::common::util::CheckLibraryTrust(path.string(), checked);
+  if (!untrusted.empty()) {
+    throw std::runtime_error("Untrusted discovery plugin '" + path.string() + "': " + untrusted);
   }
+  return checked;
 }
 
 std::filesystem::path PluginDirectory() {
@@ -145,8 +140,8 @@ std::unique_ptr<DiscoveryProvider> CreateDiscoveryProvider(DiscoveryBackend back
   if (library) {
     const auto path = PluginDirectory() / library;
     if (std::filesystem::exists(path)) {
-      if (PluginDirectoryOverride()) RequireTrustedPlugin(path);
-      return std::make_unique<PluginProvider>(path, backend);
+      return std::make_unique<PluginProvider>(
+          PluginDirectoryOverride() ? RequireTrustedPlugin(path) : path, backend);
     }
   }
   return nullptr;
