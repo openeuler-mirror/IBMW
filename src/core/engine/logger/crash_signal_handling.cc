@@ -100,7 +100,7 @@ CrashSignalHandling::~CrashSignalHandling() {
   }
   selfdev_alt_stack_ = nullptr;
   #endif
-  SetLogger(nullptr);
+  PublishLogger(nullptr);
 }
 
 #elif IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
@@ -135,7 +135,7 @@ CrashSignalHandling::~CrashSignalHandling() {
     }
   }
   previous_actions_.clear();
-  SetLogger(nullptr);
+  PublishLogger(nullptr);
 
   if (alt_stack_ == nullptr) return;
   // The alternate stack belongs to the installing thread. Free it only when
@@ -360,7 +360,7 @@ CrashSignalHandling::CrashSignalHandling() {
 
 CrashSignalHandling::~CrashSignalHandling() {
   std::lock_guard<std::mutex> lock(lifecycle_mu_);
-  if (--instances_ == 0) SetLogger(nullptr);
+  if (--instances_ == 0) PublishLogger(nullptr);
 }
 
 void CrashSignalHandling::HandleSignal(int, siginfo_t*, void*) {}

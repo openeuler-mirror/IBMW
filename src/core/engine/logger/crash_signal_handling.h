@@ -29,11 +29,10 @@ class CrashSignalHandling {
   CrashSignalHandling(const CrashSignalHandling&) = delete;
   CrashSignalHandling& operator=(const CrashSignalHandling&) = delete;
 
-  // The signal handler reads the logger without a lock, so the pointer it
-  // reads is switched before the previous owner is released.
+  // Not from a signal handler. Serialized with construction and destruction.
   static void SetLogger(const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr) {
-    logger_.store(logger_ptr ? logger_ptr.get() : &default_logger_, std::memory_order_release);
-    logger_owner_ = logger_ptr;
+    std::lock_guard<std::mutex> lock(lifecycle_mu_);
+    PublishLogger(logger_ptr);
   }
   static const ibmw::common::util::LoggerWrapper& GetLogger() {
     return *logger_.load(std::memory_order_acquire);
@@ -78,6 +77,14 @@ class CrashSignalHandling {
   static void RefreshModules();
 
  private:
+  // Caller holds lifecycle_mu_. The signal handler reads the logger without
+  // a lock, so the pointer it reads is switched before the previous owner is
+  // released.
+  static void PublishLogger(const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr) {
+    logger_.store(logger_ptr ? logger_ptr.get() : &default_logger_, std::memory_order_release);
+    logger_owner_ = logger_ptr;
+  }
+
 #if defined(IBMW_SELFDEV_CRASH_HANDLER)
   // Receives the demangled report from ibmw::selfdev::crash and logs it.
   static void ReportToLog(const char* report, size_t len, void* user_data);
