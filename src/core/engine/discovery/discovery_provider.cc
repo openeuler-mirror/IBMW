@@ -30,10 +30,12 @@ const char* PluginDirectoryOverride() {
 
 // An overridden plugin must not let another user plant code, for example
 // through an environment kept by sudo: the same rule as every library loaded by
-// path (CORE-017). Returns the checked path, which is the one to load.
+// path (CORE-017); the directory may be sticky like /tmp. A plugin that cannot
+// be resolved is refused, not left to dlopen. Returns the checked path, which
+// is the one to load.
 std::filesystem::path RequireTrustedPlugin(const std::filesystem::path& path) {
   std::string checked;
-  const auto untrusted = ibmw::common::util::CheckLibraryTrust(path.string(), checked);
+  const auto untrusted = ibmw::common::util::CheckLibraryTrust(path.string(), checked, true);
   if (!untrusted.empty()) {
     throw std::runtime_error("Untrusted discovery plugin '" + path.string() + "': " + untrusted);
   }

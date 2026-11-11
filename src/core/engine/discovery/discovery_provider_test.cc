@@ -198,6 +198,9 @@ TEST(DiscoveryPluginDirectoryTest, OverrideRequiresTrustedDirectoryAndLibrary) {
 
   std::filesystem::permissions(plugin, perms::others_write, std::filesystem::perm_options::remove);
   EXPECT_NE(CreateDiscoveryProvider(DiscoveryBackend::kDds), nullptr);
+  std::filesystem::permissions(directory, perms::all | perms::sticky_bit);  // like /tmp
+  EXPECT_NE(CreateDiscoveryProvider(DiscoveryBackend::kDds), nullptr);
+  std::filesystem::permissions(directory, perms::owner_all);
   std::filesystem::remove_all(directory);
 }
 

@@ -98,6 +98,15 @@ TEST_F(DynamicLibTrustTest, LoadsTheCheckedPath) {
   std::filesystem::remove(link);
 }
 
+TEST_F(DynamicLibTrustTest, FailClosedRefusesUnresolvablePaths) {
+  const auto missing = (dir_ / "libmissing.so").string();
+  std::string dlopen_name;
+  EXPECT_EQ(CheckLibraryTrust(missing, dlopen_name), "");
+  EXPECT_NE(CheckLibraryTrust(missing, dlopen_name, true).find("cannot be resolved"),
+            std::string::npos);
+  EXPECT_EQ(CheckLibraryTrust("libc.so", dlopen_name, true), "");  // bare names use the search path
+}
+
 TEST_F(DynamicLibTrustTest, ChecksRelativePaths) {
   const auto cwd = std::filesystem::current_path();
   std::filesystem::current_path(dir_);

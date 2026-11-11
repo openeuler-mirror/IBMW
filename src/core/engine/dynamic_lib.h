@@ -33,14 +33,19 @@ namespace ibmw::common::util {
 // Ancestor directories are not checked. Bare names keep the loader search path.
 // Returns the refusal reason, or an empty string and sets dlopen_name to the
 // checked (resolved) path, so a symlink re-pointed after the check is not
-// followed. One canonical() and two stat() calls per load.
-inline std::string CheckLibraryTrust(const std::string& lib_name, std::string& dlopen_name) {
+// followed. One canonical() and two stat() calls per load. A path that cannot
+// be resolved is left to dlopen to report, unless fail_closed is set.
+inline std::string CheckLibraryTrust(const std::string& lib_name, std::string& dlopen_name,
+                                     bool fail_closed = false) {
   dlopen_name = lib_name;
   if (lib_name.find('/') == std::string::npos) return {};
   std::error_code ec;
   const auto file = std::filesystem::canonical(lib_name, ec);
   struct stat status {};
-  if (ec || ::stat(file.c_str(), &status) != 0) return {};  // dlopen reports it
+  if (ec || ::stat(file.c_str(), &status) != 0) {
+    return fail_closed ? "Refusing to load '" + lib_name + "': it cannot be resolved."
+                       : std::string();
+  }
   const auto trusted_owner = [](const struct stat& st) {
 #if defined(__OHOS__)
     constexpr uid_t kShellUid = 2000;
