@@ -135,6 +135,37 @@ TEST(CrashSignalHandlingTest, CrashAfterDestructionUsesPreviousHandler) {
   EXPECT_EQ(output.find("IBMW crash"), std::string::npos) << output;
 }
 
+// The handlers are process-wide too: an earlier owner's destructor leaves
+// them to the owner still alive, whose crash is still reported.
+TEST(CrashSignalHandlingTest, CrashAfterEarlierOwnerIsGoneIsStillReported) {
+  int fds[2];
+  ASSERT_EQ(pipe(fds), 0);
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    const rlimit no_core{0, 0};
+    (void)setrlimit(RLIMIT_CORE, &no_core);
+    dup2(fds[1], STDERR_FILENO);
+    close(fds[0]);
+    signal(SIGSEGV, SIG_DFL);
+    auto first = std::make_unique<CrashSignalHandling>();
+    CrashSignalHandling second;
+    first.reset();
+    *reinterpret_cast<volatile int*>(0x10) = 1;
+    _exit(0);
+  }
+  close(fds[1]);
+  std::string output;
+  char buffer[4096];
+  for (ssize_t n; (n = read(fds[0], buffer, sizeof(buffer))) > 0;) output.append(buffer, n);
+  close(fds[0]);
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFSIGNALED(status)) << output;
+  EXPECT_EQ(WTERMSIG(status), SIGSEGV);
+  EXPECT_EQ(output.find(kSignalLine), 0u) << output;
+}
+
 // The symbolizing part ends the process at once here, as a hang there would:
 // what was written before it is the raw part.
 TEST(CrashSignalHandlingTest, RawTraceIsWrittenBeforeTheSymbolizedReport) {

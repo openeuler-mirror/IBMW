@@ -49,7 +49,11 @@ void CrashSignalHandling::ReportToLog(const char* report, size_t len, void*) {
 
 CrashSignalHandling::CrashSignalHandling() {
   std::lock_guard<std::mutex> lock(lifecycle_mu_);
-  if (instances_++ != 0) return;
+  // Counted once installed: a constructor that throws has no destructor.
+  if (instances_ != 0) {
+    ++instances_;
+    return;
+  }
   #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
   ibmw::selfdev::crash::Options options;
   options.alt_stack_size = 1024 * 1024 * 8;  // same as the backward-cpp path
@@ -68,6 +72,7 @@ CrashSignalHandling::CrashSignalHandling() {
   }
   util::EnableAltSignalStacks(true);  // executor threads started from now on
   #endif
+  instances_ = 1;
 }
 
 CrashSignalHandling::~CrashSignalHandling() {
@@ -106,9 +111,14 @@ std::vector<int> DefaultSignals() {
 
 CrashSignalHandling::CrashSignalHandling() {
   std::lock_guard<std::mutex> lock(lifecycle_mu_);
-  if (instances_++ != 0) return;
+  // Counted once installed: a constructor that throws has no destructor.
+  if (instances_ != 0) {
+    ++instances_;
+    return;
+  }
   InstallHandlers(DefaultSignals());
   util::EnableAltSignalStacks(true);  // executor threads started from now on
+  instances_ = 1;
 }
 
 CrashSignalHandling::~CrashSignalHandling() {
@@ -312,6 +322,8 @@ void CrashSignalHandling::EnsureAltStack() {
 }
 
 void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
+  // Reserved first, so no handler is installed without being recorded.
+  previous_actions_.reserve(signals.size());
   EnsureAltStack();
   // The first backtrace() loads libgcc_s, which allocates: do it here, not in
   // the handler.
