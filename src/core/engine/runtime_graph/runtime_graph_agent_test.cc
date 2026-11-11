@@ -269,6 +269,7 @@ class FakeAgent {
       : path_(path.string()) {
     listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     sockaddr_un address{.sun_family = AF_UNIX};
+    EXPECT_LT(path_.size(), sizeof(address.sun_path)) << "TMPDIR too long for a socket path";
     std::strncpy(address.sun_path, path_.c_str(), sizeof(address.sun_path) - 1);
     EXPECT_EQ(::bind(listen_fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
     EXPECT_EQ(::listen(listen_fd_, 1), 0);

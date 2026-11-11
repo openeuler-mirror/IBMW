@@ -68,9 +68,14 @@ TEST(ContextTest, LogReportsCallerFunction) {
   ctx->log().Info("hello {}", 1);
   EXPECT_EQ(recorded.level, static_cast<uint32_t>(IBMW_LOG_LEVEL_INFO));
   EXPECT_EQ(recorded.text, "hello 1");
-  // GCC names the whole member function, clang only "TestBody"; both name
-  // the caller, not OpLog::Log.
+  // The caller, not OpLog::Log: GCC names the whole member function, clang
+  // (OHOS) only "TestBody".
+#if defined(__clang__)
   EXPECT_NE(recorded.function.find("TestBody"), std::string::npos) << recorded.function;
+#else
+  EXPECT_NE(recorded.function.find("LogReportsCallerFunction"), std::string::npos)
+      << recorded.function;
+#endif
 
   recorded = {};
   ctx->log().Debug("dropped");
