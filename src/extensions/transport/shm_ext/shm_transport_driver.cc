@@ -580,9 +580,9 @@ bool ShmTransportDriver::RegisterPodSubscriber(std::string_view topic, std::stri
       try {
         cb(payload, payload_size);
       } catch (const std::exception& e) {
-        MW_WARN("POD subscriber callback threw: {}", e.what());
+        MW_WARN_INTERVAL(1000, "POD subscriber callback threw: {}", e.what());
       } catch (...) {
-        MW_WARN("POD subscriber callback threw an unknown exception.");
+        MW_WARN_INTERVAL(1000, "POD subscriber callback threw an unknown exception.");
       }
       if (release) release();
     };

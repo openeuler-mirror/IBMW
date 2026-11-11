@@ -391,7 +391,7 @@ Ros2TransportDriver::AttachSerializedSubscriber(
                                std::chrono::system_clock::now().time_since_epoch()).count()),
                            .source_driver = "ros2", .payload = std::move(payload)});
           } catch (const std::exception& error) {
-            MW_ERROR("Native ROS2 receive failed: {}", error.what());
+            MW_ERROR_INTERVAL(1000, "Native ROS2 receive failed: {}", error.what());
           }
         });
     const uint64_t handle = next_native_handle_++;

@@ -130,7 +130,9 @@ ZenohTransportDriver::AttachSerializedSubscriber(
                                std::chrono::system_clock::now().time_since_epoch()).count()),
                            .source_driver = "zenoh", .payload = std::move(payload)});
           } catch (const std::exception& error) {
-            MW_ERROR("Native Zenoh receive failed: {}", error.what());
+            MW_ERROR_INTERVAL(1000, "Native Zenoh receive failed: {}", error.what());
+          } catch (...) {
+            MW_ERROR_INTERVAL(1000, "Native Zenoh receive failed with an unknown exception.");
           }
         }, subscriber->subscription);
     MW_ASSERT(attached, "Cannot declare native Zenoh subscriber.");
@@ -269,6 +271,8 @@ bool ZenohTransportDriver::OnMessage(
 
           } catch (const std::exception& e) {
             MW_WARN_INTERVAL(1000, "Handle Zenoh transport msg failed, exception info: {}", e.what());
+          } catch (...) {
+            MW_WARN_INTERVAL(1000, "Handle Zenoh transport msg failed with an unknown exception.");
           }
         };
 
