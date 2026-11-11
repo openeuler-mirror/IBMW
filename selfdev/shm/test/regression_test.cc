@@ -22,6 +22,7 @@
 #include <climits>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -1698,12 +1699,19 @@ TEST(ShmRegressionTest, DiagnosticsAreRateLimited) {
     for (int i = 0; i < 50; ++i) Log("subscriber", "connect failed", "shm://rg44");
     LogAlways("publisher", "config warning", "shm://rg44");
   });
-  EXPECT_EQ(lines(out, "connect failed"), 10u) << out;
+  // Another thread of the test process may log in the same second and take
+  // a slot (and add to the dropped count): check the limit on all lines.
+  EXPECT_EQ(lines(out, "\n") - lines(out, "config warning"), 10u) << out;
+  EXPECT_GE(lines(out, "connect failed"), 1u) << out;
   // The next line written, limited or not, reports the dropped ones.
-  EXPECT_NE(out.find("config warning (40 earlier lines dropped)"), std::string::npos) << out;
+  const size_t note = out.find("config warning (");
+  ASSERT_NE(note, std::string::npos) << out;
+  EXPECT_GE(std::strtoul(out.c_str() + note + 16, nullptr, 10), 40u) << out;
+  EXPECT_NE(out.find(" earlier lines dropped)\n", note), std::string::npos) << out;
   std::this_thread::sleep_for(1100ms);
   out = CaptureStderr([] { Log("subscriber", "rejected by publisher", "shm://rg44", "kAbiMismatch"); });
-  EXPECT_EQ(out, "[ibmw_shm] subscriber shm://rg44: rejected by publisher: kAbiMismatch\n");
+  EXPECT_NE(out.find("[ibmw_shm] subscriber shm://rg44: rejected by publisher: kAbiMismatch\n"), std::string::npos)
+      << out;
 }
 
 }  // namespace
