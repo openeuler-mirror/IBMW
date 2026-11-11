@@ -1642,6 +1642,28 @@ TEST(ShmRegressionTest, SegmentsMapWithoutFstat) {
   EXPECT_EQ(strict.Stats().connections, 0u);
 }
 
+// Runs f with stderr redirected to a pipe: gtest's CaptureStderr needs /tmp,
+// which the OHOS device does not have. The output must fit the pipe buffer.
+template <typename F>
+std::string CaptureStderr(F&& f) {
+  int fds[2];
+  if (::pipe(fds) != 0) return "pipe failed";
+  std::fflush(stderr);
+  const int saved = ::dup(STDERR_FILENO);
+  ::dup2(fds[1], STDERR_FILENO);
+  ::close(fds[1]);
+  f();
+  std::fflush(stderr);
+  ::dup2(saved, STDERR_FILENO);
+  ::close(saved);
+  std::string out;
+  char buf[4096];
+  ssize_t n;
+  while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) out.append(buf, static_cast<size_t>(n));
+  ::close(fds[0]);
+  return out;
+}
+
 // RG-44 Peers can make the diagnostics repeat at will (connect failures,
 // rejects): at most 10 lines a second reach stderr, the next line written
 // says how many were dropped, and LogAlways lines are never dropped.
@@ -1654,17 +1676,15 @@ TEST(ShmRegressionTest, DiagnosticsAreRateLimited) {
   // Start right after a second boundary, so the burst stays in one window.
   const uint64_t start_s = NowNs() / 1'000'000'000;
   while (NowNs() / 1'000'000'000 == start_s) std::this_thread::sleep_for(1ms);
-  testing::internal::CaptureStderr();
-  for (int i = 0; i < 50; ++i) Log("subscriber", "connect failed", "shm://rg44");
-  LogAlways("publisher", "config warning", "shm://rg44");
-  std::string out = testing::internal::GetCapturedStderr();
+  std::string out = CaptureStderr([] {
+    for (int i = 0; i < 50; ++i) Log("subscriber", "connect failed", "shm://rg44");
+    LogAlways("publisher", "config warning", "shm://rg44");
+  });
   EXPECT_EQ(lines(out, "connect failed"), 10u) << out;
   // The next line written, limited or not, reports the dropped ones.
   EXPECT_NE(out.find("config warning (40 earlier lines dropped)"), std::string::npos) << out;
   std::this_thread::sleep_for(1100ms);
-  testing::internal::CaptureStderr();
-  Log("subscriber", "rejected by publisher", "shm://rg44", "kAbiMismatch");
-  out = testing::internal::GetCapturedStderr();
+  out = CaptureStderr([] { Log("subscriber", "rejected by publisher", "shm://rg44", "kAbiMismatch"); });
   EXPECT_EQ(out, "[ibmw_shm] subscriber shm://rg44: rejected by publisher: kAbiMismatch\n");
 }
 
