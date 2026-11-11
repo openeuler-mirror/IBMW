@@ -12,7 +12,10 @@ details remain governed by the documentation for each release.
   package (`runtime_graph.type_support_pkgs`, `--type-support`) given by path is
   refused when the file (after resolving symlinks) or its directory is owned by
   another non-root user or writable by others (a sticky directory such as `/tmp`
-  is accepted; group write is allowed). The resolved path is the one loaded, so
+  is accepted; group write is allowed). On OHOS, owners below the application
+  uid range other than shell (2000), such as the installer service that owns the
+  libraries of an installed HAP, are accepted too when the file and directory
+  are not group writable. The resolved path is the one loaded, so
   `$ORIGIN` in a symlinked library's RUNPATH now means the target's directory.
   Relative paths still resolve as before; prefer absolute paths.
 - Configuration: `${ENV}` references are expanded after the YAML is parsed,

@@ -1321,10 +1321,13 @@ so prefer absolute paths. Every library given by a path containing `/`
 `ibmw topic`/`ibmw bag` `--type-support`) is only loaded when the library file
 (after resolving symlinks) and its directory are owned by the current user or
 root and are not writable by others; a world-writable directory is accepted only
-with the sticky bit (like `/tmp`). Group write is allowed. Parent directories
-further up are not checked. The resolved path is what gets loaded, so `$ORIGIN`
-in a symlinked library's RUNPATH refers to the target's directory. Bare names
-(`libfoo.so`) use the system loader search path unchanged.
+with the sticky bit (like `/tmp`). Group write is allowed. On OHOS, owners
+below the application uid range (10000) other than shell (2000) are accepted
+too, as long as the file or directory is not group writable: the libraries of
+an installed HAP belong to the installer service, not to the app. Parent
+directories further up are not checked. The resolved path is what gets loaded,
+so `$ORIGIN` in a symlinked library's RUNPATH refers to the target's directory.
+Bare names (`libfoo.so`) use the system loader search path unchanged.
 
 ---
 
