@@ -27,9 +27,11 @@
 namespace ibmw::selfdev::shm::detail {
 
 // Writes "[ibmw_shm] <side> <url>: <what>[: <reason>]" to stderr. Peers can
-// trigger these, so at most kLogLinesPerSecond lines a second are written;
-// the next one written says how many were dropped. Does not allocate.
+// trigger these, so at most 10 lines a second are written; the next line
+// written (Log or LogAlways) says how many were dropped. Does not allocate.
 void Log(const char* side, const char* what, const std::string& url, const char* reason = nullptr) noexcept;
+// Same line, never dropped: for messages a peer cannot repeat at will.
+void LogAlways(const char* side, const char* what, const std::string& url) noexcept;
 
 // ============================================================ publisher side
 

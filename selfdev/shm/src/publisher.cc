@@ -233,12 +233,14 @@ Result<uint32_t> PublisherImpl::GrowLocked(uint32_t class_shift, uint32_t exact_
     // Kernel without F_SEAL_FUTURE_WRITE: subscribers could map the data
     // writable. Either refuse or carry on and say so.
     if (options_.require_read_only) {
-      Log("F_SEAL_FUTURE_WRITE unavailable and require_read_only is set: not creating the pool", url_);
+      detail::LogAlways("publisher", "F_SEAL_FUTURE_WRITE unavailable and require_read_only is set: not creating the pool",
+                        url_);
       return Error::kSystem;
     }
     if (!unsealed_logged_) {
       unsealed_logged_ = true;
-      Log("warning: F_SEAL_FUTURE_WRITE unavailable, subscribers can write to published chunks", url_);
+      detail::LogAlways("publisher", "warning: F_SEAL_FUTURE_WRITE unavailable, subscribers can write to published chunks",
+                        url_);
     }
     ++stats_.unsealed_segments;
   }

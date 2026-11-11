@@ -108,21 +108,12 @@ std::string DefaultRoot() {
 
 }  // namespace
 
-void Log(const char* side, const char* what, const std::string& url, const char* reason) noexcept {
-  constexpr uint32_t kLogLinesPerSecond = 10;
-  static std::atomic<uint64_t> window_start_s{0};
-  static std::atomic<uint32_t> lines_in_window{0};
-  static std::atomic<uint64_t> dropped{0};
-  const uint64_t now_s = NowNs() / 1'000'000'000;
-  uint64_t start = window_start_s.load(std::memory_order_relaxed);
-  if (now_s != start && window_start_s.compare_exchange_strong(start, now_s, std::memory_order_relaxed)) {
-    lines_in_window.store(0, std::memory_order_relaxed);
-  }
-  if (lines_in_window.fetch_add(1, std::memory_order_relaxed) >= kLogLinesPerSecond) {
-    dropped.fetch_add(1, std::memory_order_relaxed);
-    return;
-  }
-  const uint64_t n = dropped.exchange(0, std::memory_order_relaxed);
+namespace {
+
+std::atomic<uint64_t> g_log_dropped{0};
+
+void WriteLog(const char* side, const char* what, const std::string& url, const char* reason) noexcept {
+  const uint64_t n = g_log_dropped.exchange(0, std::memory_order_relaxed);
   const char* sep = reason != nullptr ? ": " : "";
   if (reason == nullptr) reason = "";
   if (n != 0) {
@@ -131,6 +122,36 @@ void Log(const char* side, const char* what, const std::string& url, const char*
   } else {
     std::fprintf(stderr, "[ibmw_shm] %s %s: %s%s%s\n", side, url.c_str(), what, sep, reason);
   }
+}
+
+}  // namespace
+
+void Log(const char* side, const char* what, const std::string& url, const char* reason) noexcept {
+  constexpr uint64_t kLogLinesPerSecond = 10;
+  constexpr int kCountBits = 16;
+  // Second of the current window (high bits) and lines written in it: one
+  // CAS, so the window only moves forward and no count is lost.
+  static std::atomic<uint64_t> window{0};
+  const uint64_t now_s = NowNs() / 1'000'000'000;
+  uint64_t cur = window.load(std::memory_order_relaxed);
+  uint64_t next;
+  do {
+    const uint64_t start_s = cur >> kCountBits;
+    const uint64_t lines = cur & ((uint64_t{1} << kCountBits) - 1);
+    if (now_s > start_s) {
+      next = (now_s << kCountBits) | 1;
+    } else if (lines < kLogLinesPerSecond) {
+      next = cur + 1;
+    } else {
+      g_log_dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  } while (!window.compare_exchange_weak(cur, next, std::memory_order_relaxed));
+  WriteLog(side, what, url, reason);
+}
+
+void LogAlways(const char* side, const char* what, const std::string& url) noexcept {
+  WriteLog(side, what, url, nullptr);
 }
 
 std::vector<std::string> ForeignServiceDirs(const std::string& root, const std::string& owner,
