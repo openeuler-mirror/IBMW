@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <iostream>
+#include <sstream>
 #include <streambuf>
 #include <string>
 #include <utility>
@@ -21,6 +22,32 @@ void RecordingSink(ActionLogLevel level, std::string_view message) noexcept {
 }
 
 void SilentSink(ActionLogLevel, std::string_view) noexcept {}
+
+// Captures std::cout and std::cerr through their buffers: gtest's
+// CaptureStdout/CaptureStderr need /tmp, which OHOS devices do not have.
+class StreamCapture {
+ public:
+  StreamCapture()
+      : old_out_(std::cout.rdbuf(out_.rdbuf())), old_err_(std::cerr.rdbuf(err_.rdbuf())) {}
+  ~StreamCapture() {
+    std::cout.rdbuf(old_out_);
+    std::cerr.rdbuf(old_err_);
+  }
+  std::string Out() { return Take(out_); }
+  std::string Err() { return Take(err_); }
+
+ private:
+  static std::string Take(std::ostringstream& stream) {
+    std::string text = stream.str();
+    stream.str({});
+    return text;
+  }
+
+  std::ostringstream out_;
+  std::ostringstream err_;
+  std::streambuf* old_out_;
+  std::streambuf* old_err_;
+};
 
 class ActionLogTest : public testing::Test {
  protected:
@@ -45,38 +72,35 @@ TEST_F(ActionLogTest, ThrowingStreamIsSwallowed) {
 }
 
 TEST_F(ActionLogTest, DefaultWritesInfoToStdoutAndOthersToStderr) {
-  testing::internal::CaptureStdout();
-  testing::internal::CaptureStderr();
+  StreamCapture capture;
   ActionLog(ActionLogLevel::kInfo, "started");
   ActionLog(ActionLogLevel::kWarn, "rejected");
   ActionLog(ActionLogLevel::kError, "failed");
-  EXPECT_EQ(testing::internal::GetCapturedStderr(), "[WARN] rejected\n[ERROR] failed\n");
-  EXPECT_EQ(testing::internal::GetCapturedStdout(), "[INFO] started\n");
+  EXPECT_EQ(capture.Err(), "[WARN] rejected\n[ERROR] failed\n");
+  EXPECT_EQ(capture.Out(), "[INFO] started\n");
 }
 
 TEST_F(ActionLogTest, SinkReceivesMessagesInsteadOfStdStreams) {
   SetActionLogSink(RecordingSink);
-  testing::internal::CaptureStdout();
-  testing::internal::CaptureStderr();
+  StreamCapture capture;
   ActionLog(ActionLogLevel::kInfo, "started");
   ActionLog(ActionLogLevel::kError, "failed");
-  EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
-  EXPECT_EQ(testing::internal::GetCapturedStdout(), "");
+  EXPECT_EQ(capture.Err(), "");
+  EXPECT_EQ(capture.Out(), "");
   ASSERT_EQ(g_records.size(), 2u);
   EXPECT_EQ(g_records[0], std::make_pair(ActionLogLevel::kInfo, std::string("started")));
   EXPECT_EQ(g_records[1], std::make_pair(ActionLogLevel::kError, std::string("failed")));
 }
 
 TEST_F(ActionLogTest, SinkCanSilenceAndNullRestoresDefault) {
+  StreamCapture capture;
   SetActionLogSink(SilentSink);
-  testing::internal::CaptureStderr();
   ActionLog(ActionLogLevel::kError, "silenced");
-  EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
+  EXPECT_EQ(capture.Err(), "");
 
   SetActionLogSink(nullptr);
-  testing::internal::CaptureStderr();
   ActionLog(ActionLogLevel::kError, "visible");
-  EXPECT_EQ(testing::internal::GetCapturedStderr(), "[ERROR] visible\n");
+  EXPECT_EQ(capture.Err(), "[ERROR] visible\n");
 }
 
 }  // namespace
