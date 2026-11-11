@@ -59,7 +59,11 @@ class RpcClientTool {
     state_->timeout_handle = timeout_handle;
   }
 
+  // False, leaving `msg_recorder` alone, when req_id is taken or after
+  // AbandonAll() (nothing would complete the record then).
   bool Record(uint32_t req_id, std::chrono::nanoseconds timeout, MsgRecorder&& msg_recorder) {
+    if (state_->closed.load(std::memory_order_relaxed)) [[unlikely]]
+      return false;
 #if defined(IBMW_SELFDEV_CONCURRENT)
     bool ret = state_->client_msg_recorder_map.Emplace(req_id, std::move(msg_recorder));
 #else
@@ -158,8 +162,8 @@ class RpcClientTool {
           [&req_ids](uint32_t req_id, const MsgRecorder&) { req_ids.push_back(req_id); });
     } catch (...) {
       // Out of memory: find the records one at a time instead (a full scan
-      // each, cold path), bounded so a handle that records again cannot
-      // keep this going.
+      // each, cold path). Record() fails once closed; the bound is a
+      // backstop.
       req_ids.clear();
       for (size_t left = state_->client_msg_recorder_map.Size(); left > 0; --left) {
         std::optional<uint32_t> any;

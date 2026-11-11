@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <deque>
 #include <future>
 #include <memory>
@@ -26,8 +27,27 @@
 #include "engine/executor/thread_pool_executor.h"
 #include "engine/rpc_client_tool.h"
 
+// Allocation failure injection for this thread (see FailAllocations).
+namespace {
+thread_local bool fail_allocations = false;
+}  // namespace
+
+void* operator new(std::size_t n) {
+  if (fail_allocations) throw std::bad_alloc();
+  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
+  throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+
 namespace ibmw::runtime::core::util {
 namespace {
+
+// While alive, operator new throws std::bad_alloc on this thread.
+struct FailAllocations {
+  FailAllocations() { fail_allocations = true; }
+  ~FailAllocations() { fail_allocations = false; }
+};
 
 using namespace std::chrono_literals;
 
@@ -89,6 +109,40 @@ TEST(RpcClientToolTest, AbandonAllCompletesEachPendingRecordOnce) {
   std::sort(abandoned.begin(), abandoned.end());
   EXPECT_EQ(abandoned, (std::vector<int>{10, 30}));
   EXPECT_FALSE(tool.GetRecord(1));
+  EXPECT_FALSE(tool.GetRecord(3));
+}
+
+// Collecting the ids allocates; when that fails every record still gets
+// its result (one at a time).
+TEST(RpcClientToolTest, AbandonAllCompletesEveryRecordWhenOutOfMemory) {
+  RpcClientTool<int> tool;
+  for (int i = 1; i <= 100; ++i) ASSERT_TRUE(tool.Record(static_cast<uint32_t>(i), 1s, int{i}));
+  int abandoned = 0;
+  int sum = 0;
+  {
+    FailAllocations oom;
+    tool.AbandonAll([&](int&& v) {
+      ++abandoned;
+      sum += v;
+    });
+  }
+  EXPECT_EQ(abandoned, 100);
+  EXPECT_EQ(sum, 5050);
+  for (uint32_t i = 1; i <= 100; ++i) EXPECT_FALSE(tool.GetRecord(i));
+}
+
+// Nothing completes a record taken after AbandonAll(): refused.
+TEST(RpcClientToolTest, RecordFailsAfterAbandonAll) {
+  RpcClientTool<int> tool;
+  ASSERT_TRUE(tool.Record(1, 1s, 10));
+  int abandoned = 0;
+  tool.AbandonAll([&](int&&) {
+    ++abandoned;
+    EXPECT_FALSE(tool.Record(2, 1s, 20));  // from the handle
+  });
+  EXPECT_EQ(abandoned, 1);
+  EXPECT_FALSE(tool.Record(3, 1s, 30));
+  EXPECT_FALSE(tool.GetRecord(2));
   EXPECT_FALSE(tool.GetRecord(3));
 }
 
