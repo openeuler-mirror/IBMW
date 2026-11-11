@@ -131,6 +131,28 @@ TEST_F(DynamicLibTrustTest, RefusesLibraryOwnedByAnotherUser) {
   EXPECT_NE(DynamicLib::GetErr().find("Refusing to load"), std::string::npos);
 }
 
+#if defined(__OHOS__)
+// Installed HAP libraries belong to the installer service (uid 3060).
+TEST_F(DynamicLibTrustTest, TrustsSystemServiceOwnerWithoutGroupWrite) {
+  if (::geteuid() != 0) GTEST_SKIP() << "needs root to chown the fixture";
+  ASSERT_EQ(::chown(lib_.c_str(), 3060, 3060), 0);
+  DynamicLib lib;
+  EXPECT_TRUE(lib.Load(lib_.string())) << DynamicLib::GetErr();
+  lib.Unload();
+  Chmod(lib_, 0664);
+  EXPECT_FALSE(lib.Load(lib_.string()));
+  EXPECT_NE(DynamicLib::GetErr().find("Refusing to load"), std::string::npos);
+}
+
+TEST_F(DynamicLibTrustTest, RefusesShellOwner) {
+  if (::geteuid() != 0) GTEST_SKIP() << "needs root to chown the fixture";
+  ASSERT_EQ(::chown(lib_.c_str(), 2000, 2000), 0);
+  DynamicLib lib;
+  EXPECT_FALSE(lib.Load(lib_.string()));
+  EXPECT_NE(DynamicLib::GetErr().find("Refusing to load"), std::string::npos);
+}
+#endif
+
 TEST(DynamicLib, BareNamesUseTheLoaderSearchPath) {
   DynamicLib lib;
 #if defined(__GLIBC__)

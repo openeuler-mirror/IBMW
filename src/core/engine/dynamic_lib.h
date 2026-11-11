@@ -26,6 +26,10 @@ namespace ibmw::common::util {
 // replaceable by other users. The file and its directory (after resolving
 // symlinks) must be owned by the effective user or root and not writable by
 // others; a sticky directory such as /tmp may be. Group write is allowed.
+// On OHOS the libraries of an installed HAP belong to the installer service
+// (uid 3060), not to the app uid, so platform service uids (below the
+// application range) are trusted too, without group write; the shell uid used
+// by hdc is not.
 // Ancestor directories are not checked. Bare names keep the loader search path.
 // Returns the refusal reason, or an empty string and sets dlopen_name to the
 // checked (resolved) path, so a symlink re-pointed after the check is not
@@ -37,16 +41,30 @@ inline std::string CheckLibraryTrust(const std::string& lib_name, std::string& d
   const auto file = std::filesystem::canonical(lib_name, ec);
   struct stat status {};
   if (ec || ::stat(file.c_str(), &status) != 0) return {};  // dlopen reports it
-  const auto trusted_owner = [](const struct stat& st) { return st.st_uid == ::geteuid() || st.st_uid == 0; };
+  const auto trusted_owner = [](const struct stat& st) {
+#if defined(__OHOS__)
+    constexpr uid_t kShellUid = 2000;
+    constexpr uid_t kFirstAppUid = 10000;
+    if (st.st_uid != ::geteuid() && st.st_uid != 0 && st.st_uid < kFirstAppUid && st.st_uid != kShellUid) {
+      return (st.st_mode & S_IWGRP) == 0;
+    }
+#endif
+    return st.st_uid == ::geteuid() || st.st_uid == 0;
+  };
+#if defined(__OHOS__)
+  constexpr const char* kTrustedOwners = "the current user, root or a system service";
+#else
+  constexpr const char* kTrustedOwners = "the current user or root";
+#endif
   if (!trusted_owner(status) || (status.st_mode & S_IWOTH) != 0) {
     return "Refusing to load '" + file.string() +
-           "': the library must be owned by the current user or root and not writable by others.";
+           "': the library must be owned by " + kTrustedOwners + " and not writable by others.";
   }
   const auto directory = file.parent_path();
   if (::stat(directory.c_str(), &status) != 0 || !trusted_owner(status) ||
       ((status.st_mode & S_IWOTH) != 0 && (status.st_mode & S_ISVTX) == 0)) {
     return "Refusing to load '" + file.string() + "': directory '" + directory.string() +
-           "' must be owned by the current user or root and not writable by others.";
+           "' must be owned by " + kTrustedOwners + " and not writable by others.";
   }
   dlopen_name = file.string();
   return {};
