@@ -1137,6 +1137,33 @@ TEST(ShmRegressionTest, GroupDirectoryAndForeignOwners) {
   EXPECT_EQ(foreign, expected);
 }
 
+// Runs f with stderr redirected to a pipe: gtest's CaptureStderr needs /tmp,
+// which the OHOS device does not have. The output must fit the pipe buffer.
+template <typename F>
+std::string CaptureStderr(F&& f) {
+  int fds[2];
+  if (::pipe(fds) != 0) return "pipe failed";
+  std::fflush(stderr);
+  const int saved = ::dup(STDERR_FILENO);
+  if (saved < 0 || ::dup2(fds[1], STDERR_FILENO) < 0) {
+    if (saved >= 0) ::close(saved);
+    ::close(fds[0]);
+    ::close(fds[1]);
+    return "dup failed";
+  }
+  ::close(fds[1]);
+  f();
+  std::fflush(stderr);
+  ::dup2(saved, STDERR_FILENO);
+  ::close(saved);
+  std::string out;
+  char buf[4096];
+  ssize_t n;
+  while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) out.append(buf, static_cast<size_t>(n));
+  ::close(fds[0]);
+  return out;
+}
+
 // RG-30 (third review, M4) Without F_SEAL_FUTURE_WRITE subscribers could map data
 // segments writable. That is counted and visible; require_read_only turns
 // it into a hard failure instead.
@@ -1157,9 +1184,22 @@ TEST(ShmRegressionTest, MissingWriteSealIsVisibleOrFatal) {
   PublisherOptions strict;
   strict.require_read_only = true;
   Publisher pub(UniqueUrl("rg30"), strict);
-  auto l = pub.Loan(64);
-  ASSERT_FALSE(l.ok());
-  EXPECT_EQ(l.error(), Error::kSystem);
+  // Every refused Loan() tries to grow again; the refusal is said once.
+  std::string out = CaptureStderr([&] {
+    for (int i = 0; i < 3; ++i) {
+      auto l = pub.Loan(64);
+      EXPECT_FALSE(l.ok());
+      if (!l.ok()) {
+        EXPECT_EQ(l.error(), Error::kSystem);
+      }
+    }
+  });
+  size_t refusals = 0;
+  for (size_t pos = out.find("not creating the pool"); pos != std::string::npos;
+       pos = out.find("not creating the pool", pos + 1)) {
+    ++refusals;
+  }
+  EXPECT_EQ(refusals, 1u) << out;
   EXPECT_EQ(pub.Stats().segments, 0u);
   fault::no_future_write_seal.store(false);
   auto ok = pub.Loan(64);
@@ -1640,28 +1680,6 @@ TEST(ShmRegressionTest, SegmentsMapWithoutFstat) {
   ASSERT_TRUE(raw.Handshake(/*seal_conn=*/false));
   EXPECT_TRUE(raw.Closed());
   EXPECT_EQ(strict.Stats().connections, 0u);
-}
-
-// Runs f with stderr redirected to a pipe: gtest's CaptureStderr needs /tmp,
-// which the OHOS device does not have. The output must fit the pipe buffer.
-template <typename F>
-std::string CaptureStderr(F&& f) {
-  int fds[2];
-  if (::pipe(fds) != 0) return "pipe failed";
-  std::fflush(stderr);
-  const int saved = ::dup(STDERR_FILENO);
-  ::dup2(fds[1], STDERR_FILENO);
-  ::close(fds[1]);
-  f();
-  std::fflush(stderr);
-  ::dup2(saved, STDERR_FILENO);
-  ::close(saved);
-  std::string out;
-  char buf[4096];
-  ssize_t n;
-  while ((n = ::read(fds[0], buf, sizeof(buf))) > 0) out.append(buf, static_cast<size_t>(n));
-  ::close(fds[0]);
-  return out;
 }
 
 // RG-44 Peers can make the diagnostics repeat at will (connect failures,

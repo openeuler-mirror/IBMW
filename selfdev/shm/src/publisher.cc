@@ -231,17 +231,17 @@ Result<uint32_t> PublisherImpl::GrowLocked(uint32_t class_shift, uint32_t exact_
   if (!seg) return seg.error();
   if (!seg->read_only_enforced) {
     // Kernel without F_SEAL_FUTURE_WRITE: subscribers could map the data
-    // writable. Either refuse or carry on and say so.
-    if (options_.require_read_only) {
-      detail::LogAlways("publisher", "F_SEAL_FUTURE_WRITE unavailable and require_read_only is set: not creating the pool",
-                        url_);
-      return Error::kSystem;
-    }
+    // writable. Either refuse or carry on and say so, once per publisher:
+    // a refused loan is retried on every grow.
     if (!unsealed_logged_) {
       unsealed_logged_ = true;
-      detail::LogAlways("publisher", "warning: F_SEAL_FUTURE_WRITE unavailable, subscribers can write to published chunks",
+      detail::LogAlways("publisher",
+                        options_.require_read_only
+                            ? "F_SEAL_FUTURE_WRITE unavailable and require_read_only is set: not creating the pool"
+                            : "warning: F_SEAL_FUTURE_WRITE unavailable, subscribers can write to published chunks",
                         url_);
     }
+    if (options_.require_read_only) return Error::kSystem;
     ++stats_.unsealed_segments;
   }
 
