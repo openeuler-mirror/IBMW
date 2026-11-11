@@ -3,6 +3,7 @@
 
 #include "engine/runtime_graph/runtime_graph_subsystem.h"
 
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <unistd.h>
@@ -77,7 +78,8 @@ class GraphTestDriver final : public transport::TransportDriver {
 class RuntimeGraphIntegrationTest : public testing::Test {
  protected:
   void SetUp() override {
-    std::string pattern = "/tmp/ibmw-graph-test-XXXXXX";
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "ibmw-graph-test-XXXXXX").string();
     ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
     directory_ = pattern;
   }

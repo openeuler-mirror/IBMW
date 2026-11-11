@@ -38,7 +38,8 @@ using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 class DiscoveryProviderTest : public testing::Test {
  protected:
   void SetUp() override {
-    std::string pattern = "/tmp/ibmw-discovery-test-XXXXXX";
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "ibmw-discovery-test-XXXXXX").string();
     ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
     options_.registry_path = pattern;
   }
@@ -166,7 +167,8 @@ struct FailingOwner {
 // COMM-033: an overridden plugin directory is only used when another user
 // cannot have planted the library.
 TEST(DiscoveryPluginDirectoryTest, OverrideRequiresTrustedDirectoryAndLibrary) {
-  std::string pattern = "/tmp/ibmw-discovery-plugin-XXXXXX";
+  std::string pattern =
+      (std::filesystem::temp_directory_path() / "ibmw-discovery-plugin-XXXXXX").string();
   ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
   const std::filesystem::path directory = pattern;
   const auto plugin = directory / "libibmw_discovery_dds.so";

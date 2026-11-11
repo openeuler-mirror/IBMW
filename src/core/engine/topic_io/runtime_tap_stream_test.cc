@@ -36,7 +36,8 @@ class DirectPublishTap final : public PublishTapCapability {
 };
 
 TEST(RuntimeTapStreamTest, SharesOwnedFormatsAndRemovesPublisherIndexEntries) {
-  std::string directory = "/tmp/ibmw-tap-formats-XXXXXX";
+  std::string directory =
+      (std::filesystem::temp_directory_path() / "ibmw-tap-formats-XXXXXX").string();
   ASSERT_NE(::mkdtemp(directory.data()), nullptr);
   DirectPublishTap tap;
   RuntimeTapServer server(tap, "runtime", directory);
@@ -99,7 +100,8 @@ TEST(RuntimeTapStreamTest, SharesOwnedFormatsAndRemovesPublisherIndexEntries) {
 // a topic that still has a session, including after other sessions stop and
 // with more topics than filter bits.
 TEST(RuntimeTapStreamTest, TopicFilterKeepsEveryOpenSessionVisible) {
-  std::string directory = "/tmp/ibmw-tap-filter-XXXXXX";
+  std::string directory =
+      (std::filesystem::temp_directory_path() / "ibmw-tap-filter-XXXXXX").string();
   ASSERT_NE(::mkdtemp(directory.data()), nullptr);
   DirectPublishTap tap;
   RuntimeTapServer server(tap, "runtime", directory);
@@ -294,7 +296,8 @@ publishers:
 TEST(RuntimeTapStreamTest, QueueRespectsByteBudget) {
   // COMM-009: 20 x 4 MiB frames queued before the reader connects must be
   // capped by the 64 MiB byte budget (16 frames), not only by the count limit.
-  std::string directory = "/tmp/ibmw-tap-budget-XXXXXX";
+  std::string directory =
+      (std::filesystem::temp_directory_path() / "ibmw-tap-budget-XXXXXX").string();
   ASSERT_NE(::mkdtemp(directory.data()), nullptr);
   DirectPublishTap tap;
   RuntimeTapServer server(tap, "runtime", directory);

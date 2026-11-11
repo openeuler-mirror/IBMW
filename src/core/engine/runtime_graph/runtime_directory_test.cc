@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <fstream>
 
 #include "engine/runtime_graph/runtime_directory.h"
@@ -14,7 +15,8 @@ namespace {
 class RuntimeDirectoryTest : public testing::Test {
  protected:
   void SetUp() override {
-    std::string path = "/tmp/ibmw-registry-security-XXXXXX";
+    std::string path =
+        (std::filesystem::temp_directory_path() / "ibmw-registry-security-XXXXXX").string();
     ASSERT_NE(::mkdtemp(path.data()), nullptr);
     root_ = path;
   }

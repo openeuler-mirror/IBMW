@@ -35,7 +35,7 @@ using namespace std::chrono_literals;
 class RuntimeGraphAgentTest : public testing::Test {
  protected:
   void SetUp() override {
-    std::string path = "/tmp/ibmw-agent-test-XXXXXX";
+    std::string path = (std::filesystem::temp_directory_path() / "ibmw-agent-test-XXXXXX").string();
     ASSERT_NE(::mkdtemp(path.data()), nullptr);
     directory_ = path;
   }

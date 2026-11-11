@@ -4,6 +4,7 @@
 #include "engine/runtime_graph/type_support_registry.h"
 
 #include <dlfcn.h>
+#include <filesystem>
 #include <future>
 #include <gtest/gtest.h>
 
@@ -21,7 +22,8 @@ class TypeSupportRegistryTest : public testing::Test {
     ASSERT_NE(set_hook_, nullptr);
     ASSERT_NE(count_, nullptr);
     set_hook_(nullptr, nullptr);
-    std::string path = "/tmp/ibmw-typesupport-registry-XXXXXX";
+    std::string path =
+        (std::filesystem::temp_directory_path() / "ibmw-typesupport-registry-XXXXXX").string();
     ASSERT_NE(::mkdtemp(path.data()), nullptr);
     directory_ = path;
   }

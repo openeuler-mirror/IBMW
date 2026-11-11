@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -55,8 +56,8 @@ constexpr int kDeepbind = RTLD_DEEPBIND;
 #endif
 
 std::string MakeRoot() {
-  char buf[] = "/tmp/ibmwr.XXXXXX";
-  if (::mkdtemp(buf) == nullptr) std::abort();
+  std::string buf = (std::filesystem::temp_directory_path() / "ibmwr.XXXXXX").string();
+  if (::mkdtemp(buf.data()) == nullptr) std::abort();
   return buf;
 }
 
