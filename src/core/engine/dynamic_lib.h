@@ -13,7 +13,10 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
+// RTLD_DI_* are enumerators on glibc, so test for the libc, not the macro.
+// OHOS musl defines RTLD_DI_LINKMAP but does not declare dlinfo.
+#if defined(__GLIBC__) || (defined(RTLD_DI_LINKMAP) && !defined(__OHOS__))
+  #define IBMW_DYNAMIC_LIB_HAS_DLINFO 1
   #include <link.h>
 #endif
 
@@ -86,8 +89,7 @@ class DynamicLib {
 
     if (nullptr == handle_) return false;
 
-#if defined(__GLIBC__) || defined(RTLD_DI_LINKMAP)
-    // RTLD_DI_* are enumerators on glibc, so test for the libc, not the macro.
+#if defined(IBMW_DYNAMIC_LIB_HAS_DLINFO)
     // l_name is the path the loader actually opened (after search-path
     // resolution). Never throw here: dlopen has already succeeded.
     lib_full_path_ = lib_name_;
