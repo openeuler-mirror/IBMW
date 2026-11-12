@@ -4,6 +4,7 @@
 #include <MQTTAsync.h>
 #include <algorithm>
 #include <condition_variable>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include "engine/discovery/service_discovery_protocol.h"
@@ -35,16 +36,25 @@ class Provider final : public ServiceDiscoveryProvider {
     std::lock_guard lock(state.mutex);
     state.completed = true; state.changed.notify_all();
   }
-  static void Failure(void* context, MQTTAsync_failureData* data) {
-    auto& state = *static_cast<State*>(context);
+  // The callbacks run on Paho C threads: no exception may leave them.
+  static void SetError(State& state, const char* error) noexcept {
     std::lock_guard lock(state.mutex);
-    state.error = "MQTT discovery operation failed (" + std::to_string(data ? data->code : -1) + ").";
+    try {
+      state.error = error;
+    } catch (...) {
+      // Out of memory: the waiter reaches its deadline instead.
+    }
     state.changed.notify_all();
   }
-  static void Lost(void* context, char*) {
+  static void Failure(void* context, MQTTAsync_failureData* data) {
     auto& state = *static_cast<State*>(context);
-    std::lock_guard lock(state.mutex);
-    state.error = "MQTT broker connection was lost."; state.changed.notify_all();
+    char error[64];
+    std::snprintf(error, sizeof(error), "MQTT discovery operation failed (%d).",
+                  data ? data->code : -1);
+    SetError(state, error);
+  }
+  static void Lost(void* context, char*) {
+    SetError(*static_cast<State*>(context), "MQTT broker connection was lost.");
   }
   static int Arrived(void* context, char* topic, int, MQTTAsync_message* message) {
     auto& state = *static_cast<State*>(context);
@@ -57,10 +67,12 @@ class Provider final : public ServiceDiscoveryProvider {
         std::lock_guard lock(state.mutex);
         state.snapshots.insert_or_assign(instance, std::move(snapshot));
       }
+      state.changed.notify_all();
     } catch (const std::exception& error) {
-      std::lock_guard lock(state.mutex); state.error = error.what();
+      SetError(state, error.what());
+    } catch (...) {
+      SetError(state, "Cannot decode MQTT service directory.");
     }
-    state.changed.notify_all();
     MQTTAsync_freeMessage(&message); MQTTAsync_free(topic);
     return 1;
   }
