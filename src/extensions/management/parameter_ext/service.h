@@ -50,16 +50,33 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
     RegisterServiceFunc(name, nullptr, GetParameterTypeSupport<Req>(), GetParameterTypeSupport<Rsp>(),
         ibmw::rpc::ServiceFunc([this, handler](const ibmw_service_context_base_t*, const void* req,
                                              void* rsp, ibmw_function_base_t* callback) {
-          uint32_t status = 0;
-          try {
-            (this->*handler)(*static_cast<const Req*>(req), *static_cast<Rsp*>(rsp));
-          } catch (...) {
-            status = IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
-          }
+          const uint32_t status = Invoke(handler, req, rsp);
           const auto* ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
           ops->invoker(callback->object_buf, status);
         }));
   }
+
+ protected:
+  // Runs a handler so that the callback is always invoked: an exception
+  // (e.g. the parameter store is not started) is logged and answered with
+  // IBMW_RPC_STATUS_SVR_HANDLE_FAILED and an error code instead of leaving
+  // the RPC without an answer. Returns the RPC status.
+  template <typename Req, typename Rsp>
+  uint32_t Invoke(void (ParameterServiceImpl::*handler)(const Req&, Rsp&), const void* req, void* rsp) noexcept {
+    auto& typed_rsp = *static_cast<Rsp*>(rsp);
+    try {
+      (this->*handler)(*static_cast<const Req*>(req), typed_rsp);
+      return 0;
+    } catch (const std::exception& e) {
+      LogHandlerFailure(e.what());
+    } catch (...) {
+      LogHandlerFailure("unknown exception");
+    }
+    SetErrorCode(ErrorCode::kInternalError, typed_rsp);
+    return IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
+  }
+
+  static void LogHandlerFailure(const char* what) noexcept;
 
   void HandleListModules(
       const ibmw::protocols::parameter_extension::ListModulesReq& req,
@@ -90,13 +107,15 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
     kInvalidModuleName = 1,
     kParameterNotFound = 2,
     kInvalidParameterName = 3,
+    kInternalError = 4,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
       "",
       "INVALID_MODULE_NAME",
       "PARAMETER_NOT_FOUND",
-      "INVALID_PARAMETER_NAME"};
+      "INVALID_PARAMETER_NAME",
+      "INTERNAL_ERROR"};
 
   template <typename T>
   void SetErrorCode(ErrorCode code, T& rsp) {
