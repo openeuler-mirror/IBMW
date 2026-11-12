@@ -148,9 +148,13 @@ void MqttRpcDriver::Initialize(YAML::Node options_node) {
           reply.payloadlen = static_cast<int>(payload.size());
           reply.qos = 1;
           const auto code = MQTTAsync_sendMessage(client, topic.c_str(), &reply, nullptr);
-          if (code != MQTTASYNC_SUCCESS) MW_WARN("Cannot send MQTT service directory: {}", code);
+          // Requests come from any broker client; rate-limit so a flood cannot flood the log.
+          if (code != MQTTASYNC_SUCCESS)
+            MW_WARN_INTERVAL(1000, "Cannot send MQTT service directory: {}", code);
         } catch (const std::exception& error) {
-          MW_WARN("Cannot produce MQTT service directory: {}", error.what());
+          MW_WARN_INTERVAL(1000, "Cannot produce MQTT service directory: {}", error.what());
+        } catch (...) {
+          MW_WARN_INTERVAL(1000, "Cannot produce MQTT service directory: unknown exception");
         }
       });
 
