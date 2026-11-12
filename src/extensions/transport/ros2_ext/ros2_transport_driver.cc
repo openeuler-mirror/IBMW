@@ -351,9 +351,18 @@ ibmw::transport::QosDescriptor Ros2TransportDriver::EndpointQos(
     }
     return result;
   } catch (const std::exception& error) {
-    MW_ERROR("Cannot inspect ROS 2 endpoint QoS: {}", error.what());
-    return {};
+    // Formatting the log line may itself throw; this function is noexcept.
+    try {
+      MW_ERROR("Cannot inspect ROS 2 endpoint QoS: {}", error.what());
+    } catch (...) {
+    }
+  } catch (...) {
+    try {
+      MW_ERROR("Cannot inspect ROS 2 endpoint QoS: unknown exception");
+    } catch (...) {
+    }
   }
+  return {};
 }
 
 runtime::core::transport::SerializedSubscriberHandle
