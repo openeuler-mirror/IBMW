@@ -64,7 +64,7 @@ class MsgHandleCatalog {
 
       auto find_topic_itr = msg_handle_map_.find(topic);
       if (find_topic_itr == msg_handle_map_.end()) [[unlikely]] {
-        MW_WARN("Unregisted topic: {}", topic);
+        MW_WARN_INTERVAL(1000, "Unregisted topic: {}", topic);
         return;
       }
 
