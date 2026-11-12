@@ -69,8 +69,12 @@ class LogControlServiceImpl : public ibmw::rpc::ServiceBase {
     } catch (...) {
       LogHandlerFailure("unknown exception");
     }
-    typed_rsp = Rsp{};
-    SetErrorCode(ErrorCode::kInternalError, typed_rsp);
+    try {
+      typed_rsp = Rsp{};
+      SetErrorCode(ErrorCode::kInternalError, typed_rsp);
+    } catch (...) {
+      // Out of memory: the status alone reports the failure.
+    }
     return IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
   }
 
@@ -107,6 +111,7 @@ class LogControlServiceImpl : public ibmw::rpc::ServiceBase {
     rsp.msg = std::string(kErrorInfoArray[static_cast<uint32_t>(code)]);
   }
 
+ private:
   ibmw::runtime::core::logger::LoggingSubsystem* logging_subsystem_ptr_ = nullptr;
 };
 

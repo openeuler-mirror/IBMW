@@ -60,9 +60,8 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
   // Runs a handler so that the callback is always invoked: an exception
   // (e.g. the parameter store is not started) is logged and answered with
   // IBMW_RPC_STATUS_SVR_HANDLE_FAILED and an error code instead of leaving
-  // the RPC without an answer. A partly filled response is discarded; the
-  // error text fits the small-string buffer (no allocation). Returns the RPC
-  // status.
+  // the RPC without an answer. A partly filled response is discarded.
+  // Returns the RPC status.
   template <typename Req, typename Rsp>
   uint32_t Invoke(void (ParameterServiceImpl::*handler)(const Req&, Rsp&), const void* req, void* rsp) noexcept {
     auto& typed_rsp = *static_cast<Rsp*>(rsp);
@@ -78,8 +77,12 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
     } catch (...) {
       LogHandlerFailure("unknown exception");
     }
-    typed_rsp = Rsp{};
-    SetErrorCode(ErrorCode::kInternalError, typed_rsp);
+    try {
+      typed_rsp = Rsp{};
+      SetErrorCode(ErrorCode::kInternalError, typed_rsp);
+    } catch (...) {
+      // Out of memory: the status alone reports the failure.
+    }
     return IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
   }
 
@@ -132,6 +135,7 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
     rsp.msg = std::string(kErrorInfoArray[static_cast<uint32_t>(code)]);
   }
 
+ private:
   ibmw::runtime::core::parameter::ParameterStore* parameter_store_ptr_ = nullptr;
 };
 

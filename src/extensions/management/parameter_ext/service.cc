@@ -13,7 +13,7 @@ namespace ibmw::extensions::parameter_extension {
 
 void ParameterServiceImpl::LogHandlerFailure(const char* what) noexcept {
   try {
-    MW_ERROR("Parameter service handler failed: {}", what);
+    MW_ERROR_INTERVAL(1000, "Parameter service handler failed: {}", what);
   } catch (...) {
   }
 }

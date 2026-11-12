@@ -9,7 +9,7 @@ namespace ibmw::extensions::log_control_extension {
 
 void LogControlServiceImpl::LogHandlerFailure(const char* what) noexcept {
   try {
-    MW_ERROR("Log control service handler failed: {}", what);
+    MW_ERROR_INTERVAL(1000, "Log control service handler failed: {}", what);
   } catch (...) {
   }
 }
