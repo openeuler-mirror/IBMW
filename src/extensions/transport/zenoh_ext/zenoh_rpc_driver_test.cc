@@ -374,6 +374,29 @@ TEST_F(ZenohRpcDriverTest, RefusedServerIsNotServed) {
   EXPECT_EQ(served.load(), 1);
 }
 
+// A refused registration of a function already served leaves that server alone.
+TEST_F(ZenohRpcDriverTest, RefusedDuplicateKeepsTheFirstServer) {
+  auto& driver = NewDriver();
+  std::atomic<int> served = 0;
+  const runtime::core::service::ServiceFuncWrapper service{.info = infos_[0], .service_func = [&](const auto& frame) {
+    ++served;
+    *static_cast<int*>(frame->rsp_ptr) = 1;
+    Answer(frame);
+  }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  auto refused_info = infos_[0];
+  refused_info.module_name = "other";
+  refused_info.rsp_type_support_ref = ibmw::util::TypeSupportRef(UnnamedTypeSupport());
+  EXPECT_FALSE(driver.RegisterServiceFunc({.info = refused_info, .service_func = [](const auto&) {}}));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  Watch("rsp/" + a);
+  driver.Start();
+  Put("req/" + a, Request(a, 1, "1"));
+  EXPECT_EQ(WaitSeen(1).size(), 1u);
+  EXPECT_EQ(served.load(), 1);
+}
+
 // A function registered again by another module is accepted, but requests
 // keep going to the first server.
 TEST_F(ZenohRpcDriverTest, SecondServerOfAFunctionIsNotCalled) {

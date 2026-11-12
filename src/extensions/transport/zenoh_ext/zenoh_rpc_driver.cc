@@ -474,15 +474,22 @@ bool ZenohRpcDriver::RegisterServiceFunc(
     };
     shm_loan_sizes_.Set("rsp/" + pattern, shm_init_loan_size_);
     const std::string request_key = "req/" + pattern;
+    // A function registered again keeps its first server (RegisterRpcNode
+    // declares nothing then); only a node this call declares is undone below.
+    // This driver is the only RPC user of its bus.
+    const bool declared_here = !sub_keyexprs_.contains(request_key);
     if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled)) return false;
     try {
       sub_keyexprs_.insert(request_key);
       zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
                                     info.rsp_type_support_ref.TypeName());
     } catch (...) {
-      // A failed registration serves nothing: undeclare the node again.
-      zenoh_bus_ptr_->UnregisterSubscriber(request_key);
-      sub_keyexprs_.erase(request_key);
+      // A failed registration serves nothing: undeclare its node again. Its
+      // answer publisher stays until the bus shuts down; nothing sends on it.
+      if (declared_here) {
+        zenoh_bus_ptr_->UnregisterSubscriber(request_key);
+        sub_keyexprs_.erase(request_key);
+      }
       throw;
     }
     return true;
