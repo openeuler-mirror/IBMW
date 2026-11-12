@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <optional>
+#include <utility>
 
 #include "extension_api/ibmw_runtime_directory.h"
 
@@ -31,10 +32,14 @@ uint32_t Domain(const std::string& value) {
 }
 
 ibmw::discovery::ServiceDiscoveryTlsOptions ParseDiscoveryTlsOptions(const Invocation& invocation) {
-  ibmw::discovery::ServiceDiscoveryTlsOptions result{
-      .truststore = Read(invocation, "--mqtt-truststore").value_or(""),
-      .client_cert = Read(invocation, "--mqtt-client-cert").value_or(""),
-      .client_key = Read(invocation, "--mqtt-client-key").value_or("")};
+  // Values are read before each aggregate is built: GCC before 13 (PR66139)
+  // leaks the members already constructed when an aggregate initializer throws.
+  auto truststore = Read(invocation, "--mqtt-truststore").value_or("");
+  auto client_cert = Read(invocation, "--mqtt-client-cert").value_or("");
+  auto client_key = Read(invocation, "--mqtt-client-key").value_or("");
+  ibmw::discovery::ServiceDiscoveryTlsOptions result{.truststore = std::move(truststore),
+                                                     .client_cert = std::move(client_cert),
+                                                     .client_key = std::move(client_key)};
   const auto broker = Read(invocation, "--mqtt");
   if (!result.Empty() && (!broker || !broker->starts_with("ssl://")))
     throw std::invalid_argument("MQTT TLS credentials require --mqtt ssl://host:port.");
@@ -86,11 +91,14 @@ std::vector<ibmw::discovery::ServiceDiscoveryOptions> ParseDiscoveryOptions(cons
     throw std::invalid_argument("Discovery configuration requires its corresponding source to be selected.");
   std::vector<Options> result;
   if (registry) result.push_back({.registry_path = ParseRegistryPath(invocation)});
-  if (dds) result.push_back({.backend = Backend::kDds, .domain_id = Domain(dd.value_or(common.value_or("0")))});
+  if (dds) {
+    const uint32_t dds_domain = Domain(dd.value_or(common.value_or("0")));
+    result.push_back({.backend = Backend::kDds, .domain_id = dds_domain});
+  }
   if (ros2) {
     const char* env = std::getenv("ROS_DOMAIN_ID");
-    result.push_back({.backend = Backend::kRos2,
-        .domain_id = Domain(rd.value_or(common.value_or(env && *env ? env : "0")))});
+    const uint32_t ros_domain = Domain(rd.value_or(common.value_or(env && *env ? env : "0")));
+    result.push_back({.backend = Backend::kRos2, .domain_id = ros_domain});
   }
   if (zenoh) result.push_back({.backend = Backend::kZenoh, .zenoh_domain = zd.value_or(""), .zenoh_config = zc.value_or("")});
   if (http) result.push_back({.backend = Backend::kHttp, .endpoint = *http});
