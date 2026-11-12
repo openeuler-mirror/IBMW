@@ -15,9 +15,15 @@ void ZenohServiceDiscoveryResponder::Start(const z_loaned_session_t* session, st
   // the oldest pending query is dropped (answered without a reply).
   Owned<z_owned_closure_query_t> callback;
   z_ring_channel_query_new(&callback.value, &queries_.value, 16);
-  Check(z_declare_queryable(session, &queryable_.value, z_loan(key), z_move(callback.value), nullptr),
-        "Declare Zenoh service directory");
-  worker_ = std::jthread([this] { Serve(); });
+  try {
+    Check(z_declare_queryable(session, &queryable_.value, z_loan(key), z_move(callback.value),
+                              nullptr),
+          "Declare Zenoh service directory");
+    worker_ = std::jthread([this] { Serve(); });
+  } catch (...) {
+    Stop();  // a later Start must not overwrite a live channel or queryable
+    throw;
+  }
 }
 void ZenohServiceDiscoveryResponder::Serve() {
   // Blocks until a query arrives or Stop() drops the queryable.
