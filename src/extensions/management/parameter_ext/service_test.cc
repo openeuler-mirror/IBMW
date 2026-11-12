@@ -53,6 +53,15 @@ class ParameterServiceTest : public ::testing::Test {
   TestableService service_;
 };
 
+// EXT-014: a call that arrives without a parameter store gets an answer.
+TEST(ParameterServiceNotReadyTest, MissingStoreIsReported) {
+  TestableService service;
+  auto set = service.Call(&TestableService::HandleSet, proto::SetParameterReq{"mod", "k", "v"});
+  EXPECT_EQ(set.msg, "NOT_READY");
+  EXPECT_NE(set.code, 0u);
+  EXPECT_EQ(service.Call(&TestableService::HandleGet, proto::GetParameterReq{"mod", "k"}).msg, "NOT_READY");
+}
+
 TEST_F(ParameterServiceTest, SetRejectsUnknownModuleAndEmptyKey) {
   auto ok = service_.Call(&TestableService::HandleSet, proto::SetParameterReq{"mod", "k", "v"});
   EXPECT_EQ(ok.code, 0u);
@@ -107,7 +116,9 @@ TEST(ParameterServiceNotStarted, ExceptionBecomesErrorCode) {
 }
 
 TEST(ParameterServiceNotStarted, ExceptionDiscardsPartialAnswer) {
+  runtime::core::parameter::ParameterStore store;
   TestableService service;
+  service.SetParameterStore(&store);
   const auto handler = static_cast<void (ParameterServiceImpl::*)(const proto::DumpParameterReq&,
                                                                   proto::DumpParameterRsp&)>(
       &TestableService::FillThenThrow);

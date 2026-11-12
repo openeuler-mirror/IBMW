@@ -66,6 +66,10 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
   template <typename Req, typename Rsp>
   uint32_t Invoke(void (ParameterServiceImpl::*handler)(const Req&, Rsp&), const void* req, void* rsp) noexcept {
     auto& typed_rsp = *static_cast<Rsp*>(rsp);
+    if (parameter_store_ptr_ == nullptr) [[unlikely]] {
+      SetErrorCode(ErrorCode::kNotReady, typed_rsp);
+      return 0;
+    }
     try {
       (this->*handler)(*static_cast<const Req*>(req), typed_rsp);
       return 0;
@@ -111,6 +115,7 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
     kParameterNotFound = 2,
     kInvalidParameterName = 3,
     kInternalError = 4,
+    kNotReady = 5,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
@@ -118,7 +123,8 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
       "INVALID_MODULE_NAME",
       "PARAMETER_NOT_FOUND",
       "INVALID_PARAMETER_NAME",
-      "INTERNAL_ERROR"};
+      "INTERNAL_ERROR",
+      "NOT_READY"};
 
   template <typename T>
   void SetErrorCode(ErrorCode code, T& rsp) {

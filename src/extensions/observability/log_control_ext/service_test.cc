@@ -14,6 +14,8 @@ namespace {
 
 using ibmw::runtime::core::logger::LoggingSubsystem;
 using ibmw::runtime::core::logger::LogLevelTool;
+using ibmw::protocols::log_control_extension::GetModuleLogLevelReq;
+using ibmw::protocols::log_control_extension::GetModuleLogLevelRsp;
 using ibmw::protocols::log_control_extension::SetModuleLogLevelReq;
 using ibmw::protocols::log_control_extension::SetModuleLogLevelRsp;
 
@@ -29,7 +31,26 @@ class TestService : public LogControlServiceImpl {
     }
     return rsp;
   }
+
+  GetModuleLogLevelRsp Get(const GetModuleLogLevelReq& req) {
+    GetModuleLogLevelRsp rsp;
+    for (auto& wrapper : service_func_wrapper_vec_) {
+      if (wrapper.func_name != "GetModuleLogLevel") continue;
+      ibmw::rpc::ServiceCallback callback([](uint32_t) {});
+      wrapper.service_func(nullptr, &req, &rsp, callback.NativeHandle());
+    }
+    return rsp;
+  }
 };
+
+// EXT-014: a call that arrives without a logging subsystem gets an answer.
+TEST(LogControlServiceTest, MissingLoggingSubsystemIsReported) {
+  TestService service;
+  auto set = service.Set(SetModuleLogLevelReq{.module_log_level_map = {{"core", "debug"}}});
+  EXPECT_EQ(set.msg, "NOT_READY");
+  EXPECT_NE(set.code, 0u);
+  EXPECT_EQ(service.Get(GetModuleLogLevelReq{}).msg, "NOT_READY");
+}
 
 TEST(LogLevelToolTest, UnknownNameIsDetected) {
   EXPECT_EQ(LogLevelTool::TryGetLogLevelFromName("warn"), IBMW_LOG_LEVEL_WARN);

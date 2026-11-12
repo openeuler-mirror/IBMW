@@ -71,13 +71,15 @@ class LogControlServiceImpl : public ibmw::rpc::ServiceBase {
     kInvalidModuleName = 1,
     kInvalidLogLevel = 2,
     kEmptySettings = 3,
+    kNotReady = 4,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
       "",
       "INVALID_MODULE_NAME",
       "INVALID_LOG_LEVEL",
-      "EMPTY_SETTINGS"};
+      "EMPTY_SETTINGS",
+      "NOT_READY"};
 
   template <typename Rsp>
   void SetErrorCode(ErrorCode code, Rsp& rsp) {
