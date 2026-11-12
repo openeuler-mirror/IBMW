@@ -12,22 +12,43 @@ index 7ff52b5..ee6a2d5 100644
                       publisher.topic.available_drivers.end() && Direct(publisher, driver) &&
                   ConnectionKey(publisher.capture_capabilities.at(driver)) == connection;
 diff --git a/src/extensions/CMakeLists.txt b/src/extensions/CMakeLists.txt
-index bd01098..16cae34 100644
 --- a/src/extensions/CMakeLists.txt
 +++ b/src/extensions/CMakeLists.txt
-@@ -97,8 +97,11 @@ if(IBMW_BUILD_PROXY_EXTENSION)
+@@ -98,13 +98,16 @@
    add_subdirectory(utility/proxy_ext)
  endif()
  
 -# CLI providers are built after their runtime dependencies.
 -add_subdirectory(cli/topic)
+-add_subdirectory(cli/module)
+-add_subdirectory(cli/service)
+-add_subdirectory(cli/param)
+-add_subdirectory(cli/log)
+-add_subdirectory(cli/doctor)
 -if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
 -  add_subdirectory(cli/bag)
 +# CLI providers are built after their runtime dependencies. They need
 +# ibmw::cli::command from src/core/main, which is not built for OHOS.
 +if(TARGET ibmw::cli::command)
 +  add_subdirectory(cli/topic)
++  add_subdirectory(cli/module)
++  add_subdirectory(cli/service)
++  add_subdirectory(cli/param)
++  add_subdirectory(cli/log)
++  add_subdirectory(cli/doctor)
 +  if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
 +    add_subdirectory(cli/bag)
 +  endif()
+ endif()
+diff --git a/src/tools/CMakeLists.txt b/src/tools/CMakeLists.txt
+--- a/src/tools/CMakeLists.txt
++++ b/src/tools/CMakeLists.txt
+@@ -17,6 +17,7 @@
+ endif()
+ 
+ # Standalone regression suite; independent of the Python CLI packaging option.
+-if(IBMW_BUILD_TESTS AND IBMW_BUILD_RUNTIME)
++# It needs ibmw::cli::command from src/core/main, which is not built for OHOS.
++if(IBMW_BUILD_TESTS AND IBMW_BUILD_RUNTIME AND TARGET ibmw::cli::command)
+   add_subdirectory(ibmw_diag)
  endif()
