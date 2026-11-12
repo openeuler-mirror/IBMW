@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 """Core Metrics lossless E2E and Reporter hot-hook gate for the shm transport.
 
 Runs the protocol machinery of core_metrics_perf.py (snapshots, sandboxed build,

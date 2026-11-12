@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # TOOL-041: each cmake_flags item of the matrix yaml reaches cmake as one
 # argument, without word splitting or pathname expansion. A stub cmake
 # records the arguments and fails, so nothing is built; --report keeps the

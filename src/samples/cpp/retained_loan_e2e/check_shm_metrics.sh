@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # Non-managed check of shm_retained_loan_e2e (CI / ctest): runs the direct and
 # the retained workload to completion (no MW_PERF_MANAGED, so they exit by
 # themselves and write the final Reporter V1 snapshot), checks the PASS markers

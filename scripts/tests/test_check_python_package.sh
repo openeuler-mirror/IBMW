@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # cmake/CheckPythonPackage.cmake must detect importable modules without pip,
 # e.g. distribution packages in a venv created --without-pip (TOOL-047).
 set -euo pipefail

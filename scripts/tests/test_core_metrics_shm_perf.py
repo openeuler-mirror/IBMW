@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 import contextlib, importlib.util, inspect, io, json, os, signal, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock

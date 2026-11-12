@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 """Interference accounting of the shm Core Metrics gate (core_metrics_shm_perf.py)."""
 import ast, contextlib, importlib.util, io, json, os, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path

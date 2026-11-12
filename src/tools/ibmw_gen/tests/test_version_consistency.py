@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 """HYG-020: every hard-coded release version matches the repository VERSION file.
 
 ibmw_gen keeps a literal __version__ because it also runs packaged (without

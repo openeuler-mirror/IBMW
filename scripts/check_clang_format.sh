@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # Checks that the files listed in scripts/clang_format_files.txt are
 # clang-format clean (HYG-028). Other versions format differently, so only
 # clang-format 18 is accepted.

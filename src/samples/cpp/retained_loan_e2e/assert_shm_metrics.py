@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 """shm counterpart of assert_metrics.py: the checks of assert_metrics.py on the
 shm Reporter V1 kinds, plus exact direct counts from direct.shm.metrics.json,
 retained lower bounds, and the expected driver label on every record of the kind.

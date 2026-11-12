@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # scripts/check_clang_format.sh passes clean files and fails on unformatted
 # or missing ones, a missing tool, or another clang-format version (HYG-028).
 # A stub stands in for clang-format, so the real tool is not needed.

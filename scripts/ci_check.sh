@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # Local merge gate (HYG-044): runs, one after another, the build, unit tests,
 # release hygiene, docs governance, clang-format of the listed files and
 # generated-sample drift on the committed tree, and commit-message validation of every commit on the branch. Steps run

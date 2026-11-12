@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
 # shm counterpart of run_metrics_managed.sh: the same collector-managed leader
 # protocol on shm_retained_loan_e2e. No RouDi: shm_ext is linked in. Every run
 # uses a private discovery root under /tmp (never /dev/shm), removed on exit.
