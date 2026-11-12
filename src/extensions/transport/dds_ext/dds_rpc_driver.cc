@@ -478,7 +478,8 @@ bool DdsRpcDriver::RegisterClientFunc(
 
 bool DdsRpcDriver::IsClientReady(std::string_view module, std::string_view function) const noexcept {
   try {
-    // client_endpoints_ is only stable in Start; check the state before reading it.
+    // Like Call(): refuse outside Start. Callers must not overlap Shutdown(),
+    // which clears client_endpoints_.
     if (state_.load() != State::kStart) return false;
     const auto it = client_endpoints_.find(std::string(module) + ":" + std::string(function));
     if (it == client_endpoints_.end()) return false;
