@@ -100,10 +100,28 @@ std::vector<ibmw::discovery::ServiceDiscoveryOptions> ParseDiscoveryOptions(cons
     const uint32_t ros_domain = Domain(rd.value_or(common.value_or(env && *env ? env : "0")));
     result.push_back({.backend = Backend::kRos2, .domain_id = ros_domain});
   }
-  if (zenoh) result.push_back({.backend = Backend::kZenoh, .zenoh_domain = zd.value_or(""), .zenoh_config = zc.value_or("")});
-  if (http) result.push_back({.backend = Backend::kHttp, .endpoint = *http});
-  if (grpc) result.push_back({.backend = Backend::kGrpc, .endpoint = *grpc});
-  if (mqtt) result.push_back({.backend = Backend::kMqtt, .endpoint = *mqtt, .mqtt_tls = mqtt_tls});
+  // Each aggregate gets only moved or trivial values (PR66139, see above).
+  if (zenoh) {
+    std::string domain = zd.value_or("");
+    std::filesystem::path config = zc.value_or("");
+    result.push_back({.backend = Backend::kZenoh,
+                      .zenoh_domain = std::move(domain),
+                      .zenoh_config = std::move(config)});
+  }
+  if (http) {
+    std::string endpoint = *http;
+    result.push_back({.backend = Backend::kHttp, .endpoint = std::move(endpoint)});
+  }
+  if (grpc) {
+    std::string endpoint = *grpc;
+    result.push_back({.backend = Backend::kGrpc, .endpoint = std::move(endpoint)});
+  }
+  if (mqtt) {
+    std::string endpoint = *mqtt;
+    auto tls = mqtt_tls;
+    result.push_back(
+        {.backend = Backend::kMqtt, .endpoint = std::move(endpoint), .mqtt_tls = std::move(tls)});
+  }
   return result;
 }
 
