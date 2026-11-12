@@ -111,6 +111,16 @@ std::vector<char> Frame(const std::string& fields, const std::string& body) {
   return out;
 }
 
+// JsonIntTypeSupport without a type name: the service directory refuses it.
+const ibmw_type_support_base_t* UnnamedTypeSupport() {
+  static const ibmw_type_support_base_t ts = [] {
+    auto copy = *JsonIntTypeSupport();
+    copy.type_name = [](void*) { return ibmw::util::ToIbmwStringView(""); };
+    return copy;
+  }();
+  return &ts;
+}
+
 class ZenohRpcDriverTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -331,6 +341,36 @@ TEST_F(ZenohRpcDriverTest, ServerAnswersOnlyAfterStart) {
   driver.Start();
   Put("req/" + a, Request(a, 2, "2"));
   EXPECT_EQ(WaitSeen(1).size(), 1u);
+  EXPECT_EQ(served.load(), 1);
+}
+
+// A server the service directory refuses is not left declared: it never
+// answers, and the same function can be registered again.
+TEST_F(ZenohRpcDriverTest, RefusedServerIsNotServed) {
+  auto& driver = NewDriver();
+  std::atomic<int> served = 0;
+  auto refused_info = infos_[0];
+  refused_info.rsp_type_support_ref = ibmw::util::TypeSupportRef(UnnamedTypeSupport());
+  const runtime::core::service::ServiceFuncWrapper refused{.info = refused_info,
+                                                           .service_func = [&](const auto& frame) {
+                                                             served += 100;
+                                                             Answer(frame);
+                                                           }};
+  EXPECT_FALSE(driver.RegisterServiceFunc(refused));
+  const runtime::core::service::ServiceFuncWrapper service{.info = infos_[0],
+                                                           .service_func = [&](const auto& frame) {
+                                                             ++served;
+                                                             *static_cast<int*>(frame->rsp_ptr) = 1;
+                                                             Answer(frame);
+                                                           }};
+  ASSERT_TRUE(driver.RegisterServiceFunc(service));
+  const std::string a = Pattern("/test/a");
+  ASSERT_NO_FATAL_FAILURE(PeerPublishes({"req/" + a}));
+  Watch("rsp/" + a);
+  driver.Start();
+  Put("req/" + a, Request(a, 1, "1"));
+  EXPECT_EQ(WaitSeen(1).size(), 1u);
+  std::this_thread::sleep_for(100ms);
   EXPECT_EQ(served.load(), 1);
 }
 

@@ -473,11 +473,18 @@ bool ZenohRpcDriver::RegisterServiceFunc(
       }
     };
     shm_loan_sizes_.Set("rsp/" + pattern, shm_init_loan_size_);
+    const std::string request_key = "req/" + pattern;
     if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled)) return false;
-    // Track the node before anything else can throw, so Shutdown() still undeclares it.
-    sub_keyexprs_.insert("req/" + pattern);
-    zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
-                                 info.rsp_type_support_ref.TypeName());
+    try {
+      sub_keyexprs_.insert(request_key);
+      zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
+                                    info.rsp_type_support_ref.TypeName());
+    } catch (...) {
+      // A failed registration serves nothing: undeclare the node again.
+      zenoh_bus_ptr_->UnregisterSubscriber(request_key);
+      sub_keyexprs_.erase(request_key);
+      throw;
+    }
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
