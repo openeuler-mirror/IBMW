@@ -478,8 +478,10 @@ bool DdsRpcDriver::RegisterClientFunc(
 
 bool DdsRpcDriver::IsClientReady(std::string_view module, std::string_view function) const noexcept {
   try {
+    // client_endpoints_ is only stable in Start; check the state before reading it.
+    if (state_.load() != State::kStart) return false;
     const auto it = client_endpoints_.find(std::string(module) + ":" + std::string(function));
-    if (it == client_endpoints_.end() || state_.load() != State::kStart) return false;
+    if (it == client_endpoints_.end()) return false;
     eprosima::fastdds::dds::PublicationMatchedStatus requests;
     eprosima::fastdds::dds::SubscriptionMatchedStatus responses;
     return it->second->writer->get_publication_matched_status(requests) == kDdsRpcReturnOk &&
