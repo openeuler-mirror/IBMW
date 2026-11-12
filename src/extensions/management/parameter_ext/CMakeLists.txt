@@ -37,7 +37,7 @@ if(IBMW_BUILD_PARAMETER_EXTENSION)
 endif()
 
 if(IBMW_BUILD_TESTS)
-  add_executable(ibmw_parameter_service_test parameter_service_test.cc service.cc global.cc)
+  add_executable(ibmw_parameter_service_test parameter_service_test.cc service_test.cc service.cc global.cc)
   target_link_libraries(ibmw_parameter_service_test PRIVATE ibmw::core::engine ibmw_parameter_types GTest::gtest_main)
   add_werror(ibmw_parameter_service_test)
   add_test(NAME ibmw_parameter_service_test COMMAND ibmw_parameter_service_test)

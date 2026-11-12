@@ -7,6 +7,13 @@
 
 namespace ibmw::extensions::log_control_extension {
 
+void LogControlServiceImpl::LogHandlerFailure(const char* what) noexcept {
+  try {
+    MW_ERROR("Log control service handler failed: {}", what);
+  } catch (...) {
+  }
+}
+
 void LogControlServiceImpl::HandleGetModuleLogLevel(
     const ibmw::protocols::log_control_extension::GetModuleLogLevelReq& req,
     ibmw::protocols::log_control_extension::GetModuleLogLevelRsp& rsp) {

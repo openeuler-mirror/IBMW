@@ -35,7 +35,7 @@ class TestableService : public ParameterServiceImpl {
   }
 };
 
-class ParameterServiceTest : public ::testing::Test {
+class ParameterServiceRegressionTest : public ::testing::Test {
  protected:
   void SetUp() override {
     store_.Initialize(YAML::Node());
@@ -62,7 +62,7 @@ TEST(ParameterServiceNotReadyTest, MissingStoreIsReported) {
   EXPECT_EQ(service.Call(&TestableService::HandleGet, proto::GetParameterReq{"mod", "k"}).msg, "NOT_READY");
 }
 
-TEST_F(ParameterServiceTest, SetRejectsUnknownModuleAndEmptyKey) {
+TEST_F(ParameterServiceRegressionTest, SetRejectsUnknownModuleAndEmptyKey) {
   auto ok = service_.Call(&TestableService::HandleSet, proto::SetParameterReq{"mod", "k", "v"});
   EXPECT_EQ(ok.code, 0u);
   EXPECT_EQ(Get("k"), "v");
@@ -74,7 +74,7 @@ TEST_F(ParameterServiceTest, SetRejectsUnknownModuleAndEmptyKey) {
   EXPECT_EQ(store_.GetParams("mod")->ListParameter().size(), 1u);
 }
 
-TEST_F(ParameterServiceTest, LoadIsAllOrNothing) {
+TEST_F(ParameterServiceRegressionTest, LoadIsAllOrNothing) {
   proto::LoadParameterReq req;
   req.module_parameter_map["mod"].value = {{"a", "1"}};
   req.module_parameter_map["zzz_unknown"].value = {{"b", "2"}};  // after "mod" in the map
@@ -95,7 +95,7 @@ TEST_F(ParameterServiceTest, LoadIsAllOrNothing) {
   EXPECT_EQ(Get("b"), "2");
 }
 
-TEST_F(ParameterServiceTest, FailedDumpReturnsNoPartialResult) {
+TEST_F(ParameterServiceRegressionTest, FailedDumpReturnsNoPartialResult) {
   proto::DumpParameterReq req;
   req.module_names = {"mod", "nope"};
   auto rsp = service_.Call(&TestableService::HandleDump, req);

@@ -115,7 +115,9 @@ HTTP/gRPC 可用不同地址和端口，MQTT 还可用 `--mqtt-server-id` 区分
   新增 DDS/CDR 适配。旧 JSON 服务端可能对非法输入返回成功，需要升级服务端才能
   获得严格校验保证。
 - 服务业务码：0 成功；1 `INVALID_MODULE_NAME`；2 `INVALID_LOG_LEVEL`；
-  3 `EMPTY_SETTINGS`。直接调用批量 set 时，先校验全部条目，再修改；
+  3 `EMPTY_SETTINGS`；4 `NOT_READY`（服务尚未绑定日志子系统）；
+  5 `INTERNAL_ERROR`（处理异常，RPC 状态为服务端处理失败）。
+  直接调用批量 set 时，先校验全部条目，再修改；
   不承诺多个 logger 对并发读者表现为同一事务。
 - 成功退出码为 0；传输失败和业务错误均非零，诊断写入 stderr。
   `set` 成功输出 `Set log level successful`。`--timeout` 默认 5 秒，

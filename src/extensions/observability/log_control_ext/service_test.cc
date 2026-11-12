@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 #include "engine/logger/log_level_tool.h"
 #include "log_control_ext/service.h"
 
@@ -41,15 +43,38 @@ class TestService : public LogControlServiceImpl {
     }
     return rsp;
   }
+
+  // Fills part of the answer, then fails; run through Invoke like a
+  // registered handler.
+  void FillThenThrow(const GetModuleLogLevelReq&, GetModuleLogLevelRsp& rsp) {
+    rsp.module_log_level_map["core"] = "Info";
+    throw std::runtime_error("failed part way");
+  }
+  uint32_t CallThrowing(GetModuleLogLevelRsp& rsp) {
+    const GetModuleLogLevelReq req;
+    return Invoke(static_cast<void (LogControlServiceImpl::*)(const GetModuleLogLevelReq&,
+                                                              GetModuleLogLevelRsp&)>(
+                      &TestService::FillThenThrow),
+                  &req, &rsp);
+  }
 };
 
 // EXT-014: a call that arrives without a logging subsystem gets an answer.
-TEST(LogControlServiceTest, MissingLoggingSubsystemIsReported) {
+TEST(LogControlServiceRegressionTest, MissingLoggingSubsystemIsReported) {
   TestService service;
   auto set = service.Set(SetModuleLogLevelReq{.module_log_level_map = {{"core", "debug"}}});
   EXPECT_EQ(set.msg, "NOT_READY");
   EXPECT_NE(set.code, 0u);
   EXPECT_EQ(service.Get(GetModuleLogLevelReq{}).msg, "NOT_READY");
+}
+
+// A handler exception is answered with INTERNAL_ERROR and no partial result.
+TEST(LogControlServiceRegressionTest, ExceptionDiscardsPartialAnswer) {
+  TestService service;
+  GetModuleLogLevelRsp rsp;
+  EXPECT_EQ(service.CallThrowing(rsp), static_cast<uint32_t>(IBMW_RPC_STATUS_SVR_HANDLE_FAILED));
+  EXPECT_EQ(rsp.msg, "INTERNAL_ERROR");
+  EXPECT_TRUE(rsp.module_log_level_map.empty());
 }
 
 TEST(LogLevelToolTest, UnknownNameIsDetected) {
@@ -61,7 +86,7 @@ TEST(LogLevelToolTest, UnknownNameIsDetected) {
   EXPECT_EQ(LogLevelTool::GetLogLevelFromName("warnning"), IBMW_LOG_LEVEL_OFF);
 }
 
-TEST(LogControlServiceTest, UnknownLevelIsRejectedAndNothingChanges) {
+TEST(LogControlServiceRegressionTest, UnknownLevelIsRejectedAndNothingChanges) {
   LoggingSubsystem logging;
   logging.Initialize(YAML::Node());
   logging.GetLoggerAccess("core");
