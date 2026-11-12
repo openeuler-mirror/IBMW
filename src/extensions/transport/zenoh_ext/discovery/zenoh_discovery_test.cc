@@ -223,6 +223,13 @@ TEST_F(ZenohDiscoveryTest, DiscoversSilentEndpointsFromAllInstancesAndKeepsDomai
   EXPECT_TRUE(std::any_of(snapshot.endpoints.begin(), snapshot.endpoints.end(), [](const auto& endpoint) {
     return endpoint.topic_name == "/only_subscriber" && endpoint.role == EndpointRole::kSubscriber;
   }));
+  // The observer accepts the same spellings as the drivers.
+  auto slashed = MakeProvider();
+  slashed->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_domain = "/robot/a/", .zenoh_config = client_});
+  const auto again = WaitFor(*slashed, 5);
+  ASSERT_TRUE(again.Succeeded());
+  EXPECT_EQ(again.endpoints.size(), 5u);
+  EXPECT_EQ(again.endpoints.front().source.domain, "robot/a");
 }
 
 TEST_F(ZenohDiscoveryTest, HandlesEmptyDomainRestartAndFailedInitialization) {
