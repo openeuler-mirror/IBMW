@@ -9,8 +9,10 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "engine/runtime_graph/runtime_registration.h"
+#include "extension_api/ibmw_module_lifecycle.h"
 
 namespace ibmw::runtime::core::runtime_graph {
 
@@ -27,6 +29,8 @@ class RuntimeGraphAgent {
   using StopTapHandler = ibmw::extension::RuntimeGraphV1::StopTapHandler;
   using StartPlaybackHandler = ibmw::extension::RuntimeGraphV1::StartPlaybackHandler;
   using StopPlaybackHandler = ibmw::extension::RuntimeGraphV1::StopPlaybackHandler;
+  using ListModuleLifecycleHandler =
+      std::function<std::vector<ibmw::extension::ModuleLifecycleStatus>()>;
 
   explicit RuntimeGraphAgent(Options options);
   ~RuntimeGraphAgent();
@@ -38,6 +42,7 @@ class RuntimeGraphAgent {
   void SetStopTapHandler(StopTapHandler handler);
   void SetStartPlaybackHandler(StartPlaybackHandler handler);
   void SetStopPlaybackHandler(StopPlaybackHandler handler);
+  void SetListModuleLifecycleHandler(ListModuleLifecycleHandler handler);
 
   void Initialize();
   void Start();
@@ -47,6 +52,7 @@ class RuntimeGraphAgent {
     return options_.registration;
   }
 
+  // Before Start only; initialized registrations retain their process identity.
   void UpdateRegistration(RuntimeRegistration registration);
 
  private:
@@ -72,6 +78,7 @@ class RuntimeGraphAgent {
   StopTapHandler stop_tap_handler_;
   StartPlaybackHandler start_playback_handler_;
   StopPlaybackHandler stop_playback_handler_;
+  ListModuleLifecycleHandler list_module_lifecycle_handler_;
 };
 
 }  // namespace ibmw::runtime::core::runtime_graph

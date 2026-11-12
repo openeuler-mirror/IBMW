@@ -134,6 +134,273 @@ ibmw-gen 会生成 Module 脚手架、CMake 规则、YAML 配置以及 DDS/JSON 
 要查看含 8 个可运行 Demo（另含 Extension 加载示例）的实战教程，参见 [ibmw-template/](../../ibmw-template/)
 和 [ibmw-gen 参考](../../src/tools/ibmw_gen/README.zh.md)。
 
+### 查询 Service
+
+`ibmw service list`、`type` 和 `find` 支持 registry、DDS、ROS 2、Zenoh、MQTT、HTTP
+和 gRPC 发现。默认使用 registry，读取本机同一用户的有效 IBMW 运行时登记信息。
+网络来源使用独立的发现观察器，无需启动 Engine。这些命令只查询元数据，不调用业务 RPC。
+
+```bash
+ibmw service list
+ibmw service list --registry -t
+ibmw service list --count-services
+ibmw service type 'json:/my_project.ComputeService/Compute'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' -c
+ibmw service list --include-hidden-services
+# 先将 IBMW_REGISTRY_PATH 设为运行时使用的私有注册根目录（当前用户所有，权限 0700）。
+ibmw service list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+对于 registry、HTTP、gRPC、MQTT 和 Zenoh，服务名是**完整的已注册 RPC 方法名**，
+包含类型前缀；`type` 输出准确的 `request_type -> response_type` 类型对。
+ROS 2 返回原生服务名和 `pkg/srv/Type` 类型。DDS 返回线协议服务名和请求/响应类型对，
+识别 ROS 2 的 `rq/...Request`/`rr/...Reply` 和 IBMW 的
+`ibmw_rpc/rq/...`/`ibmw_rpc/rr/...` 约定；不会还原 IBMW 逻辑名称，
+也不支持发现任意厂商的 RPC 协议。DDS 服务端必须在同一个 participant 中同时具有
+请求 reader 和响应 writer。
+
+`find` 精确匹配 `type` 返回的完整字符串。类型对需像示例中一样加引号，避免 Shell 将
+`>` 解释为重定向。名称和类型会排序、去重；同一名称对应多个类型时，`type` 每行输出一个，
+`list -t` 列出全部类型。`list -c` 和 `find -c` 统计匹配的唯一服务名数量，而非端点数量。
+
+`list -t` 输出示例：
+
+```text
+json:/my_project.ComputeService/Compute [json:my_project.ComputeRequest -> json:my_project.ComputeResponse]
+```
+
+这些命令只显示**服务端注册**，仅注册客户端不会新增可列出的服务。服务名按 `/` 分隔后，
+任一名称分量以 `_` 开头即视为隐藏服务；`--include-hidden-services` 可以放在子命令之前
+或之后。注册信息只表示元数据，不代表服务已就绪或通信已成功。
+
+对于 registry 发现，运行时在初始化期间采集 ServiceCatalog 元数据，并在 Service 子系统
+启动前刷新，包括 App 模式下在 `Engine::Initialize()` 与 `Start()` 之间新增的注册。
+登记信息包含服务端/客户端角色、完整方法名、请求/响应类型、模块/包标识，以及已启用的
+RPC Driver。本机来源可以表示所有 RPC Driver，并不限于 `local`。
+运行时需启用 `ibmw.runtime_graph.enabled`（默认开启）才能发布登记信息。
+
+`--registry-path` 指定注册根目录，与 `ibmw.runtime_graph.registry_path` 一致，
+命令自动使用其 `v2/` 子目录。默认根目录为 `$XDG_RUNTIME_DIR/ibmw`，未设置时为
+`/tmp/ibmw-<euid>`。查询成功但结果为空时退出码为 0；`type` 查询不存在或被隐藏的服务时
+退出码为 1，发现错误也返回 1。旧版本运行时缺少服务元数据时，命令提示升级并重启，
+保留新版本运行时的可用结果并返回 1。需要使用更新后的运行时重新构建/部署应用并重启，
+才能发布服务元数据。已有 Topic 和 Module 登记仍可读取；已退出运行时的记录由现有
+registry 存活检查机制处理。
+
+#### 网络来源
+
+```bash
+ibmw service list --dds --dds-domain 10 -t
+ibmw service list --ros2 --ros-domain 10 -t
+ibmw service type /add_two_ints --ros2
+ibmw service find example_interfaces/srv/AddTwoInts --ros2
+ibmw service list --zenoh --zenoh-domain robot --zenoh-config ./zenoh.json5
+ibmw service list --mqtt tcp://192.168.1.10:1883 -t
+ibmw service list --http 192.168.1.10:50080 -t
+ibmw service list --grpc 192.168.1.10:50051 -t
+ibmw service list --registry --dds --ros2 --domain 10 --timeout 3
+```
+
+来源选项适用于三个子命令，可以组合使用。短选项为 `-d`（DDS）、`-r`（ROS 2）和
+`-z`（Zenoh）。`--domain` 作用于已选择的 DDS/ROS 2 来源，各来源专用的 domain 选项
+优先于它。DDS 默认使用 domain 0；ROS 2 未指定 domain 时使用 `ROS_DOMAIN_ID`，
+再默认到 0。Zenoh 使用原生配置和 `limit_domain`（默认为空）。网络发现插件随对应的
+Extension 构建选项启用；缺少插件时命令报错。
+
+HTTP 和 gRPC 必须显式指定**服务端**地址，CLI 主动连接已有监听端口。
+HTTP 使用只读端点 `GET /ibmw/discovery/services/v1`；gRPC 使用 IBMW 专用的
+`/ibmw.discovery.v1.ServiceDirectory/List` 一元方法，通过 gRPC 帧传输 JSON，
+不使用 gRPC reflection。这两种来源目前使用明文 HTTP/HTTP2。
+MQTT 必须显式指定 broker URI（`tcp://host:port`，或使用受信任服务端证书的
+`ssl://host:port`）；CLI 暂未提供认证凭据和自定义客户端证书选项。
+每次 MQTT 查询先订阅独立的临时回复主题，再发布目录请求；回复不设置 retained 标志。
+Zenoh 查询运行时持有的目录 queryable。发现服务端无需预先知道 CLI 的 IP，后续启动的
+CLI 进程也可独立查询。
+
+HTTP、gRPC、MQTT 和 Zenoh 的目录响应器需要更新后的 IBMW 运行时，并配置对应的
+RPC Driver。它们只公开成功注册的服务端名称和类型，包括 App 模式下 Start 之前的注册，
+不会导出 registry 路径或模块库路径。DDS 和 ROS 2 使用原生发现，也可发现符合相应协议的
+原生服务端。MQTT broker ACL 必须允许访问 `ibmw/discovery/services/v1/request`
+和 `ibmw/discovery/services/v1/reply/+` 主题。目录访问沿用现有监听端口、broker
+或会话的访问控制。
+
+MQTT 的 `list/type/find` 支持 `--mqtt ssl://host:port`。使用私有 CA 时提供
+`--mqtt-truststore <path>`，否则使用系统信任库；双向 TLS 需要同时提供
+`--mqtt-client-cert <path>` 和 `--mqtt-client-key <path>`。证书配置仅适用于
+TLS MQTT 来源，认证或连接失败返回退出码 1，不作为成功的空目录。
+
+`--timeout` 设置共享采集窗口，默认 2 秒，范围为 0.01–60 秒；选中的来源并发查询。
+原生会话建立和 transport 清理可能带来额外耗时。成功返回空结果不代表所有对端均可达，
+发现较慢的网络应适当延长窗口。任一来源不可用或出错时，命令输出诊断并返回退出码 1，
+同时保留其他来源的有效结果。旧版 HTTP/gRPC 服务端缺少目录方法时会报错；
+旧版 MQTT/Zenoh 运行时则不会回复元数据查询。
+
+### 调用 Service
+
+`ibmw service call <service> <type> '<request>' [options]` 创建临时 RPC 客户端，
+发送一次请求，输出 JSON 响应后退出。请求接受单个 JSON/YAML 对象。
+类型加载、文本转换和调用生命周期由 service 命令独立实现。
+
+```bash
+# HTTP：使用已安装的请求/响应 TypeSupport 包
+ibmw service call 'json:/my_project.ComputeService/Compute' \
+  'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' \
+  '{value: 21}' --http 127.0.0.1:50080 \
+  --type-support ./libmy_project_typesupport.so --timeout 5
+
+# DDS：必须使用类型包中的规范类型名，不能直接把发现得到的 wire type 当作它
+ibmw service call 'dds:/my_project.EchoService/Echo' \
+  'dds:my_project::Request -> dds:my_project::Response' \
+  '{value: 21}' --dds --domain 10 --type-support ./libmy_project_typesupport.so
+
+# 原生 ROS 2：从已 source 的 ROS 安装中加载服务和消息 introspection
+ibmw service call /add_two_ints example_interfaces/srv/AddTwoInts \
+  '{a: 19, b: 23}' --ros2 --ros-domain 10
+```
+
+每次调用必须且只能选择一个后端：`--dds`、`--ros2`、`--zenoh`、
+`--mqtt <broker-uri>`、`--http <host:port>` 或 `--grpc <host:port>`。
+HTTP 和 gRPC 地址也可使用 `http://host:port`，当前不提供 HTTPS。
+gRPC 方法名支持 `cdr:`、`dds:`、`ros2:` 或 `json:` 前缀。
+使用 `--transport-library <path>` 可显式指定所选后端的运行时库。
+显式方法名允许调用隐藏服务；`--include-hidden-services` 也被接受。
+
+除原生 ROS 2 外，`<type>` 必须是带引号的 `request_type -> response_type`；
+`--type-support <library>` 可以重复，用来加载两种类型。两种 TypeSupport 都必须
+支持 JSON 文本转换；发送前先验证请求。DDS 还要求原生 DDS TypeSupport 和 CDR 支持。
+DDS 默认使用 IBMW RPC topic 命名；调用 ROS 2 兼容服务时增加 `--ros2-compatible`，
+服务名使用实际线协议名称，请求/响应类型必须与对端 DDS 类型和布局兼容。
+这条 DDS 路径不依赖 rcl，也不自动从 `.srv` 名称生成类型支持。
+原生 `--ros2` 则要求构建 `IBMW_BUILD_ROS2_EXTENSION=ON`，部署
+`libibmw_service_call_ros2.so`，并安装相应的 C++ service typesupport 和
+introspection 库；此模式不使用 `--type-support`。
+
+`--domain`、`--dds-domain`、`--ros-domain`、`--zenoh-domain` 和
+`--zenoh-config` 沿用对应后端的连接配置。MQTT 可设置 `--mqtt-client-id`、
+`--mqtt-server-id`、`--mqtt-qos`；TLS broker 使用 `ssl://` 或 `mqtts://`，
+必须提供 `--mqtt-truststore`，可配套提供 `--mqtt-client-cert` 和
+`--mqtt-client-key`。HTTP/gRPC/MQTT/Zenoh 可通过 `--serialization` 选择两种
+类型共同支持的格式，否则优先使用请求类型的默认格式。
+
+`--discovery-timeout` 是客户端就绪等待上限（默认 2 秒），`--timeout` 是发送后
+的响应等待上限（默认 5 秒），两者互相独立；初始化和资源清理另有开销。
+DDS 等待请求与响应端点匹配，原生 ROS 2 查询客户端可用状态，MQTT 等待连接和
+订阅确认，Zenoh 等待请求订阅端匹配。连接就绪不保证业务调用一定成功。命令不自动重发请求；响应超时或
+Ctrl+C 后，服务端仍可能已执行请求。
+
+成功返回 0，stdout 只有 JSON 响应；失败返回 1，诊断写入 stderr。
+错误状态沿用所选 Driver 的映射；HTTP Driver 对非 200 响应不保留原始服务端状态码。
+SIGINT/SIGTERM 分别返回 130/143。registry 只是发现来源，`local` 只在进程内通信，
+本命令不通过 registry 控制 socket 转发其他进程的纯 local 服务。需要显式选择
+服务端已经启用的网络 Driver 及其地址/domain；不会自动选择一个同名服务实例。
+
+### 查看和修改运行时参数
+
+`ibmw param list [module]`、`ibmw param get <module> <parameter_name>` 和
+`ibmw param set <module> <parameter_name> <value>` 通过集中式参数服务访问
+IBMW 字符串参数，连接选项沿用 `service call`。`set` 只修改运行时值。
+服务端配置、多实例命名和完整示例见 [参数命令](parameters.zh.md)。
+
+### 查看和修改运行时日志级别
+
+`ibmw log list [module]` 列出所选日志服务中的 logger 名称及当前级别，
+`ibmw log set <module> <level>` 修改已有 logger 的级别；`core` 表示框架日志。
+连接选项沿用 `service call`，不依赖 Runtime Agent，也不修改启动配置。
+服务端配置、后端选择及示例见 [日志命令](log-control.zh.md)。
+
+### 查看本机模块
+
+`ibmw module list` 通过 RuntimeRegistry 列出本机同一用户的有效运行时中登记的模块，
+每行输出 `runtime_id/module_name [pid: <PID>]`，默认显示所属进程的 PID，
+按运行时 ID 和模块名排序。同名模块在不同运行时中分别显示。
+
+```bash
+ibmw module list
+ibmw module list --runtime robot-main
+ibmw module list --count-modules
+# 先将 IBMW_REGISTRY_PATH 设为运行时使用的私有注册根目录（当前用户所有，权限 0700）。
+ibmw module list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+`--count-modules`（`-c`）只输出模块实例数量。
+`--registry-path` 指定注册根目录，与 `ibmw.runtime_graph.registry_path` 一致，命令自动使用其 `v2/` 子目录。
+默认根目录为 `$XDG_RUNTIME_DIR/ibmw`，未设置时为 `/tmp/ibmw-<euid>`。
+
+列表来自 ModuleBus，包含包加载、直接注册的模块及 App 模式 `CreateModule()` 创建的运行上下文，
+即使模块没有任何话题也能列出。只有通信端点上的 `module_name` 不会产生模块记录。
+模块列表在初始化时写入，并在模块启动前刷新；它表示已登记模块，不代表业务健康状态。
+运行时需启用 `ibmw.runtime_graph.enabled`（默认开启），关闭注册功能的进程不会出现在结果中。
+
+没有模块时输出为空、退出码为 0；指定的运行时不存在时退出码为 1。
+旧版本注册文件缺少模块列表时，命令提示升级并重启对应运行时，保留其他可用结果并返回 1；
+计数模式此时只统计提供模块信息的运行时。进程退出后的过期记录由现有 RuntimeRegistry 机制处理。
+
+### 模块生命周期记录（基础接口）
+
+ModuleBus 在准备模块访问接口及执行 `Setup()`、`Run()` 时记录每个模块的结果。
+进程内通过 `GetModuleLifecycleStatuses()` 获取按模块名排序的线程安全值快照；
+Runtime Agent 提供只读 `ListModuleLifecycle` 请求，C++ 客户端对应
+`RuntimeGraphAgentClient::ListModuleLifecycle()`。查询不会调用模块回调或修改登记文件。
+`ibmw doctor module` 已使用本接口检查初始化和启动结果，根命令 `ibmw doctor`
+也包含此检查；`module list/info` 保持原有行为。用法及查询范围见
+[Doctor 模块生命周期检查](doctor.zh.md#模块生命周期检查)。
+
+每条记录包含 `module_name`、`package_path`、`kind`、`initialize`、`start`、
+`failure` 和 `updated_at_unix_ms`。阶段结果分别为 `not_attempted`（尚未执行）、
+`in_progress`（执行中）、`succeeded`（成功）、`failed`（失败）或
+`not_applicable`（不适用）；失败信息包含 `phase` 和 `reason`。
+时间戳为最近一次记录状态变化的 Unix 毫秒时间，不是心跳。
+
+`kind=managed` 包括包加载和直接注册的模块；初始化涵盖访问接口配置及 `Setup()`，
+启动对应 `Run()`。`kind=app_context` 表示 `CreateModule()` 创建的运行上下文：
+初始化结果只表示访问接口配置结果，`start` 始终为 `not_applicable`，不会虚构启动成功。
+失败返回值、传播到 ModuleBus 的标准或非标准异常都会记录；原有失败传播行为保持不变。
+C++ 模块包装层已捕获并转成 `false` 的异常只能记录回调失败，详细原因仍以原日志为准。
+
+记录在进入单个模块初始化时建立。禁用的模块，以及在此之前发生的包加载、模块创建、
+元信息读取等失败不在本接口覆盖范围内；初始化中断后尚未处理的模块也不会生成记录。
+记录独立于模块对象保存，关闭后仍能通过进程内接口查询，但只保留到 ModuleBus 销毁。
+同名 App 上下文初始化失败后重试时，以本次尝试覆盖上次记录。
+阶段成功仅表示该次框架操作成功，不表示模块当前仍在运行或业务健康。
+
+Runtime Agent 必须启用并已开始服务才能从其他进程查询。当前 Engine 的初始化、启动
+顺序意味着模块失败可能早于 Agent 开始服务，此时只能由宿主通过进程内接口读取记录。
+本版本不提供失败落盘、进程退出后查询、运行中健康上报或卡死检测。
+旧 Agent 或未设置生命周期查询能力的 Agent 返回不支持错误，不会伪装为空模块列表。
+
+### 查看模块通信接口
+
+`ibmw module info <module>` 显示已登记模块的名称、运行时 ID、PID，以及发布和订阅的话题与消息类型。
+参数为模块名；同名模块存在于多个运行时时，命令列出候选运行时并返回 1，使用 `--runtime` 指定目标。
+`--registry-path` 与 `module list` 使用相同的注册根目录规则。
+
+```bash
+ibmw module info perception
+ibmw module info perception --runtime robot-main
+ibmw module info perception --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+示例输出：
+
+```text
+Module: perception
+Runtime: robot-main
+PID: 12345
+
+Publishers:
+  /detections [json:DetectionArray]
+
+Subscribers:
+  /camera/image [json:Image]
+```
+
+各方向按话题名和消息类型排序，相同话题和类型的重复端点只显示一次，包含注册表中标记为隐藏的话题。
+没有对应接口时显示 `(none)`，无话题模块也可成功查询。结果来自运行时登记的接口快照，
+不代表当前消息流量、连接状态或业务健康；未登记的端点不会显示。
+模块或指定运行时不存在时返回 1。旧运行时缺少模块列表时提示升级重启，保留唯一可用匹配的输出并返回 1；
+只出现在话题端点上的模块名不会被视为已登记模块。可用信息完整且唯一匹配时返回 0。
+
 ---
 
 ## 构建选项

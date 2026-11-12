@@ -3,6 +3,8 @@
 
 #include "engine/module/parameter_store.h"
 
+#include <algorithm>
+
 namespace YAML {
 template <>
 struct convert<ibmw::runtime::core::parameter::ParameterStore::Options> {
@@ -82,6 +84,18 @@ ParameterHandle* ParameterStore::GetParams(std::string_view module_name) const {
   if (itr != parameter_handle_access_wrap_map_.end()) return &(itr->second->parameter_handle);
 
   return nullptr;
+}
+
+std::vector<std::string> ParameterStore::ListModules() const {
+  MW_REQUIRE(state_.load() == State::kStart,
+             "Method can only be called when state is 'Start'.");
+  // Handles are created during initialization and retained until shutdown.
+  std::vector<std::string> names;
+  names.reserve(parameter_handle_access_wrap_map_.size());
+  for (const auto& [name, handle] : parameter_handle_access_wrap_map_)
+    names.push_back(name);
+  std::sort(names.begin(), names.end());
+  return names;
 }
 
 std::list<std::pair<std::string, std::string>> ParameterStore::GenInitializationReport() const {

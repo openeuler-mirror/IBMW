@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "base/exception.h"
+#include "engine/runtime_graph/module_lifecycle.h"
 #include "engine/runtime_graph/runtime_protocol.h"
 #include "engine/runtime_graph/runtime_directory.h"
 
@@ -121,8 +122,14 @@ RuntimeGraphAgent::~RuntimeGraphAgent() {
 }
 
 void RuntimeGraphAgent::UpdateRegistration(RuntimeRegistration registration) {
-  MW_ASSERT(state_.load() == State::kCreated,
-            "Runtime registration can only be updated before Initialize.");
+  const auto state = state_.load();
+  MW_ASSERT(state == State::kCreated || state == State::kInitialized,
+            "Runtime registration can only be updated before Start.");
+  if (state == State::kInitialized) {
+    MW_ASSERT(SameRegistrationOwner(registration, options_.registration),
+              "Cannot change the identity of an initialized Runtime registration.");
+    WriteRuntimeRegistration(registration, registration_path_);
+  }
   options_.registration = std::move(registration);
 }
 
@@ -148,6 +155,12 @@ void RuntimeGraphAgent::SetStopPlaybackHandler(StopPlaybackHandler handler) {
   MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
             "Set handlers before Start.");
   stop_playback_handler_ = std::move(handler);
+}
+
+void RuntimeGraphAgent::SetListModuleLifecycleHandler(ListModuleLifecycleHandler handler) {
+  MW_ASSERT(state_.load() == State::kCreated || state_.load() == State::kInitialized,
+            "Set handlers before Start.");
+  list_module_lifecycle_handler_ = std::move(handler);
 }
 
 void RuntimeGraphAgent::Initialize() {
@@ -345,6 +358,12 @@ nlohmann::json RuntimeGraphAgent::HandleRequest(
     result = nlohmann::json::array();
     for (const auto& topic : options_.registration.topics) {
       result.push_back(TopicAdvertisementToJson(topic));
+    }
+  } else if (method == "ListModuleLifecycle") {
+    MW_ASSERT(list_module_lifecycle_handler_, "Runtime does not support ListModuleLifecycle.");
+    result = nlohmann::json::array();
+    for (const auto& status : list_module_lifecycle_handler_()) {
+      result.push_back(ModuleLifecycleStatusToJson(status));
     }
   } else if (method == "GetTopicDescriptor") {
     result = TopicAdvertisementToJson(FindTopic(params));

@@ -20,7 +20,8 @@ if(IBMW_BUILD_TESTS)
   # The business extension intentionally hides its implementation symbols.
   # Compile its registration path into this regression test.
   add_executable(ibmw_discovery_zenoh_test zenoh_discovery_test.cc
-    zenoh_discovery_responder.cc ../zenoh_bus.cc ../zenoh_transport_driver.cc ../global.cc)
+    zenoh_discovery_responder.cc zenoh_service_discovery_responder.cc
+    ../zenoh_bus.cc ../zenoh_transport_driver.cc ../global.cc)
   target_include_directories(ibmw_discovery_zenoh_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
   target_link_libraries(ibmw_discovery_zenoh_test PRIVATE ibmw_discovery_zenoh
     ibmw_zenoh_discovery_protocol ibmw::core::engine

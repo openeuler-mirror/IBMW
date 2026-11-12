@@ -3,13 +3,20 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+#include <unordered_map>
+
+#include "engine/discovery/service_discovery_protocol.h"
 #include "engine/service/service_driver.h"
+#include "extension_api/ibmw_service_client_readiness.h"
 #include "engine/rpc_client_tool.h"
 #include "mqtt_ext/msg_handle_catalog.h"
 
 namespace ibmw::extensions::mqtt_extension {
 
-class MqttRpcDriver : public runtime::core::service::ServiceDriver {
+class MqttRpcDriver : public runtime::core::service::ServiceDriver,
+                      public ibmw::extension::ServiceClientReadinessV1 {
  public:
   struct Options {
     std::string timeout_executor;
@@ -47,6 +54,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver {
   void Initialize(YAML::Node options_node) override;
   void Start() override;
   void Shutdown() override;
+  bool IsClientReady(std::string_view module, std::string_view function) const noexcept override;
 
   void SetServiceCatalog(const runtime::core::service::ServiceCatalog* service_catalog_ptr) noexcept override {
     service_catalog_ptr_ = service_catalog_ptr;
@@ -65,6 +73,12 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver {
   void UnSubscribeMqttTopic();
 
  private:
+  struct SubscriptionStatus {
+    std::atomic_size_t pending{0};
+    std::atomic_bool failed{false};
+  };
+  using SubscriptionBatch = std::unordered_map<std::string, std::shared_ptr<SubscriptionStatus>>;
+  std::shared_ptr<SubscriptionBatch> subscriptions_;
   void ReturnRspWithStatusCode(
       std::string_view mqtt_pub_topic,
       int qos,
@@ -80,6 +94,8 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver {
     kShutdown,
   };
 
+  std::shared_ptr<ibmw::discovery::service_protocol::Catalog> discovery_catalog_ =
+      std::make_shared<ibmw::discovery::service_protocol::Catalog>();
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
 

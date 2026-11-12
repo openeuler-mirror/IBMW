@@ -6,6 +6,7 @@
 #include "cpp/service/rpc_status.h"
 #include "cpp/util/type_support.h"
 #include "engine/service/service_driver.h"
+#include "extension_api/ibmw_service_client_readiness.h"
 #include "engine/service/service_driver_tools.h"
 #include "engine/rpc_client_tool.h"
 #include "base/buffer_util.h"
@@ -16,7 +17,8 @@
 #include "zenoh_ext/zenoh_bus.h"
 
 namespace ibmw::extensions::zenoh_extension {
-class ZenohRpcDriver : public runtime::core::service::ServiceDriver {
+class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
+                       public ibmw::extension::ServiceClientReadinessV1 {
  public:
   struct Options {
     std::string timeout_executor;
@@ -45,6 +47,7 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver {
   void Initialize(YAML::Node options_node) override;
   void Start() override;
   void Shutdown() override;
+  bool IsClientReady(std::string_view module, std::string_view function) const noexcept override;
 
   bool RegisterServiceFunc(
       const runtime::core::service::ServiceFuncWrapper& service_func_wrapper) noexcept override;

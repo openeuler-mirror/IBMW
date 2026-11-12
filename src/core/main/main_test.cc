@@ -10,11 +10,30 @@
 #include <unistd.h>
 
 #include "gtest/gtest.h"
+#include "cli/command.h"
 #include "yaml-cpp/yaml.h"
 
 int RunCli(int argc, char** argv);
 
 namespace {
+
+TEST(CommandTest, HelpAfterOptionTerminatorIsALiteralArgument) {
+  for (const auto* value : {"--help", "-h"}) {
+    ibmw::cli::Command command("test", "");
+    bool invoked = false;
+    command.AddSubcommand("set", "").AddArgument("<value>", "")
+        .SetHandler([&](const ibmw::cli::Invocation& invocation) {
+          invoked = true;
+          EXPECT_EQ(invocation.positional_args, (std::vector<std::string>{value}));
+          return 23;
+        });
+    std::vector<std::string> args{"test", "set", "--", value};
+    std::vector<char*> argv;
+    for (auto& arg : args) argv.push_back(arg.data());
+    EXPECT_EQ(command.Run(static_cast<int>(argv.size()), argv.data()), 23);
+    EXPECT_TRUE(invoked);
+  }
+}
 
 class CliTest : public testing::Test {
  protected:

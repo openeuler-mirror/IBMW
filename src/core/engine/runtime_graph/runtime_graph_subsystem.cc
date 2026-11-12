@@ -290,6 +290,8 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
   }
   DiscoverTypeSupportPackagesFromCatalog();
   registration_ = BuildRegistration();
+  RefreshModuleList();
+  RefreshServiceList();
   if (!options_.enabled) return;
   tap_runtime_ = extension::MakeExtensionRuntimeV2(*engine_);
   publish_tap_ = std::make_unique<RuntimePublishTapCapability>(*tap_runtime_);
@@ -298,6 +300,9 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
   tap_server_->Start();
   agent_ = std::make_unique<RuntimeGraphAgent>(RuntimeGraphAgent::Options{
       .registration = registration_, .registry_path = options_.registry_path});
+  agent_->SetListModuleLifecycleHandler([this] {
+    return engine_->GetModuleBus().GetModuleLifecycleStatuses();
+  });
   agent_->SetStartTapHandler(start_tap_handler_ ? start_tap_handler_ :
       RuntimeGraphAgent::StartTapHandler([this](const auto& advertisement) {
         return tap_server_->StartSession(advertisement);
@@ -314,6 +319,59 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
   }
   agent_->Initialize();
   registration_ = agent_->Registration();
+}
+
+void RuntimeGraphSubsystem::RefreshModuleList() {
+  MW_REQUIRE(state_.load() == State::kInit && engine_,
+             "Module registration requires an initialized Runtime Graph.");
+  std::vector<std::string> modules;
+  for (const auto* info : engine_->GetModuleBus().GetModuleDetailInfoList()) {
+    modules.push_back(info->module_name);
+  }
+  std::sort(modules.begin(), modules.end());
+  if (registration_.modules && *registration_.modules == modules) return;
+  auto updated = registration_;
+  updated.modules = std::move(modules);
+  if (agent_) agent_->UpdateRegistration(updated);
+  registration_ = std::move(updated);
+}
+
+void RuntimeGraphSubsystem::RefreshServiceList() {
+  MW_REQUIRE(state_.load() == State::kInit && engine_,
+             "Service registration requires an initialized Runtime Graph.");
+  const auto& dispatcher = engine_->GetServiceDispatcher();
+  const auto* catalog = dispatcher.GetServiceCatalog();
+  MW_REQUIRE(catalog, "Service catalog is not initialized.");
+  const auto& drivers = dispatcher.GetServiceDriverDispatcher();
+  std::vector<ibmw::extension::ServiceAdvertisement> services;
+  const auto append = [&](const auto& wrappers, const auto& driver_map, bool server) {
+    for (const auto& [key, wrapper] : wrappers) {
+      const auto& info = wrapper->info;
+      ibmw::extension::ServiceAdvertisement service{
+          .endpoint_id = std::string(server ? "server-" : "client-") + std::to_string(info.index),
+          .service_name = info.func_name,
+          .request_type = std::string(info.req_type_support_ref.TypeName()),
+          .response_type = std::string(info.rsp_type_support_ref.TypeName()),
+          .module_name = info.module_name,
+          .package_path = info.pkg_path,
+          .server = server,
+          .hidden = IsHiddenTopic(info.func_name)};
+      if (const auto found = driver_map.find(info.func_name); found != driver_map.end()) {
+        for (const auto driver : found->second) service.available_drivers.emplace_back(driver);
+      }
+      services.push_back(std::move(service));
+    }
+  };
+  append(catalog->GetServiceFuncWrapperMap(), drivers.GetServersDriverInfo(), true);
+  append(catalog->GetClientFuncWrapperMap(), drivers.GetClientsDriverInfo(), false);
+  std::sort(services.begin(), services.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.endpoint_id < rhs.endpoint_id;
+  });
+  if (registration_.services && *registration_.services == services) return;
+  auto updated = registration_;
+  updated.services = std::move(services);
+  if (agent_) agent_->UpdateRegistration(updated);
+  registration_ = std::move(updated);
 }
 
 void RuntimeGraphSubsystem::DiscoverTypeSupportPackagesFromCatalog() {

@@ -20,7 +20,7 @@ file(GLOB_RECURSE test_files ${CMAKE_CURRENT_SOURCE_DIR}/*_test.cc)
 list(FILTER src EXCLUDE REGEX "/discovery/")
 list(FILTER test_files EXCLUDE REGEX "/discovery/")
 list(REMOVE_ITEM src ${test_files})
-list(APPEND src discovery/zenoh_discovery_responder.cc)
+list(APPEND src discovery/zenoh_discovery_responder.cc discovery/zenoh_service_discovery_responder.cc)
 
 # Add target
 add_library(${CUR_TARGET_NAME} SHARED)

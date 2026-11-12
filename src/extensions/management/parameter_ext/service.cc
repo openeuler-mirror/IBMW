@@ -2,6 +2,8 @@
 // All rights reserved.
 
 #include "parameter_ext/service.h"
+
+#include <algorithm>
 #include "parameter_ext/global.h"
 
 namespace ibmw::extensions::parameter_extension {
@@ -15,7 +17,11 @@ void ParameterServiceImpl::HandleSet(
     return;
   }
 
-  parameter_handle_ptr->SetParameter(req.parameter_key, req.parameter_value);
+  if (req.parameter_key.empty()) {
+    SetErrorCode(ErrorCode::kInvalidParameterName, rsp);
+    return;
+  }
+  parameter_handle_ptr->SetParameterValue(req.parameter_key, req.parameter_value);
 }
 
 void ParameterServiceImpl::HandleGet(
@@ -27,9 +33,15 @@ void ParameterServiceImpl::HandleGet(
     return;
   }
 
+  if (req.parameter_key.empty()) {
+    SetErrorCode(ErrorCode::kInvalidParameterName, rsp);
+    return;
+  }
   auto parameter_ptr = parameter_handle_ptr->GetParameter(req.parameter_key);
   if (parameter_ptr) {
     rsp.parameter_value = *parameter_ptr;
+  } else {
+    SetErrorCode(ErrorCode::kParameterNotFound, rsp);
   }
 }
 
@@ -43,6 +55,7 @@ void ParameterServiceImpl::HandleList(
   }
 
   rsp.parameter_keys = parameter_handle_ptr->ListParameter();
+  std::sort(rsp.parameter_keys.begin(), rsp.parameter_keys.end());
 }
 
 void ParameterServiceImpl::HandleDump(
@@ -88,6 +101,12 @@ void ParameterServiceImpl::HandleLoad(
       parameter_handle_ptr->SetParameter(key, value);
     }
   }
+}
+
+void ParameterServiceImpl::HandleListModules(
+    const ibmw::protocols::parameter_extension::ListModulesReq&,
+    ibmw::protocols::parameter_extension::ListModulesRsp& rsp) {
+  rsp.module_names = parameter_store_ptr_->ListModules();
 }
 
 }  // namespace ibmw::extensions::parameter_extension

@@ -4,12 +4,14 @@
 #include "ros2_ext/ros2_transport_driver.h"
 
 #include <regex>
+#include <optional>
 #include <string_view>
 
 #include "cpp/util/string.h"
 #include "cpp/util/type_support.h"
 #include "ros2_ext/global.h"
 #include "ros2_ext/ros2_name_encode.h"
+#include "ros2_ext/detail/qos_observation.h"
 
 #include "rcl/error_handling.h"
 #include "rclcpp/version.h"
@@ -293,7 +295,65 @@ Ros2TransportDriver::SerializedOperations() noexcept {
           },
           .detach_subscriber = [](void* driver, SerializedSubscriberHandle handle) noexcept {
             return static_cast<Ros2TransportDriver*>(driver)->DetachSerializedSubscriber(handle);
+          },
+          .publisher_qos = [](void* driver, std::string_view topic, std::string_view type) noexcept {
+            return static_cast<Ros2TransportDriver*>(driver)->EndpointQos(topic, type, true);
+          },
+          .subscriber_qos = [](void* driver, std::string_view topic, std::string_view type) noexcept {
+            return static_cast<Ros2TransportDriver*>(driver)->EndpointQos(topic, type, false);
           }};
+}
+
+ibmw::transport::QosDescriptor Ros2TransportDriver::EndpointQos(
+    std::string_view topic, std::string_view msg_type, bool publisher) const noexcept {
+  try {
+    if (!ros2_node_ptr_) return {};
+    std::optional<rmw_qos_profile_t> qos;
+    std::string wire_topic;
+    if (msg_type.starts_with("ros2:")) {
+      const Key key{std::string(topic), std::string(msg_type)};
+      if (publisher) {
+        const auto it = ros2_send_type_wrapper_map_.find(key);
+        if (it != ros2_send_type_wrapper_map_.end()) {
+          if (const auto* actual = rcl_publisher_get_actual_qos(it->second.publisher_ptr.get())) qos = *actual;
+          if (const auto* name = rcl_publisher_get_topic_name(it->second.publisher_ptr.get())) wire_topic = name;
+        }
+      } else {
+        const auto it = ros2_message_handler_map_.find(key);
+        if (it != ros2_message_handler_map_.end()) {
+          qos = it->second.ros_sub_handle_ptr->get_actual_qos().get_rmw_qos_profile();
+          wire_topic = it->second.ros_sub_handle_ptr->get_topic_name();
+        }
+      }
+    } else {
+      const auto name = std::string(topic) + "/" + Ros2NameEncode(msg_type);
+      if (publisher) {
+        const auto it = publisher_map_.find(name);
+        if (it != publisher_map_.end()) {
+          qos = it->second->get_actual_qos().get_rmw_qos_profile();
+          wire_topic = it->second->get_topic_name();
+        }
+      } else {
+        const auto it = message_handler_map_.find(name);
+        if (it != message_handler_map_.end()) {
+          qos = it->second.ros_sub_handle_ptr->get_actual_qos().get_rmw_qos_profile();
+          wire_topic = it->second.ros_sub_handle_ptr->get_topic_name();
+        }
+      }
+    }
+    if (!qos) return {};
+    auto result = detail::DescribeQos(*qos);
+    result.policies["qos_provenance"] = "actual_entity";
+    if (!wire_topic.empty()) result.policies["wire_topic_name"] = wire_topic;
+    size_t domain = 0;
+    if (rcl_node_get_domain_id(ros2_node_ptr_->get_node_base_interface()->get_rcl_node_handle(), &domain) == RCL_RET_OK) {
+      result.policies["domain_id"] = std::to_string(domain);
+    }
+    return result;
+  } catch (const std::exception& error) {
+    MW_ERROR("Cannot inspect ROS 2 endpoint QoS: {}", error.what());
+    return {};
+  }
 }
 
 runtime::core::transport::SerializedSubscriberHandle

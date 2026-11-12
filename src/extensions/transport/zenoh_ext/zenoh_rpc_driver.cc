@@ -106,12 +106,14 @@ void ZenohRpcDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::Start) == State::Init,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->StartServiceDiscovery(limit_domain_);
 }
 
 void ZenohRpcDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::Shutdown) == State::Shutdown)
     return;
 
+  zenoh_bus_ptr_->StopServiceDiscovery();
   client_tool_ptr_.reset();
 }
 
@@ -423,6 +425,8 @@ bool ZenohRpcDriver::RegisterServiceFunc(
       }
     };
     zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled);
+    zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
+                                 info.rsp_type_support_ref.TypeName());
 
     z_node_shm_size_map_["rsp/" + pattern] = shm_init_loan_size_;
     return true;
@@ -542,6 +546,19 @@ bool ZenohRpcDriver::RegisterClientFunc(
     return false;
   }
   return true;
+}
+
+bool ZenohRpcDriver::IsClientReady(std::string_view, std::string_view function) const noexcept {
+  try {
+    if (state_.load() != State::Start) return false;
+    const auto key = "req/ibmw_rpc/" +
+                     common::util::UrlEncode(rpc::GetFuncNameWithoutPrefix(function)) + limit_domain_;
+    const auto& publishers = zenoh_bus_ptr_->GetPublisherRegisterMap();
+    const auto publisher = publishers.find(key);
+    if (publisher == publishers.end()) return false;
+    zc_matching_status_t status{};
+    return zc_publisher_get_matching_status(z_loan(publisher->second->z_pub), &status) == 0 && status.matching;
+  } catch (...) { return false; }
 }
 
 void ZenohRpcDriver::Call(
@@ -819,10 +836,13 @@ void ZenohRpcDriver::ReturnRspWithStatusCode(
     uint32_t code) {
   namespace util = ibmw::common::util;
 
-  int pkg_size = 1 + serialization_type.size() + 4 + 4;
+  const uint32_t data_size = 1 + serialization_type.size() + 4 + 4;
+  const size_t pkg_size = 4 + data_size;
   std::vector<char> msg_buf_vec(pkg_size);
   util::BufferOperator buf_oper(msg_buf_vec.data(), msg_buf_vec.size());
 
+  // Error responses use the same length-prefixed frame as successful replies.
+  buf_oper.SetUint32(data_size);
   buf_oper.SetString(serialization_type, util::BufferLenType::kUInt8);
   buf_oper.SetBuffer(req_id_buf, 4);
   buf_oper.SetUint32(code);

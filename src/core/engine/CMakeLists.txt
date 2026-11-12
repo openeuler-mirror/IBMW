@@ -24,6 +24,9 @@ list(REMOVE_ITEM test_files ${discovery_test_src})
 set(shared_runtime_src
     ${CMAKE_CURRENT_SOURCE_DIR}/discovery/discovery_provider.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/discovery/registry_discovery_provider.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/service_discovery.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/discovery/service_discovery_protocol.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/module_lifecycle.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_agent.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_graph_client.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/runtime_graph/runtime_registration.cc
@@ -41,23 +44,16 @@ target_include_directories(ibmw_extension_support
   PUBLIC $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>)
 target_link_libraries(ibmw_extension_support PRIVATE ibmw::base yaml-cpp::yaml-cpp)
-set(LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC
-    ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1/driver_fixture.cc)
-set(LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER
-    ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1/transport_driver.h)
 set(EXTENSION_V2_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/test/extension_v2_fixture.cc)
 set(TYPE_SUPPORT_V1_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/type_support/test/type_support_pkg_v1_fixture.cc)
-list(REMOVE_ITEM src ${LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC}
-                     ${EXTENSION_V2_FIXTURE_SRC}
+list(REMOVE_ITEM src ${EXTENSION_V2_FIXTURE_SRC}
                      ${TYPE_SUPPORT_V1_FIXTURE_SRC})
 list(REMOVE_ITEM src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_query.cc)
 if(NOT IBMW_ENABLE_CORE_METRICS)
   list(REMOVE_ITEM test_files ${CMAKE_CURRENT_SOURCE_DIR}/core_metrics_test.cc)
 endif()
-
-list(REMOVE_ITEM head_files ${LEGACY_TRANSPORT_DRIVER_FIXTURE_HEADER})
 
 # Add target
 add_library(${CUR_TARGET_NAME} STATIC)
@@ -178,28 +174,6 @@ if(IBMW_BUILD_TESTS)
 endif()
 
 if(IBMW_BUILD_TESTS AND test_files)
-  add_library(legacy_transport_driver_v1 MODULE
-              ${LEGACY_TRANSPORT_DRIVER_FIXTURE_SRC})
-  target_include_directories(
-    legacy_transport_driver_v1
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1)
-  target_link_libraries(legacy_transport_driver_v1 PRIVATE yaml-cpp::yaml-cpp)
-  if(UNIX AND NOT APPLE)
-    set(LEGACY_TRANSPORT_DRIVER_FIXTURE_MAP
-        ${CMAKE_CURRENT_SOURCE_DIR}/transport/test/abi/v1/exports.map)
-    target_link_options(
-      legacy_transport_driver_v1
-      PRIVATE "LINKER:--exclude-libs,ALL"
-              "LINKER:--version-script=${LEGACY_TRANSPORT_DRIVER_FIXTURE_MAP}")
-    set_target_properties(
-      legacy_transport_driver_v1
-      PROPERTIES LINK_DEPENDS ${LEGACY_TRANSPORT_DRIVER_FIXTURE_MAP})
-  endif()
-  set_target_properties(
-    legacy_transport_driver_v1
-    PROPERTIES CXX_VISIBILITY_PRESET hidden
-               VISIBILITY_INLINES_HIDDEN ON)
-
   foreach(fixture IN ITEMS extension_legacy_fixture
                            extension_v2_fixture
                            extension_v2_bad_version_fixture
@@ -256,7 +230,6 @@ if(IBMW_BUILD_TESTS AND test_files)
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})
   set_tests_properties(${CUR_TARGET_NAME}_test PROPERTIES TIMEOUT 120)
   add_dependencies(${CUR_TARGET_NAME}_test
-                   legacy_transport_driver_v1
                    extension_legacy_fixture
                    extension_v2_fixture
                    extension_v2_bad_version_fixture
@@ -269,10 +242,6 @@ if(IBMW_BUILD_TESTS AND test_files)
                    type_support_bad_size_v1_fixture
                    type_support_bad_package_size_v1_fixture
                    type_support_null_type_v1_fixture)
-  target_compile_definitions(
-    ${CUR_TARGET_NAME}_test
-    PRIVATE
-      "LEGACY_TRANSPORT_DRIVER_FIXTURE_PATH=\"$<TARGET_FILE:legacy_transport_driver_v1>\"")
   target_compile_definitions(
     ${CUR_TARGET_NAME}_test
     PRIVATE

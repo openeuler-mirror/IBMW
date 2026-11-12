@@ -125,6 +125,30 @@ void MqttRpcDriver::Initialize(YAML::Node options_node) {
     MW_TRACE("Mqtt service driver does not enable the timeout function.");
   }
 
+  // Use a non-shared subscription: every runtime answers on the querying
+  // client's unique reply topic. Nothing is retained at the broker.
+  namespace directory = ibmw::discovery::service_protocol;
+  sub_info_vec_.push_back({directory::kMqttRequestTopic, 1});
+  msg_handle_catalog_ptr_->RegisterMsgHandle(directory::kMqttRequestTopic,
+      [catalog = discovery_catalog_, client = client_](MQTTAsync_message* message) {
+        try {
+          constexpr std::string_view prefix = directory::kMqttReplyPrefix;
+          if (message->retained || message->payloadlen != static_cast<int>(prefix.size() + 20)) return;
+          const std::string topic(static_cast<const char*>(message->payload), message->payloadlen);
+          if (!topic.starts_with(prefix) ||
+              topic.find_first_not_of("0123456789abcdef", prefix.size()) != std::string::npos) return;
+          const auto payload = catalog->Encode();
+          MQTTAsync_message reply = MQTTAsync_message_initializer;
+          reply.payload = const_cast<char*>(payload.data());
+          reply.payloadlen = static_cast<int>(payload.size());
+          reply.qos = 1;
+          const auto code = MQTTAsync_sendMessage(client, topic.c_str(), &reply, nullptr);
+          if (code != MQTTASYNC_SUCCESS) MW_WARN("Cannot send MQTT service directory: {}", code);
+        } catch (const std::exception& error) {
+          MW_WARN("Cannot produce MQTT service directory: {}", error.what());
+        }
+      });
+
   options_node = options_;
 }
 
@@ -338,6 +362,8 @@ bool MqttRpcDriver::RegisterServiceFunc(
     sub_info_vec_.emplace_back(MqttSubInfo{mqtt_sub_topic_2, qos});
 
     msg_handle_catalog_ptr_->RegisterMsgHandle(mqtt_sub_topic_2, handle);
+    discovery_catalog_->Add(info.func_name, info.req_type_support_ref.TypeName(),
+                            info.rsp_type_support_ref.TypeName());
 
     return true;
   } catch (const std::exception& e) {
@@ -464,6 +490,22 @@ bool MqttRpcDriver::RegisterClientFunc(
     MW_ERROR("{}", e.what());
     return false;
   }
+}
+
+bool MqttRpcDriver::IsClientReady(std::string_view, std::string_view function) const noexcept {
+  try {
+    const auto name = rpc::GetFuncNameWithoutPrefix(function);
+    if (state_.load() != State::kStart || !MQTTAsync_isConnected(client_) ||
+        !client_cfg_info_map_.contains(name)) return false;
+    const auto subscriptions = std::atomic_load(&subscriptions_);
+    if (!subscriptions) return false;
+    const auto topic = "ibmw_rpc_rsp/" + common::util::UrlEncode(client_id_) + "/" +
+                       common::util::UrlEncode(name);
+    const auto subscription = subscriptions->find(topic);
+    // Completion publishes the failure flag; read it after pending reaches zero.
+    return subscription != subscriptions->end() && subscription->second->pending.load() == 0 &&
+           !subscription->second->failed.load();
+  } catch (...) { return false; }
 }
 
 void MqttRpcDriver::Call(
@@ -635,10 +677,38 @@ void MqttRpcDriver::RegisterGetExecutorFunc(
 }
 
 void MqttRpcDriver::SubscribeMqttTopic() {
+  // Each reconnect owns a distinct batch. Late callbacks cannot mark a newer
+  // connection ready, and callbacks never dereference a destroyed RPC driver.
+  const auto batch = std::make_shared<SubscriptionBatch>();
+  // Build the immutable topic map before publishing it to readiness readers.
+  for (const auto& sub_info : sub_info_vec_) {
+    auto& status = (*batch)[sub_info.topic];
+    if (!status) status = std::make_shared<SubscriptionStatus>();
+    status->pending.fetch_add(1);
+  }
+  std::atomic_store(&subscriptions_, batch);
   for (auto sub_info : sub_info_vec_) {
     // todo:Replace with MQTTClient_subscribeMany
-    int rc = MQTTAsync_subscribe(client_, sub_info.topic.data(), sub_info.qos, NULL);
+    MQTTAsync_responseOptions response = MQTTAsync_responseOptions_initializer;
+    using Context = std::shared_ptr<SubscriptionStatus>;
+    const auto& status = batch->at(sub_info.topic);
+    response.context = new Context(status);
+    response.onSuccess = [](void* context, MQTTAsync_successData* data) {
+      const std::unique_ptr<Context> owner(static_cast<Context*>(context));
+      if (!data || data->alt.qos == 128) (*owner)->failed.store(true);
+      (*owner)->pending.fetch_sub(1);
+    };
+    response.onFailure = [](void* context, MQTTAsync_failureData*) {
+      const std::unique_ptr<Context> owner(static_cast<Context*>(context));
+      (*owner)->failed.store(true);
+      (*owner)->pending.fetch_sub(1);
+    };
+    // A failure only blocks calls that need this subscription.
+    int rc = MQTTAsync_subscribe(client_, sub_info.topic.data(), sub_info.qos, &response);
     if (rc != MQTTASYNC_SUCCESS) {
+      delete static_cast<Context*>(response.context);
+      status->failed.store(true);
+      status->pending.fetch_sub(1);
       MW_ERROR("Failed to subscribe mqtt, topic: {} return code: {}", sub_info.topic, rc);
     }
   }

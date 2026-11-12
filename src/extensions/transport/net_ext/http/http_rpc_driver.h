@@ -4,6 +4,7 @@
 #pragma once
 
 #include "engine/service/service_driver.h"
+#include "engine/discovery/service_discovery_protocol.h"
 #include "net_base/asio_http_cli.h"
 #include "net_base/asio_http_svr.h"
 
@@ -61,6 +62,8 @@ class HttpRpcDriver : public runtime::core::service::ServiceDriver {
   };
 
   Options options_;
+  std::shared_ptr<ibmw::discovery::service_protocol::Catalog> discovery_catalog_ =
+      std::make_shared<ibmw::discovery::service_protocol::Catalog>();
   std::atomic<State> state_ = State::kPreInit;
 
   const runtime::core::service::ServiceCatalog* service_catalog_ptr_ = nullptr;

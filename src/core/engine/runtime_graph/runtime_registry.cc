@@ -17,6 +17,15 @@
 namespace ibmw::runtime::core::runtime_graph {
 
 std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimes() const {
+  return DiscoverLocalRuntimesImpl(true);
+}
+
+std::vector<RuntimeRegistration> RuntimeRegistry::InspectLocalRuntimes() const {
+  return DiscoverLocalRuntimesImpl(false);
+}
+
+std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimesImpl(
+    bool cleanup_stale) const {
   std::vector<RuntimeRegistration> result;
   if (!std::filesystem::exists(registry_path_)) {
     return result;
@@ -69,6 +78,7 @@ std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimes() const 
           (process_start_time.has_value() &&
            *process_start_time != registration.process_start_time_ticks);
       if (stale) {
+        if (!cleanup_stale) continue;
         std::error_code error;
         if (socket_in_registry && socket_stat.st_uid == ::geteuid() &&
             S_ISSOCK(socket_stat.st_mode) &&

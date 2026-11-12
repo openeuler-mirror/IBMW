@@ -135,6 +135,24 @@ void GrpcRpcDriver::Initialize(YAML::Node options_node) {
     options_ = options_node.as<Options>();
 
   options_node = options_;
+  if (http2_svr_ptr_) {
+    http2_svr_ptr_->RegisterHttpHandleFunc(ibmw::discovery::service_protocol::kGrpcPath,
+        [catalog = discovery_catalog_](const http2::RequestPtr& req, http2::ResponsePtr& rsp)
+            -> boost::asio::awaitable<void> {
+          try {
+            if (req->GetMethod() != "POST" ||
+                ibmw::discovery::service_protocol::GrpcPayload(req->GetBody().GetStringView()) != "{}") {
+              rsp->AddTrailer("grpc-status", "3");
+            } else {
+              rsp->Write(ibmw::discovery::service_protocol::GrpcFrame(catalog->Encode()));
+              rsp->AddTrailer("grpc-status", "0");
+            }
+          } catch (const std::exception&) {
+            rsp->AddTrailer("grpc-status", "13");
+          }
+          co_return;
+        });
+  }
 }
 
 void GrpcRpcDriver::Start() {
@@ -164,8 +182,9 @@ bool GrpcRpcDriver::RegisterServiceFunc(
     const auto& func_name = service_func_wrapper.info.func_name;
 
     MW_DEBUG("Register service func: {}", func_name);
-    if (!func_name.starts_with("cdr:") && !func_name.starts_with("dds:") && !func_name.starts_with("ros2:")) {
-      MW_ERROR("Service func name should start with 'cdr:', 'dds:' or 'ros2:'.");
+    if (!func_name.starts_with("cdr:") && !func_name.starts_with("dds:") &&
+        !func_name.starts_with("ros2:") && !func_name.starts_with("json:")) {
+      MW_ERROR("Service func name should start with 'cdr:', 'dds:', 'ros2:' or 'json:'.");
       return false;
     }
 
@@ -308,6 +327,10 @@ bool GrpcRpcDriver::RegisterServiceFunc(
 
     http2_svr_ptr_->RegisterHttpHandleFunc(pattern, std::move(http_handle));
     MW_INFO("Register http2 handle for service, uri: {}", pattern);
+
+    const auto& discovery_info = service_func_wrapper.info;
+    discovery_catalog_->Add(discovery_info.func_name, discovery_info.req_type_support_ref.TypeName(),
+                            discovery_info.rsp_type_support_ref.TypeName());
 
     return true;
   } catch (std::exception& e) {

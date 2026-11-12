@@ -7,6 +7,7 @@
 #include "zenoh.h"
 #include "zenoh_ext/global.h"
 #include "discovery/zenoh_discovery_responder.h"
+#include "discovery/zenoh_service_discovery_responder.h"
 
 namespace ibmw::extensions::zenoh_extension {
 class ZenohBus {
@@ -38,6 +39,14 @@ class ZenohBus {
                               std::string topic, std::string type, std::string key);
   void StartDiscovery(const std::string& limit_domain);
   void StopDiscovery() noexcept;
+  void RecordService(std::string_view name, std::string_view request, std::string_view response) {
+    service_discovery_.Catalog().Add(name, request, response);
+  }
+  void StartServiceDiscovery(std::string_view domain) {
+    if (domain.starts_with('/')) domain.remove_prefix(1);
+    service_discovery_.Start(z_loan(z_session_), domain);
+  }
+  void StopServiceDiscovery() noexcept { service_discovery_.Stop(); }
 
   void RegisterRpcNode(const std::string& keyexpr, MsgHandleFunc handle, const std::string& role, bool shm_enabled);
 
@@ -79,6 +88,7 @@ class ZenohBus {
   z_owned_session_t z_session_;
   z_owned_config_t z_config_;
   ibmw::discovery::ZenohDiscoveryResponder discovery_;
+  ibmw::discovery::ZenohServiceDiscoveryResponder service_discovery_;
   bool initialized_ = false;
 
   // shm related

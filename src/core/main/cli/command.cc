@@ -150,11 +150,11 @@ const Command::OptionSpec* Command::FindOption(std::string_view token) const {
 bool Command::ContainsHelpRequest(
     const std::vector<std::string>& raw_args,
     size_t argument_index) const {
-  return std::any_of(
-      raw_args.begin() + static_cast<std::ptrdiff_t>(argument_index),
-      raw_args.end(), [](const std::string& token) {
-        return token == "--help" || token == "-h";
-      });
+  for (size_t index = argument_index; index < raw_args.size(); ++index) {
+    if (raw_args[index] == "--") break;
+    if (raw_args[index] == "--help" || raw_args[index] == "-h") return true;
+  }
+  return false;
 }
 
 int Command::Dispatch(

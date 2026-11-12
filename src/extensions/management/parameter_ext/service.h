@@ -7,7 +7,7 @@
 
 #include "engine/module/parameter_store.h"
 #include "cpp/service/rpc_handle.h"
-#include "cpp/util/json_type_support.h"
+#include "parameter_ext/parameter_type_support.h"
 #include "parameter_ext/parameter_types.h"
 
 namespace ibmw::extensions::parameter_extension {
@@ -17,110 +17,25 @@ namespace ibmw::extensions::parameter_extension {
  *
  * Replaces the protobuf-generated ParameterServiceCoService.
  * Inherits from ibmw::rpc::ServiceBase directly and registers
- * five JSON-typed RPC handlers in the constructor:
+ * JSON-compatible RPC handlers in the constructor:
  *   - Set
  *   - Get
  *   - List
  *   - Dump
  *   - Load
+ *   - ListModules
  */
 class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
  public:
   ParameterServiceImpl()
-      : ibmw::rpc::ServiceBase(
-            "json",
-            "ibmw.protocols.parameter_extension.ParameterService") {
+      : ibmw::rpc::ServiceBase("json", ibmw::protocols::parameter_extension::kServiceName) {
     using namespace ibmw::protocols::parameter_extension;
-
-    // Register Set handler
-    RegisterServiceFunc(
-        "Set",
-        nullptr,
-        ibmw::json::GetJsonMessageTypeSupport<SetParameterReq>(),
-        ibmw::json::GetJsonMessageTypeSupport<SetParameterRsp>(),
-        ibmw::rpc::ServiceFunc(
-            [this](const ibmw_service_context_base_t* ctx_ptr,
-                   const void* req,
-                   void* rsp,
-                   ibmw_function_base_t* callback) {
-              HandleSet(
-                  *static_cast<const SetParameterReq*>(req),
-                  *static_cast<SetParameterRsp*>(rsp));
-              auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
-              ops->invoker(callback->object_buf, 0);
-            }));
-
-    // Register Get handler
-    RegisterServiceFunc(
-        "Get",
-        nullptr,
-        ibmw::json::GetJsonMessageTypeSupport<GetParameterReq>(),
-        ibmw::json::GetJsonMessageTypeSupport<GetParameterRsp>(),
-        ibmw::rpc::ServiceFunc(
-            [this](const ibmw_service_context_base_t* ctx_ptr,
-                   const void* req,
-                   void* rsp,
-                   ibmw_function_base_t* callback) {
-              HandleGet(
-                  *static_cast<const GetParameterReq*>(req),
-                  *static_cast<GetParameterRsp*>(rsp));
-              auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
-              ops->invoker(callback->object_buf, 0);
-            }));
-
-    // Register List handler
-    RegisterServiceFunc(
-        "List",
-        nullptr,
-        ibmw::json::GetJsonMessageTypeSupport<ListParameterReq>(),
-        ibmw::json::GetJsonMessageTypeSupport<ListParameterRsp>(),
-        ibmw::rpc::ServiceFunc(
-            [this](const ibmw_service_context_base_t* ctx_ptr,
-                   const void* req,
-                   void* rsp,
-                   ibmw_function_base_t* callback) {
-              HandleList(
-                  *static_cast<const ListParameterReq*>(req),
-                  *static_cast<ListParameterRsp*>(rsp));
-              auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
-              ops->invoker(callback->object_buf, 0);
-            }));
-
-    // Register Dump handler
-    RegisterServiceFunc(
-        "Dump",
-        nullptr,
-        ibmw::json::GetJsonMessageTypeSupport<DumpParameterReq>(),
-        ibmw::json::GetJsonMessageTypeSupport<DumpParameterRsp>(),
-        ibmw::rpc::ServiceFunc(
-            [this](const ibmw_service_context_base_t* ctx_ptr,
-                   const void* req,
-                   void* rsp,
-                   ibmw_function_base_t* callback) {
-              HandleDump(
-                  *static_cast<const DumpParameterReq*>(req),
-                  *static_cast<DumpParameterRsp*>(rsp));
-              auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
-              ops->invoker(callback->object_buf, 0);
-            }));
-
-    // Register Load handler
-    RegisterServiceFunc(
-        "Load",
-        nullptr,
-        ibmw::json::GetJsonMessageTypeSupport<LoadParameterReq>(),
-        ibmw::json::GetJsonMessageTypeSupport<LoadParameterRsp>(),
-        ibmw::rpc::ServiceFunc(
-            [this](const ibmw_service_context_base_t* ctx_ptr,
-                   const void* req,
-                   void* rsp,
-                   ibmw_function_base_t* callback) {
-              HandleLoad(
-                  *static_cast<const LoadParameterReq*>(req),
-                  *static_cast<LoadParameterRsp*>(rsp));
-              auto ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
-              ops->invoker(callback->object_buf, 0);
-            }));
+    RegisterMethod<SetParameterReq, SetParameterRsp>("Set", &ParameterServiceImpl::HandleSet);
+    RegisterMethod<GetParameterReq, GetParameterRsp>("Get", &ParameterServiceImpl::HandleGet);
+    RegisterMethod<ListParameterReq, ListParameterRsp>("List", &ParameterServiceImpl::HandleList);
+    RegisterMethod<DumpParameterReq, DumpParameterRsp>("Dump", &ParameterServiceImpl::HandleDump);
+    RegisterMethod<LoadParameterReq, LoadParameterRsp>("Load", &ParameterServiceImpl::HandleLoad);
+    RegisterMethod<ListModulesReq, ListModulesRsp>("ListModules", &ParameterServiceImpl::HandleListModules);
   }
 
   ~ParameterServiceImpl() override = default;
@@ -130,6 +45,26 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
   }
 
  private:
+  template <typename Req, typename Rsp>
+  void RegisterMethod(std::string_view name, void (ParameterServiceImpl::*handler)(const Req&, Rsp&)) {
+    RegisterServiceFunc(name, nullptr, GetParameterTypeSupport<Req>(), GetParameterTypeSupport<Rsp>(),
+        ibmw::rpc::ServiceFunc([this, handler](const ibmw_service_context_base_t*, const void* req,
+                                             void* rsp, ibmw_function_base_t* callback) {
+          uint32_t status = 0;
+          try {
+            (this->*handler)(*static_cast<const Req*>(req), *static_cast<Rsp*>(rsp));
+          } catch (...) {
+            status = IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
+          }
+          const auto* ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
+          ops->invoker(callback->object_buf, status);
+        }));
+  }
+
+  void HandleListModules(
+      const ibmw::protocols::parameter_extension::ListModulesReq& req,
+      ibmw::protocols::parameter_extension::ListModulesRsp& rsp);
+
   void HandleSet(
       const ibmw::protocols::parameter_extension::SetParameterReq& req,
       ibmw::protocols::parameter_extension::SetParameterRsp& rsp);
@@ -153,11 +88,15 @@ class ParameterServiceImpl : public ibmw::rpc::ServiceBase {
   enum class ErrorCode : uint32_t {
     kSuc = 0,
     kInvalidModuleName = 1,
+    kParameterNotFound = 2,
+    kInvalidParameterName = 3,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
       "",
-      "INVALID_MODULE_NAME"};
+      "INVALID_MODULE_NAME",
+      "PARAMETER_NOT_FOUND",
+      "INVALID_PARAMETER_NAME"};
 
   template <typename T>
   void SetErrorCode(ErrorCode code, T& rsp) {

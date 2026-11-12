@@ -3,6 +3,7 @@
 
 #include "dds_ext/dds_transport_driver.h"
 #include "dds_ext/detail/dds_qos_descriptor.h"
+#include "dds_ext/detail/qos_observation.h"
 #include "dds_ext/global.h"
 #include "dds_ext/ros2_type_helper.h"
 #ifdef IBMW_ENABLE_COMM_TRACE
@@ -932,35 +933,6 @@ eprosima::fastdds::dds::DataReaderQos DdsTransportDriver::GetReaderQos(
   return qos;
 }
 
-namespace {
-
-template <typename Qos>
-runtime::core::transport::QosDescriptor DescribeDdsQos(const Qos& qos) {
-  runtime::core::transport::QosDescriptor descriptor;
-  descriptor.policies.emplace(
-      "history",
-      qos.history().kind == eprosima::fastdds::dds::KEEP_ALL_HISTORY_QOS
-          ? "keep_all"
-          : "keep_last");
-  descriptor.policies.emplace(
-      "depth", std::to_string(qos.history().depth));
-  descriptor.policies.emplace(
-      "reliability",
-      qos.reliability().kind ==
-              eprosima::fastdds::dds::BEST_EFFORT_RELIABILITY_QOS
-          ? "best_effort"
-          : "reliable");
-  descriptor.policies.emplace(
-      "durability",
-      qos.durability().kind ==
-              eprosima::fastdds::dds::TRANSIENT_LOCAL_DURABILITY_QOS
-          ? "transient_local"
-          : "volatile");
-  return descriptor;
-}
-
-}  // namespace
-
 runtime::core::transport::QosDescriptor
 DdsTransportDriver::PublisherQos(
     std::string_view topic,
@@ -968,8 +940,20 @@ DdsTransportDriver::PublisherQos(
   try {
     const std::string topic_name(topic);
     const std::string type_name(msg_type);
-    return DescribeDdsQos(GetWriterQos(
-        topic_name, GetDdsTopicName(topic_name, type_name)));
+    const auto it = publisher_map_.find(GetDdsTopicName(topic_name, type_name));
+    if (it != publisher_map_.end() && it->second.writer && it->second.topic) {
+      return detail::observation::Actual(*it->second.writer, *publisher_, *it->second.topic);
+    }
+    std::lock_guard lock(serialized_publisher_mutex_);
+    runtime::core::transport::QosDescriptor result;
+    for (const auto& [handle, entry] : serialized_publisher_map_) {
+      if (entry.descriptor.topic != topic || entry.descriptor.msg_type != msg_type || !entry.writer || !entry.topic) continue;
+      auto actual = detail::observation::Actual(*entry.writer, *publisher_, *entry.topic);
+      // This callback addresses a logical topic/type, not a specific native endpoint.
+      if (!result.Empty() && result.policies != actual.policies) return {};
+      result = std::move(actual);
+    }
+    return result;
   } catch (const std::exception& error) {
     MW_ERROR("Cannot describe DDS Publisher QoS: {}", error.what());
     return {};
@@ -983,8 +967,19 @@ DdsTransportDriver::SubscriberQos(
   try {
     const std::string topic_name(topic);
     const std::string type_name(msg_type);
-    return DescribeDdsQos(GetReaderQos(
-        topic_name, GetDdsTopicName(topic_name, type_name)));
+    const auto it = subscriber_map_.find(GetDdsTopicName(topic_name, type_name));
+    if (it != subscriber_map_.end() && it->second.reader && it->second.topic) {
+      return detail::observation::Actual(*it->second.reader, *subscriber_, *it->second.topic);
+    }
+    std::lock_guard lock(serialized_subscriber_mutex_);
+    runtime::core::transport::QosDescriptor result;
+    for (const auto& [handle, entry] : serialized_subscriber_map_) {
+      if (entry.descriptor.topic != topic || entry.descriptor.msg_type != msg_type || !entry.reader || !entry.topic) continue;
+      auto actual = detail::observation::Actual(*entry.reader, *subscriber_, *entry.topic);
+      if (!result.Empty() && result.policies != actual.policies) return {};
+      result = std::move(actual);
+    }
+    return result;
   } catch (const std::exception& error) {
     MW_ERROR("Cannot describe DDS Subscriber QoS: {}", error.what());
     return {};
@@ -1394,6 +1389,7 @@ DdsTransportDriver::AttachSerializedSubscriber(
       serialized_subscriber_map_.emplace(
           handle,
           SerializedSubscriberInfo{
+              .descriptor = descriptor,
               .topic = topic,
               .reader = reader,
               .native_type_support = std::move(type),

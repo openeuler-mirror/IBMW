@@ -75,6 +75,22 @@ void HttpRpcDriver::Initialize(YAML::Node options_node) {
     options_ = options_node.as<Options>();
 
   options_node = options_;
+  if (http_svr_ptr_) {
+    namespace http = boost::beast::http;
+    using Server = ibmw::common::net::AsioHttpServer;
+    http_svr_ptr_->RegisterHttpHandleFunc<http::string_body>(
+        ibmw::discovery::service_protocol::kHttpPath,
+        [catalog = discovery_catalog_](const http::request<http::dynamic_body>& req,
+            http::response<http::string_body>& rsp, std::chrono::nanoseconds)
+            -> boost::asio::awaitable<Server::HttpHandleStatus> {
+          rsp.result(req.method() == http::verb::get ? http::status::ok : http::status::method_not_allowed);
+          rsp.set(http::field::content_type, "application/json");
+          rsp.set(http::field::cache_control, "no-store");
+          rsp.body() = req.method() == http::verb::get ? catalog->Encode() : "{}";
+          rsp.keep_alive(req.keep_alive()); rsp.prepare_payload();
+          co_return Server::HttpHandleStatus::kOk;
+        });
+  }
 }
 
 void HttpRpcDriver::Start() {
@@ -290,6 +306,9 @@ bool HttpRpcDriver::RegisterServiceFunc(
     http_svr_ptr_->RegisterHttpHandleFunc<http::dynamic_body>(
         pattern, std::move(http_handle));
     MW_INFO("Register http handle for service, uri '{}'", pattern);
+
+    const auto& info = service_func_wrapper.info;
+    discovery_catalog_->Add(info.func_name, info.req_type_support_ref.TypeName(), info.rsp_type_support_ref.TypeName());
 
     return true;
   } catch (const std::exception& e) {

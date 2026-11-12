@@ -4,6 +4,7 @@
 #include "engine/module/module_bus.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include "cpp/module_base.h"
 #include "cpp/util/string.h"
@@ -92,6 +93,12 @@ struct convert<ibmw::runtime::core::module::ModuleBus::Options> {
 }  // namespace YAML
 
 namespace ibmw::runtime::core::module {
+
+using ibmw::extension::ModuleLifecycleFailure;
+using ibmw::extension::ModuleLifecycleKind;
+using ibmw::extension::ModuleLifecyclePhase;
+using ibmw::extension::ModuleLifecycleResult;
+using ibmw::extension::ModuleLifecycleStatus;
 
 void ModuleBus::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
@@ -231,8 +238,10 @@ void ModuleBus::Start() {
 
     const auto* module_ptr = module_wrapper_map_itr->second->module_ptr;
 
-    bool start_ret = module_ptr->run(module_ptr->ctx);
-    MW_REQUIRE(start_ret, "Start module '{}' failed.", module_name);
+    RunLifecyclePhase(module_name, ModuleLifecyclePhase::kStart, [&] {
+      bool start_ret = module_ptr->run(module_ptr->ctx);
+      MW_REQUIRE(start_ret, "Start module '{}' failed.", module_name);
+    });
 
     MW_TRACE("Start module '{}' succeeded.", module_name);
   }
@@ -372,6 +381,48 @@ const std::vector<const util::ModuleDetailInfo*>& ModuleBus::GetModuleDetailInfo
   return module_detail_info_vec_;
 }
 
+std::vector<ModuleLifecycleStatus> ModuleBus::GetModuleLifecycleStatuses() const {
+  std::lock_guard lock(lifecycle_mutex_);
+  std::vector<ModuleLifecycleStatus> result;
+  result.reserve(lifecycle_statuses_.size());
+  for (const auto& [name, status] : lifecycle_statuses_) {
+    result.push_back(status);
+  }
+  return result;
+}
+
+void ModuleBus::UpdateLifecycleResult(const std::string& module_name,
+                                     ModuleLifecyclePhase phase,
+                                     ModuleLifecycleResult result,
+                                     std::string reason) {
+  std::lock_guard lock(lifecycle_mutex_);
+  auto& status = lifecycle_statuses_.at(module_name);
+  (phase == ModuleLifecyclePhase::kInitialize ? status.initialize : status.start) = result;
+  if (result == ModuleLifecycleResult::kFailed) {
+    status.failure = ModuleLifecycleFailure{.phase = phase, .reason = std::move(reason)};
+  }
+  status.updated_at_unix_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+void ModuleBus::RunLifecyclePhase(const std::string& module_name,
+                                  ModuleLifecyclePhase phase,
+                                  const std::function<void()>& operation) {
+  UpdateLifecycleResult(module_name, phase, ModuleLifecycleResult::kInProgress);
+  try {
+    operation();
+  } catch (const std::exception& error) {
+    UpdateLifecycleResult(module_name, phase, ModuleLifecycleResult::kFailed, error.what());
+    throw;
+  } catch (...) {
+    UpdateLifecycleResult(module_name, phase, ModuleLifecycleResult::kFailed,
+                          "Non-standard exception in module lifecycle callback.");
+    throw;
+  }
+  UpdateLifecycleResult(module_name, phase, ModuleLifecycleResult::kSucceeded);
+}
+
 std::optional<ModuleBus::Options::ModuleOptions> ModuleBus::GetModuleOptions(std::string_view module_name) {
   auto find_module_options_itr = std::find_if(
       options_.modules_options.begin(), options_.modules_options.end(),
@@ -389,29 +440,41 @@ void ModuleBus::InitModule(ModuleWrapper* module_wrapper_ptr) {
   const auto& module_name = module_wrapper_ptr->info.module_name;
   const auto* module_ptr = module_wrapper_ptr->module_ptr;
 
-  auto module_options = GetModuleOptions(module_name);
-  auto& detail_info = module_wrapper_ptr->info;
-  if (module_options) {
-    detail_info.log_lvl = module_options->log_lvl;
-    detail_info.use_default_log_lvl = module_options->use_default_log_lvl;
-    detail_info.cfg_file_path = module_options->cfg_file_path;
-  } else {
-    options_.modules_options.emplace_back(Options::ModuleOptions{
-        .name = module_name,
-        .log_lvl = detail_info.log_lvl,
-        .use_default_log_lvl = detail_info.use_default_log_lvl,
-        .cfg_file_path = detail_info.cfg_file_path});
+  {
+    std::lock_guard lock(lifecycle_mutex_);
+    lifecycle_statuses_.insert_or_assign(module_name, ModuleLifecycleStatus{
+        .module_name = module_name,
+        .package_path = module_wrapper_ptr->info.pkg_path,
+        .kind = module_ptr ? ModuleLifecycleKind::kManaged : ModuleLifecycleKind::kAppContext,
+        .start = module_ptr ? ModuleLifecycleResult::kNotAttempted
+                            : ModuleLifecycleResult::kNotApplicable});
   }
 
-  module_access_configurator_(detail_info, *(module_wrapper_ptr->core_access_ptr));
+  RunLifecyclePhase(module_name, ModuleLifecyclePhase::kInitialize, [&] {
+    auto module_options = GetModuleOptions(module_name);
+    auto& detail_info = module_wrapper_ptr->info;
+    if (module_options) {
+      detail_info.log_lvl = module_options->log_lvl;
+      detail_info.use_default_log_lvl = module_options->use_default_log_lvl;
+      detail_info.cfg_file_path = module_options->cfg_file_path;
+    } else {
+      options_.modules_options.emplace_back(Options::ModuleOptions{
+          .name = module_name,
+          .log_lvl = detail_info.log_lvl,
+          .use_default_log_lvl = detail_info.use_default_log_lvl,
+          .cfg_file_path = detail_info.cfg_file_path});
+    }
 
-  // Initialize the module
-  if (module_ptr != nullptr) {
-    bool ret = module_ptr->setup(
-        module_ptr->ctx, module_wrapper_ptr->core_access_ptr->NativeHandle());
+    module_access_configurator_(detail_info, *(module_wrapper_ptr->core_access_ptr));
 
-    MW_REQUIRE(ret, "Init module '{}' failed.", module_name);
-  }
+    // Initialize the module
+    if (module_ptr != nullptr) {
+      bool ret = module_ptr->setup(
+          module_ptr->ctx, module_wrapper_ptr->core_access_ptr->NativeHandle());
+
+      MW_REQUIRE(ret, "Init module '{}' failed.", module_name);
+    }
+  });
 
   MW_TRACE("Init module '{}' succeeded.", module_name);
 }

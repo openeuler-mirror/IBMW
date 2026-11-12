@@ -11,6 +11,7 @@
 
 #include "boost/asio/io_context.hpp"
 #include "engine/service/service_driver.h"
+#include "engine/discovery/service_discovery_protocol.h"
 #include "grpc_ext/client/client_pool.h"
 #include "grpc_ext/server/server.h"
 
@@ -68,6 +69,8 @@ class GrpcRpcDriver : public runtime::core::service::ServiceDriver {
   };
 
   Options options_;
+  std::shared_ptr<ibmw::discovery::service_protocol::Catalog> discovery_catalog_ =
+      std::make_shared<ibmw::discovery::service_protocol::Catalog>();
   std::atomic<State> state_ = State::kPreInit;
 
   const runtime::core::service::ServiceCatalog* service_catalog_ptr_ = nullptr;

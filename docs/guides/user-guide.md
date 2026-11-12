@@ -138,6 +138,319 @@ For a hands-on walkthrough with 8 working demos plus an extension-loading exampl
 [ibmw-template/](../../ibmw-template/) and the
 [ibmw-gen reference](../../src/tools/ibmw_gen/README.md).
 
+### Querying Services
+
+`ibmw service list`, `type`, and `find` support registry, DDS, ROS 2, Zenoh,
+MQTT, HTTP, and gRPC discovery. Registry is the default and reads live local
+IBMW runtimes owned by the same user. Network sources use independent discovery
+observers without starting an Engine. These commands inspect metadata and do
+not invoke business RPCs.
+
+```bash
+ibmw service list
+ibmw service list --registry -t
+ibmw service list --count-services
+ibmw service type 'json:/my_project.ComputeService/Compute'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse'
+ibmw service find 'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' -c
+ibmw service list --include-hidden-services
+# Set IBMW_REGISTRY_PATH to the runtime's private registry root (owned by you, mode 0700).
+ibmw service list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+For registry, HTTP, gRPC, MQTT and Zenoh, service names are the **full registered
+RPC method names**, including the type prefix. `type` prints the exact
+`request_type -> response_type` pair. ROS 2 reports native service names and
+`pkg/srv/Type` types. DDS reports wire service names and wire request/response
+type pairs, recognizing ROS 2 `rq/...Request`/`rr/...Reply` and IBMW
+`ibmw_rpc/rq/...`/`ibmw_rpc/rr/...` conventions; it does not reconstruct logical
+IBMW names or claim to discover arbitrary vendor RPC protocols. A DDS server
+requires a request reader and a reply writer in the same participant.
+
+`find` matches the exact string returned by `type`. Quote type pairs so the shell
+does not interpret `>` as redirection. Names and types are sorted and deduplicated;
+if one name has several types, `type` prints each on its own line and `list -t`
+shows all of them.
+`list -c` and `find -c` count unique matching service names, not endpoints.
+
+Example `list -t` output:
+
+```text
+json:/my_project.ComputeService/Compute [json:my_project.ComputeRequest -> json:my_project.ComputeResponse]
+```
+
+Only **server registrations** appear in these commands. A registered client alone
+does not add a listed service. A name is hidden when any slash-separated name
+component begins with `_`; `--include-hidden-services` is accepted both before
+the subcommand and after it. Registration is metadata, not a check of service
+readiness or successful communication.
+
+For registry discovery, the runtime captures ServiceCatalog metadata during
+initialization and refreshes it before the Service subsystem starts, including registrations added between
+`Engine::Initialize()` and `Start()` in app mode. Server and client roles, full
+method names, request/response types, module/package identities, and enabled RPC
+drivers are stored in the registration. All RPC drivers can be represented by
+this local source, not just `local`. Runtimes must enable
+`ibmw.runtime_graph.enabled` (the default) to publish registrations.
+
+`--registry-path` selects the registry root, matching
+`ibmw.runtime_graph.registry_path`; the command adds the `v2/` namespace.
+The default root is `$XDG_RUNTIME_DIR/ibmw`, or `/tmp/ibmw-<euid>` when unset.
+An empty successful query exits 0; `type` for an unknown or hidden service exits 1.
+Discovery errors exit 1. Older runtimes without service metadata produce an
+upgrade/restart diagnostic and exit 1 while preserving available results from
+newer runtimes. Rebuild/redeploy applications with the updated runtime and restart
+them to publish service metadata. Existing Topic and Module registrations remain
+readable. Exited runtimes are handled by the existing registry liveness checks.
+
+#### Network sources
+
+```bash
+ibmw service list --dds --dds-domain 10 -t
+ibmw service list --ros2 --ros-domain 10 -t
+ibmw service type /add_two_ints --ros2
+ibmw service find example_interfaces/srv/AddTwoInts --ros2
+ibmw service list --zenoh --zenoh-domain robot --zenoh-config ./zenoh.json5
+ibmw service list --mqtt tcp://192.168.1.10:1883 -t
+ibmw service list --http 192.168.1.10:50080 -t
+ibmw service list --grpc 192.168.1.10:50051 -t
+ibmw service list --registry --dds --ros2 --domain 10 --timeout 3
+```
+
+Source flags apply to all three subcommands and may be combined. Short aliases
+are `-d` (DDS), `-r` (ROS 2), and `-z` (Zenoh). `--domain` applies to selected
+DDS/ROS 2 sources; source-specific domains override it. DDS defaults to domain 0;
+ROS 2 otherwise uses `ROS_DOMAIN_ID`, then 0. Zenoh uses its native configuration
+and `limit_domain` (empty by default). Network plugins are built with their
+corresponding extension build options. Missing plugins report an error.
+
+HTTP and gRPC require an explicit **server** address; the CLI actively connects
+to that existing listener. HTTP uses the read-only
+`GET /ibmw/discovery/services/v1` endpoint. gRPC uses the IBMW-specific
+`/ibmw.discovery.v1.ServiceDirectory/List` unary method with framed JSON, not
+gRPC reflection. These sources currently use plaintext HTTP/HTTP2. MQTT requires
+an explicit broker URI (`tcp://host:port`, or `ssl://host:port` with a trusted
+server certificate); CLI credentials and custom client certificates are not
+currently exposed. Each MQTT query subscribes to its own temporary reply topic
+before publishing a directory request. Responses are not retained. Zenoh queries
+runtime-owned directory queryables. No discovery server needs the CLI's IP in
+advance, and later CLI processes can query independently.
+
+HTTP, gRPC, MQTT and Zenoh directory responders require the updated IBMW runtime
+and a configured RPC driver. They expose successfully registered server names and
+types only, including app-mode registrations before Start. They do not export
+registry paths or module library paths. DDS and ROS 2 use native discovery and
+also work with matching native service servers. MQTT broker ACLs must allow the
+`ibmw/discovery/services/v1/request` and `ibmw/discovery/services/v1/reply/+`
+topics. Directory access follows the existing listener/broker/session access
+controls.
+
+MQTT `list/type/find` accepts `--mqtt ssl://host:port`. Supply
+`--mqtt-truststore <path>` for a private CA, or use the system trust store.
+Mutual TLS requires both `--mqtt-client-cert <path>` and
+`--mqtt-client-key <path>`. These credentials require a TLS MQTT source;
+authentication or connection failure returns exit code 1, not a successful
+empty directory.
+
+`--timeout` selects a shared collection window (default 2 seconds, range
+0.01–60). Selected sources are queried concurrently. Native session setup and
+transport cleanup may add overhead. An empty successful collection is not proof
+that all peers are reachable; allow a longer window on slow discovery networks.
+An unavailable/error source produces a diagnostic and exit code 1 while retaining
+results from working sources. An older HTTP/gRPC server without the directory
+method reports an error; an older MQTT/Zenoh runtime simply does not reply to
+metadata queries.
+
+### Calling Services
+
+`ibmw service call <service> <type> '<request>' [options]` creates a temporary RPC
+client, sends one request, prints a JSON response, and exits. The request is one
+JSON/YAML object. Type loading, text conversion, and lifecycle handling live in
+the service command independently of the topic commands.
+
+```bash
+ibmw service call 'json:/my_project.ComputeService/Compute' \
+  'json:my_project.ComputeRequest -> json:my_project.ComputeResponse' \
+  '{value: 21}' --http 127.0.0.1:50080 \
+  --type-support ./libmy_project_typesupport.so --timeout 5
+
+ibmw service call 'dds:/my_project.EchoService/Echo' \
+  'dds:my_project::Request -> dds:my_project::Response' \
+  '{value: 21}' --dds --domain 10 --type-support ./libmy_project_typesupport.so
+
+ibmw service call /add_two_ints example_interfaces/srv/AddTwoInts \
+  '{a: 19, b: 23}' --ros2 --ros-domain 10
+```
+
+Select exactly one backend: `--dds`, `--ros2`, `--zenoh`, `--mqtt <broker-uri>`,
+`--http <host:port>`, or `--grpc <host:port>`. HTTP and gRPC also accept
+`http://host:port`; HTTPS is not provided. gRPC method names follow the existing
+driver's `cdr:`, `dds:`, `ros2:`, or `json:` prefix convention. Override the selected
+extension with `--transport-library <path>`. Explicit calls allow hidden names;
+`--include-hidden-services` is also accepted.
+
+Except for native ROS 2, quote the `request_type -> response_type` pair and
+provide one or more `--type-support <library>` packages. Both types must support
+JSON text conversion; the request is validated before transports are started.
+DDS additionally requires native DDS TypeSupport and CDR. Use canonical IBMW
+type names from the package, not unverified discovery wire names. DDS defaults
+to IBMW RPC topic naming. Add `--ros2-compatible` for ROS 2 wire naming, use the
+actual wire service name, and provide DDS types matching the peer's type names
+and layouts. This DDS path does not require rcl and does not generate TypeSupport
+from a `.srv` name. Native `--ros2` instead accepts `pkg/srv/Type`, requires
+`IBMW_BUILD_ROS2_EXTENSION=ON`, `libibmw_service_call_ros2.so`, and the installed
+C++ service typesupport and introspection libraries from a sourced ROS environment.
+It does not use `--type-support`.
+
+Use the corresponding `--domain`, `--dds-domain`, `--ros-domain`,
+`--zenoh-domain`, and `--zenoh-config` options for connection settings. MQTT
+supports `--mqtt-client-id`, `--mqtt-server-id`, and `--mqtt-qos`. TLS brokers
+(`ssl://` or `mqtts://`) require `--mqtt-truststore` and optionally a matching
+`--mqtt-client-cert`/`--mqtt-client-key` pair. HTTP/gRPC/MQTT/Zenoh accept
+`--serialization` for a format supported by both types; otherwise the request's
+default format is preferred.
+
+`--discovery-timeout` bounds client readiness waiting (default 2 seconds), while
+`--timeout` bounds response waiting after sending (default 5 seconds). Initialization
+and cleanup add overhead. DDS checks request/reply endpoint matches, native ROS 2
+checks client service readiness, MQTT waits for connection and subscription
+acknowledgments, and Zenoh waits for a matching request subscriber. Readiness does
+not guarantee business-call success. Requests are
+never automatically retried; a response timeout or Ctrl+C does not prove that the
+server did not execute the request.
+
+Success exits 0 and writes only the JSON response to stdout; errors exit 1 with
+diagnostics on stderr. Error status follows the selected driver's mapping; the
+HTTP driver does not preserve the original server status for non-200 responses.
+SIGINT/SIGTERM exit 130/143. Registry is a discovery source
+and `local` is an in-process driver: call does not forward another process's
+local-only service through its registry control socket. Select an enabled network
+driver and supply its endpoint/domain explicitly; the command does not automatically
+choose among same-named service instances.
+
+### Runtime Parameters
+
+Use `ibmw param list [module]`, `ibmw param get <module> <parameter_name>`,
+and `ibmw param set <module> <parameter_name> <value>` to access IBMW string
+parameters through the centralized parameter service. Connection options reuse
+`service call`; `set` changes runtime memory only. See the
+[parameter CLI guide (中文)](parameters.zh.md) for deployment and examples.
+
+### Runtime Log Levels
+
+Use `ibmw log list [module]` to list registered loggers and their current levels,
+and `ibmw log set <module> <level>` to change an existing logger (`core` selects
+the framework logger). Connection options reuse `service call`; no Runtime Agent
+or startup-file changes are involved. See the [log CLI guide (中文)](log-control.zh.md).
+
+### Listing Local Modules
+
+`ibmw module list` uses RuntimeRegistry to list modules registered by live local runtimes
+owned by the same user. Each line is `runtime_id/module_name [pid: <PID>]`, showing
+the owning process ID by default, sorted by runtime ID and module name.
+Identically named modules in different runtimes remain separate.
+
+```bash
+ibmw module list
+ibmw module list --runtime robot-main
+ibmw module list --count-modules
+# Set IBMW_REGISTRY_PATH to the runtime's private registry root (owned by you, mode 0700).
+ibmw module list --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+`--count-modules` (`-c`) only prints the number of module instances.
+`--registry-path` selects the registry root, matching
+`ibmw.runtime_graph.registry_path`; the command adds the `v2/` namespace.
+The default root is `$XDG_RUNTIME_DIR/ibmw`, or `/tmp/ibmw-<euid>` when unset.
+
+The list comes from ModuleBus and includes package-loaded modules, directly
+registered modules, and app-mode runtime contexts created with `CreateModule()`.
+Modules without topics are included; an endpoint's `module_name` alone does not
+create a module record. The list is captured during initialization and refreshed
+before modules start. Registration does not establish business health.
+Runtimes must enable `ibmw.runtime_graph.enabled` (the default) to be discoverable.
+
+An empty list succeeds with exit code 0; a requested runtime that is not found
+returns 1. Older registrations without module information produce a diagnostic
+requesting an upgrade and restart, retain available results, and return 1. In this
+case, count mode only counts runtimes that provide module information.
+The existing RuntimeRegistry mechanism handles stale registrations after process exit.
+
+### Module Lifecycle Records (Foundation API)
+
+`ModuleBus::GetModuleLifecycleStatuses()` returns a thread-safe value snapshot,
+sorted by module name, of initialization and start attempts. Runtime Agent exposes
+the read-only `ListModuleLifecycle` request, available through
+`RuntimeGraphAgentClient::ListModuleLifecycle()`. Queries neither invoke module
+callbacks nor change registration files. `ibmw doctor module` uses this API to
+check recorded initialization/start results; bare `ibmw doctor` includes the same
+checks. `module list/info` retain their existing behavior. See the
+[Doctor guide (中文)](doctor.zh.md#模块生命周期检查) for usage and query scope.
+
+Each record contains `module_name`, `package_path`, `kind`, `initialize`, `start`,
+`failure`, and `updated_at_unix_ms`. Phase results are `not_attempted`,
+`in_progress`, `succeeded`, `failed`, or `not_applicable`. A failure contains
+`phase` and `reason`; the timestamp is the last recorded transition in Unix
+milliseconds, not a heartbeat. `managed` modules cover packages and direct
+registration: initialization includes CoreAccess configuration and `Setup()`,
+while start observes `Run()`. For `app_context` entries created by `CreateModule()`,
+initialization only prepares CoreAccess and start is always `not_applicable`.
+
+False callback results and exceptions reaching ModuleBus are recorded without
+changing failure propagation. Exceptions already converted to `false` by the
+C++ module wrapper appear as callback failures; their details remain in the log.
+Records are created when individual module initialization begins. Disabled modules,
+earlier package loading/creation/metadata failures, and modules not reached after
+an initialization failure are not covered. Records survive module cleanup until
+ModuleBus destruction; retrying a failed app-context initialization replaces that
+name's previous attempt. Success describes the recorded operation, not current
+execution or business health.
+
+Cross-process queries require an enabled, serving Agent. Engine initialization
+or module start can fail before the Agent begins serving; those records are only
+available to the host through the in-process API. This version does not persist
+failures across process exit or detect business faults/hangs. Older Agents and
+Agents without the handler report unsupported queries rather than an empty list.
+
+### Inspecting Module Interfaces
+
+`ibmw module info <module>` shows a registered module's name, runtime ID, PID,
+and published and subscribed topics with their message types. The argument is
+the module name. If several runtimes contain that name, the command lists the
+candidate runtimes and returns 1; select one with `--runtime`.
+`--registry-path` uses the same registry root rules as `module list`.
+
+```bash
+ibmw module info perception
+ibmw module info perception --runtime robot-main
+ibmw module info perception --registry-path "$IBMW_REGISTRY_PATH"
+```
+
+Example output:
+
+```text
+Module: perception
+Runtime: robot-main
+PID: 12345
+
+Publishers:
+  /detections [json:DetectionArray]
+
+Subscribers:
+  /camera/image [json:Image]
+```
+
+Each direction is sorted by topic name and message type. Duplicate endpoints
+with the same topic and type appear once, including topics marked as hidden in
+the registry. An empty direction shows `(none)`; modules without topics can
+still be queried successfully. Results describe the runtime's registered
+interface snapshot, not current traffic, connections, or business health.
+Endpoints absent from the registry are not shown.
+A missing module or selected runtime returns 1. Older runtimes without module
+lists produce an upgrade/restart diagnostic, retain a unique available match's
+output, and return 1. A name found only on topic endpoints is not treated as a
+registered module. A unique match with complete available information returns 0.
+
 ---
 
 ## Build Options

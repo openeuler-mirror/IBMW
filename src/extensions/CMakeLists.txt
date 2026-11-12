@@ -53,9 +53,8 @@ endif()
 
 # ── Observability extensions ─────────────────────────────────────────
 
-if(IBMW_BUILD_LOG_CONTROL_EXTENSION)
-  add_subdirectory(observability/log_control_ext)
-endif()
+# Log protocol types are also needed by the CLI when the server is disabled.
+add_subdirectory(observability/log_control_ext)
 
 if(IBMW_BUILD_TOPIC_LOGGER_EXTENSION)
   add_subdirectory(observability/topic_logger_ext)
@@ -75,9 +74,8 @@ if(IBMW_BUILD_TIME_MANIPULATOR_EXTENSION)
   add_subdirectory(management/time_manipulator_ext)
 endif()
 
-if(IBMW_BUILD_PARAMETER_EXTENSION)
-  add_subdirectory(management/parameter_ext)
-endif()
+# Parameter protocol types are also needed by the CLI when the server is disabled.
+add_subdirectory(management/parameter_ext)
 
 if(IBMW_BUILD_SERVICE_INTROSPECTION_EXTENSION)
   add_subdirectory(management/service_introspection_ext)
@@ -95,6 +93,11 @@ endif()
 
 # CLI providers are built after their runtime dependencies.
 add_subdirectory(cli/topic)
+add_subdirectory(cli/module)
+add_subdirectory(cli/service)
+add_subdirectory(cli/param)
+add_subdirectory(cli/log)
+add_subdirectory(cli/doctor)
 if(IBMW_BUILD_RECORD_PLAYBACK_EXTENSION)
   add_subdirectory(cli/bag)
 endif()

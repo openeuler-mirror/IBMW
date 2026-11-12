@@ -28,13 +28,13 @@ class ParamsRef {
   std::string GetParameter(std::string_view key) const {
     MW_ASSERT(base_ptr_, "Reference is null.");
     auto view_holder = base_ptr_->get_parameter(base_ptr_->ctx, util::ToIbmwStringView(key));
-    if (view_holder.parameter_val.len) {
-      std::string result = util::ToStdString(view_holder.parameter_val);
+    std::string result;
+    if (view_holder.parameter_val.len)
+      result = util::ToStdString(view_holder.parameter_val);
+    // Existing empty values also own a holder; only missing keys have no callback.
+    if (view_holder.release_callback)
       ParameterValReleaseCallback(view_holder.release_callback)();
-      return result;
-    }
-
-    return "";
+    return result;
   }
 
   void SetParameter(std::string_view key, std::string_view val) {

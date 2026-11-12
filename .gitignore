@@ -105,3 +105,6 @@ local.cmake
 !tools/mw_perf_collect/core.py
 !src/tools/ibmw_cli/ibmw_cli/templates/install/
 !src/tools/ibmw_cli/ibmw_cli/templates/install/**
+# The log CLI source directory is not a colcon log output directory.
+!src/extensions/cli/log/
+!src/extensions/cli/log/**
