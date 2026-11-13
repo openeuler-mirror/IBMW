@@ -1,20 +1,10 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
-//
-// ROS2 RPC demo — Client module.
-// NOTE: This is a skeleton. ROS2 RPC requires external service type packages.
-
 #pragma once
 
-#include <atomic>
-#include <memory>
-
-#include "cpp/co/async_scope.h"
-#include "cpp/co/task.h"
 #include "cpp/module_base.h"
-// TODO: #include your ROS2 RPC generated header, e.g.:
-// #include "YourService.ibmw_rpc.srv.h"
+#include "ros2_rpc_client_module_typesupport.inc.h"
 
 namespace my_project {
 
@@ -31,18 +21,8 @@ class Ros2RpcClientModule : public ibmw::Module {
   bool Run() override;
   void Stop() override;
 
- private:
-  auto GetLogger() { return core_.GetLogger(); }
-
-  ibmw::co::Task<void> MainLoop();
-
+  IBMW_TS_RPC_CLIENT_LOOP_DECL
   ibmw::Runtime core_;
-  ibmw::executor::ExecutorHandle executor_;
-
-  ibmw::co::AsyncScope scope_;
-  std::atomic_bool run_flag_{true};
-
-  // TODO: std::shared_ptr<your_package::srv::YourServiceCoAccess> access_;
 };
 
 }  // namespace my_project

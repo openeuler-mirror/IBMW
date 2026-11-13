@@ -58,6 +58,7 @@ ibmw/
     |  |  mqtt_ext/       #     MQTT
     |  |  ros2_ext/       #     ROS2 **(已废弃)**
     |  |  iceoryx_ext/    #     Iceoryx（共享内存）
+    |  |  shm_ext/        #     自研共享内存（selfdev/shm，无需 RouDi）
     |  |  zenoh_ext/      #     Zenoh
     |  rpc/
     |  |  grpc_ext/       #     gRPC
@@ -488,7 +489,7 @@ class MyExtension : public ibmw::ExtensionBase {
 // my_extension.cc，在全局作用域
 #include "my_extension.h"
 
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 ### Extension 日志
@@ -656,7 +657,7 @@ static const ibmw_type_support_base_t* kTypeSupportArray[] = {
 
 const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
   static const ibmw_type_support_package_v1_t kPackage{
-      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
       .struct_size = sizeof(ibmw_type_support_package_v1_t),
       .entry_count = std::size(kTypeSupportArray),
       .entries = kTypeSupportArray,
@@ -754,6 +755,8 @@ ROS2 节点发现和调用（`ros2 service call`、`ros2 service list`）。
 | 异步回调 | `AsyncAccessBase<Req, Rsp>` | 否 | 通过回调 |
 | Future | `FutureAccessBase<Req, Rsp>` | 否 | `std::future<rpc::Status>` |
 | 协程 | `CoAccessBase<Req, Rsp>` | 否 | `co::Task<rpc::Status>` |
+
+异步和 future 模式按地址把 `req`、`rsp` 交给 provider。使用引用版本时，调用方必须保证两者存活到回调执行或 future 就绪。生成的 `AsyncAccess`、`FutureAccess` 还接受 `std::shared_ptr<const Req>` 和 `std::shared_ptr<Rsp>`，这组重载会把两个对象保活到调用完成。`req` 或 `rsp` 为空时以 `IBMW_RPC_STATUS_CLI_UNKNOWN` 完成。
 
 ### RPC Filter
 

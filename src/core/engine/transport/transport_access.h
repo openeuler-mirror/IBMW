@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <exception>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -77,7 +81,36 @@ class SenderAccess {
 
   const ibmw::common::util::LoggerWrapper& GetLogger() const { return logger_; }
 
+  // Exceptions swallowed at the C ABI entries of this sender (COMM-039).
+  uint64_t AbiExceptionCount() const noexcept { return abi_exception_count_.load(std::memory_order_relaxed); }
+
  private:
+  // Called from a catch block: counts the exception and logs it at most once
+  // per second for this sender.
+  void ReportAbiException(const char* entry) noexcept {
+    abi_exception_count_.fetch_add(1, std::memory_order_relaxed);
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch())
+                               .count();
+    int64_t next = next_report_ms_.load(std::memory_order_relaxed);
+    if (now_ms < next || !next_report_ms_.compare_exchange_strong(next, now_ms + 1000, std::memory_order_relaxed)) {
+      return;
+    }
+    try {
+      std::string what = "unknown exception";
+      try {
+        throw;
+      } catch (const std::exception& e) {
+        what = e.what();
+      } catch (...) {
+      }
+      MW_LOG(logger_, ibmw::common::util::kLogLevelError,
+             "Sender of topic '{}' (module '{}', pkg path '{}') threw in '{}': {} ({} so far).", topic_name_,
+             module_name_, pkg_path_, entry, what, abi_exception_count_.load(std::memory_order_relaxed));
+    } catch (...) {
+    }
+  }
+
   bool RegisterSendType(const ibmw_type_support_base_t* msg_type_support) {
     return transport_driver_dispatcher_.RegisterSendType(
         RegisterSendTypeAccessInfoWrapper{
@@ -162,10 +195,13 @@ class SenderAccess {
 
   static ibmw_transport_sender_base_t GenBase(void* ctx) {
     return ibmw_transport_sender_base_t{
+        .struct_size = sizeof(ibmw_transport_sender_base_t),
         .register_send_type = [](void* ctx, const ibmw_type_support_base_t* msg_type_support) -> bool {
+          if (ctx == nullptr) return false;
           try {
             return static_cast<SenderAccess*>(ctx)->RegisterSendType(msg_type_support);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("register_send_type");
             return false;
           }
         },
@@ -173,24 +209,30 @@ class SenderAccess {
                       ibmw_string_view_t msg_type,
                       const ibmw_transport_context_base_t* ctx_ptr,
                       const void* msg_ptr) {
+          if (ctx == nullptr) return;
           try {
             static_cast<SenderAccess*>(ctx)->Send(msg_type, ctx_ptr, msg_ptr);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("send");
           }
         },
         .get_topic = [](void* ctx) -> ibmw_string_view_t {
+          if (ctx == nullptr) return {};
           try {
             return ibmw::util::ToIbmwStringView(static_cast<SenderAccess*>(ctx)->topic_name_);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("get_topic");
             return {};
           }
         },
         .merge_subscribe_context_to_publish_context = [](void* ctx,                                             //
                                                          const ibmw_transport_context_base_t* subscribe_ctx_ptr,  //
                                                          const ibmw_transport_context_base_t* publish_ctx_ptr) {  //
+          if (ctx == nullptr) return;
           try {
             static_cast<SenderAccess*>(ctx)->MergeSubscribeContextToPublishContext(subscribe_ctx_ptr, publish_ctx_ptr);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("merge_subscribe_context_to_publish_context");
           }
         },
         .loan = [](void* ctx,
@@ -200,31 +242,39 @@ class SenderAccess {
                    ibmw_loaned_sample_handle_t* out_handle) {
           if (out_handle == nullptr) return;
           *out_handle = {};
+          if (ctx == nullptr) return;
           try {
             static_cast<SenderAccess*>(ctx)->Loan(msg_type, requested_size, mode, out_handle);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("loan");
           }
         },
         .publish_loaned = [](void* ctx, ibmw_loaned_sample_handle_t* handle) {
+          if (ctx == nullptr) return;
           try {
             static_cast<SenderAccess*>(ctx)->PublishLoaned(handle);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("publish_loaned");
           }
         },
         .release_loaned = [](void* ctx, ibmw_loaned_sample_handle_t* handle) {
+          if (ctx == nullptr) return;
           try {
             static_cast<SenderAccess*>(ctx)->ReleaseLoaned(handle);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("release_loaned");
           }
         },
         .ctx = ctx,
         .register_loaned_pod_topic = [](
             void* ctx, ibmw_string_view_t msg_type,
             size_t initial_size_hint, size_t alignment) -> bool {
+          if (ctx == nullptr) return false;
           try {
             return static_cast<SenderAccess*>(ctx)->RegisterLoanedPodTopic(
                 msg_type, initial_size_hint, alignment);
           } catch (...) {
+            static_cast<SenderAccess*>(ctx)->ReportAbiException("register_loaned_pod_topic");
             return false;
           }
         }};
@@ -240,6 +290,9 @@ class SenderAccess {
   TransportDriverDispatcher& transport_driver_dispatcher_;
 
   const std::unordered_set<std::string>& passed_context_meta_keys_;
+
+  std::atomic<uint64_t> abi_exception_count_{0};
+  std::atomic<int64_t> next_report_ms_{0};
 
   const ibmw_transport_sender_base_t base_;
 };
@@ -357,6 +410,7 @@ class ReceiverAccess {
 
   static ibmw_transport_receiver_base_t GenBase(void* ctx) {
     return ibmw_transport_receiver_base_t{
+        .struct_size = sizeof(ibmw_transport_receiver_base_t),
         .on_message = [](void* ctx,
                         const ibmw_type_support_base_t* msg_type_support,
                         ibmw_function_base_t* callback) -> bool {
@@ -520,6 +574,7 @@ class TransportAccess {
 
   static ibmw_transport_handle_base_t GenBase(void* ctx) {
     return ibmw_transport_handle_base_t{
+        .struct_size = sizeof(ibmw_transport_handle_base_t),
         .get_sender = [](void* ctx, ibmw_string_view_t topic) -> const ibmw_transport_sender_base_t* {
           try {
             return static_cast<TransportAccess*>(ctx)->GetPublisher(topic);

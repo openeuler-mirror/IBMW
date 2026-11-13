@@ -153,8 +153,13 @@ using ExecutorTask = ibmw::util::Function<ibmw_function_executor_task_ops_t>;
 #### 自由函数
 
 ```cpp
-Timer<ExecutorTask> CreateTimer(ExecutorHandle executor);
+template <typename TaskType>
+[[nodiscard]] std::shared_ptr<TimerBase> CreateTimer(ExecutorHandle executor,
+                                                     std::chrono::nanoseconds period,
+                                                     TaskType&& task, bool auto_start = true);
 ```
+
+返回的 `shared_ptr` 持有定时器；最后一个副本释放后定时器即停止。
 
 ---
 
@@ -294,6 +299,8 @@ using ServiceFunc = ibmw::util::Function<...>;       // void(ContextRef, const v
 | `AsyncAccessBase<Req, Rsp>` | `void Invoke(ctx, req, rsp, callback)` | 回调式 |
 | `FutureAccessBase<Req, Rsp>` | `std::future<Status> Invoke(ctx, req, rsp)` | future 式 |
 | `CoAccessBase<Req, Rsp>` | `co::Task<Status> Invoke(ctx, req, rsp)` | 协程式 |
+
+异步和 future 模式按地址把 `req`、`rsp` 交给 provider。使用引用版本时，调用方必须保证两者存活到回调执行或 future 就绪。生成的 `AsyncAccess`、`FutureAccess` 还接受 `std::shared_ptr<const Req>` 和 `std::shared_ptr<Rsp>`，这组重载会把两个对象保活到调用完成。`req` 或 `rsp` 为空时以 `IBMW_RPC_STATUS_CLI_UNKNOWN` 完成。
 
 ---
 
@@ -622,7 +629,7 @@ const ibmw_type_support_base_t* GetJsonMessageTypeSupport();
 
 ```cpp
 // 在 extension .so 的全局作用域中使用
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 `ExtensionBase` 提供框架生命周期方法 `Initialize` 和 `Shutdown`；
@@ -632,7 +639,7 @@ Extension 实现 `OnInit` 和 `OnShutdown`。
 
 | 宏 | 描述 |
 |-------|-------------|
-| `IBMW_EXT_ENTRY_V2(ExtensionClass)` | 定义带版本的 Extension 入口点 |
+| `IBMW_EXT_ENTRY(ExtensionClass)` | 定义带版本的 Extension 入口点 `IbmwExtEntryV3`（`IBMW_EXT_ENTRY_V2` 为别名）。基于旧版 IBMW 编译的 Extension 会被拒绝加载，需要重新编译 |
 | `IBMW_CORE_EXTENSION_EXPORT` | 导出 visibility 属性 |
 | `IBMW_DECLARE_EXTENSION_LOGGER(ns)` | 声明 per-extension logger |
 | `IBMW_DEFINE_EXTENSION_LOGGER(ns)` | 定义 per-extension logger |
@@ -648,7 +655,11 @@ Module package 是包含一个或多个 IBMW module 的共享库。
 ### 入口点
 
 ```cpp
+#define IBMW_PKG_ABI_VERSION_V2 2
+
 typedef struct {
+    uint32_t abi_version;  // IBMW_PKG_ABI_VERSION_V2
+    uint32_t struct_size;  // sizeof(ibmw_pkg_entry_v2_t)
     size_t (*get_module_num)();
     const ibmw_string_view_t* (*get_module_name_list)();
     const ibmw_module_base_t* (*create_module)(ibmw_string_view_t module_name);
@@ -656,10 +667,13 @@ typedef struct {
     void (*set_driver_slot)(ibmw_string_view_t module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 
-IBMW_PKG_EXPORT ibmw_pkg_entry_t IbmwPkgEntry();
+IBMW_PKG_EXPORT ibmw_pkg_entry_v2_t IbmwPkgEntryV2();
 ```
+
+加载器拒绝 `abi_version` 不符或 `struct_size` 小于 `sizeof(ibmw_pkg_entry_v2_t)` 的入口；
+只导出旧的无版本 `IbmwPkgEntry` 的库会被拒绝，并提示重新编译。
 
 ### 便捷宏
 
@@ -670,7 +684,7 @@ static const auto kModuleArray = std::array{
 IBMW_PKG_MAIN(kModuleArray)
 ```
 
-自动生成单一 `IbmwPkgEntry` 符号。
+自动生成单一 `IbmwPkgEntryV2` 符号。
 
 ---
 
@@ -715,7 +729,7 @@ typedef uint64_t ibmw_driver_slot_t;
 ```
 
 每个 `*TransportDriver` 子类（local / tcp / http / udp / dds / mqtt /
-ros2 / iceoryx / zenoh，共 9 个）通过 `IBMW_DECLARE_DRIVER_SLOT(...)` 在
+ros2 / iceoryx / zenoh / shm，共 10 个）通过 `IBMW_DECLARE_DRIVER_SLOT(...)` 在
 header 内声明一个稳定 slot id。该 id 进入 Engine 在 `Start()` 阶段调用的
 广播链路：`engine.cc::Start()` → `module_bus.cc::BroadcastDriverSlot` →
 `package_loader.cc::PackageHandle::SetDriverSlot`。
@@ -728,11 +742,11 @@ typedef struct {
     void (*set_driver_slot)(const char* module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 ```
 
 `IBMW_PKG_MAIN(...)` 宏在 `src/api/pkg/pkg_main.h` 中导出
-入口符号 `IbmwPkgEntry`（typed slot）。该符号在每一个 pkg `.so` 中都通过
+入口符号 `IbmwPkgEntryV2`（typed slot）。该符号在每一个 pkg `.so` 中都通过
 `nm -D` 可见。
 
 ### `src/api/cpp/module_base.h` —— `IBMW_USE_DRIVER` / `IBMW_USE_DRIVERS`
@@ -784,7 +798,7 @@ ModuleBus::BroadcastDriverSlot(slot_id, driver_ptr)
     │  for each PackageHandle:
     ▼
 PackageHandle::SetDriverSlot(module_name, slot_id, driver_ptr)
-    │  -> IbmwPkgEntry.set_driver_slot
+    │  -> IbmwPkgEntryV2.set_driver_slot
     ▼
 Module::SetDriverSlot(slot_id, driver_ptr)        // IBMW_USE_DRIVER(S) 生成的 override
     │  fold over IBMW_DRIVER_ENTRY 列表

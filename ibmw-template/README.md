@@ -208,7 +208,7 @@ This produces the full project under `my_ibmw_project/`:
 my_ibmw_project/
   CMakeLists.txt          # Ready-to-build CMake project
   cfg/                    # YAML configs for every demo (app + pkg)
-  src/                    # Module scaffolds with TODO markers
+  src/                    # Modules; demo bodies come from user_code in the yaml
 ```
 
 ### Build and run
@@ -232,7 +232,7 @@ make -j$(nproc)
 | Manual (this template) | ibmw-gen |
 |------------------------|----------|
 | Write module `.h`/`.cc`, CMake targets, YAML configs, type bridges by hand | Declare everything in one `.ibmw.yaml`, generate the rest |
-| Full control over every line | Scaffolds with TODO markers; fill in business logic |
+| Full control over every line | Business logic in `user_code` (or the generated TODO regions) |
 | Good for learning IBMW internals | Good for quickly bootstrapping new projects |
 
 Both approaches produce equivalent code. The hand-written demos in this

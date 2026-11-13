@@ -4,7 +4,9 @@
 #include <dlfcn.h>
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -35,6 +37,15 @@ uint32_t CreateCount(void* library) {
                            : reinterpret_cast<uint32_t (*)()>(symbol)();
 }
 
+// Creations so far if the fixture is already mapped (it may stay mapped
+// across --gtest_repeat iterations), else 0.
+uint32_t MappedCreateCount(const char* path) {
+#if defined(RTLD_NOLOAD)
+  if (Library mapped(dlopen(path, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD)); mapped) return CreateCount(mapped.get());
+#endif
+  return 0;
+}
+
 uint32_t InitializationCount(void* library, const char* name) {
   auto* symbol = dlsym(library, name);
   EXPECT_NE(symbol, nullptr) << dlerror();
@@ -61,9 +72,13 @@ TEST(ExtensionLoaderAbi, RejectsRuntimeV1WithoutCallingEitherInitializer) {
   EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), 0u);
 }
 
+// Counters are compared against their value before the test: a fixture may
+// stay mapped across --gtest_repeat iterations (not unloadable, or leaked).
 TEST(ExtensionLoaderAbi, InitializesMatchingRuntimeV2AcrossDso) {
   auto library = OpenFixture(EXTENSION_RUNTIME_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t engine_inits = InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount");
+  const uint32_t runtime_inits = InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount");
   Engine engine;
   ExtensionBus bus;
   bus.RegisterCorePtr(&engine);
@@ -71,45 +86,66 @@ TEST(ExtensionLoaderAbi, InitializesMatchingRuntimeV2AcrossDso) {
   options["items"][0]["name"] = "extension-v2-fixture";
   options["items"][0]["path"] = EXTENSION_RUNTIME_V2_FIXTURE_PATH;
   EXPECT_NO_THROW(bus.Initialize(options));
-  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount"), 0u);
-  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), 1u);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureEngineInitCount"), engine_inits);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureRuntimeInitCount"), runtime_inits + 1);
   bus.Shutdown();
 }
 
-TEST(ExtensionLoaderAbi, V2OnlyFixtureFailsClosedForLegacyLoader) {
+TEST(ExtensionLoaderAbi, CurrentFixtureExportsOnlyV3Entry) {
+  const uint32_t creates = MappedCreateCount(EXTENSION_V2_FIXTURE_PATH);
   auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 
   dlerror();
+  EXPECT_NE(dlsym(library.get(), "IbmwExtEntryV3"), nullptr);
+  EXPECT_EQ(dlsym(library.get(), "IbmwExtEntryV2"), nullptr);
   EXPECT_EQ(dlsym(library.get(), "IbmwExtEntry"), nullptr);
-  EXPECT_EQ(CreateCount(library.get()), 0U);
+  EXPECT_EQ(CreateCount(library.get()), creates);
 }
 
-TEST(ExtensionLoaderAbi, LoadsValidatedV2OnlyFixture) {
+TEST(ExtensionLoaderAbi, LoadsValidatedV3Fixture) {
   auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t creates = CreateCount(library.get());
 
   ExtensionLoader loader;
   loader.LoadExtension(EXTENSION_V2_FIXTURE_PATH);
   ASSERT_NE(loader.GetExtension(), nullptr);
   EXPECT_EQ(loader.GetExtension()->Name(), "extension-v2-fixture");
-  EXPECT_EQ(CreateCount(library.get()), 1U);
+  EXPECT_EQ(CreateCount(library.get()), creates + 1);
   loader.UnLoadExtension();
 }
 
-TEST(ExtensionLoaderAbi, FallsBackToLegacyEntry) {
-  auto library = OpenFixture(EXTENSION_LEGACY_FIXTURE_PATH);
+// Libraries built against an earlier extension ABI are rejected without
+// calling their entry or create function.
+class ExtensionLoaderOldAbi : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(ExtensionLoaderOldAbi, RejectsOldEntryBeforeCreate) {
+  auto library = OpenFixture(GetParam());
   ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t creates = CreateCount(library.get());
 
   ExtensionLoader loader;
-  loader.LoadExtension(EXTENSION_LEGACY_FIXTURE_PATH);
-  ASSERT_NE(loader.GetExtension(), nullptr);
-  EXPECT_EQ(loader.GetExtension()->Name(), "extension-v2-fixture");
-  EXPECT_EQ(CreateCount(library.get()), 1U);
+  try {
+    loader.LoadExtension(GetParam());
+    ADD_FAILURE() << "old extension entry was accepted";
+  } catch (const ibmw::common::util::IbmwException& e) {
+    EXPECT_NE(std::string(e.what()).find("rebuild"), std::string::npos) << e.what();
+  }
+  EXPECT_EQ(loader.GetExtension(), nullptr);
+  EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
+  EXPECT_EQ(CreateCount(library.get()), creates);
+
+  EXPECT_NO_THROW(loader.LoadExtension(EXTENSION_V2_FIXTURE_PATH));
+  EXPECT_NE(loader.GetExtension(), nullptr);
   loader.UnLoadExtension();
 }
 
-TEST(ExtensionLoaderAbi, RejectsWrongV2VersionBeforeCreate) {
+INSTANTIATE_TEST_SUITE_P(Entries, ExtensionLoaderOldAbi,
+                         ::testing::Values(EXTENSION_LEGACY_FIXTURE_PATH,
+                                           EXTENSION_V2_ENTRY_FIXTURE_PATH));
+
+TEST(ExtensionLoaderAbi, RejectsWrongVersionBeforeCreate) {
   auto library = OpenFixture(EXTENSION_V2_BAD_VERSION_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 
@@ -124,7 +160,7 @@ TEST(ExtensionLoaderAbi, RejectsWrongV2VersionBeforeCreate) {
   loader.UnLoadExtension();
 }
 
-TEST(ExtensionLoaderAbi, RejectsWrongV2SizeBeforeCreate) {
+TEST(ExtensionLoaderAbi, RejectsWrongSizeBeforeCreate) {
   auto library = OpenFixture(EXTENSION_V2_BAD_SIZE_FIXTURE_PATH);
   ASSERT_NE(library, nullptr) << dlerror();
 
@@ -159,6 +195,7 @@ TEST(ExtensionLoaderAbi, RejectsSecondLoadAndKeepsFirstExtension) {
 }
 
 TEST(ExtensionLoaderAbi, DestroyThrowLeaksDsoAndClearsLoaderState) {
+  const uint32_t creates = MappedCreateCount(EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH);  // leaked by a repeat
   ExtensionLoader loader;
   loader.LoadExtension(EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH);
   ASSERT_NE(loader.GetExtension(), nullptr);
@@ -174,8 +211,102 @@ TEST(ExtensionLoaderAbi, DestroyThrowLeaksDsoAndClearsLoaderState) {
       dlopen(EXTENSION_V2_DESTROY_THROWS_FIXTURE_PATH,
              RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD));
   ASSERT_NE(still_mapped, nullptr) << dlerror();
-  EXPECT_EQ(CreateCount(still_mapped.get()), 1U);
+  EXPECT_EQ(CreateCount(still_mapped.get()), creates + 1);
 #endif
+}
+
+// CORE-016: the resolved library path never throws and is absolute, for both
+// explicit paths and bare names resolved through the loader search path.
+TEST(DynamicLibPath, ResolvesFullPathWithoutThrowing) {
+  ibmw::common::util::DynamicLib by_path;
+  ASSERT_TRUE(by_path.Load(EXTENSION_V2_FIXTURE_PATH));
+  EXPECT_EQ(by_path.GetLibFullPath(),
+            std::filesystem::canonical(EXTENSION_V2_FIXTURE_PATH).string());
+
+#if defined(__GLIBC__)  // soname of a library resolved through the search path
+  ibmw::common::util::DynamicLib by_name;
+  ASSERT_TRUE(by_name.Load("libm.so.6"));
+  EXPECT_TRUE(std::filesystem::path(by_name.GetLibFullPath()).is_absolute()) << by_name.GetLibFullPath();
+  EXPECT_TRUE(std::filesystem::exists(by_name.GetLibFullPath())) << by_name.GetLibFullPath();
+#endif
+}
+
+// CORE-026: a lib whose extension name does not match the config must have its
+// extension destroyed instead of leaked together with the DSO.
+TEST(ExtensionBusLifecycle, NameMismatchDestroysLoadedExtension) {
+  auto library = OpenFixture(EXTENSION_V2_FIXTURE_PATH);
+  ASSERT_NE(library, nullptr) << dlerror();
+  const uint32_t created_before = CreateCount(library.get());
+  const uint32_t destroyed_before = InitializationCount(library.get(), "IbmwExtFixtureDestroyCount");
+
+  Engine engine;
+  ExtensionBus bus;
+  bus.RegisterCorePtr(&engine);
+  YAML::Node options;
+  options["items"][0]["name"] = "some-other-name";
+  options["items"][0]["path"] = EXTENSION_V2_FIXTURE_PATH;
+  EXPECT_ANY_THROW(bus.Initialize(options));
+
+  EXPECT_EQ(CreateCount(library.get()), created_before + 1U);
+  EXPECT_EQ(InitializationCount(library.get(), "IbmwExtFixtureDestroyCount"), destroyed_before + 1U);
+  bus.Shutdown();
+}
+
+class CountingExtension final : public ibmw::EngineExtensionBase {
+ public:
+  CountingExtension(std::string name, bool init_ok) : name_(std::move(name)), init_ok_(init_ok) {}
+  std::string_view Name() const noexcept override { return name_; }
+  bool Initialize(Engine*) noexcept override { return init_ok_; }
+  void Shutdown() noexcept override { ++shutdown_count; }
+  int shutdown_count = 0;
+
+ private:
+  std::string name_;
+  bool init_ok_;
+};
+
+YAML::Node DirectExtensionOptions(std::initializer_list<const char*> names) {
+  YAML::Node options;
+  size_t i = 0;
+  for (const char* name : names) {
+    options["items"][i]["name"] = name;
+    options["items"][i]["path"] = "";
+    ++i;
+  }
+  return options;
+}
+
+// CORE-026: directly registered extensions are shut down too, exactly once,
+// in reverse initialization order.
+TEST(ExtensionBusLifecycle, ShutsDownDirectlyRegisteredExtensions) {
+  Engine engine;
+  ExtensionBus bus;
+  CountingExtension first("first", true);
+  CountingExtension second("second", true);
+  bus.RegisterCorePtr(&engine);
+  bus.RegisterExtension(&first);
+  bus.RegisterExtension(&second);
+  ASSERT_NO_THROW(bus.Initialize(DirectExtensionOptions({"first", "second"})));
+  bus.Shutdown();
+  bus.Shutdown();
+  EXPECT_EQ(first.shutdown_count, 1);
+  EXPECT_EQ(second.shutdown_count, 1);
+}
+
+// An extension whose Initialize() fails gets one Shutdown() to release what it
+// acquired, and is not visited again by the bus Shutdown().
+TEST(ExtensionBusLifecycle, FailedInitializeIsShutDownOnce) {
+  Engine engine;
+  ExtensionBus bus;
+  CountingExtension good("good", true);
+  CountingExtension bad("bad", false);
+  bus.RegisterCorePtr(&engine);
+  bus.RegisterExtension(&good);
+  bus.RegisterExtension(&bad);
+  EXPECT_ANY_THROW(bus.Initialize(DirectExtensionOptions({"good", "bad"})));
+  bus.Shutdown();
+  EXPECT_EQ(good.shutdown_count, 1);
+  EXPECT_EQ(bad.shutdown_count, 1);
 }
 
 }  // namespace

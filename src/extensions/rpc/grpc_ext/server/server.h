@@ -67,12 +67,27 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
 
     options_ = ServerOptions::Verify(options);
     connection_options_ptr_ = std::make_shared<ConnectionOptions>(options_);
-
-    MW_REQUIRE(CheckListenAddr(options_.ep),
-                            "{} is already in use.", ibmw::common::util::SSToString(options_.ep));
   }
 
   void Start() {
+    MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    acceptor_.open(options_.ep.protocol(), ec);
+    if (!ec) acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true), ec);
+    if (!ec) acceptor_.bind(options_.ep, ec);
+    if (!ec) acceptor_.listen(boost::asio::ip::tcp::acceptor::max_listen_connections, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      acceptor_.close(ignored);
+      MW_THROW("Grpc svr failed to listen on {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
     MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
@@ -81,12 +96,8 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          acceptor_.open(options_.ep.protocol());
-          acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-          acceptor_.bind(options_.ep);
-          acceptor_.listen();
-
           while (state_.load() == State::kStart) {
+            bool accept_failed = false;
             try {
               if (connection_ptr_list_.size() >= options_.max_connection_num) {
                 acceptor_timer_.expires_after(options_.mgr_timer_dt);
@@ -106,6 +117,17 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
               connection_ptr_list_.emplace_back(connection_ptr);
             } catch (const std::exception& e) {
               MW_WARN("Http svr accept connection get exception and exit, exception info: {}", e.what());
+              accept_failed = true;
+            }
+
+            // Back off after a failed accept (e.g. EMFILE) instead of spinning
+            // on the same error.
+            if (accept_failed && state_.load() == State::kStart) {
+              try {
+                acceptor_timer_.expires_after(kAcceptRetryDelay);
+                co_await acceptor_timer_.async_wait(boost::asio::use_awaitable);
+              } catch (const std::exception&) {
+              }
             }
           }
 
@@ -167,25 +189,18 @@ class AsioHttp2Server : public std::enable_shared_from_this<AsioHttp2Server> {
       } catch (const std::exception& e) {
         MW_TRACE("Http svr mgr shutdown failed, exception info: {}", e.what());
       }
+
+      // connection_ptr_list_ is only touched on mgr_strand_.
+      for (auto& connection_ptr : connection_ptr_list_) {
+        connection_ptr->Shutdown();
+      }
+
+      connection_ptr_list_.clear();
     });
-
-    for (auto& connection_ptr : connection_ptr_list_) {
-      connection_ptr->Shutdown();
-    }
-
-    connection_ptr_list_.clear();
   }
 
  private:
-  static bool CheckListenAddr(const boost::asio::ip::tcp::endpoint& ep) {
-    try {
-      IOCtx io;
-      Tcp::acceptor acceptor(io, ep);
-      return true;
-    } catch (...) {
-      return false;
-    }
-  }
+  static constexpr std::chrono::milliseconds kAcceptRetryDelay{100};
 
  private:
   enum class State : uint32_t {

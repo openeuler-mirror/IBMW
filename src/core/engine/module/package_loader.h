@@ -69,6 +69,11 @@ class PackageLoader {
   auto& GetDynamicLib() { return dynamic_lib_; }
 
  private:
+  using CreateModuleFunc = const ibmw_module_base_t* (*)(ibmw_string_view_t);
+  void CreateModules(CreateModuleFunc create_module_fn,
+                     const std::vector<std::string>& disable_modules,
+                     const std::vector<std::string>& enable_modules);
+
   std::shared_ptr<ibmw::common::util::LoggerWrapper> logger_ptr_;
 
   std::string pkg_path_;
@@ -92,11 +97,11 @@ class PackageLoader {
       module_ptr_map_;
 
   // Create an enumeration class to identify the usage of the pkgs module (UseNone: use all, UseEnable: use enabled module, UseDisable: use disabled module, use UseNone by default)
-  enum class Enable_or_Disable : uint32_t {
+  enum class EnableOrDisable : uint32_t {
     kUseNone,
     kUseEnable,
     kUseDisable,
-  } enable_or_disable_for_pkg_ = Enable_or_Disable::kUseNone;
+  } enable_or_disable_for_pkg_ = EnableOrDisable::kUseNone;
 };
 
 }  // namespace ibmw::runtime::core::module

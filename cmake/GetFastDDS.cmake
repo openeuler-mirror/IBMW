@@ -223,7 +223,7 @@ if(_ibmw_rosidl_target_prefix_route)
 elseif(IBMW_DDS_PROVIDER STREQUAL "ROS2_MINIMAL_SDK")
   if(NOT IBMW_ROS2_MINIMAL_SDK_PREFIX OR NOT IS_DIRECTORY "${IBMW_ROS2_MINIMAL_SDK_PREFIX}")
     message(FATAL_ERROR
-      "IBMW_DDS_PROVIDER=ROS2_MINIMAL_SDK requires -DIBMW_ROS2_MINIMAL_SDK_PREFIX=<prefix> pointing to the SDK produced by sibling IBMW_together/ros2_minimal_deps. No /opt/ros fallback is used.")
+      "IBMW_DDS_PROVIDER=ROS2_MINIMAL_SDK requires -DIBMW_ROS2_MINIMAL_SDK_PREFIX=<prefix> pointing to the SDK produced by ros2_minimal_deps in the separate IBMW_together repository (not part of this repository). No /opt/ros fallback is used.")
   endif()
   _ibmw_clear_package_cache(fastcdr)
   _ibmw_clear_package_cache(fastrtps)

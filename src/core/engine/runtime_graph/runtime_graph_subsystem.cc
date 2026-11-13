@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "base/exception.h"
+#include "engine/dynamic_lib.h"
 #include "engine/engine.h"
 #include "engine/extension/extension_runtime.h"
 
@@ -299,7 +300,8 @@ void RuntimeGraphSubsystem::Initialize(YAML::Node options_node) {
       *publish_tap_, registration_.runtime_id, options_.registry_path, GetLogger());
   tap_server_->Start();
   agent_ = std::make_unique<RuntimeGraphAgent>(RuntimeGraphAgent::Options{
-      .registration = registration_, .registry_path = options_.registry_path});
+      .registration = registration_, .registry_path = options_.registry_path,
+      .logger = GetLogger()});
   agent_->SetListModuleLifecycleHandler([this] {
     return engine_->GetModuleBus().GetModuleLifecycleStatuses();
   });
@@ -384,6 +386,14 @@ void RuntimeGraphSubsystem::DiscoverTypeSupportPackagesFromCatalog() {
     }
   }
   for (const auto& package_path : package_paths) {
+    // Best effort: a module loaded by bare name may live in a directory the
+    // CORE-017 check refuses; skip it here instead of failing initialization.
+    std::string dlopen_name;
+    if (const auto untrusted = ibmw::common::util::CheckLibraryTrust(package_path, dlopen_name);
+        !untrusted.empty()) {
+      MW_WARN("Module package '{}' not probed for TypeSupport: {}", package_path, untrusted);
+      continue;
+    }
     if (!type_support_registry_.TryLoad(package_path)) {
       MW_WARN("Module package '{}' has no loadable TypeSupport package.", package_path);
     }

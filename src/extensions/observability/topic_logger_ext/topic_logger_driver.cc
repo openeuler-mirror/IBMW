@@ -70,7 +70,7 @@ void TopicLoggerDriver::Initialize(YAML::Node options_node) {
       // if no log data, then stop timer to avoid unnecessary work
       if (!current_log_data_) [[unlikely]] {
         publish_flag_ = false;
-        timer_ptr->Cancel();
+        timer_ptr_->Cancel();
         return;
       }
 
@@ -90,7 +90,7 @@ void TopicLoggerDriver::Initialize(YAML::Node options_node) {
     log_publisher_.Send(kMsgTypeName, ctx, static_cast<const void*>(log_data_ptr.get()));
   };
 
-  timer_ptr = ibmw::executor::CreateTimer(timer_executor_,
+  timer_ptr_ = ibmw::executor::CreateTimer(timer_executor_,
                                            std::chrono::milliseconds(options_.interval_ms),
                                            std::move(timer_task),
                                            false);
@@ -144,7 +144,7 @@ void TopicLoggerDriver::Log(const runtime::core::logger::LogDataWrapper& log_dat
       // if timer is stop, then reset it
       if (!publish_flag_) [[unlikely]] {
         publish_flag_ = true;
-        timer_ptr->Reset();
+        timer_ptr_->Reset();
       }
     }
 
@@ -172,8 +172,11 @@ bool TopicLoggerDriver::CheckLog(const runtime::core::logger::LogDataWrapper& lo
       if_log = true;
     }
   } catch (const std::exception& e) {
-    (void)fprintf(stderr, "Regex get exception, expr: %s, string: %s, exception info: %s\n",
-                  options_.module_filter.c_str(), log_data_wrapper.module_name.data(), e.what());
+    // module_name is a string_view and need not be NUL-terminated.
+    (void)fprintf(stderr, "Regex get exception, expr: %s, string: %.*s, exception info: %s\n",
+                  options_.module_filter.c_str(),
+                  static_cast<int>(log_data_wrapper.module_name.size()),
+                  log_data_wrapper.module_name.data(), e.what());
   }
 
   std::unique_lock lock(module_filter_map_mutex_);

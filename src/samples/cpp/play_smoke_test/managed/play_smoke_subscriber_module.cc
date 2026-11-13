@@ -5,7 +5,10 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <string>
 #include <utility>
+
+#include <unistd.h>
 
 #include "yaml-cpp/yaml.h"
 
@@ -27,10 +30,15 @@ bool PlaySmokeSubscriberModule::Setup(ibmw::Runtime core) {
         "{} requires a topics sequence.", name_);
     topics_ = node["topics"].as<std::vector<std::string>>();
     const char* output_environment = std::getenv("PLAY_SMOKE_OUTPUT");
-    output_path_ = output_environment != nullptr
-                       ? output_environment
-                       : node["output_file"].as<std::string>(
-                             "/tmp/ibmw-play-smoke-received.log");
+    if (output_environment != nullptr) {
+      output_path_ = output_environment;
+    } else if (node["output_file"]) {
+      output_path_ = node["output_file"].as<std::string>();
+    } else {
+      // Per process, so parallel runs and other users do not share the file.
+      output_path_ = std::filesystem::temp_directory_path() /
+                     ("ibmw-play-smoke-received-" + std::to_string(::getpid()) + ".log");
+    }
     output_.open(output_path_, std::ios::out | std::ios::trunc);
     MW_CHECK_LOG_THROW(
         core_.GetLogger(), output_.is_open(),
@@ -53,8 +61,8 @@ bool PlaySmokeSubscriberModule::Setup(ibmw::Runtime core) {
   }
   MW_LOG(
       core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
-      "Play smoke subscriber ready: name='{}', serialization='{}', topics={}.",
-      name_, serialization_, topics_.size());
+      "Play smoke subscriber ready: name='{}', serialization='{}', topics={}, output='{}'.",
+      name_, serialization_, topics_.size(), output_path_.string());
   return true;
 }
 

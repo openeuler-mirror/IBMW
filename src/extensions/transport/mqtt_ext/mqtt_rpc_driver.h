@@ -47,7 +47,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver,
         max_pkg_size_(max_pkg_size),
         msg_handle_catalog_ptr_(msg_handle_catalog_ptr) {}
 
-  ~MqttRpcDriver() override = default;
+  ~MqttRpcDriver() override;
 
   std::string_view Name() const noexcept override { return "mqtt"; }
 
@@ -80,7 +80,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver,
   using SubscriptionBatch = std::unordered_map<std::string, std::shared_ptr<SubscriptionStatus>>;
   std::shared_ptr<SubscriptionBatch> subscriptions_;
   void ReturnRspWithStatusCode(
-      std::string_view mqtt_pub_topic,
+      const std::string& mqtt_pub_topic,  // passed to MQTT as a C string
       int qos,
       std::string_view serialization_type,
       const char* req_id_buf,
@@ -115,7 +115,7 @@ class MqttRpcDriver : public runtime::core::service::ServiceDriver,
 
   std::shared_ptr<MsgHandleCatalog> msg_handle_catalog_ptr_;
 
-  std::atomic_uint32_t req_id_ = 0;
+  std::atomic_uint32_t req_id_{runtime::core::util::RandomReqIdStart()};
 
   struct ClientCfgInfo {
     std::string server_mqtt_id;

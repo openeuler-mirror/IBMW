@@ -16,7 +16,7 @@ echo "ROS2-Ibmw Bidirectional Interop Test"
 echo "=========================================="
 
 # Source ROS2 environment
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
 
 # Check environment first
 echo ""

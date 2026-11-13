@@ -13,11 +13,11 @@ class ZenohServiceDiscoveryResponder {
   void Start(const z_loaned_session_t* session, std::string_view domain);
   void Stop() noexcept;
  private:
-  void Serve(std::stop_token stop);
+  void Serve();
   service_protocol::Catalog catalog_;
   std::string key_;
   zenoh_detail::Owned<z_owned_queryable_t> queryable_;
-  zenoh_detail::Owned<z_owned_fifo_handler_query_t> queries_;
+  zenoh_detail::Owned<z_owned_ring_handler_query_t> queries_;
   std::jthread worker_;
 };
 }  // namespace ibmw::discovery

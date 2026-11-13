@@ -144,7 +144,8 @@ endfunction()
 # )
 #
 # Creates a SHARED library (.so) for pkg-mode, linked to ibmw::api::pkg
-# and the specified module targets.
+# and the specified module targets. With an installed IBMW, its install
+# RUNPATH defaults to $ORIGIN-relative directories (see below).
 #
 # Example:
 #   ibmw_add_pkg(pubsub_pkg
@@ -162,6 +163,48 @@ function(ibmw_add_pkg TARGET_NAME)
 
   target_link_libraries(${TARGET_NAME}
     PRIVATE ibmw::api::pkg ${ARG_MODULES} ${ARG_DEPS})
+
+  # Built against an installed IBMW (find_package(ibmw)): by default the
+  # installed package gets a RUNPATH of its own directory and <ibmw prefix>/lib
+  # (for libibmw_selfdev_coro), the latter relative to where the package is
+  # expected to be installed (<prefix>/${CMAKE_INSTALL_LIBDIR}, or lib). It holds
+  # no absolute path, so nothing of the build machine is searched at run time
+  # and both trees can move together. bin/ibmw loads that library at start-up,
+  # so the package also loads without it; the RUNPATH covers other hosts. A
+  # project-wide CMAKE_INSTALL_RPATH or CMAKE_INSTALL_RPATH_USE_LINK_PATH, the
+  # target property or CMAKE_SKIP_RPATH / CMAKE_SKIP_INSTALL_RPATH override it.
+  # The relative part is fixed at configure time: installing the package to
+  # another directory than <CMAKE_INSTALL_PREFIX>/<libdir> (cmake --install
+  # --prefix, a subdirectory) leaves it pointing elsewhere. Link directories of
+  # DEPS outside the project are not added any more (they were with
+  # INSTALL_RPATH_USE_LINK_PATH); a package needing them sets CMAKE_INSTALL_RPATH
+  # or CMAKE_INSTALL_RPATH_USE_LINK_PATH.
+  if(TARGET ibmw::selfdev::coro AND NOT CMAKE_INSTALL_RPATH
+     AND NOT DEFINED CMAKE_INSTALL_RPATH_USE_LINK_PATH)
+    get_target_property(_ibmw_coro_imported ibmw::selfdev::coro IMPORTED)
+    if(_ibmw_coro_imported)
+      get_target_property(_ibmw_coro_location ibmw::selfdev::coro LOCATION)
+      get_filename_component(_ibmw_coro_dir "${_ibmw_coro_location}" DIRECTORY)
+      if(NOT CMAKE_INSTALL_LIBDIR)
+        set(_ibmw_pkg_libdir "${CMAKE_INSTALL_PREFIX}/lib")
+      elseif(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+        set(_ibmw_pkg_libdir "${CMAKE_INSTALL_LIBDIR}")
+      else()
+        set(_ibmw_pkg_libdir "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
+      endif()
+      file(RELATIVE_PATH _ibmw_coro_rel "${_ibmw_pkg_libdir}" "${_ibmw_coro_dir}")
+      if(APPLE)
+        set(_ibmw_pkg_origin "@loader_path")
+      else()
+        set(_ibmw_pkg_origin "$ORIGIN")
+      endif()
+      set(_ibmw_pkg_rpath "${_ibmw_pkg_origin}")
+      if(_ibmw_coro_rel)
+        list(APPEND _ibmw_pkg_rpath "${_ibmw_pkg_origin}/${_ibmw_coro_rel}")
+      endif()
+      set_target_properties(${TARGET_NAME} PROPERTIES INSTALL_RPATH "${_ibmw_pkg_rpath}")
+    endif()
+  endif()
 
   if(ARG_OUTPUT_NAME)
     set_target_properties(${TARGET_NAME} PROPERTIES OUTPUT_NAME ${ARG_OUTPUT_NAME})

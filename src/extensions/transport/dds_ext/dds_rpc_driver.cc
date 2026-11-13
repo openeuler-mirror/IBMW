@@ -132,16 +132,48 @@ void DdsRpcDriver::Start() {
              server_endpoints_.size(), client_endpoints_.size());
 }
 
+DdsRpcDriver::~DdsRpcDriver() {
+  // A timeout callback may still be in Shutdown, or after it on the timer thread.
+  if (state_.load() == State::kShutdown) WaitForShutdown();
+  if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
+}
+
+// Not in a timeout task: the first Shutdown may be waiting for that task.
+// Not on the thread of the first Shutdown either (re-entered from a callback).
+void DdsRpcDriver::WaitForShutdown() const {
+  if (shutdown_thread_.load() == std::this_thread::get_id()) return;
+  if (timeout_executor_ && timeout_executor_.IsInCurrentExecutor()) return;
+  shutdown_done_.wait(false);
+}
+
 void DdsRpcDriver::Shutdown() {
-  if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
+  if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown) {
+    // The first Shutdown may run in a timeout callback: wait for it.
+    WaitForShutdown();
     return;
+  }
+  shutdown_thread_.store(std::this_thread::get_id());
+  struct Done {
+    std::atomic<bool>& flag;
+    ~Done() {
+      flag.store(true);
+      flag.notify_all();
+    }
+  } done{shutdown_done_};
 
   auto* participant = dds_bus_.GetParticipant();
 
-  // Clean up client endpoints
+  // First the built-in timer: a running timeout ends before the endpoints go.
+  if (builtin_timeout_timer_) builtin_timeout_timer_->Stop();
+
+  // Clean up client endpoints. Without readers no answer arrives any more;
+  // the calls still waiting get a result (also from a timeout callback).
   for (auto& [key, ep] : client_endpoints_) {
     if (ep->reader) subscriber_->delete_datareader(ep->reader);
     if (ep->writer) publisher_->delete_datawriter(ep->writer);
+    ep->client_tool.AbandonAll([](std::shared_ptr<runtime::core::service::ServiceMessageFrame>&& frame) {
+      runtime::core::service::CallResultCallback(*frame, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+    });
   }
   client_listeners_.clear();
   client_endpoints_.clear();
@@ -413,14 +445,19 @@ bool DdsRpcDriver::RegisterClientFunc(
     auto instance_handle = ep->reader->get_instance_handle();
     dds_rpc_rtps::iHandle2GUID(ep->reply_reader_guid, instance_handle);
 
-    // Setup timeout
-    if (timeout_executor_) {
-      ep->client_tool.RegisterTimeoutExecutor(timeout_executor_);
-      ep->client_tool.RegisterTimeoutHandle(
-          [](std::shared_ptr<runtime::core::service::ServiceMessageFrame>&& frame) {
-            runtime::core::service::CallResultCallback(*frame, ibmw::rpc::Status(IBMW_RPC_STATUS_TIMEOUT));
-          });
+    // Setup timeout. Always on: a native .srv server cannot answer a failure,
+    // so without a configured timeout_executor a built-in timer is started
+    // with the first client (TRANS-049).
+    if (!timeout_executor_) {
+      builtin_timeout_timer_ = std::make_unique<RpcTimeoutTimer>();
+      timeout_executor_ = builtin_timeout_timer_->Handle();
+      MW_TRACE("DDS RPC driver: no timeout executor configured, using the built-in timer.");
     }
+    ep->client_tool.RegisterTimeoutExecutor(timeout_executor_);
+    ep->client_tool.RegisterTimeoutHandle(
+        [](std::shared_ptr<runtime::core::service::ServiceMessageFrame>&& frame) {
+          runtime::core::service::CallResultCallback(*frame, ibmw::rpc::Status(IBMW_RPC_STATUS_TIMEOUT));
+        });
 
     MW_INFO("DDS RPC client registered: func='{}', rq='{}', rr='{}'",
                info.func_name, ep->dds_topic_rq, ep->dds_topic_rr);
@@ -441,8 +478,11 @@ bool DdsRpcDriver::RegisterClientFunc(
 
 bool DdsRpcDriver::IsClientReady(std::string_view module, std::string_view function) const noexcept {
   try {
+    // Like Call(): refuse outside Start. Callers must not overlap Shutdown(),
+    // which clears client_endpoints_.
+    if (state_.load() != State::kStart) return false;
     const auto it = client_endpoints_.find(std::string(module) + ":" + std::string(function));
-    if (it == client_endpoints_.end() || state_.load() != State::kStart) return false;
+    if (it == client_endpoints_.end()) return false;
     eprosima::fastdds::dds::PublicationMatchedStatus requests;
     eprosima::fastdds::dds::SubscriptionMatchedStatus responses;
     return it->second->writer->get_publication_matched_status(requests) == kDdsRpcReturnOk &&
@@ -480,6 +520,10 @@ void DdsRpcDriver::Call(
     auto record_copy = client_call_wrapper_ptr;
     bool record_ret = ep.client_tool.Record(seq, timeout, std::move(record_copy));
     if (!record_ret) [[unlikely]] {
+      record_ret = ep.client_tool.RetryRecord(
+          seq, timeout, client_call_wrapper_ptr, [&ep] { return ep.seq_counter.fetch_add(1) + 1; });
+    }
+    if (!record_ret) [[unlikely]] {
       MW_ERROR("Failed to record DDS RPC request seq={}.", seq);
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
       return;
@@ -493,10 +537,10 @@ void DdsRpcDriver::Call(
         dds_rpc_rtps::SequenceNumber_t(0, seq));
     auto write_ret = ep.writer->write(const_cast<void*>(client_call_wrapper_ptr->req_ptr), wparams);
     if (!DdsRpcWriteSucceeded(write_ret)) [[unlikely]] {
-      // Remove record
-      ep.client_tool.GetRecord(seq);
       MW_WARN("DDS RPC client write failed, func='{}'.", info.func_name);
-      CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED));
+      // Only if still recorded: a timeout or Shutdown may have completed it.
+      if (ep.client_tool.GetRecord(seq))
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED));
       return;
     }
 
@@ -541,8 +585,8 @@ void DdsRpcDriver::ServerListener::on_data_available(
       req_identity.writer_guid() = related_guid;
     }
 
-    MW_INFO("DDS RPC server received request: func='{}', identity seq=({},{})",
-            info.func_name, req_identity.sequence_number().high, req_identity.sequence_number().low);
+    MW_TRACE("DDS RPC server received request: func='{}', identity seq=({},{})",
+             info.func_name, req_identity.sequence_number().high, req_identity.sequence_number().low);
 
     // Create service invoke wrapper
     auto service_invoke_wrapper_ptr = std::make_shared<runtime::core::service::ServiceMessageFrame>(
@@ -623,11 +667,12 @@ void DdsRpcDriver::ClientListener::on_data_available(
     // (matches rmw_fastrtps __rmw_take_response: uses related_sample_identity)
     auto& related_id = sample_info.related_sample_identity;
 
-    // Check if this response is for us (match GUID)
-    if (related_id.writer_guid() != ep_.reply_reader_guid) {
+    // Check if this response is for us (match GUID and the full id)
+    const auto reply_seq = DdsRpcReplySeq(related_id, ep_.reply_reader_guid);
+    if (!reply_seq) {
       continue;
     }
-    uint32_t seq = related_id.sequence_number().low;
+    uint32_t seq = *reply_seq;
 
     MW_TRACE("DDS RPC client received response: func='{}', seq={}.",
                 ep_.func_name, seq);

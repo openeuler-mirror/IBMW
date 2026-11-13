@@ -43,8 +43,16 @@ modules:
     transport: dds
     topic: hello_topic
     message: ExampleEventMsg
+    user_code:
+      publish_body: |
+        msg_count_++;
+        msg.msg("hello");
+        msg.num(static_cast<int32_t>(msg_count_));
   - name: SubscriberModule
     type: subscriber
     transport: dds
     topic: hello_topic
     message: ExampleEventMsg
+    user_code:
+      on_message_body: |
+        MW_INFO("Received message: msg='{}', num={}", msg->msg(), msg->num());

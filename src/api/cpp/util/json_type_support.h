@@ -159,6 +159,7 @@ const ibmw_type_support_base_t* GetJsonMessageTypeSupport() {
       .custom_type_support_ptr = [](void* ctx) -> const void* {
         return nullptr;  // No custom type support for JSON types
       },
+      .msg_min_size = sizeof(JsonType),
       .ctx = nullptr};
 
   return &kTs;

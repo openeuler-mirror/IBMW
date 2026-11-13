@@ -15,11 +15,7 @@ using FrameworkAsyncTransportFilter = ibmw::util::InlineFunction<void(MessageFra
 
 class FrameworkAsyncTransportFilterCollector {
  public:
-  FrameworkAsyncTransportFilterCollector()
-      : final_filter_(
-            [](MessageFrame& msg_wrapper, FrameworkAsyncTransportHandle&& h) {
-              h(msg_wrapper);
-            }) {}
+  FrameworkAsyncTransportFilterCollector() : final_filter_(PassThrough()) {}
   ~FrameworkAsyncTransportFilterCollector() = default;
 
   FrameworkAsyncTransportFilterCollector(const FrameworkAsyncTransportFilterCollector&) = delete;
@@ -41,11 +37,17 @@ class FrameworkAsyncTransportFilterCollector {
     final_filter_(msg_wrapper, std::move(h));
   }
 
+  // Back to the no-filter state (never an empty function: InvokeTransport()
+  // does not check, to stay branch-free on the message path).
   void Clear() {
-    final_filter_ = FrameworkAsyncTransportFilter();
+    final_filter_ = PassThrough();
   }
 
  private:
+  static FrameworkAsyncTransportFilter PassThrough() {
+    return [](MessageFrame& msg_wrapper, FrameworkAsyncTransportHandle&& h) { h(msg_wrapper); };
+  }
+
   FrameworkAsyncTransportFilter final_filter_;
 };
 
@@ -116,8 +118,10 @@ class FrameworkAsyncTransportFilterBus {
     return {};
   }
 
+  // Collectors reference entries of filter_map_, so they go first.
   void Clear() {
     filter_collector_map_.clear();
+    filter_names_map_.clear();
     filter_map_.clear();
   }
 

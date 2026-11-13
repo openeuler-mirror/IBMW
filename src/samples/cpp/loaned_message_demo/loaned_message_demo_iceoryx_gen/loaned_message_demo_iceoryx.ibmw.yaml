@@ -47,6 +47,12 @@ modules:
     topic: point_topic
     message: geometry_msgs::msg::Point
     # ros2_msg_include / ros2_package are auto-derived from message.
+    user_code:
+      populate_loaned_message: |
+        /* Written directly into the iceoryx SHM chunk (zero-copy). */
+        loop_var->x = static_cast<double>(publish_count_);
+        loop_var->y = loop_var->x * 2.0;
+        loop_var->z = loop_var->x * 3.0;
   # Subscriber side, iceoryx transport. Callback receives the loaned
   # SHM sample by const-ref (true zero-copy borrow).
   - name: PointIceoryxLoanedSubscriber

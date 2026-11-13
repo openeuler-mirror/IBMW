@@ -12,7 +12,10 @@
 extern "C" {
 #endif
 
+/// Entries without ibmw_type_support_base_t::msg_min_size; rejected.
 #define IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1 UINT32_C(1)
+/// Current version: entries carry msg_min_size. Descriptor layout unchanged.
+#define IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2 UINT32_C(2)
 #define IBMW_TYPE_SUPPORT_PACKAGE_V1_RESERVED_COUNT 8u
 
 /**

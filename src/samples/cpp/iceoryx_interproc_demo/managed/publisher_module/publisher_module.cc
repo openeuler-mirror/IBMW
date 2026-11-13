@@ -50,7 +50,7 @@ bool PublisherModule::Run() {
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
          "PublisherModule Run");
   running_ = true;
-  std::thread([this]() { PublishLoop(); }).detach();
+  publish_thread_ = std::thread([this]() { PublishLoop(); });
   return true;
 }
 
@@ -58,7 +58,9 @@ void PublisherModule::Stop() {
   MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
          "PublisherModule Stop");
   running_ = false;
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  if (publish_thread_.joinable()) {
+    publish_thread_.join();
+  }
 }
 
 void PublisherModule::PublishLoop() {

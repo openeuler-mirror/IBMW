@@ -7,6 +7,7 @@
 #
 #   iox_loaned_pod  - iceoryx: zero-copy POD path (extension-only API)
 #   iox_loaned_ctx  - iceoryx: zero-copy ctx-meta path (standard receive stack)
+#   shm_loaned_pod  - shm_ext: iox_loaned_pod on the self-developed transport
 #   iox_send        - iceoryx: standard Send() (with serialization)
 #   dds_loaned      - DDS:     LoanedMessage path (zero-copy via DataSharing/SHM)
 #   dds_send_shm    - DDS:     standard Send() over SHM transport (no DataSharing)
@@ -44,6 +45,23 @@ endif()
 add_subdirectory(bench_payload)
 add_subdirectory(bench_common)
 
+# Reporter V1 hot-hook benchmark of the Core Metrics gates (iceoryx and shm); it
+# links no transport. Build the compile-out baseline and the fully enabled
+# Reporter lane. A Core Metrics build without Reporter V1 has no Reporter hot
+# path to benchmark.
+if((IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION) AND
+   (NOT IBMW_ENABLE_CORE_METRICS OR IBMW_ENABLE_REPORTER_V1))
+  add_executable(core_metrics_reporter_hot_bench
+    iox_loaned_ctx/standalone/reporter_hot_bench/main.cc)
+  target_link_libraries(core_metrics_reporter_hot_bench PRIVATE
+    ibmw::core::engine ibmw::core::extension_api ibmw::core::reporter_host_abi)
+  set_target_properties(core_metrics_reporter_hot_bench PROPERTIES ENABLE_EXPORTS ON)
+  if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+    target_link_options(core_metrics_reporter_hot_bench PRIVATE
+      "LINKER:--export-dynamic")
+  endif()
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
   add_subdirectory(iox_loaned_ctx)
   return()
@@ -60,6 +78,8 @@ add_subdirectory(publish_tap)
 add_subdirectory(iox_loaned_pod)
 add_subdirectory(iox_loaned_ctx)
 add_subdirectory(iox_send)
+# Self-developed shm transport (shm_ext) running the iox_send modules.
+add_subdirectory(shm_send)
 add_subdirectory(dds_loaned)
 add_subdirectory(dds_send_shm)
 add_subdirectory(dds_send_tcp)
@@ -67,6 +87,9 @@ add_subdirectory(dds_send_tcp)
 add_subdirectory(net_send_tcp)
 # Phase 7 §7.3 Step 3.8: encapsulated user-level loan path benchmark.
 add_subdirectory(iox_loan_v2)
+add_subdirectory(shm_loan_v2)
+add_subdirectory(shm_loaned_ctx)
+add_subdirectory(shm_loaned_pod)
 
 # Minimal cross-middleware A/B/C interop endpoint.  It is deliberately
 # separate from the historical matrix so existing targets and ABI remain
@@ -104,6 +127,16 @@ foreach(_matrix_dep
         iox_loaned_ctx_subscriber_app
         iox_send_publisher_app
         iox_send_subscriber_app
+        iox_loan_v2_publisher_app
+        iox_loan_v2_subscriber_app
+        shm_send_publisher_app
+        shm_send_subscriber_app
+        shm_loan_v2_publisher_app
+        shm_loan_v2_subscriber_app
+        shm_loaned_ctx_publisher_app
+        shm_loaned_ctx_subscriber_app
+        shm_loaned_pod_publisher_app
+        shm_loaned_pod_subscriber_app
         net_send_tcp_publisher_app
         net_send_tcp_subscriber_app)
   if(TARGET ${_matrix_dep})

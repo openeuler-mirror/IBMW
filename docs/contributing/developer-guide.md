@@ -60,6 +60,7 @@ ibmw/
     |  |  mqtt_ext/       #     MQTT
      |  |  ros2_ext/       #     ROS2 **(deprecated)**
     |  |  iceoryx_ext/    #     Iceoryx (shared memory)
+    |  |  shm_ext/        #     Self-developed shared memory (selfdev/shm, no RouDi)
     |  |  zenoh_ext/      #     Zenoh
     |  rpc/
     |  |  grpc_ext/       #     gRPC
@@ -502,7 +503,7 @@ class MyExtension : public ibmw::ExtensionBase {
 // my_extension.cc, at global scope
 #include "my_extension.h"
 
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 ### Extension Logging
@@ -668,7 +669,7 @@ static const ibmw_type_support_base_t* kTypeSupportArray[] = {
 IBMW_TYPE_SUPPORT_PKG_EXPORT
 const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
     static const ibmw_type_support_package_v1_t kPackage{
-        .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+        .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
         .struct_size = sizeof(ibmw_type_support_package_v1_t),
         .entry_count = std::size(kTypeSupportArray),
         .entries = kTypeSupportArray,
@@ -769,6 +770,13 @@ Key implementation details:
 | Async callback | `AsyncAccessBase<Req, Rsp>` | No | via callback |
 | Future | `FutureAccessBase<Req, Rsp>` | No | `std::future<rpc::Status>` |
 | Coroutine | `CoAccessBase<Req, Rsp>` | No | `co::Task<rpc::Status>` |
+
+The async and future patterns pass `req` and `rsp` to the provider by address.
+With the reference overloads, the caller must keep both alive until the
+callback runs or the future is ready. Generated `AsyncAccess` and
+`FutureAccess` classes also take `std::shared_ptr<const Req>` and
+`std::shared_ptr<Rsp>`; those overloads keep both objects alive until the call
+completes. A null `req` or `rsp` completes with `IBMW_RPC_STATUS_CLI_UNKNOWN`.
 
 ### RPC Filters
 

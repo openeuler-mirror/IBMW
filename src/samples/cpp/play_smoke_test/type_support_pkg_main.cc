@@ -121,6 +121,7 @@ const ibmw_type_support_base_t* HeaderTranscodingSupport() {
       .custom_type_support_ptr = [](void* context) {
         return HeaderCdrSupport()->custom_type_support_ptr(context);
       },
+      .msg_min_size = sizeof(Header),
       .ctx = nullptr};
   return &kSupport;
 }
@@ -155,7 +156,7 @@ const ibmw_schema_support_package_v1_t schema_support_package{
     .reserved = {}};
 
 const ibmw_type_support_package_v1_t type_support_package{
-    .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+    .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
     .struct_size = sizeof(ibmw_type_support_package_v1_t),
     .entry_count = std::size(type_support_array),
     .entries = type_support_array,

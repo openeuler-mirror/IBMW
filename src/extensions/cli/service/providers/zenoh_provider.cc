@@ -5,6 +5,7 @@
 #include <thread>
 #include "engine/discovery/service_discovery_protocol.h"
 #include "zenoh_ext/discovery/zenoh_discovery_util.h"
+#include "zenoh_ext/key_expr.h"
 
 namespace ibmw::discovery {
 namespace {
@@ -16,8 +17,12 @@ class Provider final : public ServiceDiscoveryProvider {
   ~Provider() override {
     if (z_internal_check(session_.value)) z_close(z_loan_mut(session_.value), nullptr);
   }
-  ServiceDiscoverySnapshot Query(const ServiceDiscoveryOptions& options,
-      std::chrono::steady_clock::time_point deadline) override {
+  ServiceDiscoverySnapshot Query(const ServiceDiscoveryOptions& requested,
+                                 std::chrono::steady_clock::time_point deadline) override {
+    // Same domain spelling as the RPC driver's limit_domain: surrounding slashes ignored.
+    auto options = requested;
+    options.zenoh_domain =
+        extensions::zenoh_extension::NormalizeLimitDomain(requested.zenoh_domain);
     const auto source = DescribeSource(options);
     Owned<z_owned_config_t> config;
     if (options.zenoh_config.empty()) z_config_default(&config.value);

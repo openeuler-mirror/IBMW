@@ -13,6 +13,9 @@ endif()
 set(iceoryx_DOWNLOAD_URL
     "https://github.com/eclipse-iceoryx/iceoryx/archive/refs/tags/v2.95.4.tar.gz"
     CACHE STRING "")
+set(iceoryx_DOWNLOAD_SHA256
+    "82c4fe7507d1609e1275a04a3fe8278ae20620aa30e1eede63f96a9c23308ab6"
+    CACHE STRING "SHA256 of iceoryx_DOWNLOAD_URL (update both together)")
 
 set(DOWNLOAD_TOML_LIB OFF)
 
@@ -25,6 +28,7 @@ else()
   FetchContent_Declare(
     iceoryx
     URL ${iceoryx_DOWNLOAD_URL}
+    URL_HASH SHA256=${iceoryx_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP ON
     OVERRIDE_FIND_PACKAGE)
 endif()

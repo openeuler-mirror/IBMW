@@ -5,12 +5,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <fstream>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include <lz4frame.h>
 #include <zstd.h>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "base/exception.h"
 
@@ -40,12 +47,54 @@ std::string ReadFile(const std::filesystem::path& path) {
   return data;
 }
 
-void WriteFile(const std::filesystem::path& path, std::string_view data) {
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
-  MW_ASSERT(output.is_open(), "Cannot create compressed file '{}'.", path.string());
-  output.write(data.data(), static_cast<std::streamsize>(data.size()));
-  output.close();
-  MW_ASSERT(output.good(), "Cannot write compressed file '{}'.", path.string());
+// Closes a file descriptor and removes the temporary file unless released.
+struct TemporaryFile {
+  int fd = -1;
+  std::string path;
+  ~TemporaryFile() {
+    if (fd >= 0) ::close(fd);
+    if (!path.empty()) ::unlink(path.c_str());
+  }
+};
+
+// A new file next to path: O_EXCL neither follows nor reuses a planted link.
+TemporaryFile CreateTemporaryFile(const std::filesystem::path& path) {
+  static std::atomic<uint64_t> counter{0};
+  TemporaryFile file;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    std::string candidate = path.string() + ".tmp." + std::to_string(::getpid()) + "." +
+                            std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+    file.fd = ::open(candidate.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
+    if (file.fd >= 0) {
+      file.path = std::move(candidate);
+      return file;
+    }
+    MW_ASSERT(errno == EEXIST, "Cannot create '{}': {}.", candidate, std::strerror(errno));
+  }
+  MW_ASSERT(false, "Cannot create a temporary file for '{}'.", path.string());
+  return file;
+}
+
+void WriteAll(const TemporaryFile& file, std::string_view data) {
+  while (!data.empty()) {
+    const ssize_t written = ::write(file.fd, data.data(), data.size());
+    if (written < 0 && errno == EINTR) continue;
+    MW_ASSERT(written > 0, "Cannot write compressed file '{}': {}.", file.path, std::strerror(errno));
+    data.remove_prefix(static_cast<size_t>(written));
+  }
+}
+
+void SyncDirectory(const std::filesystem::path& directory) {
+  const int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  MW_ASSERT(fd >= 0, "Cannot open directory '{}': {}.", directory.string(), std::strerror(errno));
+  const int result = ::fsync(fd);
+  const int error = errno;
+  ::close(fd);
+  // Some file systems (vfat, some FUSE and Android/OHOS storage layers) cannot
+  // sync a directory (ENOTSUP is EOPNOTSUPP on Linux); the file itself was
+  // synced and the rename stays atomic, only its durability is not guaranteed.
+  if (result != 0 && (error == EINVAL || error == EOPNOTSUPP)) return;
+  MW_ASSERT(result == 0, "Cannot sync directory '{}': {}.", directory.string(), std::strerror(error));
 }
 
 std::string CompressZstd(std::string_view input, int compression_level) {
@@ -62,7 +111,7 @@ std::string CompressZstd(std::string_view input, int compression_level) {
   return output;
 }
 
-std::string DecompressZstd(std::string_view input) {
+std::string DecompressZstd(std::string_view input, size_t max_output_size) {
   ZSTD_DStream* stream = ZSTD_createDStream();
   MW_ASSERT(stream != nullptr, "Cannot create a Zstd decompressor.");
   struct Guard {
@@ -77,6 +126,13 @@ std::string DecompressZstd(std::string_view input) {
   ZSTD_inBuffer source{input.data(), input.size(), 0};
   std::array<char, kStreamBufferSize> buffer{};
   std::string output;
+  // The declared size is only a reservation hint; the cap below still holds.
+  const unsigned long long declared =
+      ZSTD_getFrameContentSize(input.data(), input.size());
+  if (declared != ZSTD_CONTENTSIZE_UNKNOWN &&
+      declared != ZSTD_CONTENTSIZE_ERROR) {
+    output.reserve(DecompressReserveHint(declared, max_output_size));
+  }
   size_t remaining = 1;
   while (source.pos < source.size || remaining != 0) {
     ZSTD_outBuffer destination{buffer.data(), buffer.size(), 0};
@@ -84,6 +140,9 @@ std::string DecompressZstd(std::string_view input) {
     MW_ASSERT(
         !ZSTD_isError(remaining), "Zstd decompression failed: {}.",
         ZSTD_getErrorName(remaining));
+    MW_ASSERT(
+        destination.pos <= max_output_size - output.size(),
+        "Zstd output exceeds the {} byte limit.", max_output_size);
     output.append(buffer.data(), destination.pos);
     MW_ASSERT(
         destination.pos != 0 || source.pos < source.size || remaining == 0,
@@ -111,7 +170,7 @@ std::string CompressLz4(std::string_view input, int compression_level) {
   return output;
 }
 
-std::string DecompressLz4(std::string_view input) {
+std::string DecompressLz4(std::string_view input, size_t max_output_size) {
   LZ4F_dctx* context = nullptr;
   const size_t created =
       LZ4F_createDecompressionContext(&context, LZ4F_VERSION);
@@ -127,6 +186,17 @@ std::string DecompressLz4(std::string_view input) {
   size_t remaining = 1;
   std::array<char, kStreamBufferSize> buffer{};
   std::string output;
+  {
+    // The declared size is only a reservation hint; the cap below still holds.
+    LZ4F_frameInfo_t info{};
+    size_t source_size = input.size();
+    remaining = LZ4F_getFrameInfo(context, &info, input.data(), &source_size);
+    MW_ASSERT(
+        !LZ4F_isError(remaining), "LZ4 decompression failed: {}.",
+        LZ4F_getErrorName(remaining));
+    source_offset = source_size;
+    output.reserve(DecompressReserveHint(info.contentSize, max_output_size));
+  }
   while (source_offset < input.size() || remaining != 0) {
     size_t source_size = input.size() - source_offset;
     size_t destination_size = buffer.size();
@@ -137,6 +207,9 @@ std::string DecompressLz4(std::string_view input) {
         !LZ4F_isError(remaining), "LZ4 decompression failed: {}.",
         LZ4F_getErrorName(remaining));
     source_offset += source_size;
+    MW_ASSERT(
+        destination_size <= max_output_size - output.size(),
+        "LZ4 output exceeds the {} byte limit.", max_output_size);
     output.append(buffer.data(), destination_size);
     MW_ASSERT(
         destination_size != 0 || source_size != 0 || remaining == 0,
@@ -164,12 +237,13 @@ std::string CompressBuffer(
 
 std::string DecompressBuffer(
     std::string_view input,
-    std::string_view format) {
+    std::string_view format,
+    size_t max_output_size) {
   if (format == "zstd") {
-    return DecompressZstd(input);
+    return DecompressZstd(input, max_output_size);
   }
   if (format == "lz4") {
-    return DecompressLz4(input);
+    return DecompressLz4(input, max_output_size);
   }
   MW_ASSERT(false, "Unsupported compression format '{}'.", format);
   return {};
@@ -186,19 +260,27 @@ std::filesystem::path CompressFile(
     std::string_view format,
     int compression_level) {
   const auto output_path = CompressedFilePath(input_path, format);
-  const auto temporary_path = output_path.string() + ".tmp";
-  WriteFile(
-      temporary_path,
-      CompressBuffer(ReadFile(input_path), format, compression_level));
-  std::filesystem::rename(temporary_path, output_path);
+  const std::string compressed = CompressBuffer(ReadFile(input_path), format, compression_level);
+  // The input is only removed once the output and its name are on disk: a
+  // power loss leaves one of them complete. This runs on the compression
+  // pool, the fsync does not block recording.
+  TemporaryFile temporary = CreateTemporaryFile(output_path);
+  WriteAll(temporary, compressed);
+  MW_ASSERT(::fsync(temporary.fd) == 0, "Cannot sync '{}': {}.", temporary.path, std::strerror(errno));
+  MW_ASSERT(::close(std::exchange(temporary.fd, -1)) == 0, "Cannot close '{}': {}.", temporary.path,
+            std::strerror(errno));
+  std::filesystem::rename(temporary.path, output_path);
+  temporary.path.clear();
+  SyncDirectory(output_path.parent_path().empty() ? "." : output_path.parent_path());
   std::filesystem::remove(input_path);
   return output_path;
 }
 
 std::string ReadCompressedFile(
     const std::filesystem::path& input_path,
-    std::string_view format) {
-  return DecompressBuffer(ReadFile(input_path), format);
+    std::string_view format,
+    size_t max_output_size) {
+  return DecompressBuffer(ReadFile(input_path), format, max_output_size);
 }
 
 }  // namespace ibmw::extensions::record_playback_extension

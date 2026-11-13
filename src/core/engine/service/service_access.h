@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <unordered_set>
 
 #include "c/service/rpc_handle_base.h"
@@ -69,15 +70,21 @@ class ServiceAccess {
       const void* req_ptr,
       void* rsp_ptr,
       ibmw_function_base_t* callback) noexcept {
-    service_driver_dispatcher_.Call(
-        CallAccessInfoWrapper{
-            .pkg_path = pkg_path_,
-            .module_name = module_name_,
-            .func_name = func_name,
-            .ctx_ptr = ctx_ptr,
-            .req_ptr = req_ptr,
-            .rsp_ptr = rsp_ptr,
-            .callback = callback});
+    // The dispatcher reports failures through the callback; this only guards
+    // against allocation failure before it could take the callback over.
+    try {
+      service_driver_dispatcher_.Call(
+          CallAccessInfoWrapper{
+              .pkg_path = pkg_path_,
+              .module_name = module_name_,
+              .func_name = func_name,
+              .ctx_ptr = ctx_ptr,
+              .req_ptr = req_ptr,
+              .rsp_ptr = rsp_ptr,
+              .callback = callback});
+    } catch (...) {
+      std::fprintf(stderr, "IBMW: service call setup failed before dispatch.\n");
+    }
   }
 
   void MergeServerContextToClientContext(
@@ -87,7 +94,9 @@ class ServiceAccess {
 
     if (server_ctx_ref.GetType() != ibmw_rpc_context_type_t::IBMW_RPC_SERVER_CONTEXT ||
         client_ctx_ref.GetType() != ibmw_rpc_context_type_t::IBMW_RPC_CLIENT_CONTEXT) [[unlikely]] {
-      // TODO warn log
+      MW_LOG_INTERVAL(1000, service_driver_dispatcher_.GetLogger(), ibmw::common::util::kLogLevelWarn,
+                      "Service context merge skipped: expected server and client contexts, got types {} and {}.",
+                      static_cast<int>(server_ctx_ref.GetType()), static_cast<int>(client_ctx_ref.GetType()));
       return;
     }
 
@@ -99,6 +108,7 @@ class ServiceAccess {
 
   static ibmw_service_handle_base_t GenBase(void* ctx) {
     return ibmw_service_handle_base_t{
+        .struct_size = sizeof(ibmw_service_handle_base_t),
         .register_service_func = [](void* ctx,
                                     ibmw_string_view_t func_name,
                                     const void* custom_type_support_ptr,

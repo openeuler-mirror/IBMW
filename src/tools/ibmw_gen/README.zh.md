@@ -499,6 +499,37 @@ modules:
     executor_name: my_exec    # 可选：绑定到某个 Executor
 ```
 
+#### `user_code`（可选，按 Module 配置）
+
+在生成时直接填充 Module 的用户代码区域，取代默认的 TODO 占位内容。键为区域名，
+值为 C++ 代码，**整体替换该区域的默认内容**（按区域缩进重新缩进；在 loaned
+publisher 宏体内每行自动补齐对齐的 ` \` 续行）。不写 `user_code` 时输出与原来完全
+相同。用户 `.h/.cc` 只在首次生成时写入，重新生成需加 `--force`。
+
+| Module 类型 | 区域 |
+|---|---|
+| `publisher`、`direct_ros2_publisher`、`direct_iceoryx_publisher` | `publish_body` |
+| `subscriber`、`loaned_subscriber`、`direct_ros2_subscriber`、`direct_iceoryx_subscriber` | `on_message_body` |
+| `loaned_publisher` | `populate_loaned_message`（宏体：只能用 `/* */` 注释） |
+| `rpc_server` | `rpc_server_handler_body.<Method>` |
+| `rpc_client` | `rpc_client_request_parameter_build.<Method>`、`rpc_client_response_parameter_consume.<Method>`、`rpc_client_return_status_handling.<Method>` |
+
+```yaml
+  - name: PublisherModule
+    type: publisher
+    transport: dds
+    topic: hello_topic
+    message: HelloMsg
+    user_code:
+      publish_body: |
+        msg.id(msg_count_);
+        msg.message("hello");
+        msg_count_++;
+```
+
+未知区域名、不支持的 Module 类型、非字符串值以及与 IBMW 标记锚点相同的行都会被拒绝。
+`user_code` 作为代码而非字符串字面量输出，因此不受其他 Module 字段的引号/反斜杠检查限制。
+
 ### apps（必需）
 
 定义可运行的应用。每个 App 包含一个或多个 Module。

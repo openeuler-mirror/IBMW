@@ -8,7 +8,7 @@
 #include "pkg/pkg_macro.h"
 #include "chn_publisher_module/transport_publisher_module.h"
 #include "chn_subscriber_inline_module/chn_subscriber_inline_module.h"
-#include "chn_subscriber_on_exeutor_module/chn_subscriber_on_exeutor_module.h"
+#include "chn_subscriber_on_executor_module/chn_subscriber_on_executor_module.h"
 #include "executor/executor_module.h"
 #include "logger/logger_module.h"
 #include "rpc_client_module/rpc_client_module.h"

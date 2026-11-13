@@ -22,7 +22,7 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
 
   // Driver injection happens between Initialize() and Start(); only opts
   // loading + stats reservation lives in Setup. RegisterRawPodSubscriber
-  // moves to Run() where driver_ is guaranteed non-null.
+  // happens in RegisterWithDriver().
   auto cfg_path = core_.GetConfigurator().GetConfigFilePath();
   opts_ = LoadBenchOptions(cfg_path);
   stats_ = ibmw::common::util::LatencyStats(opts_.label);
@@ -40,10 +40,10 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
   return true;
 }
 
-bool SubscriberModule::Run() {
+bool SubscriberModule::RegisterWithDriver() {
   if (driver_ == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
-           "SubscriberModule: iceoryx driver not injected before Run()");
+           "SubscriberModule: iceoryx driver not injected");
     return false;
   }
 
@@ -78,6 +78,16 @@ bool SubscriberModule::Run() {
   if (!ok) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
            "SubscriberModule: RegisterRawPodSubscriber failed");
+    return false;
+  }
+  registered_ = true;
+  return true;
+}
+
+bool SubscriberModule::Run() {
+  if (!registered_) {
+    MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+           "SubscriberModule: RegisterWithDriver() did not succeed before Start()");
     return false;
   }
   return true;

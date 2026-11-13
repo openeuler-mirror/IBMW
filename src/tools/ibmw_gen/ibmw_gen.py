@@ -33,14 +33,17 @@ from generators.json_types_gen import (
 from generators.dds_idl_gen import generate_dds_idl_files
 from generators.dds_types_gen import generate_dds_type_bridges
 from generators.dds_rpc_yaml_gen import generate_dds_rpc_yamls
-from generators.module_gen import generate_modules
+from generators.module_gen import ModuleGenError, generate_modules
+from generators.user_code import UserCodeError
 from generators.app_gen import generate_app_mains
 from generators.pkg_gen import generate_pkg_mains
 from generators.type_support_pkg_gen import generate_type_support_package_sources
 from generators.config_gen import generate_configs
 from generators.cmake_gen import generate_cmake
+from generators._common import output_file_path
 from generators.action_gen import generate_experimental_actions
 
+# Kept equal to the repository VERSION file by tests/test_version_consistency.py.
 __version__ = "0.1.0"
 
 # ── File writing helpers ─────────────────────────────────────────────────────
@@ -92,7 +95,7 @@ def write_file(output_dir: str, rel_path: str, content: str,
 
     Returns one of: "overwrite", "skip", "new"
     """
-    abs_path = os.path.join(output_dir, rel_path)
+    abs_path = output_file_path(output_dir, rel_path)
     exists = os.path.exists(abs_path)
 
     if exists and not _is_always_overwrite(rel_path) and _is_user_file(rel_path):
@@ -417,7 +420,7 @@ def main():
             "--target",
             action="append",
             default=[],
-            choices=("dds_ros2", "dds_native", "iceoryx", "json"),
+            choices=("dds_ros2", "dds_native", "iceoryx", "shm", "json"),
             help="Artifact target to record in the report; repeatable (default: dds_ros2)",
         )
         import_parser.add_argument(
@@ -643,7 +646,12 @@ def main():
                 emit(rel_path, content)
 
     if "modules" in categories:
-        for rel_path, content in generate_modules(project):
+        try:
+            module_files = generate_modules(project)
+        except (ModuleGenError, UserCodeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        for rel_path, content in module_files:
             emit(rel_path, content)
 
     if "apps" in categories:

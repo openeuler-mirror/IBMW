@@ -92,7 +92,10 @@ void ExecutorBus::Initialize(YAML::Node options_node) {
 
     auto access_ptr = std::make_unique<ExecutorAccess>(executor_ptr.get());
 
-    executor_access_map_.emplace(executor_options.name, std::move(access_ptr));
+    {
+      std::unique_lock<std::shared_mutex> lck(executor_access_mutex_);
+      executor_access_map_.emplace(executor_options.name, std::move(access_ptr));
+    }
 
     executor_vec_.emplace_back(std::move(executor_ptr));
   }
@@ -122,13 +125,21 @@ void ExecutorBus::Shutdown() {
 
   // Shut down executors FIRST, before destroying access wrappers.
   // Executors may still have in-flight tasks that reference access wrappers.
-  for (auto& itr : executor_vec_) {
-    itr->Shutdown();
+  // Reverse creation order: an executor bound to another one (strand on a
+  // thread pool, timer on a bound executor) is created after it, so it must
+  // stop and be destroyed first. A strand outliving its io_context is a UAF.
+  // Consequence: a task still draining in an earlier executor that dispatches
+  // into a later one is rejected (logged), since that one is already stopped.
+  for (auto itr = executor_vec_.rbegin(); itr != executor_vec_.rend(); ++itr) {
+    (*itr)->Shutdown();
   }
 
   executor_bus_access_map_.clear();
-  executor_access_map_.clear();
-  executor_vec_.clear();
+  {
+    std::unique_lock<std::shared_mutex> lck(executor_access_mutex_);
+    executor_access_map_.clear();
+  }
+  while (!executor_vec_.empty()) executor_vec_.pop_back();
   executor_gen_func_map_.clear();
 }
 
@@ -160,9 +171,13 @@ const ExecutorBusAccess& ExecutorBus::GetExecutorAccess(
 
 ibmw::executor::ExecutorHandle ExecutorBus::GetExecutor(
     std::string_view executor_name) {
-  auto finditr = executor_access_map_.find(executor_name);
-  if (finditr != executor_access_map_.end())
-    return ibmw::executor::ExecutorHandle(finditr->second->NativeHandle());
+  {
+    std::shared_lock<std::shared_mutex> lck(executor_access_mutex_);
+    auto finditr = executor_access_map_.find(executor_name);
+    if (finditr != executor_access_map_.end())
+      return ibmw::executor::ExecutorHandle(finditr->second->NativeHandle());
+  }
+  if (state_.load() == State::kShutdown) return ibmw::executor::ExecutorHandle();
 
   MW_WARN("Get executor failed, executor name '{}'", executor_name);
 

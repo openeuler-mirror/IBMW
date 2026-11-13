@@ -13,11 +13,11 @@
 
 using namespace ibmw::runtime::core;
 
-bool run_flag = true;
+volatile std::sig_atomic_t run_flag = 1;
 
 void SignalHandler(int sig) {
   if (sig == SIGINT || sig == SIGTERM) {
-    run_flag = false;
+    run_flag = 0;
     return;
   }
 

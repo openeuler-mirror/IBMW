@@ -153,8 +153,13 @@ using ExecutorTask = ibmw::util::Function<ibmw_function_executor_task_ops_t>;
 #### Free Function
 
 ```cpp
-Timer<ExecutorTask> CreateTimer(ExecutorHandle executor);
+template <typename TaskType>
+[[nodiscard]] std::shared_ptr<TimerBase> CreateTimer(ExecutorHandle executor,
+                                                     std::chrono::nanoseconds period,
+                                                     TaskType&& task, bool auto_start = true);
 ```
+
+The returned `shared_ptr` owns the timer; the timer stops once the last copy is released.
 
 ---
 
@@ -294,6 +299,13 @@ using ServiceFunc = ibmw::util::Function<...>;       // void(ContextRef, const v
 | `AsyncAccessBase<Req, Rsp>` | `void Invoke(ctx, req, rsp, callback)` | Callback-based |
 | `FutureAccessBase<Req, Rsp>` | `std::future<Status> Invoke(ctx, req, rsp)` | Future-based |
 | `CoAccessBase<Req, Rsp>` | `co::Task<Status> Invoke(ctx, req, rsp)` | Coroutine-based |
+
+The async and future patterns pass `req` and `rsp` to the provider by address.
+With the reference overloads, the caller must keep both alive until the
+callback runs or the future is ready. Generated `AsyncAccess` and
+`FutureAccess` classes also take `std::shared_ptr<const Req>` and
+`std::shared_ptr<Rsp>`; those overloads keep both objects alive until the call
+completes. A null `req` or `rsp` completes with `IBMW_RPC_STATUS_CLI_UNKNOWN`.
 
 ---
 
@@ -621,7 +633,7 @@ and nlohmann `to_json`/`from_json` ADL functions. Serialization type: `"json"`.
 
 ```cpp
 // At global scope in the extension .so
-IBMW_EXT_ENTRY_V2(MyExtension)
+IBMW_EXT_ENTRY(MyExtension)
 ```
 
 `ExtensionBase` provides the framework lifecycle methods `Initialize` and
@@ -631,7 +643,7 @@ IBMW_EXT_ENTRY_V2(MyExtension)
 
 | Macro | Description |
 |-------|-------------|
-| `IBMW_EXT_ENTRY_V2(ExtensionClass)` | Define the versioned extension entry point |
+| `IBMW_EXT_ENTRY(ExtensionClass)` | Define the versioned extension entry point `IbmwExtEntryV3` (`IBMW_EXT_ENTRY_V2` is an alias). Extensions built against an earlier IBMW are rejected and must be rebuilt |
 | `IBMW_CORE_EXTENSION_EXPORT` | Export visibility attribute |
 | `IBMW_DECLARE_EXTENSION_LOGGER(ns)` | Declare per-extension logger |
 | `IBMW_DEFINE_EXTENSION_LOGGER(ns)` | Define per-extension logger |
@@ -647,7 +659,11 @@ Module packages are shared libraries containing one or more IBMW modules.
 ### Entry Points
 
 ```cpp
+#define IBMW_PKG_ABI_VERSION_V2 2
+
 typedef struct {
+    uint32_t abi_version;  // IBMW_PKG_ABI_VERSION_V2
+    uint32_t struct_size;  // sizeof(ibmw_pkg_entry_v2_t)
     size_t (*get_module_num)();
     const ibmw_string_view_t* (*get_module_name_list)();
     const ibmw_module_base_t* (*create_module)(ibmw_string_view_t module_name);
@@ -655,10 +671,14 @@ typedef struct {
     void (*set_driver_slot)(ibmw_string_view_t module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 
-IBMW_PKG_EXPORT ibmw_pkg_entry_t IbmwPkgEntry();
+IBMW_PKG_EXPORT ibmw_pkg_entry_v2_t IbmwPkgEntryV2();
 ```
+
+The loader rejects a library whose entry has another `abi_version` or a
+`struct_size` below `sizeof(ibmw_pkg_entry_v2_t)`. A library exporting only the
+old unversioned `IbmwPkgEntry` is rejected with a request to rebuild it.
 
 ### Convenience Macro
 
@@ -669,7 +689,7 @@ static const auto kModuleArray = std::array{
 IBMW_PKG_MAIN(kModuleArray)
 ```
 
-Generates the single `IbmwPkgEntry` symbol automatically.
+Generates the single `IbmwPkgEntryV2` symbol automatically.
 
 ---
 
@@ -717,8 +737,8 @@ typedef uint64_t ibmw_driver_slot_t;
 #define IBMW_DECLARE_DRIVER_SLOT(name)  /* injects kStableDriverId into a Driver class */
 ```
 
-Each of the nine `*TransportDriver` subclasses (local / tcp / http / udp /
-dds / mqtt / ros2 / iceoryx / zenoh) declares a stable slot id via
+Each of the ten `*TransportDriver` subclasses (local / tcp / http / udp /
+dds / mqtt / ros2 / iceoryx / zenoh / shm) declares a stable slot id via
 `IBMW_DECLARE_DRIVER_SLOT(...)`. That id flows through the broadcast chain
 the Engine fires at `Start()`:
 `engine.cc::Start()` -> `module_bus.cc::BroadcastDriverSlot` ->
@@ -728,15 +748,17 @@ the Engine fires at `Start()`:
 
 ```c
 typedef struct {
+    uint32_t abi_version;
+    uint32_t struct_size;
     /* ... module entry points ... */
     void (*set_driver_slot)(const char* module_name,
                             ibmw_driver_slot_t slot_id,
                             void* driver_ptr);
-} ibmw_pkg_entry_t;
+} ibmw_pkg_entry_v2_t;
 ```
 
 `IBMW_PKG_MAIN(...)` in `src/api/pkg/pkg_main.h` exports the
-entry symbol `IbmwPkgEntry` (typed slot). It must be visible via `nm -D`
+entry symbol `IbmwPkgEntryV2` (typed slot). It must be visible via `nm -D`
 from every pkg `.so`.
 
 ### `src/api/cpp/module_base.h` -- `IBMW_USE_DRIVER` / `IBMW_USE_DRIVERS`
@@ -794,7 +816,7 @@ ModuleBus::BroadcastDriverSlot(slot_id, driver_ptr)
     |  for each PackageHandle:
     v
 PackageHandle::SetDriverSlot(module_name, slot_id, driver_ptr)
-    |  -> IbmwPkgEntry.set_driver_slot
+    |  -> IbmwPkgEntryV2.set_driver_slot
     v
 Module::SetDriverSlot(slot_id, driver_ptr)        // override emitted by IBMW_USE_DRIVER(S)
     |  fold over the IBMW_DRIVER_ENTRY list

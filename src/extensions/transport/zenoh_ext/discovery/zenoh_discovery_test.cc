@@ -18,6 +18,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <gtest/gtest.h>
+#include <json/json.h>
 
 namespace ibmw::discovery {
 namespace {
@@ -109,7 +110,7 @@ struct Business {
   ZenohTransportDriver driver;
 
   Business(const std::string& config, const std::string& domain)
-      : driver(bus, domain.empty() ? "" : '/' + domain, 1024) {
+      : driver(bus, domain, 1024) {
     bus->Initialize(config, 1024 * 1024);
     driver.Initialize(YAML::Node(YAML::NodeType::Map));
   }
@@ -188,7 +189,8 @@ TEST_F(ZenohDiscoveryTest, DiscoversSilentEndpointsFromAllInstancesAndKeepsDomai
   ASSERT_TRUE(first.Add("/only_subscriber", EndpointRole::kSubscriber));
   ASSERT_TRUE(first.Add("/_hidden", EndpointRole::kPublisher));
   first.driver.Start();
-  Business second(client_, "robot/a");
+  // Surrounding slashes name the same domain (TRANS-047).
+  Business second(client_, "/robot/a/");
   ASSERT_TRUE(second.Add("/shared", EndpointRole::kPublisher));
   second.driver.Start();
   Business other(client_, "robot/b");
@@ -214,12 +216,20 @@ TEST_F(ZenohDiscoveryTest, DiscoversSilentEndpointsFromAllInstancesAndKeepsDomai
     EXPECT_NE(endpoint.topic_name, "/other_domain");
     EXPECT_EQ(endpoint.hidden, endpoint.topic_name == "/_hidden");
     EXPECT_TRUE(endpoint.wire_topic_name.ends_with("/robot/a"));
+    EXPECT_EQ(endpoint.wire_topic_name.find("//"), std::string::npos) << endpoint.wire_topic_name;
   }
   EXPECT_EQ(instances.size(), 2u);
   EXPECT_EQ(identities.size(), 5u);
   EXPECT_TRUE(std::any_of(snapshot.endpoints.begin(), snapshot.endpoints.end(), [](const auto& endpoint) {
     return endpoint.topic_name == "/only_subscriber" && endpoint.role == EndpointRole::kSubscriber;
   }));
+  // The observer accepts the same spellings as the drivers.
+  auto slashed = MakeProvider();
+  slashed->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_domain = "/robot/a/", .zenoh_config = client_});
+  const auto again = WaitFor(*slashed, 5);
+  ASSERT_TRUE(again.Succeeded());
+  EXPECT_EQ(again.endpoints.size(), 5u);
+  EXPECT_EQ(again.endpoints.front().source.domain, "robot/a");
 }
 
 TEST_F(ZenohDiscoveryTest, HandlesEmptyDomainRestartAndFailedInitialization) {
@@ -233,7 +243,10 @@ TEST_F(ZenohDiscoveryTest, HandlesEmptyDomainRestartAndFailedInitialization) {
   EXPECT_THROW(provider->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_config = directory_ / "missing"}), std::runtime_error);
   provider->Stop();
   provider->Start({.backend = DiscoveryBackend::kZenoh, .zenoh_config = client_});
-  EXPECT_EQ(WaitFor(*provider, 1).endpoints.size(), 1u);
+  const auto found = WaitFor(*provider, 1);
+  ASSERT_EQ(found.endpoints.size(), 1u);
+  // The empty domain adds no key suffix, so the key does not end with '/'.
+  EXPECT_FALSE(found.endpoints.front().wire_topic_name.ends_with('/')) << found.endpoints.front().wire_topic_name;
   provider->Stop();
   provider->Stop();
   // Withdrawal is observable without terminating the business session.
@@ -303,11 +316,24 @@ TEST_F(ZenohDiscoveryTest, TopicObserverReceivesOncePerWireSampleAndStops) {
   EXPECT_EQ(count.load(), stopped);
 }
 
+TEST(ZenohKeyExprTest, NormalizesLimitDomain) {
+  using ibmw::extensions::zenoh_extension::LimitDomainKeySuffix;
+  using ibmw::extensions::zenoh_extension::NormalizeLimitDomain;
+  EXPECT_EQ(NormalizeLimitDomain(""), "");
+  EXPECT_EQ(NormalizeLimitDomain("//"), "");
+  EXPECT_EQ(NormalizeLimitDomain("robot/a"), "robot/a");
+  EXPECT_EQ(NormalizeLimitDomain("/robot/a/"), "robot/a");
+  EXPECT_EQ(LimitDomainKeySuffix(""), "");
+  EXPECT_EQ(LimitDomainKeySuffix("robot"), "/robot");
+}
+
 TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding) {
   using ibmw::extensions::zenoh_extension::DecodeZenohPayload;
-  EXPECT_ANY_THROW(DecodeZenohPayload("abc"));
+  using ibmw::common::util::BufferOutOfBoundsException;
+  // The length prefix is parsed by the shared GetLengthPrefixedPayload.
+  EXPECT_THROW(DecodeZenohPayload("abc"), BufferOutOfBoundsException);
   auto bytes = Envelope("json", "{}");
-  EXPECT_ANY_THROW(DecodeZenohPayload(std::string_view(bytes).substr(0, bytes.size() - 1)));
+  EXPECT_THROW(DecodeZenohPayload(std::string_view(bytes).substr(0, bytes.size() - 1)), BufferOutOfBoundsException);
   bytes.append(100, 'x');
   const auto decoded = DecodeZenohPayload(bytes);
   EXPECT_EQ(decoded.serialization, "json");
@@ -318,6 +344,8 @@ TEST(ZenohSerializedCaptureTest, RejectsTruncationAndExcludesSharedMemoryPadding
 TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBeforeDetach) {
   Business sender(server_, "robot");
   ASSERT_TRUE(sender.Add("/capture", EndpointRole::kPublisher));
+  // The bus takes registrations only before its drivers start.
+  ASSERT_TRUE(sender.bus->RegisterPublisher("custom/capture/address", false));
   sender.driver.Start();
   Business receiver(client_, "robot");
   receiver.driver.Start();
@@ -327,7 +355,6 @@ TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBefor
   // The discovered address is authoritative; capture must not reconstruct it
   // from the logical topic/type or append a second domain suffix.
   options.wire_topic_name = "custom/capture/address";
-  ASSERT_TRUE(sender.bus->RegisterPublisher(options.wire_topic_name, false));
   std::promise<void> entered, release;
   auto ready = entered.get_future();
   auto released = release.get_future().share();
@@ -366,6 +393,10 @@ TEST_F(ZenohDiscoveryTest, NativeCaptureAttachesAfterStartAndDrainsCallbackBefor
 
 TEST_F(ZenohDiscoveryTest, NativeCaptureRejectsBroadKeysAndDoesNotMixTopics) {
   Business sender(server_, "robot");
+  // The bus takes registrations only before its drivers start.
+  for (const char* key : {"transport/exact", "transport/other", "transport/exact/child"}) {
+    ASSERT_TRUE(sender.bus->RegisterPublisher(key, false));
+  }
   sender.driver.Start();
   Business receiver(client_, "robot");
   receiver.driver.Start();
@@ -380,9 +411,6 @@ TEST_F(ZenohDiscoveryTest, NativeCaptureRejectsBroadKeysAndDoesNotMixTopics) {
     if (invalid) receiver.driver.DetachSerializedSubscriber(invalid);
   }
   options.wire_topic_name = "transport/exact";
-  ASSERT_TRUE(sender.bus->RegisterPublisher(options.wire_topic_name, false));
-  ASSERT_TRUE(sender.bus->RegisterPublisher("transport/other", false));
-  ASSERT_TRUE(sender.bus->RegisterPublisher("transport/exact/child", false));
   std::atomic<unsigned> received = 0, polluted = 0;
   const auto handle = receiver.driver.AttachSerializedSubscriber(options, [&](auto&& message) {
     if (message.payload->JoinToString() != "selected") ++polluted;

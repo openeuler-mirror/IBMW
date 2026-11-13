@@ -29,8 +29,9 @@ ibmw::rpc::Status RpcServerModule::OnAddTwoInts(
   (void)req;
   (void)rsp;
   // IBMW_RPC_SERVER_HANDLER_BODY_ADD_TWO_INTS_BEGIN
-  MW_INFO("AddTwoInts called");
-  // TODO: implement handler logic
+  rsp.sum(req.a() + req.b());
+  MW_INFO("AddTwoInts: {} + {} = {}", req.a(), req.b(), rsp.sum());
+  return ibmw::rpc::Status();
   // IBMW_RPC_SERVER_HANDLER_BODY_ADD_TWO_INTS_END
   return ibmw::rpc::Status();
 }

@@ -53,7 +53,12 @@ class DynamicLatch {
     std::ptrdiff_t prev_state = state_.fetch_sub(delta, std::memory_order_acq_rel);
 
     std::ptrdiff_t prev_count = GetCount(prev_state);
-    MW_ASSERT(prev_count >= delta, "DynamicLatch::CountDown underflow.");
+    if (prev_count < delta) [[unlikely]] {
+      // The subtraction borrowed into the closed flag; undo it before
+      // reporting so the latch keeps its count and closed state.
+      state_.fetch_add(delta, std::memory_order_acq_rel);
+      MW_ASSERT(false, "DynamicLatch::CountDown underflow.");
+    }
 
     if (prev_count == delta) {
       state_.notify_all();

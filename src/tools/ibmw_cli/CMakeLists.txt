@@ -4,16 +4,21 @@
 # Get all the files in folder
 file(GLOB_RECURSE IBMW_CLI_SRC_FILES "${CMAKE_CURRENT_SOURCE_DIR}/ibmw_cli/*")
 
+# PyInstaller writes its work and output trees into the build directory, not
+# the source tree.
 add_custom_target(
   ibmw_cli ALL
-  COMMAND ${Python3_EXECUTABLE} -m PyInstaller ${CMAKE_CURRENT_SOURCE_DIR}/ibmw_cli/ibmw_cli.spec
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  COMMAND ${Python3_EXECUTABLE} -m PyInstaller --noconfirm
+          --distpath ${CMAKE_CURRENT_BINARY_DIR}/dist
+          --workpath ${CMAKE_CURRENT_BINARY_DIR}/pyinstaller
+          ${CMAKE_CURRENT_SOURCE_DIR}/ibmw_cli/ibmw_cli.spec
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   COMMENT "${Python3_EXECUTABLE} -m PyInstaller ${CMAKE_CURRENT_SOURCE_DIR}/ibmw_cli/ibmw_cli.spec"
   DEPENDS ${IBMW_CLI_SRC_FILES})
 
 if(IBMW_INSTALL)
   install(
-    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/dist/
+    DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/dist/
     DESTINATION bin
     USE_SOURCE_PERMISSIONS)
 endif()

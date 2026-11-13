@@ -88,11 +88,15 @@ void ExtensionBus::Initialize(YAML::Node options_node) {
 
       auto ext_name = extension_ptr->Name();
 
-      // Check the extension name
-      MW_REQUIRE(
-          ext_name == extension_options.name,
-          "Require extension name '{}', but get extension name '{}' in lib {}.",
-          extension_options.name, ext_name, extension_options.path);
+      // Check the extension name. The extension is not initialized yet, so it
+      // can be destroyed and its lib unloaded instead of leaking both.
+      if (ext_name != extension_options.name) [[unlikely]] {
+        std::string got_name(ext_name);
+        ext_loader_ptr->UnLoadExtension();
+        MW_THROW(
+            "Require extension name '{}', but get extension name '{}' in lib {}.",
+            extension_options.name, got_name, extension_options.path);
+      }
 
       extension_options.path = ext_loader_ptr->GetDynamicLib().GetLibFullPath();
 
@@ -132,7 +136,12 @@ void ExtensionBus::Initialize(YAML::Node options_node) {
     } else {
       ret = extension_ptr->Initialize(core_ptr_);
     }
-    MW_REQUIRE(ret, "Init extension '{}' failed.", extension_options.name);
+    if (!ret) [[unlikely]] {
+      // Let the extension release whatever it acquired before failing; it is
+      // not in used_extension_vec_, so Shutdown() below will not visit it.
+      extension_ptr->Shutdown();
+      MW_THROW("Init extension '{}' failed.", extension_options.name);
+    }
 
     used_extension_vec_.emplace_back(extension_ptr);
     MW_TRACE("Load extension '{}' succeeded.", extension_options.name);
@@ -166,9 +175,10 @@ void ExtensionBus::Shutdown() {
 
   MW_INFO("[Extensions] stopped");
 
-  // Execute Shutdown in reverse order
-  for (auto itr = extension_loader_vec_.rbegin(); itr != extension_loader_vec_.rend(); ++itr) {
-    (*itr)->GetExtension()->Shutdown();
+  // Execute Shutdown in reverse initialization order, covering both loaded and
+  // directly registered extensions.
+  for (auto itr = used_extension_vec_.rbegin(); itr != used_extension_vec_.rend(); ++itr) {
+    (*itr)->Shutdown();
   }
 
   // extension_loader_vec_ cannot be cleaned up, there are many callbacks registered from other dlls

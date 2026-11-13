@@ -430,6 +430,7 @@ Subscribers:
 | `IBMW_BUILD_NET_EXTENSION` | HTTP/TCP/UDP Transport + RPC |
 | `IBMW_BUILD_MQTT_EXTENSION` | MQTT Transport |
 | `IBMW_BUILD_ICEORYX_EXTENSION` | Iceoryx 共享内存 Transport（零拷贝） |
+| `IBMW_BUILD_SHM_EXTENSION` | 自研共享内存 Transport（零拷贝，无 RouDi，不依赖 iceoryx；仅 Linux/OHOS）。可与 iceoryx 同时开启；预设 `shm` |
 | `IBMW_BUILD_GRPC_EXTENSION` | gRPC RPC |
 | `IBMW_BUILD_ROS2_EXTENSION` | ROS2 Transport **（已废弃）**—— 改用 DDS Extension |
 | `IBMW_BUILD_ECHO_EXTENSION` | Echo RPC（测试用） |
@@ -514,7 +515,7 @@ bash start_pubsub_local.sh
 - `core_.GetExecutor().GetExecutor("name")` —— 获取 Executor 句柄
 - `executor.Dispatch(task)` / `executor.DispatchAfter(duration, task)`
 - Strand Executor 实现串行（线程安全）执行
-- `ibmw::executor::CreateTimer(executor, interval, callback)` —— 周期 Timer
+- `ibmw::executor::CreateTimer(executor, interval, callback)` —— 周期 Timer（须保存返回的句柄，句柄释放后定时器停止）
 - `co_await co::Schedule(executor)` —— 协程调度
 - 实时：`SCHED_FIFO`、`SCHED_RR` 调度策略 + CPU 绑定
 
@@ -976,7 +977,10 @@ class MultiDriverModule : public ibmw::Module {
 所有 IBMW 配置位于 `ibmw:` 顶层 key 下。模块专属配置使用与 Module 名匹配的
 独立顶层 key。
 
-支持环境变量：`${MY_VAR}` 在解析前会被替换。
+支持环境变量：解析 YAML 之后，键或值中的 `${MY_VAR}` 会被替换为该变量的值（未设置时为空字符串）。
+变量值只作为文本插入所在的单个标量，不会再被当作 YAML 解析（例如 `[a, b]` 仍是字符串）。未加引号的值展开为空、`~` 或 `null` 时为 null，
+加引号（`"${MY_VAR}"`）时为字符串。在 `[...]`、`{...}` 流式写法中需要加引号，
+例如 `["${MY_VAR}", b]`。
 
 ### 顶层结构
 
@@ -1210,7 +1214,7 @@ ibmw:
 ibmw:
   messaging:
     drivers:
-      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx
+      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx, shm
         options: { ... }
     publishers:
       - topic: <regex>       # 匹配 Topic 名
@@ -1226,7 +1230,7 @@ ibmw:
 
 | Key | 类型 | 默认 | 说明 |
 |-----|------|------|------|
-| `subscriber_use_inline_executor` | bool | `false` | 在 publisher 线程中运行回调 |
+| `subscriber_use_inline_executor` | bool | `true` | 在 publisher 线程中运行回调 |
 | `subscriber_executor` | string | `""` | 默认 subscriber 回调 Executor |
 
 ---
@@ -1246,6 +1250,13 @@ ibmw:
         enable: <bool>                 # 启用/禁用 Module
         cfg_file_path: <string>        # Module 配置文件路径
 ```
+
+库路径（`packages[].path`、`extensions.items[].path`、`runtime_graph.type_support_pkgs`）在运行时中按当前工作目录解析相对路径，
+建议使用绝对路径。所有以包含 `/` 的路径给出的库（Module 包、Extension、CLI provider、TypeSupport 包，包括
+`ibmw topic`/`ibmw bag` 的 `--type-support`），只有在库文件（解析符号链接后）及其所在目录属于当前用户或 root、
+且其他用户不可写时才会加载；所有人可写的目录只有设置了粘滞位（如 `/tmp`）才被接受。允许组可写。
+OHOS 上，属主为应用 uid 范围（10000）以下、且不是 shell（2000）的系统服务时也接受，但此时文件和目录不得组可写：已安装 HAP 的库属于安装服务而不是应用。不检查更上层的目录。
+实际加载的是解析后的路径，因此符号链接库 RUNPATH 中的 `$ORIGIN` 指向链接目标所在目录。不含 `/` 的库名（`libfoo.so`）仍按系统加载器搜索路径加载。
 
 ---
 
@@ -1286,8 +1297,8 @@ Extension 选项：
 
 | Key | 类型 | 默认 | 说明 |
 |-----|------|------|------|
-| `thread_num` | uint32 | `1` | gRPC 线程数 |
-| `listen_ip` | string | `"0.0.0.0"` | 监听地址 |
+| `thread_num` | uint32 | `2` | gRPC 线程数 |
+| `listen_ip` | string | `""` | 监听地址（IPv4）；`listen_ip` 与 `listen_port` 都设置时才启动服务端 |
 | `listen_port` | uint16 | `0` | 监听端口 |
 
 gRPC RPC Driver 选项（`type: grpc`）：
@@ -1305,12 +1316,12 @@ Extension 选项：
 | Key | 类型 | 默认 | 说明 |
 |-----|------|------|------|
 | `thread_num` | uint32 | -- | 网络 I/O 线程数（必需） |
-| `http_options.listen_ip` | string | `"0.0.0.0"` | HTTP 监听 IP |
-| `http_options.listen_port` | uint16 | `0` | HTTP 监听端口 |
-| `tcp_options.listen_ip` | string | `"0.0.0.0"` | TCP 监听 IP |
-| `tcp_options.listen_port` | uint16 | `0` | TCP 监听端口 |
-| `udp_options.listen_ip` | string | `"0.0.0.0"` | UDP 监听 IP |
-| `udp_options.listen_port` | uint16 | `0` | UDP 监听端口 |
+| `http_options.listen_ip` | string | `"127.0.0.1"` | HTTP 监听 IP（IPv4 或 IPv6） |
+| `http_options.listen_port` | uint16 | -- | HTTP 监听端口（设置 `http_options` 时必填） |
+| `tcp_options.listen_ip` | string | `"127.0.0.1"` | TCP 监听 IP（IPv4 或 IPv6） |
+| `tcp_options.listen_port` | uint16 | -- | TCP 监听端口（设置 `tcp_options` 时必填） |
+| `udp_options.listen_ip` | string | `"127.0.0.1"` | UDP 监听 IP（IPv4 或 IPv6） |
+| `udp_options.listen_port` | uint16 | -- | UDP 监听端口（设置 `udp_options` 时必填） |
 | `udp_options.max_pkg_size` | uint32 | `65535` | 最大 UDP 数据报 |
 
 #### MQTT Extension
@@ -1321,7 +1332,7 @@ Extension 选项：
 |-----|------|------|------|
 | `broker_addr` | string | -- | Broker 地址（必需） |
 | `client_id` | string | -- | Client ID（必需） |
-| `max_pkg_size_k` | uint32 | `0` | 最大包大小 KB |
+| `max_pkg_size_k` | uint32 | `1024` | 最大包大小 KB，至多 2097151（2 GiB - 1） |
 | `reconnect_interval_ms` | uint32 | `5000` | 重连间隔 |
 | `truststore` | string | `""` | CA 证书路径（TLS） |
 | `client_cert` | string | `""` | Client 证书（TLS） |
@@ -1383,6 +1394,39 @@ ibmw:
 跨进程 Pub/Sub 时，每个进程使用 **不同的** `runtime_id`（但都连接同一
 RouDi），并且 Subscriber 必须在 Publisher 第一次发送之前启动。
 
+#### Shm Extension（自研共享内存）
+
+零拷贝共享内存 Transport，不需要 RouDi，也不链接 iceoryx（构建开关
+`IBMW_BUILD_SHM_EXTENSION`，仅 Linux 内核，含 OHOS）。兼容 iceoryx_ext 的 API
+（`shm_ext/iox_style_publisher.h`），但两者**不互通**：同一 Topic 的所有进程要用同一种。
+
+```yaml
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          runtime_id: my_shm_app
+          # driver_name: iceoryx  # 原位替换 iceoryx_extension，messaging 段保持 type: iceoryx
+  messaging:
+    drivers:
+      - type: shm
+    publishers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+    subscribers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+```
+
+`driver_name` 缺省为 `shm`。核心只使用第一个同名驱动，所以与 `iceoryx_extension`
+同时加载时不能设 `driver_name: iceoryx`，否则启动失败。OHOS 上必须设置 `root_dir`
+（或环境变量 `IBMW_SHM_ROOT`）。`driver_name: iceoryx` 只对按名查找驱动的代码透明：驱动槽位恒为
+`shm`，按 iceoryx 驱动类型绑定的模块（`IBMW_USE_DRIVER`、生成的 `direct_iceoryx_*` 模块）要改用 shm
+头文件或重新生成。全部选项、行为差异与未替代项见
+[自研共享内存使用与迁移](../../selfdev/shm/docs/使用与迁移.md)。
+
 #### ROS2 Extension
 
 | Key | 类型 | 默认 | 说明 |
@@ -1437,7 +1481,7 @@ ibmw topic pub /header dds:ibmw::protocols::common::Header \
 ```
 
 必须选择一个传输后端：`--dds`、`--ros2`、`--zenoh`、`--mqtt`、`--tcp`、
-`--udp`、`--http`、`--iceoryx` 或 `--local`。类型库通过可重复的
+`--udp`、`--http`、`--iceoryx`、`--shm` 或 `--local`。类型库通过可重复的
 `--type-support` 提供；可用 `--transport-library` 覆盖默认驱动库路径。
 `--domain`、`--dds-domain`、`--ros-domain`、`--zenoh-domain` 和
 `--zenoh-config` 沿用观察命令的连接参数含义。`--ros2-compatible` 仅用于 DDS，
@@ -1452,6 +1496,7 @@ ibmw topic pub /header dds:ibmw::protocols::common::Header \
 | TCP / UDP | 必须提供 `--target IPv4:port`，可重复指定多个接收端 |
 | HTTP | 必须提供 `--target http://host:port`，可重复指定多个接收端 |
 | Iceoryx | 先启动 RouDi；可选 `--iceoryx-runtime-id`、`--shm-init-size`（默认 1024 字节） |
+| Shm（自研） | 无需 RouDi；可选 `--shm-domain`、`--shm-root-dir`、`--shm-runtime-id`、`--shm-group`、`--shm-init-size` 等 `--shm-*` 选项 |
 | local | 仅当前 CLI 进程内发送，无法投递给另一进程的 local 订阅者 |
 
 MQTT TLS 连接使用 `ssl://host:port`，必须提供 `--mqtt-truststore`；
@@ -1640,7 +1685,8 @@ session 上通过 queryable 提供端点元信息。普通 Zenoh 程序和旧版
 不会自动提供这些元信息。
 
 `--zenoh-domain` 必须精确匹配业务 YAML 中的 `limit_domain` 原值；省略时只查
-空域，并非全部域。`--zenoh-config` 接受查询端的 Zenoh 原生配置，例如连接
+空域，并非全部域。扩展会忽略 `limit_domain` 首尾的 `/`，配置时请直接写不带
+`/` 的域名。`--zenoh-config` 接受查询端的 Zenoh 原生配置，例如连接
 peer/router 的地址；查询 session 必须能到达业务 session。省略配置文件时
 使用 Zenoh 默认配置，包括原生 scouting 设置。UDP scouting 用于建立 session
 连接，随后通过 IBMW 元信息查询获取逻辑话题名和类型名。

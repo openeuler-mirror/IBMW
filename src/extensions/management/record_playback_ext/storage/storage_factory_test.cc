@@ -60,8 +60,14 @@ class TestStorage final : public Storage {
 
 TEST(StorageFactoryTest, BuiltinsAndCustomPluginAreDiscoverable) {
   constexpr auto kPluginId = "record-playback-test-storage";
-  RegisterStoragePlugin(
-      kPluginId, [] { return std::make_unique<TestStorage>(); });
+  // The registry is process wide and rejects a second registration: register
+  // once so that the test also passes with --gtest_repeat.
+  static const bool registered = [] {
+    RegisterStoragePlugin(
+        kPluginId, [] { return std::make_unique<TestStorage>(); });
+    return true;
+  }();
+  EXPECT_TRUE(registered);
 
   const auto plugins = AvailableStoragePlugins();
   EXPECT_TRUE(std::is_sorted(plugins.begin(), plugins.end()));

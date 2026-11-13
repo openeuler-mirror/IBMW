@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 // Direct stable-slot Reporter V1 hot-hook benchmark used by the preregistered
 // Core Metrics gate. Registration is deliberately outside timed regions.
 #include <array>
@@ -150,6 +153,17 @@ int main(int argc, char** argv) {
                  "empty,null,noop_abi,atomic\n";
     return 1;
   }
+  // The slot kind names the gate this run belongs to; the hook itself is the
+  // same ABI call for every transport.
+  std::string_view hot_kind = "direct_iceoryx_loan";
+  if (const char* requested_kind = std::getenv("IBMW_REPORTER_HOT_KIND")) {
+    hot_kind = requested_kind;
+    if (hot_kind != "direct_iceoryx_loan" && hot_kind != "direct_shm_loan") {
+      std::cerr << "IBMW_REPORTER_HOT_KIND must be direct_iceoryx_loan or "
+                   "direct_shm_loan\n";
+      return 1;
+    }
+  }
 #ifdef IBMW_ENABLE_CORE_METRICS
   auto& metrics =
       ibmw::runtime::core::observability::CoreMetricsController();
@@ -251,12 +265,11 @@ int main(int argc, char** argv) {
   }
   ibmw_reporter_slot_v1* slot = nullptr;
   if (api != nullptr) {
-    static constexpr char kind[] = "direct_iceoryx_loan";
     static constexpr char metric[] = "hot_hook";
     ibmw_reporter_slot_descriptor_v1 d{};
     d.abi_version = IBMW_REPORTER_ABI_VERSION_V1;
     d.struct_size = sizeof(d);
-    d.kind = {kind, sizeof(kind) - 1};
+    d.kind = {hot_kind.data(), hot_kind.size()};
     d.metric = {metric, sizeof(metric) - 1};
     slot = api->register_slot(api->owner, &d);
     if (slot == nullptr) {

@@ -21,7 +21,10 @@ all with DDS IDL / FastCDR as the primary type system.
 - **RPC framework** -- IDL-based request/response with pluggable backends
   and four calling patterns: synchronous, async callback, future, coroutine
 - **Transport (pub/sub)** -- Topic-based publish/subscribe with backend routing
-- **Zero-copy support** -- Loaned message API for shared-memory transports
+- **Zero-copy support** -- Loaned message API for shared-memory transports:
+  Iceoryx, or the optional self-developed `shm` transport
+  (`IBMW_BUILD_SHM_EXTENSION`, no RouDi daemon, Linux/OHOS; see
+  [usage and migration](selfdev/shm/docs/使用与迁移.md), in Chinese)
 - **Multi-driver modules** -- Bind multiple transport drivers (e.g., DDS +
   Iceoryx) to typed slots in a single module via the variadic
   `IBMW_USE_DRIVERS(...)` macro
@@ -47,7 +50,7 @@ all with DDS IDL / FastCDR as the primary type system.
 | [Developer Guide](docs/contributing/developer-guide.md) | Build system, code structure, writing modules and extensions |
 | [Cross-compilation Configure Guide](docs/guides/cross-compilation.md) | aarch64 Linux configure approach, target dependency model, and scoped validation boundaries |
 | [OHOS Xiaoyi Humble Cross-build Guide, Chinese](docs/guides/ohos-xiaoyi-humble-cross-build-guide.zh.md) | OHOS ARM64 compile-only guide for the Xiaoyi Humble environment |
-| Minimal ROS2 build/deploy | Start with `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`; the [IBMW guide](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) is a concept/boundary index only |
+| Minimal ROS2 build/deploy | Requires the separate `IBMW_together` companion repository. Start with `IBMW_together/ros2_minimal_deps/docs/ohos-std-msgs-string-cross-build-deploy-interop.zh.md`; the [IBMW guide](docs/guides/ohos-dds-ros2-minimal-interop.zh.md) is a concept/boundary index only |
 | [ROS2 Interface Import User Guide](docs/guides/ros2-interface-import-user-guide.md) | User-facing guide for `ibmw-gen import` modes, artifacts, and verification lanes |
 | [ROS2 Action DDS-only Adapter Guide](docs/experimental/ros2-action-dds-only-adapter-guide.md) | Experimental low-code developer guide for DDS-only Action servers |
 | [API Reference](docs/reference/api-reference.md) | Complete C++ SDK, C ABI, extension, and package API |
@@ -87,6 +90,8 @@ set -u
 
 # Recommended rcl-free build: DDS transport plus build-time ROS2 message types.
 # Do not enable deprecated IBMW_BUILD_WITH_ROS2/IBMW_BUILD_ROS2_EXTENSION here.
+# The full preset includes the self-developed shm transport, which needs a
+# Linux kernel; on other hosts add -DIBMW_BUILD_SHM_EXTENSION=OFF.
 cmake --preset full -DIBMW_BUILD_TESTS=ON -DIBMW_BUILD_BENCHMARKS=ON \
                     -DIBMW_BUILD_DDS_EXTENSION=ON -DIBMW_BUILD_ROS2_TYPES=ON \
                     -DIBMW_BUILD_WITH_ROS2=OFF -DIBMW_BUILD_ROS2_EXTENSION=OFF
@@ -124,7 +129,7 @@ rm -f ibmw-config.cmake ibmw-config-version.cmake
 For an already authenticated Humble DDS prefix, the exact preset commands are:
 
 ```bash
-export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/path/to/dds-prefix
+export IBMW_ROS2_MINIMAL_SDK_PREFIX=/absolute/dds-prefix
 cmake --preset together-ros2-minimal-sdk
 cmake --build --preset together-ros2-minimal-sdk
 ```
@@ -132,12 +137,13 @@ cmake --build --preset together-ros2-minimal-sdk
 The sibling `ros2_minimal_deps/scripts/ibmw_dds_compat.py` CLI is the recommended
 entrypoint for OHOS ARM64 because it diagnoses the prefix/toolchain, owns a
 dedicated build directory, and validates the resulting CMake cache.
-OpenCode users can invoke `/dds-compatibility`. Copyable sibling workflow:
+`IBMW_together` is a separate companion repository, not part of this repository: check it out next to this repository first, or the commands below fail with file not found.
+Copyable sibling workflow:
 ```bash
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py doctor --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 python3 ../IBMW_together/ros2_minimal_deps/scripts/ibmw_dds_compat.py run --target ohos-arm64 --dds-prefix /absolute/prefix --allow-network
 ```
-Default mode requires a message-complete prefix with the `std_msgs` config/header. DDS substrate-only builder output requires `--dds-only`. Prefix precedence is explicit `--dds-prefix`, then `IBMW_ROS2_MINIMAL_SDK_PREFIX`, then exactly one canonical candidate. Offline use requires a complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout. If `/dds-compatibility` is absent after adding/updating the skill, restart OpenCode.
+Default mode requires a message-complete prefix with the `std_msgs` config/header. DDS substrate-only builder output requires `--dds-only`. Prefix precedence is explicit `--dds-prefix`, then `IBMW_ROS2_MINIMAL_SDK_PREFIX`, then exactly one canonical candidate. Offline use requires a complete prepopulated CMake FETCHCONTENT_BASE_DIR tree containing every required source layout.
 
 > **ROS2 rcl Deprecation Notice**
 >
@@ -308,7 +314,7 @@ ibmw/
     |  pkg/                     #   Package ABI (dynlib entry points)
     |  type_support/            #   Type support ABI (serialization plugins)
     extensions/                 # Pluggable extensions
-    |  transport/               #   DDS, Net (TCP/UDP), MQTT, ROS2, Iceoryx, Zenoh
+    |  transport/               #   DDS, Net (TCP/UDP), MQTT, ROS2, Iceoryx, Shm, Zenoh
     |  rpc/                     #   gRPC
     |  observability/           #   Log Control, Topic Logger, OpenTelemetry
     |  management/              #   Parameter, Time Manipulator, Service
@@ -383,6 +389,10 @@ size matrix (1KiB / 4KiB / 16KiB / 64KiB / 256KiB / 1MiB).
 source /opt/ros/humble/setup.bash
 scripts/run_bench_sweep.sh --reset-csv
 ```
+
+The self-developed shm transport adds the `shm_send`, `shm_loan_v2`,
+`shm_loaned_pod` and `shm_loaned_ctx` samples (select them with
+`IBMW_BENCH_SAMPLES`; they also build without Iceoryx).
 
 The sweep script handles per-sample SHM cleanup, full 6×7 CSV emission,
 and is documented step-by-step in

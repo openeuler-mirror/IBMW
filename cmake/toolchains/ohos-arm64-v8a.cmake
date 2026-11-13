@@ -41,5 +41,10 @@ set(CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG "-Wl,-soname," CACHE STRING
     "SONAME linker flag for C++ shared libraries on OHOS")
 set(CMAKE_PLATFORM_NO_VERSIONED_SONAME ON CACHE BOOL
     "Use unversioned SONAME behavior for OHOS shared libraries")
+# CMake has no OHOS platform module, so ENABLE_EXPORTS adds nothing without these.
+set(CMAKE_EXE_EXPORTS_C_FLAG "-Wl,--export-dynamic" CACHE STRING
+    "Linker flag exporting executable symbols (ENABLE_EXPORTS) on OHOS")
+set(CMAKE_EXE_EXPORTS_CXX_FLAG "-Wl,--export-dynamic" CACHE STRING
+    "Linker flag exporting executable symbols (ENABLE_EXPORTS) on OHOS")
 
 include("${_ibmw_ohos_toolchain}")

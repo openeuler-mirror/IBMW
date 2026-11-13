@@ -7,7 +7,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include <fastdds/dds/publisher/DataWriter.hpp>
@@ -31,6 +33,7 @@
 #include "dds_ext/dds_bus.h"
 #include "dds_ext/global.h"
 #include "dds_ext/fastdds_compat.h"
+#include "dds_ext/rpc_timeout_timer.h"
 
 namespace ibmw::extensions::dds_extension {
 
@@ -52,6 +55,17 @@ inline bool DdsRpcWriteSucceeded(dds_rpc_return::ReturnCode_t ret) {
   return ret == kDdsRpcReturnOk;
 }
 
+// Request id a reply answers, if it is meant for the client whose reply reader
+// is `reader_guid`. Requests carry 32-bit ids with high word 0 (the client
+// tool keys records by uint32_t and skips ids still in flight on wrap), so a
+// reply with any other high word is not one of ours.
+inline std::optional<uint32_t> DdsRpcReplySeq(
+    const dds_rpc_rtps::SampleIdentity& related_id, const dds_rpc_rtps::GUID_t& reader_guid) {
+  if (related_id.writer_guid() != reader_guid || related_id.sequence_number().high != 0) [[unlikely]]
+    return std::nullopt;
+  return related_id.sequence_number().low;
+}
+
 class DdsRpcDriver : public runtime::core::service::ServiceDriver,
                       public ibmw::extension::ServiceClientReadinessV1 {
  public:
@@ -62,7 +76,7 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver,
 
  public:
   explicit DdsRpcDriver(DdsBus& dds_bus);
-  ~DdsRpcDriver() override = default;
+  ~DdsRpcDriver() override;
 
   std::string_view Name() const noexcept override { return "dds"; }
 
@@ -161,14 +175,19 @@ class DdsRpcDriver : public runtime::core::service::ServiceDriver,
  private:
   enum class State : uint32_t { kPreInit, kInit, kStart, kShutdown };
 
+  void WaitForShutdown() const;
+
   DdsBus& dds_bus_;
   Options options_;
   std::atomic<State> state_ = State::kPreInit;
+  std::atomic<bool> shutdown_done_ = false;  // set when the first Shutdown returns
+  std::atomic<std::thread::id> shutdown_thread_;  // runs the first Shutdown
 
   const runtime::core::service::ServiceCatalog* service_catalog_ptr_ = nullptr;
 
   GetExecutorFunc get_executor_func_;
   ibmw::executor::ExecutorHandle timeout_executor_;
+  std::unique_ptr<RpcTimeoutTimer> builtin_timeout_timer_;  // when none is configured
 
   eprosima::fastdds::dds::Publisher* publisher_ = nullptr;
   eprosima::fastdds::dds::Subscriber* subscriber_ = nullptr;

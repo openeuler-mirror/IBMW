@@ -10,7 +10,7 @@
 #   IBMW_HAS_DDS, IBMW_HAS_ROS2, IBMW_HAS_ICEORYX, IBMW_HAS_ZENOH,
 #   IBMW_HAS_MQTT, IBMW_HAS_NET   (from IBMW_BUILD_*_EXTENSION options)
 #   IBMW_HAS_LOCAL                (always 1; local transport has no flag)
-#   IBMW_HAS_SHM                  (= IBMW_HAS_ICEORYX || 0; SHM-DDS reserved)
+#   IBMW_HAS_SHM                  (= IBMW_HAS_ICEORYX || IBMW_HAS_SELFDEV_SHM; SHM-DDS reserved)
 #   IBMW_LOANED_SHM_OPT_OUT       (integer shim for IBMW_ALLOW_LOANED_WITHOUT_SHM
 #                                  so it can be referenced inside C++ constant
 #                                  expressions; the `defined` operator is
@@ -37,6 +37,7 @@
 set(IBMW_HAS_DDS     ${IBMW_BUILD_DDS_EXTENSION})
 set(IBMW_HAS_ROS2    ${IBMW_BUILD_ROS2_EXTENSION})
 set(IBMW_HAS_ICEORYX ${IBMW_BUILD_ICEORYX_EXTENSION})
+set(IBMW_HAS_SELFDEV_SHM ${IBMW_BUILD_SHM_EXTENSION})
 set(IBMW_HAS_ZENOH   ${IBMW_BUILD_ZENOH_EXTENSION})
 set(IBMW_HAS_MQTT    ${IBMW_BUILD_MQTT_EXTENSION})
 set(IBMW_HAS_NET     ${IBMW_BUILD_NET_EXTENSION})

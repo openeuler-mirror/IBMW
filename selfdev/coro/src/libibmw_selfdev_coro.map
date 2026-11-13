@@ -1,0 +1,15 @@
+/* Copyright (c) 2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+   All rights reserved. */
+
+/* Dynamic symbols of libibmw_selfdev_coro: only the IBMW_SELFDEV_CORO_API
+   functions (ibmw::selfdev::coro, all other symbols there are hidden). Every
+   std:: instantiation stays local to the library. No version node, so the
+   symbols stay unversioned as before. */
+{
+  global:
+    extern "C++" {
+      ibmw::selfdev::coro::*;
+    };
+  local:
+    *;
+};

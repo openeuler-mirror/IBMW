@@ -4,7 +4,10 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
+#include <string>
 #include <unordered_set>
+#include <utility>
 
 #include "cpp/executor/executor.h"
 #include "engine/transport/transport_driver.h"
@@ -29,7 +32,7 @@ class InProcessTransport : public TransportDriver {
  public:
   InProcessTransport()
       : logger_ptr_(std::make_shared<ibmw::common::util::LoggerWrapper>()) {}
-  ~InProcessTransport() override = default;
+  ~InProcessTransport() override;
 
   std::string_view Name() const noexcept override { return "local"; }
  IBMW_DECLARE_DRIVER_SLOT("local")
@@ -76,6 +79,40 @@ class InProcessTransport : public TransportDriver {
                   std::unordered_set<
                       std::string>>>>;  // module_name
   SubscribeIndexMap subscribe_index_map_;
+
+  // Counts Send() calls that have subscribers and queued async deliveries
+  // while a subscriber executor is configured. Handlers are owned by the
+  // catalog, which is released right after driver shutdown, so Shutdown()
+  // drains these first (COMM-006). Unused (zero cost) with the default
+  // inline executor.
+  //
+  // The counter lives in its own allocation: a task the executor discards
+  // after an incomplete drain (timeout, or shutdown from the subscriber
+  // executor) still decrements it after the driver is gone, so the
+  // destructor leaks it instead of freeing it while non-zero.
+  struct alignas(64) InflightCounter {
+    std::atomic<uint64_t> value{0};
+  };
+  class InflightToken {
+   public:
+    InflightToken(InflightCounter& counter, std::memory_order order) noexcept
+        : counter_(&counter.value) { counter_->fetch_add(1, order); }
+    InflightToken(InflightToken&& other) noexcept
+        : counter_(std::exchange(other.counter_, nullptr)) {}
+    InflightToken& operator=(InflightToken&&) = delete;
+    ~InflightToken() {
+      if (counter_) counter_->fetch_sub(1, std::memory_order_release);
+    }
+
+   private:
+    std::atomic<uint64_t>* counter_;
+  };
+  void DrainInflight();
+  void ReportIncompatibleCopy(const TransportInfo& pub_info, std::string_view sub_pkg_path) noexcept;
+
+  std::mutex incompatible_copy_mutex_;
+  std::unordered_set<std::string> incompatible_copy_reported_;
+  InflightCounter* inflight_ = new InflightCounter();
 };
 
 }  // namespace ibmw::runtime::core::transport

@@ -4,7 +4,7 @@
 #pragma once
 
 #include <string>
-#include <stdexcept>
+#include <exception>
 #include <unordered_map>
 
 #include "engine/logger/logging_subsystem.h"
@@ -46,17 +46,39 @@ class LogControlServiceImpl : public ibmw::rpc::ServiceBase {
     RegisterServiceFunc(name, nullptr, GetLogControlTypeSupport<Req>(), GetLogControlTypeSupport<Rsp>(),
         ibmw::rpc::ServiceFunc([this, handler](const ibmw_service_context_base_t*, const void* req,
                                              void* rsp, ibmw_function_base_t* callback) {
-          uint32_t status = 0;
-          try {
-            if (!logging_subsystem_ptr_) throw std::logic_error("Logging subsystem not initialized.");
-            (this->*handler)(*static_cast<const Req*>(req), *static_cast<Rsp*>(rsp));
-          } catch (...) {
-            status = IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
-          }
+          const uint32_t status = Invoke(handler, req, rsp);
           const auto* ops = static_cast<const ibmw_function_service_callback_ops_t*>(callback->ops);
           ops->invoker(callback->object_buf, status);
         }));
   }
+
+ protected:
+  // Runs a handler so that the callback is always invoked. The handlers answer
+  // NOT_READY themselves without a logging subsystem (EXT-014); an exception is
+  // logged and answered with IBMW_RPC_STATUS_SVR_HANDLE_FAILED and
+  // INTERNAL_ERROR, discarding a partly filled response (as parameter_ext).
+  template <typename Req, typename Rsp>
+  uint32_t Invoke(void (LogControlServiceImpl::*handler)(const Req&, Rsp&), const void* req,
+                  void* rsp) noexcept {
+    auto& typed_rsp = *static_cast<Rsp*>(rsp);
+    try {
+      (this->*handler)(*static_cast<const Req*>(req), typed_rsp);
+      return 0;
+    } catch (const std::exception& e) {
+      LogHandlerFailure(e.what());
+    } catch (...) {
+      LogHandlerFailure("unknown exception");
+    }
+    try {
+      typed_rsp = Rsp{};
+      SetErrorCode(ErrorCode::kInternalError, typed_rsp);
+    } catch (...) {
+      // Out of memory: the status alone reports the failure.
+    }
+    return IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
+  }
+
+  static void LogHandlerFailure(const char* what) noexcept;
 
   void HandleGetModuleLogLevel(
       const ibmw::protocols::log_control_extension::GetModuleLogLevelReq& req,
@@ -71,13 +93,17 @@ class LogControlServiceImpl : public ibmw::rpc::ServiceBase {
     kInvalidModuleName = 1,
     kInvalidLogLevel = 2,
     kEmptySettings = 3,
+    kNotReady = 4,
+    kInternalError = 5,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
       "",
       "INVALID_MODULE_NAME",
       "INVALID_LOG_LEVEL",
-      "EMPTY_SETTINGS"};
+      "EMPTY_SETTINGS",
+      "NOT_READY",
+      "INTERNAL_ERROR"};
 
   template <typename Rsp>
   void SetErrorCode(ErrorCode code, Rsp& rsp) {
@@ -85,6 +111,7 @@ class LogControlServiceImpl : public ibmw::rpc::ServiceBase {
     rsp.msg = std::string(kErrorInfoArray[static_cast<uint32_t>(code)]);
   }
 
+ private:
   ibmw::runtime::core::logger::LoggingSubsystem* logging_subsystem_ptr_ = nullptr;
 };
 

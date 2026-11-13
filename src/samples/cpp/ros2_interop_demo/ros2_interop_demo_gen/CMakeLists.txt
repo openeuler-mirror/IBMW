@@ -27,7 +27,7 @@ find_package(ibmw 0.1.0 REQUIRED)
 
 # --------------------------------------------------------------------------
 # Helper: force whole-archive link for ros2_types_impl static registrars.
-# Used by ros2_interop_* and direct_iceoryx_* modules.
+# Used by ros2_interop_*, direct_iceoryx_* and direct_shm_* modules.
 # --------------------------------------------------------------------------
 function(ibmw_whole_archive_link TARGET LIB)
   if(APPLE)

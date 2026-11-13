@@ -1,0 +1,11 @@
+# Allow-list for ibmw_selfdev_coro_exports: the defined dynamic symbols of
+# libibmw_selfdev_coro, demangled, with every standard library namespace of
+# the form std::__<name>:: (inline std::__n4861::, std::__1::, and also
+# std::__cxx11::, std::__exception_ptr::) shortened to std:: (see
+# check_exports.cmake). Adding a symbol is backward compatible; bump
+# SOVERSION (CMakeLists.txt) when a symbol is removed or its signature, or
+# the layout of the types it uses, changes.
+ibmw::selfdev::coro::detail::CurrentStartRecord()
+ibmw::selfdev::coro::detail::DetachedScope()
+ibmw::selfdev::coro::detail::TaskPromiseBase::Finish()
+ibmw::selfdev::coro::detail::TaskPromiseBase::Start(std::coroutine_handle<void>, std::coroutine_handle<void>)

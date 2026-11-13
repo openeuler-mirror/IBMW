@@ -63,7 +63,8 @@ if(IBMW_BUILD_TESTS AND IBMW_BUILD_ZENOH_EXTENSION)
   set(_zenoh_test_source ${PROJECT_SOURCE_DIR}/src/extensions/transport/zenoh_ext)
   add_executable(ibmw_bag_auto_schema_test auto_schema_record_test.cc
     ${_zenoh_test_source}/zenoh_bus.cc ${_zenoh_test_source}/global.cc
-    ${_zenoh_test_source}/discovery/zenoh_discovery_responder.cc)
+    ${_zenoh_test_source}/discovery/zenoh_discovery_responder.cc
+    ${_zenoh_test_source}/discovery/zenoh_service_discovery_responder.cc)
   target_include_directories(ibmw_bag_auto_schema_test PRIVATE
     ${PROJECT_SOURCE_DIR}/src/extensions/transport ${PROJECT_SOURCE_DIR}/src/extensions/management)
   target_link_libraries(ibmw_bag_auto_schema_test PRIVATE

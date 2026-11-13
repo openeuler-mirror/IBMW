@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "c/util/string.h"
@@ -88,15 +89,29 @@ typedef struct {
   /**
    * @brief Function to get all meta keys
    *
+   * The array is owned by the context and stays valid until its meta data
+   * changes or it is destroyed. Concurrent calls are safe while the meta data
+   * is not modified.
    */
   ibmw_string_view_array_t (*get_meta_keys)(void* ctx);
 
   /**
    * @brief Function to get all meta keys and values
    *
+   * The array is owned by the context and stays valid until its meta data
+   * changes or it is destroyed. Concurrent calls are safe while the meta data
+   * is not modified.
    */
   ibmw_string_view_array_t (*get_meta_key_vals)(void* ctx);
 
+
+  /**
+   * @brief Atomically marks the context used. Returns true if this call
+   * marked it, false if it was already used. Required since core ABI 3; a
+   * context whose table leaves it null is rejected as already used.
+   *
+   */
+  bool (*try_set_used)(void* ctx);
 } ibmw_rpc_context_base_ops_t;
 
 /**

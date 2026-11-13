@@ -6,6 +6,7 @@
 #include "base/ibmw_config.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <memory>
@@ -18,6 +19,7 @@
 #endif
 
 #include "c/service/rpc_context_base.h"
+#include "cpp/util/meta_views.h"
 #include "cpp/util/string.h"
 #include "base/exception.h"
 #include "base/string_util.h"
@@ -52,7 +54,9 @@ class Context {
             .ops = GenOpsBase(),
             .ctx = this}) {
     for (const auto& [key, value] : other.meta_data_map_) {
-      meta_data_map_.emplace(key, value);
+      if (auto [it, inserted] = meta_data_map_.emplace(key, value); inserted) {
+        meta_views_.Add(it->first, it->second);
+      }
     }
   }
 
@@ -68,7 +72,9 @@ class Context {
             .ops = GenOpsBase(),
             .ctx = this}) {
     for (auto& [key, value] : other.meta_data_map_) {
-      meta_data_map_.emplace(std::move(key), std::move(value));
+      if (auto [it, inserted] = meta_data_map_.emplace(std::move(key), std::move(value)); inserted) {
+        meta_views_.Add(it->first, it->second);
+      }
     }
   }
 
@@ -79,14 +85,17 @@ class Context {
 
   const ibmw_service_context_base_t* NativeHandle() const { return &base_; }
 
-  bool CheckUsed() const { return used_; }
-  void SetUsed() { used_ = true; }
+  bool CheckUsed() const { return used_.load(std::memory_order_acquire); }
+  void SetUsed() { used_.store(true, std::memory_order_release); }
+  // True if this call marked the context used (COMM-020).
+  bool TrySetUsed() { return !used_.exchange(true, std::memory_order_acq_rel); }
 
   void Reset() {
-    used_ = false;
+    used_.store(false, std::memory_order_release);
     timeout_ns_ = 0;
 
     meta_data_map_.clear();
+    meta_views_.Clear();
   }
 
   ibmw_rpc_context_type_t GetType() const {
@@ -112,9 +121,12 @@ class Context {
   void SetMetaValue(std::string_view key, std::string_view val) {
     auto finditr = meta_data_map_.find(key);
     if (finditr == meta_data_map_.end()) {
-      meta_data_map_.emplace(key, val);
+      if (auto [it, inserted] = meta_data_map_.emplace(key, val); inserted) {
+        meta_views_.Add(it->first, it->second);
+      }
     } else {
       finditr->second = std::string(val);
+      meta_views_.Update(finditr->first, finditr->second);
     }
   }
 
@@ -211,10 +223,10 @@ class Context {
   static const ibmw_rpc_context_base_ops_t* GenOpsBase() {
     static constexpr ibmw_rpc_context_base_ops_t kOps{
         .check_used = [](void* ctx) -> bool {
-          return static_cast<Context*>(ctx)->used_;
+          return static_cast<Context*>(ctx)->CheckUsed();
         },
         .set_used = [](void* ctx) {
-          static_cast<Context*>(ctx)->used_ = true;  //
+          static_cast<Context*>(ctx)->SetUsed();
         },
         .get_type = [](void* ctx) -> ibmw_rpc_context_type_t {
           return static_cast<Context*>(ctx)->type_;
@@ -234,38 +246,13 @@ class Context {
               ibmw::util::ToStdStringView(key), ibmw::util::ToStdStringView(val));  //
         },
         .get_meta_keys = [](void* ctx) -> ibmw_string_view_array_t {
-          auto& self = *static_cast<Context*>(ctx);
-
-          const auto& meta_data_map = self.meta_data_map_;
-          auto& string_buffer_vec = self.string_buffer_vec_;
-
-          string_buffer_vec.clear();
-          string_buffer_vec.reserve(meta_data_map.size());
-
-          for (const auto& it : meta_data_map)
-            string_buffer_vec.emplace_back(ibmw::util::ToIbmwStringView(it.first));
-
-          return ibmw_string_view_array_t{
-              .str_array = string_buffer_vec.data(),
-              .len = string_buffer_vec.size()};
+          return static_cast<const Context*>(ctx)->meta_views_.Keys();
         },
         .get_meta_key_vals = [](void* ctx) -> ibmw_string_view_array_t {
-          auto& self = *static_cast<Context*>(ctx);
-
-          const auto& meta_data_map = self.meta_data_map_;
-          auto& string_buffer_vec = self.string_buffer_vec_;
-
-          string_buffer_vec.clear();
-          string_buffer_vec.reserve(meta_data_map.size() * 2);
-
-          for (const auto& it : meta_data_map) {
-            string_buffer_vec.emplace_back(ibmw::util::ToIbmwStringView(it.first));
-            string_buffer_vec.emplace_back(ibmw::util::ToIbmwStringView(it.second));
-          }
-
-          return ibmw_string_view_array_t{
-              .str_array = string_buffer_vec.data(),
-              .len = string_buffer_vec.size()};
+          return static_cast<const Context*>(ctx)->meta_views_.KeyVals();
+        },
+        .try_set_used = [](void* ctx) -> bool {
+          return static_cast<Context*>(ctx)->TrySetUsed();
         }};
 
     return &kOps;
@@ -279,11 +266,12 @@ class Context {
 
   MetaDataMap meta_data_map_;
 
-  std::vector<ibmw_string_view_t> string_buffer_vec_;
+  // Arrays returned by the get_meta_keys/get_meta_key_vals ops (API-026).
+  ibmw::util::MetaViews meta_views_;
 
   uint64_t timeout_ns_ = 0;
 
-  bool used_ = false;
+  std::atomic<bool> used_{false};
 
   const ibmw_rpc_context_type_t type_;
   const ibmw_service_context_base_t base_;
@@ -316,6 +304,13 @@ class ContextRef {
   void SetUsed() {
     MW_ASSERT(base_ptr_ && base_ptr_->ops, "Reference is null.");
     base_ptr_->ops->set_used(base_ptr_->ctx);
+  }
+
+  // True if this call marked the context used (COMM-020). A table without
+  // try_set_used cannot claim the context atomically and is rejected.
+  bool TrySetUsed() {
+    MW_ASSERT(base_ptr_ && base_ptr_->ops, "Reference is null.");
+    return base_ptr_->ops->try_set_used != nullptr && base_ptr_->ops->try_set_used(base_ptr_->ctx);
   }
 
   ibmw_rpc_context_type_t GetType() const {
@@ -374,7 +369,7 @@ class ContextRef {
     auto [str_array, len] = base_ptr_->ops->get_meta_key_vals(base_ptr_->ctx);
 
     std::unordered_map<std::string_view, std::string_view> result;
-    for (size_t ii = 0; ii < len; ii += 2) {
+    for (size_t ii = 0; ii + 1 < len; ii += 2) {
       auto key = ibmw::util::ToStdStringView(str_array[ii]);
       auto val = ibmw::util::ToStdStringView(str_array[ii + 1]);
       result.emplace(key, val);
@@ -422,7 +417,7 @@ class ContextRef {
     ss << "timeout: " << timeout / 1000000 << "ms, meta: {";
 
     auto [str_array, len] = base_ptr_->ops->get_meta_key_vals(base_ptr_->ctx);
-    for (size_t ii = 0; ii < len; ii += 2) {
+    for (size_t ii = 0; ii + 1 < len; ii += 2) {
       if (ii != 0) ss << ",";
 
       auto key = ibmw::util::ToStdStringView(str_array[ii]);
@@ -459,10 +454,12 @@ inline Context::Context(ContextRef ref)
   timeout_ns_ = base_ptr->ops->get_timeout_ns(base_ptr->ctx);
 
   auto [str_array, len] = base_ptr->ops->get_meta_key_vals(base_ptr->ctx);
-  for (size_t ii = 0; ii < len; ii += 2) {
+  for (size_t ii = 0; ii + 1 < len; ii += 2) {
     auto key = ibmw::util::ToStdStringView(str_array[ii]);
     auto val = ibmw::util::ToStdStringView(str_array[ii + 1]);
-    meta_data_map_.emplace(key, val);
+    if (auto [it, inserted] = meta_data_map_.emplace(key, val); inserted) {
+      meta_views_.Add(it->first, it->second);
+    }
   }
 }
 

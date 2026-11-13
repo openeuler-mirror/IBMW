@@ -8,6 +8,9 @@ message(STATUS "get libunifex ...")
 set(libunifex_DOWNLOAD_URL
     "https://github.com/facebookexperimental/libunifex/archive/591ec09e7d51858ad05be979d4034574215f5971.tar.gz"
     CACHE STRING "")
+set(libunifex_DOWNLOAD_SHA256
+    "292d1d383b734de6e926311bd847a0ac18a5dbbbe374c04d29619aeb05fc8651"
+    CACHE STRING "SHA256 of libunifex_DOWNLOAD_URL (update both together)")
 
 if(libunifex_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     libunifex
     URL ${libunifex_DOWNLOAD_URL}
+    URL_HASH SHA256=${libunifex_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

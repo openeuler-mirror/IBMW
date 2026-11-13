@@ -4,6 +4,7 @@
 # Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 # All rights reserved.
 
+import argparse
 import os
 import sys
 import re
@@ -27,6 +28,7 @@ def gen_h_file(pkg_name, srv_filename):
 #pragma once
 
 #include <future>
+#include <memory>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/service/rpc_status.h"
@@ -142,6 +144,20 @@ class {{srv_filename}}AsyncAccess : public ibmw::rpc::AsyncAccessBase {
       std::function<void(ibmw::rpc::Status)>&& callback) {
     {{srv_filename}}(ibmw::rpc::ContextRef(), req, rsp, std::move(callback));
   }
+
+  // Keeps req and rsp alive until the call completes.
+  void {{srv_filename}}(
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback);
+
+  void {{srv_filename}}(
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback) {
+    {{srv_filename}}(ibmw::rpc::ContextRef(), std::move(req), std::move(rsp), std::move(callback));
+  }
 };
 
 class {{srv_filename}}FutureAccess : public ibmw::rpc::FutureAccessBase {
@@ -167,6 +183,18 @@ class {{srv_filename}}FutureAccess : public ibmw::rpc::FutureAccessBase {
       const {{srv_filename}}_Request& req,
       {{srv_filename}}_Response& rsp) {
     return {{srv_filename}}(ibmw::rpc::ContextRef(), req, rsp);
+  }
+
+  // Keeps req and rsp alive until the call completes.
+  std::future<ibmw::rpc::Status> {{srv_filename}}(
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp);
+
+  std::future<ibmw::rpc::Status> {{srv_filename}}(
+      std::shared_ptr<const {{srv_filename}}_Request> req,
+      std::shared_ptr<{{srv_filename}}_Response> rsp) {
+    return {{srv_filename}}(ibmw::rpc::ContextRef(), std::move(req), std::move(rsp));
   }
 };
 
@@ -407,6 +435,15 @@ void {{srv_filename}}AsyncAccess::{{srv_filename}}(
   Call(full_func_name, ctx_ref, req, rsp, std::move(callback));
 }
 
+void {{srv_filename}}AsyncAccess::{{srv_filename}}(
+    ibmw::rpc::ContextRef ctx_ref,
+    std::shared_ptr<const {{srv_filename}}_Request> req,
+    std::shared_ptr<{{srv_filename}}_Response> rsp,
+    std::function<void(ibmw::rpc::Status)>&& callback) {
+  const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, kFuncName);
+  Call(full_func_name, ctx_ref, std::move(req), std::move(rsp), std::move(callback));
+}
+
 {{srv_filename}}FutureAccess::{{srv_filename}}FutureAccess(ibmw::rpc::ServiceRef service_ref)
     : ibmw::rpc::FutureAccessBase(service_ref, kRpcType, kServiceName) {}
 
@@ -419,6 +456,14 @@ std::future<ibmw::rpc::Status> {{srv_filename}}FutureAccess::{{srv_filename}}(
     {{srv_filename}}_Response& rsp) {
   const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, kFuncName);
   return Call(full_func_name, ctx_ref, req, rsp);
+}
+
+std::future<ibmw::rpc::Status> {{srv_filename}}FutureAccess::{{srv_filename}}(
+    ibmw::rpc::ContextRef ctx_ref,
+    std::shared_ptr<const {{srv_filename}}_Request> req,
+    std::shared_ptr<{{srv_filename}}_Response> rsp) {
+  const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, kFuncName);
+  return Call(full_func_name, ctx_ref, std::move(req), std::move(rsp));
 }
 
 {{srv_filename}}CoAccess::{{srv_filename}}CoAccess(ibmw::rpc::ServiceRef service_ref)
@@ -518,29 +563,21 @@ ibmw::co::Task<ibmw::rpc::Status> {{srv_filename}}IbmwImpl::{{srv_filename}}(
 
 
 if __name__ == '__main__':
-    pkg_name = ""
-    srv_file = ""
-    output_path = ""
-    for arg in sys.argv:
-        kv = arg.split('=')
-        if (kv[0] == '--pkg_name'):
-            pkg_name = kv[1]
-        elif (kv[0] == '--srv_file'):
-            srv_file = kv[1]
-        elif (kv[0] == '--output_path'):
-            output_path = kv[1]
+    parser = argparse.ArgumentParser(description="Generate ibmw RPC code for a ROS2 srv file.")
+    parser.add_argument('--pkg_name', required=True)
+    parser.add_argument('--srv_file', required=True)
+    parser.add_argument('--output_path', required=True)
+    # Further options (ARG_OPTIONS of Ros2IbmwRpcGenCode) are ignored, as before.
+    args, _ = parser.parse_known_args()
+    pkg_name = args.pkg_name
 
-    (path, file) = os.path.split(srv_file)
+    (path, file) = os.path.split(args.srv_file)
     (filename, ext) = os.path.splitext(file)
-    cc_file_path = os.path.join(output_path, filename + ".ibmw_rpc.srv.cc")
-    h_file_path = os.path.join(output_path, filename + ".ibmw_rpc.srv.h")
+    cc_file_path = os.path.join(args.output_path, filename + ".ibmw_rpc.srv.cc")
+    h_file_path = os.path.join(args.output_path, filename + ".ibmw_rpc.srv.h")
 
-    # cc file
-    f_cc_file = open(cc_file_path, 'w')
-    f_cc_file.write(gen_cc_file(pkg_name, filename))
-    f_cc_file.close()
+    with open(cc_file_path, 'w') as f_cc_file:
+        f_cc_file.write(gen_cc_file(pkg_name, filename))
 
-    # h file
-    f_h_file = open(h_file_path, 'w')
-    f_h_file.write(gen_h_file(pkg_name, filename))
-    f_h_file.close()
+    with open(h_file_path, 'w') as f_h_file:
+        f_h_file.write(gen_h_file(pkg_name, filename))

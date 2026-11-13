@@ -6,8 +6,12 @@
 # Each wrapper runs a sibling shell harness as a subprocess; non-zero exit
 # fails the test. The harnesses own the assertions; these wrappers exist
 # solely so the synthetic tests count in the Gate 1 pytest total.
+import os
+import signal
 import subprocess
 from pathlib import Path
+
+import pytest
 
 
 def _run_harness(harness_name: str) -> None:
@@ -37,3 +41,48 @@ def test_red_lines_exempt_anchors_synthetic_harness():
 
 def test_target_ros2_prefix_synthetic_harness():
     _run_harness("test_target_ros2_prefix.sh")
+
+
+def test_dual_build_matrix_flags_synthetic_harness():
+    _run_harness("test_dual_build_matrix_flags.sh")
+
+
+# TOOL-035: an option that takes a value, given last, is an error instead of
+# an endless loop.
+@pytest.mark.parametrize("option", ["--baseline", "--scan-path", "--exclude"])
+def test_red_lines_option_without_value_fails(option):
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "check_red_lines.sh"), option],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 64
+    assert f"Missing value for {option}" in result.stderr
+
+
+# TOOL-036: every temp file is removed by the trap, also when interrupted
+# during the baseline comparison.
+def test_red_lines_interrupted_run_leaves_no_temp_files(tmp_path):
+    repo_root = Path(__file__).resolve().parents[4]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "comm").write_text("#!/bin/bash\nkill -TERM $PPID\nexit 7\n")
+    (bin_dir / "comm").chmod(0o755)
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_text("")
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", TMPDIR=str(temp_dir))
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "check_red_lines.sh"), "--baseline", str(baseline)],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == -signal.SIGTERM
+    assert list(temp_dir.iterdir()) == []

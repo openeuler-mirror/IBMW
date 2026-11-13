@@ -1,0 +1,67 @@
+# ibmw-gen project definition for loaned_publisher + loaned_subscriber demo
+# (self-developed shm variant).
+#
+# loaned_message_demo_iceoryx.ibmw.yaml with transport: shm. The shm
+# transport (src/extensions/transport/shm_ext) keeps the iceoryx loan
+# contract, so the generated modules are the iceoryx ones with the shm
+# names; no RouDi daemon is needed.
+#
+# The publisher uses the public strict loan API. The runtime configuration
+#      selects shm. Requires trivially_copyable message type
+#      (geometry_msgs::msg::Point qualifies — 3 doubles, no std::string).
+# The subscriber uses ibmw::transport::LoanedSubscriber<T>::AttachBytes
+#      (ReceiverRef vtable; dispatcher routes incoming SHM samples).
+#      The generated header static_asserts is_trivially_copyable<T>; the
+#      callback signature is OnMessage(const T& msg, std::size_t bytes) so
+#      the user receives the loaned shared-memory sample directly.
+#
+# Two apps are emitted so publisher and subscriber run as separate processes
+# (matches transport_benchmark/shm_loan_v2).
+#
+# Prerequisites for running:
+#   - libibmw_shm_transport.so must be alongside the executable (or on
+#     LD_LIBRARY_PATH).
+#   - Both processes must resolve the same shm root and domain
+#     ($IBMW_SHM_ROOT, else /dev/shm, else /tmp; $IBMW_SHM_DOMAIN, else
+#     "default").
+#
+# Usage:
+#   cd ibmw/src/samples/cpp/loaned_message_demo
+#   python3 ../../../tools/ibmw_gen/ibmw_gen.py \
+#       loaned_message_demo_shm.ibmw.yaml -o loaned_message_demo_shm_gen
+#
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+schema_version: 2
+project:
+  name: loaned_message_demo_shm_gen
+  namespace: ibmw::examples::loaned_message_demo_shm_gen
+
+messages:
+  geometry_msgs::msg::Point: {}
+modules:
+  - name: PointShmLoanedPublisher
+    type: loaned_publisher
+    transport: shm
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+    # ros2_msg_include / ros2_package are auto-derived from message.
+  # Subscriber side, shm transport. Callback receives the loaned
+  # SHM sample by const-ref (true zero-copy borrow).
+  - name: PointShmLoanedSubscriber
+    type: loaned_subscriber
+    transport: shm
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+    # ros2_msg_include / ros2_package are auto-derived.
+apps:
+  - name: loaned_pub_shm_app
+    type: pubsub
+    modules:
+      - PointShmLoanedPublisher
+
+  - name: loaned_sub_shm_app
+    type: pubsub
+    modules:
+      - PointShmLoanedSubscriber

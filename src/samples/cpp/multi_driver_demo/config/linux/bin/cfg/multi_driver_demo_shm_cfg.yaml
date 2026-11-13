@@ -1,0 +1,14 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+  modules:
+    packages:
+      - path: ./libmulti_driver_shm_pkg.so
+    modules:
+      - name: MultiDriverModule
+        log_level: INFO

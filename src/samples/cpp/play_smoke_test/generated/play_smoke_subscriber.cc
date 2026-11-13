@@ -125,6 +125,7 @@ const ibmw_type_support_base_t* JsonFirstHeaderTypeSupport() {
       .custom_type_support_ptr = [](void*) {
         return kCdr->custom_type_support_ptr(kCdr->ctx);
       },
+      .msg_min_size = sizeof(JsonHeader),
       .ctx = nullptr};
   return &kSupport;
 }

@@ -163,5 +163,39 @@ drivers:
   EXPECT_EQ(events, (std::vector<std::string>{"throws", "later"}));
 }
 
+TEST(TransportBusShutdown, LoanReleaseAfterShutdownIsNoOp) {
+  // A LoanedSample owned by user code may outlive bus Shutdown and release
+  // through the sender C ABI ctx afterwards. That ctx must stay valid and the
+  // already-destroyed source driver must not be called.
+  auto state = std::make_shared<ShutdownState>();
+  state->can_shutdown = true;
+  state->can_prepare = true;
+  TransportBus bus;
+  auto concrete_driver = std::make_unique<ShutdownVetoDriver>(state);
+  auto* concrete_ptr = concrete_driver.get();
+  std::unique_ptr<TransportDriver> driver = std::move(concrete_driver);
+  bus.RegisterTransportDriver(
+      std::move(driver),
+      TransportDriverCapabilitiesV1{
+          .shutdown_v1 =
+              static_cast<TransportShutdownCapabilityV1*>(concrete_ptr)});
+  bus.Initialize(YAML::Load(R"(
+drivers:
+  - type: shutdown-veto
+)"));
+  const auto* access = bus.GetBusAccess("loan_module").NativeHandle();
+  const auto* sender = access->get_sender(access->ctx, ibmw_string_view_t{"camera", 6});
+  ASSERT_NE(sender, nullptr);
+  bus.Start();
+
+  EXPECT_TRUE(bus.TryShutdown());
+  ASSERT_EQ(state->destructor_calls, 1);
+
+  ibmw_loaned_sample_handle_t handle{};
+  handle.source_driver = concrete_ptr;
+  sender->release_loaned(sender->ctx, &handle);
+  EXPECT_EQ(handle.source_driver, nullptr);
+}
+
 }  // namespace
 }  // namespace ibmw::runtime::core::transport

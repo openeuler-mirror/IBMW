@@ -15,13 +15,9 @@
 #include "iceoryx_posh/mepoo/chunk_header.hpp"
 #include <limits>
 #include "extension_api/ibmw_reporter_v1.h"
-#if !defined(_WIN32)
 #include <dlfcn.h>
-#endif
 
-#if defined(_MSC_VER)
-#define IBMW_NOINLINE __declspec(noinline)
-#elif defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__)
 #define IBMW_NOINLINE __attribute__((noinline))
 #else
 #define IBMW_NOINLINE
@@ -103,9 +99,6 @@ IceoryxTransportDriver::~IceoryxTransportDriver() {
 
 namespace {
 const ibmw_reporter_v1* QueryHostReporter() noexcept {
-#if defined(_WIN32)
-  return nullptr;
-#else
   void* host = dlopen(nullptr, RTLD_NOW | RTLD_LOCAL);
   if (!host) return nullptr;
   using Query = const ibmw_reporter_v1* (*)(void);
@@ -113,7 +106,6 @@ const ibmw_reporter_v1* QueryHostReporter() noexcept {
   const ibmw_reporter_v1* api = query ? query() : nullptr;
   dlclose(host);
   return api;
-#endif
 }
 }  // namespace
 #ifdef IBMW_ENABLE_REPORTER_V1
@@ -142,7 +134,8 @@ ibmw_iceoryx_query_host_reporter_v1(void) noexcept {
 void IceoryxTransportDriver::Initialize(YAML::Node options_node) {
   static_assert(std::is_nothrow_move_assignable_v<Options>);
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-  // todo: check options_node->shm_init_size
+  // shm_init_size is an extension option checked by IceoryxBus::Initialize;
+  // a copy in the driver options is a legacy field and ignored.
 
   MW_REQUIRE(
       state_.load() == State::kPreInit,
@@ -306,8 +299,8 @@ bool IceoryxTransportDriver::OnMessage(
           const auto validated_pkg_size =
               internal::ValidateEncodedPayloadSize(payload, payload_size);
           if (!validated_pkg_size) {
-            MW_WARN("Discard malformed iceoryx transport chunk: size {}.",
-                    payload_size);
+            MW_WARN_INTERVAL(1000, "Discard malformed iceoryx transport chunk: size {}.",
+                             payload_size);
             if (release) release();
             return;
           }
@@ -358,9 +351,9 @@ bool IceoryxTransportDriver::OnMessage(
                 static_cast<const void*>(remaining_buf.data()),
                 remaining_buf.size());
           } catch (const std::exception& e) {
-            MW_WARN("Handle Iceoryx transport msg failed, exception info: {}", e.what());
+            MW_WARN_INTERVAL(1000, "Handle Iceoryx transport msg failed, exception info: {}", e.what());
           } catch (...) {
-            MW_WARN("Handle Iceoryx transport msg failed with an unknown exception.");
+            MW_WARN_INTERVAL(1000, "Handle Iceoryx transport msg failed with an unknown exception.");
           }
           if (release) release();
         };
@@ -673,9 +666,9 @@ bool IceoryxTransportDriver::RegisterPodSubscriber(std::string_view topic,
       try {
         (*cb_storage)(payload, payload_size);
       } catch (const std::exception& e) {
-        MW_WARN("POD subscriber callback threw: {}", e.what());
+        MW_WARN_INTERVAL(1000, "POD subscriber callback threw: {}", e.what());
       } catch (...) {
-        MW_WARN("POD subscriber callback threw an unknown exception.");
+        MW_WARN_INTERVAL(1000, "POD subscriber callback threw an unknown exception.");
       }
       if (release) release();
     };

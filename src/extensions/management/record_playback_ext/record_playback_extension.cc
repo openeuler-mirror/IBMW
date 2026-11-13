@@ -230,7 +230,7 @@ bool RecordPlaybackExtension::InitializeRuntime(
     MW_REQUIRE(
         runtime != nullptr &&
             runtime->AbiVersion() == ibmw::extension::kRuntimeAbiVersionV2,
-        "Record/playback requires Runtime capability V1.");
+        "Record/playback requires Runtime capability V2.");
     runtime_ = runtime;
     auto* graph_access = dynamic_cast<ibmw::extension::RuntimeGraphAccessV1*>(runtime_);
     MW_REQUIRE(graph_access, "Record/playback requires Runtime Graph capability V1.");
@@ -494,7 +494,7 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
 
   std::unordered_map<ibmw::transport::TopicMetaKey, Wrapper,
                      ibmw::transport::TopicMetaKey::Hash>
-      recore_func_map;
+      record_func_map;
 
   for (auto& record_action_itr : record_action_map_) {
     auto& record_action = *(record_action_itr.second);
@@ -505,6 +505,9 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
     for (const auto& topic_meta_itr : topic_meta_map) {
       const auto& topic_meta = topic_meta_itr.second;
 
+      // record_action outlives the subscription: actions are destroyed with
+      // the extension after the transport has stopped, and AddRecord is a
+      // no-op once the kStopping hook has shut the action down.
       RecordFunc record_func =
           [&record_action, topic_id{topic_meta.id}, serialization_type{topic_meta.serialization_type}](
               uint64_t cur_timestamp, ibmw::extension::MessageView& msg_wrapper) {
@@ -515,30 +518,37 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
                          msg_wrapper.msg_type, serialization_type);
               return;
             }
-            auto pub_ts = std::string(msg_wrapper.context.GetMetaValue(
+            // Parsed in place (no string copies); malformed values from the
+            // peer are recorded as 0 instead of throwing on this thread.
+            const auto pub_ts = RecordAction::ParsePubMeta(msg_wrapper.context.GetMetaValue(
                 IBMW_TRANSPORT_CONTEXT_KEY_PUB_TIMESTAMP));
-            auto pub_seq = std::string(msg_wrapper.context.GetMetaValue(
+            const auto pub_seq = RecordAction::ParsePubMeta(msg_wrapper.context.GetMetaValue(
                 IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ));
+            if (!pub_ts || !pub_seq) [[unlikely]] {
+              MW_WARN_INTERVAL(5000, "Malformed publisher timestamp/sequence on '{}', recorded as 0.",
+                               msg_wrapper.msg_type);
+            }
 
             record_action.AddRecord(
                 RecordAction::OneRecord{
                     .topic_index = topic_id,
                     .log_timestamp = cur_timestamp,
-                    .pub_timestamp = pub_ts.empty() ? 0 : std::stoull(pub_ts),
-                    .pub_sequence = pub_seq.empty() ? 0 : static_cast<uint32_t>(std::stoul(pub_seq)),
+                    .pub_timestamp = pub_ts.value_or(0),
+                    // MCAP message sequence numbers are 32-bit.
+                    .pub_sequence = static_cast<uint32_t>(pub_seq.value_or(0)),
                     .buffer_view_ptr = buffer_view_ptr});
           };
 
-      auto& item = recore_func_map[topic_meta_itr.first];
+      auto& item = record_func_map[topic_meta_itr.first];
       item.require_cache_serialization_types.emplace(topic_meta.serialization_type);
       item.record_func_vec.emplace_back(std::move(record_func));
     }
   }
 
   // Subscribe
-  for (auto& recore_func_itr : recore_func_map) {
-    const auto& key = recore_func_itr.first;
-    auto& wrapper = recore_func_itr.second;
+  for (auto& record_func_itr : record_func_map) {
+    const auto& key = record_func_itr.first;
+    auto& wrapper = record_func_itr.second;
 
     const auto type_support_ref = FindTypeSupport(key.msg_type);
     MW_REQUIRE(
@@ -588,41 +598,8 @@ void RecordPlaybackExtension::RegisterRecordTransport() {
 }
 
 void RecordPlaybackExtension::RegisterPlaybackTransport() {
-  std::unordered_set<ibmw::transport::TopicMetaKey,
-                     ibmw::transport::TopicMetaKey::Hash>
-      playback_topic_meta_set;
-
-  // Handle playback action
-  for (auto& playback_action_itr : playback_action_map_) {
-    auto& playback_action = *(playback_action_itr.second);
-
-    const auto& topic_meta_map = playback_action.GetTopicMetaMap();
-
-    for (const auto& topic_meta_itr : topic_meta_map) {
-      playback_topic_meta_set.emplace(ibmw::transport::TopicMetaKey{
-          .topic_name = topic_meta_itr.second.topic_name,
-          .msg_type = topic_meta_itr.second.msg_type});
-    }
-  }
-
-  // RegisterSendType
-  for (const auto& item : playback_topic_meta_set) {
-    const auto type_support_ref = FindTypeSupport(item.msg_type);
-    MW_REQUIRE(
-        type_support_ref,
-        "Cannot find TypeSupport for playback type '{}'.", item.msg_type);
-    const auto package_path = TypeSupportPackage(item.msg_type);
-
-    const auto publisher = runtime_->RegisterPublisher(
-        {.topic = item.topic_name,
-         .msg_type = item.msg_type,
-         .package_path = package_path,
-         .module_name = "core",
-         .type_support = type_support_ref});
-    MW_REQUIRE(publisher, "Register publish type failed!");
-  }
-
-  // RegisterPubRecordFunc
+  // RegisterPublisher returns the existing publisher for a topic that an
+  // earlier action already registered, so one pass registers and collects.
   for (auto& playback_action_itr : playback_action_map_) {
     struct TopicIndexWrapper {
       ibmw::extension::PublisherHandle publisher;
@@ -648,7 +625,7 @@ void RecordPlaybackExtension::RegisterPlaybackTransport() {
            .package_path = package_path,
            .module_name = "core",
            .type_support = type_support_ref});
-      MW_REQUIRE(publisher, "Get publish type failed!");
+      MW_REQUIRE(publisher, "Register publisher failed for playback topic '{}'.", topic_meta.topic_name);
 
       topic_id_wrapper_map.emplace(
           topic_meta.id,
@@ -728,12 +705,12 @@ void RecordPlaybackExtension::PublishRuntimePlaybackMessage(
 
 }  // namespace ibmw::extensions::record_playback_extension
 
-extern "C" IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_v2_t IbmwExtEntryV2() {
+extern "C" IBMW_CORE_EXTENSION_EXPORT ibmw_ext_entry_v3_t IbmwExtEntryV3() {
   using Extension =
       ibmw::extensions::record_playback_extension::RecordPlaybackExtension;
-  return ibmw_ext_entry_v2_t{
-      .abi_version = kIbmwExtensionAbiVersionV2,
-      .struct_size = sizeof(ibmw_ext_entry_v2_t),
+  return ibmw_ext_entry_v3_t{
+      .abi_version = kIbmwExtensionAbiVersionV3,
+      .struct_size = sizeof(ibmw_ext_entry_v3_t),
       .create = []() -> ibmw::EngineExtensionBase* { return new Extension(); },
       .destroy = [](const ibmw::EngineExtensionBase* extension) {
         delete extension;

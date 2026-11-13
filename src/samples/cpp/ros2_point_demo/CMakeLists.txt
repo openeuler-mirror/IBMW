@@ -99,4 +99,5 @@ install(TARGETS ros2_point_app
 
 install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}
+  PATTERN ".*" EXCLUDE
 )

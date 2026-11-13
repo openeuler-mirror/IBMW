@@ -187,6 +187,20 @@ def gen_h_file(module_str, services, idl_file_stem, idl_gencode_path):
       {m["response"]}& rsp,
       std::function<void(ibmw::rpc::Status)>&& callback) {{
     {m["name"]}(ibmw::rpc::ContextRef(), req, rsp, std::move(callback));
+  }}
+
+  // Keeps req and rsp alive until the call completes.
+  void {m["name"]}(
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const {m["request"]}> req,
+      std::shared_ptr<{m["response"]}> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback);
+
+  void {m["name"]}(
+      std::shared_ptr<const {m["request"]}> req,
+      std::shared_ptr<{m["response"]}> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback) {{
+    {m["name"]}(ibmw::rpc::ContextRef(), std::move(req), std::move(rsp), std::move(callback));
   }}""")
 
         async_proxies.append(f"""class {svc_name}AsyncAccess : public ibmw::rpc::AsyncAccessBase {{
@@ -218,6 +232,18 @@ def gen_h_file(module_str, services, idl_file_stem, idl_gencode_path):
       const {m["request"]}& req,
       {m["response"]}& rsp) {{
     return {m["name"]}(ibmw::rpc::ContextRef(), req, rsp);
+  }}
+
+  // Keeps req and rsp alive until the call completes.
+  std::future<ibmw::rpc::Status> {m["name"]}(
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const {m["request"]}> req,
+      std::shared_ptr<{m["response"]}> rsp);
+
+  std::future<ibmw::rpc::Status> {m["name"]}(
+      std::shared_ptr<const {m["request"]}> req,
+      std::shared_ptr<{m["response"]}> rsp) {{
+    return {m["name"]}(ibmw::rpc::ContextRef(), std::move(req), std::move(rsp));
   }}""")
 
         future_proxies.append(f"""class {svc_name}FutureAccess : public ibmw::rpc::FutureAccessBase {{
@@ -340,6 +366,7 @@ class {svc_name}IbmwImpl final : public {svc_name}CoService {{
 #pragma once
 
 #include <future>
+#include <memory>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/service/rpc_status.h"
@@ -652,6 +679,15 @@ bool Register{svc_name}ClientFunc(ibmw::rpc::ServiceRef service_ref) {{
     std::function<void(ibmw::rpc::Status)>&& callback) {{
   const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, "{m["name"]}");
   Call(full_func_name, ctx_ref, req, rsp, std::move(callback));
+}}
+
+void {svc_name}AsyncAccess::{m["name"]}(
+    ibmw::rpc::ContextRef ctx_ref,
+    std::shared_ptr<const {req}> req,
+    std::shared_ptr<{rsp}> rsp,
+    std::function<void(ibmw::rpc::Status)>&& callback) {{
+  const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, "{m["name"]}");
+  Call(full_func_name, ctx_ref, std::move(req), std::move(rsp), std::move(callback));
 }}""")
 
     sections.append("")
@@ -676,6 +712,14 @@ bool Register{svc_name}ClientFunc(ibmw::rpc::ServiceRef service_ref) {{
     {rsp}& rsp) {{
   const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, "{m["name"]}");
   return Call(full_func_name, ctx_ref, req, rsp);
+}}
+
+std::future<ibmw::rpc::Status> {svc_name}FutureAccess::{m["name"]}(
+    ibmw::rpc::ContextRef ctx_ref,
+    std::shared_ptr<const {req}> req,
+    std::shared_ptr<{rsp}> rsp) {{
+  const std::string& full_func_name = ibmw::rpc::GetFullFuncName(rpc_type_, service_name_, "{m["name"]}");
+  return Call(full_func_name, ctx_ref, std::move(req), std::move(rsp));
 }}""")
 
     sections.append("")
@@ -874,7 +918,11 @@ def main():
 
     # Determine IDL file stem for the output filenames
     if "idl_file" in config:
-        idl_file_stem = os.path.splitext(config["idl_file"])[0]
+        # Only the file name: the outputs stay inside output_path.
+        idl_file_stem = os.path.splitext(os.path.basename(config["idl_file"]))[0]
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", idl_file_stem):
+            print(f"Error: invalid idl_file '{config['idl_file']}'", file=sys.stderr)
+            sys.exit(1)
     else:
         # Fallback: use the service file stem
         idl_file_stem = os.path.splitext(os.path.basename(service_file))[0]

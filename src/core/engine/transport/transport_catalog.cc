@@ -36,6 +36,26 @@ bool TransportCatalog::RegisterSendType(
   return true;
 }
 
+void TransportCatalog::RetireSendType(const SendTypeWrapper& send_type_wrapper) {
+  const auto& info = send_type_wrapper.info;
+  auto find_itr = send_type_wrapper_map_.find(Key{
+      .msg_type = info.msg_type,
+      .topic_name = info.topic_name,
+      .pkg_path = info.pkg_path,
+      .module_name = info.module_name});
+  if (find_itr == send_type_wrapper_map_.end() || find_itr->second.get() != &send_type_wrapper) return;
+
+  // Keys of both maps view strings owned by the wrapper, which stays alive.
+  auto topic_itr = pub_topic_index_map_.find(info.topic_name);
+  if (topic_itr != pub_topic_index_map_.end()) {
+    auto& wrappers = topic_itr->second;
+    wrappers.erase(std::remove(wrappers.begin(), wrappers.end(), &send_type_wrapper), wrappers.end());
+    if (wrappers.empty()) pub_topic_index_map_.erase(topic_itr);
+  }
+  retired_send_type_wrappers_.emplace_back(std::move(find_itr->second));
+  send_type_wrapper_map_.erase(find_itr);
+}
+
 bool TransportCatalog::OnMessage(
     std::unique_ptr<MessageHandlerWrapper>&& message_handler_ptr) {
   const auto& info = message_handler_ptr->info;

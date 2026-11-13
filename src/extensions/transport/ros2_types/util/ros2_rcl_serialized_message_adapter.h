@@ -7,6 +7,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/serialization.hpp"
+#include "rcutils/logging_macros.h"
 
 namespace ibmw {
 
@@ -35,7 +36,7 @@ class Ros2RclSerializedMessageAdapter {
                       return;
                     }
                   }
-                  fprintf(stderr, "Invalid pointer for deallocate. Warning by Ros2RclSerializedMessageAdapter.\n");
+                  RCUTILS_LOG_ERROR_NAMED("ibmw", "Ros2RclSerializedMessageAdapter: invalid pointer for deallocate.");
                 },
                 .reallocate = [](void* pointer, size_t size, void* state) -> void* {
                   auto* bawa = static_cast<ibmw_buffer_array_with_allocator_t*>(state);
@@ -56,7 +57,7 @@ class Ros2RclSerializedMessageAdapter {
                     }
                   }
 
-                  fprintf(stderr, "Invalid pointer for deallocate. Warning by Ros2RclSerializedMessageAdapter.\n");
+                  RCUTILS_LOG_ERROR_NAMED("ibmw", "Ros2RclSerializedMessageAdapter: invalid pointer for reallocate.");
                   return nullptr;
                 },
                 .zero_allocate = [](size_t number_of_elements, size_t size_of_element, void* state) -> void* {

@@ -19,7 +19,6 @@
 #ifndef IBMW_API_CPP_ACTION_SERVER_H_
 #define IBMW_API_CPP_ACTION_SERVER_H_
 
-#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,6 +33,7 @@
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
+#include "cpp/action/action_log.h"
 #include "internal/ros2_action_dds/fastdds_typesupport.h"
 #include "internal/ros2_action_dds/fastdds_wire_contract.h"
 
@@ -107,7 +107,7 @@ bool CreateService(dds::DomainParticipant* participant, dds::Publisher* publishe
   endpoint.rsp_topic =
       participant->create_topic(rsp_topic_name, endpoint.rsp_ts.get_type_name(), dds::TOPIC_QOS_DEFAULT);
   if (endpoint.req_topic == nullptr || endpoint.rsp_topic == nullptr) {
-    std::cerr << "[FAIL] create service topics failed: " << req_topic_name << std::endl;
+    ActionLog(ActionLogLevel::kError, "create service topics failed: " + req_topic_name);
     return false;
   }
   dds::DataReaderQos reader_qos;
@@ -118,10 +118,10 @@ bool CreateService(dds::DomainParticipant* participant, dds::Publisher* publishe
   endpoint.reader = subscriber->create_datareader(endpoint.req_topic, reader_qos, endpoint.listener.get());
   endpoint.writer = publisher->create_datawriter(endpoint.rsp_topic, writer_qos);
   if (endpoint.reader == nullptr || endpoint.writer == nullptr) {
-    std::cerr << "[FAIL] create service reader/writer failed: " << req_topic_name << std::endl;
+    ActionLog(ActionLogLevel::kError, "create service reader/writer failed: " + req_topic_name);
     return false;
   }
-  std::cout << "[INFO] Service endpoint rq=" << req_topic_name << " rr=" << rsp_topic_name << std::endl;
+  ActionLog(ActionLogLevel::kInfo, "Service endpoint rq=" + req_topic_name + " rr=" + rsp_topic_name);
   return true;
 }
 
@@ -139,17 +139,17 @@ bool CreatePublisher(dds::DomainParticipant* participant, dds::Publisher* publis
   owned_types.push_back(type_support);
   topic = participant->create_topic(topic_name, type_support.get_type_name(), dds::TOPIC_QOS_DEFAULT);
   if (topic == nullptr) {
-    std::cerr << "[FAIL] create topic failed: " << topic_name << std::endl;
+    ActionLog(ActionLogLevel::kError, "create topic failed: " + topic_name);
     return false;
   }
   dds::DataWriterQos qos;
   ibmw::internal::ros2_action_dds::ApplyEndpointQosProfile(qos, qos_profile);
   writer = publisher->create_datawriter(topic, qos);
   if (writer == nullptr) {
-    std::cerr << "[FAIL] create writer failed: " << topic_name << std::endl;
+    ActionLog(ActionLogLevel::kError, "create writer failed: " + topic_name);
     return false;
   }
-  std::cout << "[INFO] Topic endpoint " << topic_name << std::endl;
+  ActionLog(ActionLogLevel::kInfo, "Topic endpoint " + topic_name);
   return true;
 }
 
@@ -160,7 +160,7 @@ void WriteResponse(dds::DataWriter* writer, RspT& response, const rtps::SampleId
   auto params = ibmw::internal::ros2_action_dds::MakeServiceResponseWriteParams(identity);
   const auto ret = writer->write(&response, params);
   if (!ret) {
-    std::cerr << "[WARN] response write failed" << std::endl;
+    ActionLog(ActionLogLevel::kWarn, "response write failed");
   }
 }
 

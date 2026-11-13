@@ -14,9 +14,9 @@ from ibmw_cli.generator.deploy_generator import DeployGenerator
 
 
 def check_format(cfg):
-    required_tags = ['base_info']
+    required_tags = ['base_info', 'deploy_modes', 'modules', 'pkgs']
     for required_tag in required_tags:
-        if required_tag not in cfg.keys():
+        if required_tag not in cfg.keys() or cfg[required_tag] is None:
             raise Exception(
                 "yaml configuration file is illegal, You should add required tag: " + required_tag)
 
@@ -45,7 +45,8 @@ class ProjectGenerator(GeneratorBase):
         yaml_path = os.path.join(root_path, self.path_)
 
         with open(yaml_path, 'r', encoding='utf-8') as cfg_file:
-            root_cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
+            # Plain data only: no python object tags from a user supplied file.
+            root_cfg = yaml.safe_load(cfg_file)
             check_format(root_cfg)
 
             if root_cfg['base_info'] is None:
@@ -122,7 +123,9 @@ class ProjectGenerator(GeneratorBase):
             workspace_generator.generate()
             deploy_generator.generate()
 
-            # run the format shell
-            os.chdir(output_dir)
-            if os.path.exists('format.sh'):
-                subprocess.run('sh format.sh', shell=True, check=True)
+            # run the format shell generated above (output() refuses to
+            # overwrite, so it cannot be a pre-existing file); no shell, and
+            # the process working directory is left unchanged.
+            format_script = os.path.join(output_dir, 'format.sh')
+            if os.path.isfile(format_script):
+                subprocess.run(['bash', 'format.sh'], cwd=output_dir, check=True)

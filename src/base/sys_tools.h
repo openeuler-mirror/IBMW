@@ -5,44 +5,30 @@
 
 #include <string>
 
-#ifdef _WIN32
-  #include <windows.h>
-#else
-  #include <limits.h>
-  #include <unistd.h>
-#endif
+#include <limits.h>
+#include <unistd.h>
 
 namespace ibmw::common::util {
 
 /**
  * @brief get current executable path
  */
-inline static std::string GetExecutablePath() {
+inline std::string GetExecutablePath() {
   std::string path;
-#ifdef _WIN32
-  char buffer[MAX_PATH];
-  GetModuleFileNameA(NULL, buffer, MAX_PATH);
-  path = buffer;
-#else
   char buffer[PATH_MAX];
   ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-  if (len != -1) {
-    buffer[len] = '\0';
-    path = buffer;
+  // readlink truncates silently: a full buffer may be a cut-off path.
+  if (len != -1 && static_cast<size_t>(len) < sizeof(buffer) - 1) {
+    path.assign(buffer, static_cast<size_t>(len));
   }
-#endif
   return path;
-};
+}
 
 /**
  * @brief get current process pid
  */
-inline static std::string GetCurrentProcessPid() {
-#ifdef _WIN32
-  return std::to_string(GetCurrentProcessId());
-#else
+inline std::string GetCurrentProcessPid() {
   return std::to_string(getpid());
-#endif
-};
+}
 
 }  // namespace ibmw::common::util

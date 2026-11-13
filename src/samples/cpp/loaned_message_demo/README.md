@@ -4,7 +4,11 @@ End-to-end verification demo for the IBMW LoanedMessage API with zero-copy messa
 
 ## Features
 
-- Zero-copy publishing for Plain types (`geometry_msgs::msg::Point`) via `loan_sample`
+- LoanedMessage publishing of `geometry_msgs::msg::Point` on the ROS2-compatible
+  DDS lane. ROS2 message types are registered as non-plain, so AUTO uses the
+  heap fallback (the sample is copied by `DataWriter::write`). For a true
+  zero-copy `loan_sample` lane with a native plain DDS type, see `dds_loaned/`
+  in the [transport benchmark](../transport_benchmark/README.md).
 - Automatic fallback verification for non-Plain types (`std_msgs::msg::String`)
 - Three configuration mode tests (AUTO / STRICT / COMPAT)
 - Zero-copy statistics output
@@ -54,7 +58,7 @@ source /opt/ros/humble/setup.bash
 |-----|-------------|
 | loaned_message_app | Full test: Plain + NonPlain publish + subscribe |
 | config_test_app | 6 configuration mode test scenarios |
-| plain_pub_only_app | Plain type zero-copy publish |
+| plain_pub_only_app | Point publish (ROS2 type, AUTO heap fallback) |
 | nonplain_pub_only_app | Non-Plain type fallback verification |
 | sub_only_app | Subscriber |
 
@@ -80,10 +84,10 @@ source /opt/ros/humble/setup.bash
 
 ## Expected Output
 
-Plain type (zero-copy):
+Point (ROS2 type, AUTO heap fallback):
 ```
-[SEND] Point[0] x=1.00, y=2.00, z=3.00, is_zero_copy=true, is_plain=true, ptr=0x7f...
-[RECV] Point[1] x=1.00, y=2.00, z=3.00, valid=YES, ptr=0x7f...  (same address = zero-copy)
+[SEND] Point[0] x=1.00, y=2.00, z=3.00, is_zero_copy=false, is_plain=false, ptr=0x7f...
+[RECV] Point[1] x=1.10, y=2.20, z=3.30, valid=YES, ptr=0x7f...
 ```
 
 Non-Plain type (fallback):

@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <charconv>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -32,6 +33,14 @@ using namespace ibmw::runtime::core::runtime_graph;
 namespace {
 
 constexpr size_t kMaxQueuedMessages = 1024;
+// Byte budget per session queue, so 1024 large frames cannot pin gigabytes
+// behind a slow consumer. A single frame above the budget is still queued
+// when the queue is empty, so oversized topics keep flowing.
+constexpr size_t kMaxQueuedBytes = 64u * 1024u * 1024u;
+// Frames up to this size are allocated at once (no extra copies); larger
+// declared sizes grow with the bytes actually received, so a peer cannot make
+// us allocate 256 MiB with a 24-byte header.
+constexpr size_t kEagerPayloadAlloc = 4u * 1024u * 1024u;
 
 using TapWireHeader = RuntimeStreamHeader;
 
@@ -107,6 +116,40 @@ ReceiveResult ReceiveAll(int fd, void* data, size_t size) {
     return {.status = ReceiveStatus::kError, .error_number = errno};
   }
   return {};
+}
+
+ReceiveResult ReceivePayload(int fd, std::vector<uint8_t>& out, size_t size) {
+  if (size <= kEagerPayloadAlloc) {
+    out.resize(size);
+    return ReceiveAll(fd, out.data(), size);
+  }
+  out.clear();
+  size_t received = 0;
+  while (received < size) {
+    // Geometric growth: total copying stays below 2x the payload.
+    const size_t target =
+        std::min(size, std::max(kEagerPayloadAlloc, received * 2));
+    out.resize(target);
+    const auto result = ReceiveAll(fd, out.data() + received, target - received);
+    if (result.status != ReceiveStatus::kOk) {
+      // EOF in the middle of a payload is a truncated frame.
+      return result.status == ReceiveStatus::kEof
+                 ? ReceiveResult{.status = ReceiveStatus::kTruncated}
+                 : result;
+    }
+    received = target;
+  }
+  return {};
+}
+
+struct TopicFilterBits {
+  size_t word;
+  uint64_t mask;
+};
+
+TopicFilterBits TopicFilterBit(std::string_view topic, size_t words) noexcept {
+  const size_t hash = std::hash<std::string_view>{}(topic);
+  return {(hash >> 6) % words, uint64_t{1} << (hash & 63)};
 }
 
 uint64_t ParseUint64(std::string_view value) {
@@ -199,6 +242,7 @@ struct RuntimeTapServer::Session {
   std::mutex stop_mutex;
   std::condition_variable cv;
   std::deque<ibmw::transport::SerializedMessage> queue;
+  size_t queued_bytes = 0;
   uint64_t dropped_total = 0;
   uint64_t reported_dropped_total = 0;
   std::string stream_error;
@@ -217,7 +261,7 @@ struct RuntimeTapServer::Session {
 
   void Start() {
     std::filesystem::remove(socket_path);
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime tap socket.");
     server_fd = fd;
     const auto address = MakeSocketAddress(socket_path.string());
@@ -236,7 +280,7 @@ struct RuntimeTapServer::Session {
     stream_thread = std::thread([this] {
       int accepted = -1;
       try {
-        accepted = ::accept(server_fd.load(), nullptr, nullptr);
+        accepted = ::accept4(server_fd.load(), nullptr, nullptr, SOCK_CLOEXEC);
         if (accepted < 0) {
           if (!stopping.load()) {
             Fail(
@@ -272,6 +316,7 @@ struct RuntimeTapServer::Session {
             if (!queue.empty()) {
               message.emplace(std::move(queue.front()));
               queue.pop_front();
+              queued_bytes -= std::min(queued_bytes, message->PayloadSize());
             } else if (
                 (stopping.load() || !stream_error.empty()) &&
                 dropped_total == reported_dropped_total) {
@@ -347,16 +392,19 @@ struct RuntimeTapServer::Session {
   }
 
   void Enqueue(ibmw::transport::SerializedMessage message) {
+    const size_t bytes = message.PayloadSize();
     std::lock_guard lock(mutex);
     if (!accepting.load()) {
       return;
     }
-    if (queue.size() >= kMaxQueuedMessages) {
+    if (queue.size() >= kMaxQueuedMessages ||
+        (!queue.empty() && bytes > kMaxQueuedBytes - std::min(queued_bytes, kMaxQueuedBytes))) {
       ++dropped_total;
       cv.notify_one();
       return;
     }
     queue.emplace_back(std::move(message));
+    queued_bytes += bytes;
     cv.notify_one();
   }
 
@@ -403,8 +451,11 @@ void RuntimeTapServer::Start() {
   bool expected = false;
   MW_ASSERT(started_.compare_exchange_strong(expected, true),
             "Runtime tap server is already started.");
-  const auto root = runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
-  const auto directory = runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
+  // Only for the side effect: create both directories and check that each is
+  // private to this UID (the second call checks the parent only as an
+  // ancestor). The descriptors are closed right away.
+  runtime_graph::OpenRuntimeDirectory(socket_directory_.parent_path(), true);
+  runtime_graph::OpenRuntimeDirectory(socket_directory_, true);
 }
 
 TapSessionDescriptor RuntimeTapServer::StartSession(
@@ -433,6 +484,8 @@ TapSessionDescriptor RuntimeTapServer::StartSession(
     std::lock_guard lock(sessions_mutex_);
     sessions_.emplace(id, session);
     sessions_by_publisher_.emplace(advertisement.publisher_id, session);
+    const auto [word, mask] = TopicFilterBit(advertisement.topic.topic, kTopicFilterWords);
+    topic_filter_[word].fetch_or(mask, std::memory_order_relaxed);
     if (publish_tap_handle_ == 0) {
       publish_tap_handle_ = publish_tap_.Register(
           [this](ibmw::extension::MessageView& frame) { OnPublish(frame); });
@@ -461,6 +514,7 @@ bool RuntimeTapServer::StopSession(std::string_view session_id) {
         break;
       }
     }
+    RebuildTopicFilterLocked();
     if (sessions_.empty()) {
       tap_handle = publish_tap_handle_;
       publish_tap_handle_ = 0;
@@ -486,6 +540,7 @@ void RuntimeTapServer::Shutdown() {
     std::lock_guard lock(sessions_mutex_);
     sessions.swap(sessions_);
     sessions_by_publisher_.clear();
+    RebuildTopicFilterLocked();
     tap_handle = publish_tap_handle_;
     publish_tap_handle_ = 0;
   }
@@ -502,7 +557,26 @@ void RuntimeTapServer::Shutdown() {
   }
 }
 
+void RuntimeTapServer::RebuildTopicFilterLocked() {
+  std::array<uint64_t, kTopicFilterWords> words{};
+  for (const auto& [id, session] : sessions_) {
+    const auto [word, mask] = TopicFilterBit(session->advertisement.topic.topic, kTopicFilterWords);
+    words[word] |= mask;
+  }
+  for (size_t i = 0; i < kTopicFilterWords; ++i) {
+    topic_filter_[i].store(words[i], std::memory_order_relaxed);
+  }
+}
+
 void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
+  const auto [word, mask] = TopicFilterBit(frame.topic, kTopicFilterWords);
+  if ((topic_filter_[word].load(std::memory_order_relaxed) & mask) == 0) {
+    return;
+  }
+  CapturePublish(frame);
+}
+
+void RuntimeTapServer::CapturePublish(ibmw::extension::MessageView& frame) {
   const std::string publisher_id =
       std::string(frame.module_name) + "-" +
       std::to_string(frame.endpoint_index);
@@ -512,9 +586,9 @@ void RuntimeTapServer::OnPublish(ibmw::extension::MessageView& frame) {
     const auto [first, last] = sessions_by_publisher_.equal_range(publisher_id);
     for (auto item = first; item != last; ++item) {
       const auto& session = item->second;
+      // equal_range already matched publisher_id.
       if (session->advertisement.topic.topic == frame.topic &&
-          session->advertisement.topic.msg_type == frame.msg_type &&
-          session->advertisement.publisher_id == publisher_id) {
+          session->advertisement.topic.msg_type == frame.msg_type) {
         matching.emplace_back(session);
       }
     }
@@ -603,7 +677,7 @@ void UnixRuntimeTapClient::StartTap(
     const auto session = agent_client_.StartTap(
         advertisement.topic.topic, advertisement.publisher_id);
     session_id_ = session.session_id;
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime tap client socket.");
     stream_fd_ = fd;
     const auto address = MakeSocketAddress(session.stream_socket);
@@ -740,12 +814,12 @@ void UnixRuntimeTapClient::ReadLoop(
           "Runtime tap payload is too large.");
 
       std::string json_data(json_size, '\0');
-      std::vector<uint8_t> payload(static_cast<size_t>(payload_size));
+      std::vector<uint8_t> payload;
       const auto json_result =
           ReceiveAll(fd, json_data.data(), json_data.size());
       const auto payload_result =
           json_result.status == ReceiveStatus::kOk
-              ? ReceiveAll(fd, payload.data(), payload.size())
+              ? ReceivePayload(fd, payload, static_cast<size_t>(payload_size))
               : ReceiveResult{.status = ReceiveStatus::kTruncated};
       if (json_result.status != ReceiveStatus::kOk ||
           payload_result.status != ReceiveStatus::kOk) {

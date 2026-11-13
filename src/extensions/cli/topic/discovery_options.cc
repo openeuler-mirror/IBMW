@@ -102,10 +102,14 @@ std::vector<ibmw::discovery::DiscoveryOptions> ParseDiscoveryOptions(
     if (registry) options.registry_path = *registry;
     result.push_back(std::move(options));
   }
+  // Domains are parsed before each DiscoveryOptions aggregate is built: GCC
+  // before 13 (PR66139) leaks the defaulted registry_path when an aggregate
+  // initializer throws.
   if (dds) {
+    const uint32_t dds_domain_id =
+        dds_domain ? ParseDomain(*dds_domain, "--dds-domain") : common_domain;
     result.push_back(DiscoveryOptions{
-        .backend = DiscoveryBackend::kDds,
-        .domain_id = dds_domain ? ParseDomain(*dds_domain, "--dds-domain") : common_domain});
+        .backend = DiscoveryBackend::kDds, .domain_id = dds_domain_id});
   }
   if (ros2) {
     uint32_t selected_domain = common_domain;

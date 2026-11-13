@@ -4,6 +4,7 @@
 #include "engine/topic_io/topic_subscription.h"
 
 #include <atomic>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -82,9 +83,11 @@ YAML::Node SubscriptionRuntimeConfig(
     const auto items = config["extensions"]["items"];
     Require(items.IsSequence(), "--config-file requires ibmw.extensions.items.");
     unsigned matches = 0;
+    // Items of other extensions may lack fields; only the selected one is checked.
     for (const auto& item : items) {
-      if (item["name"].as<std::string>() != extension_name) continue;
+      if (!item.IsMap() || !item["name"] || item["name"].as<std::string>() != extension_name) continue;
       ++matches;
+      Require(bool(item["path"]), "--config-file " + extension_name + " requires a path.");
       extension = YAML::Clone(item);
       extension["path"] = resolve_path(item["path"].as<std::string>());
     }
@@ -93,7 +96,7 @@ YAML::Node SubscriptionRuntimeConfig(
     const auto drivers = config["messaging"]["drivers"];
     Require(drivers.IsSequence(), "--config-file requires ibmw.messaging.drivers.");
     for (const auto& item : drivers) {
-      if (item["type"].as<std::string>() != driver) continue;
+      if (!item.IsMap() || !item["type"] || item["type"].as<std::string>() != driver) continue;
       ++matches;
       transport = YAML::Clone(item);
     }
@@ -126,6 +129,8 @@ YAML::Node SubscriptionRuntimeConfig(
   runtime["extensions"]["items"].push_back(extension);
   runtime["messaging"]["drivers"].push_back(transport);
   runtime["runtime_graph"]["enabled"] = false;
+  // No module configs are written here; keep ConfigSubsystem from creating ./cfg/tmp in the user's cwd.
+  runtime["config"]["temp_cfg_path"] = std::filesystem::temp_directory_path().string();
   runtime["logging"]["core_level"] = "WARN";
   YAML::Node console;
   console["type"] = "console";

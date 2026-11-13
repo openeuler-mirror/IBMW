@@ -1,0 +1,429 @@
+// Copyright (c) 2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
+// Regression tests for the local (in-process) transport:
+// COMM-006: Shutdown must drain queued async deliveries before the catalog
+//           that owns the handlers is released.
+// COMM-007: cross-package delivery by direct copy requires a shared type
+//           support implementation.
+// COMM-037: one package failing does not drop the others, inline delivery
+//           leaves the serialization cache to the next driver, and the
+//           subscribers of one package do not share a Context.
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "cpp/executor/executor.h"
+#include "cpp/util/string.h"
+#include "engine/transport/transport_driver_tools.h"
+#include "engine/transport/inprocess_transport.h"
+#include "engine/transport/transport_catalog.h"
+#include "yaml-cpp/yaml.h"
+
+namespace ibmw::runtime::core::transport {
+namespace {
+
+using namespace std::chrono_literals;
+
+// Executor whose single worker runs tasks only after Release().
+class GatedExecutor {
+ public:
+  GatedExecutor() {
+    worker_ = std::thread([this] {
+      std::unique_lock lock(mutex_);
+      while (true) {
+        cv_.wait(lock, [this] { return stop_ || (released_ && !tasks_.empty()); });
+        if (tasks_.empty()) return;
+        auto task = std::move(tasks_.front());
+        tasks_.pop_front();
+        lock.unlock();
+        task();
+        lock.lock();
+      }
+    });
+  }
+  ~GatedExecutor() {
+    {
+      std::lock_guard lock(mutex_);
+      stop_ = true;
+      released_ = true;
+    }
+    cv_.notify_all();
+    worker_.join();
+  }
+  void Release() {
+    {
+      std::lock_guard lock(mutex_);
+      released_ = true;
+    }
+    cv_.notify_all();
+  }
+  size_t Queued() {
+    std::lock_guard lock(mutex_);
+    return tasks_.size();
+  }
+  // Destroys queued tasks without running them (an executor shutting down).
+  void DiscardAll() {
+    std::deque<executor::Task> dropped;
+    {
+      std::lock_guard lock(mutex_);
+      dropped.swap(tasks_);
+    }
+  }
+  // Makes the transport believe it is shut down from this executor.
+  void PretendCurrent() { pretend_current_ = true; }
+  executor::ExecutorHandle Handle() { return executor::ExecutorHandle(&base_); }
+
+ private:
+  static GatedExecutor* Self(void* ctx) { return static_cast<GatedExecutor*>(ctx); }
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::deque<executor::Task> tasks_;
+  bool released_ = false;
+  bool stop_ = false;
+  std::atomic<bool> pretend_current_{false};
+  std::thread worker_;
+  ibmw_executor_base_t base_{
+      .type = [](void*) { return ibmw::util::ToIbmwStringView("gated"); },
+      .name = [](void*) { return ibmw::util::ToIbmwStringView("gated"); },
+      .is_thread_safe = [](void*) { return true; },
+      .is_in_current_executor =
+          [](void* ctx) {
+            return Self(ctx)->pretend_current_.load() || std::this_thread::get_id() == Self(ctx)->worker_.get_id();
+          },
+      .supports_timed_dispatch = [](void*) { return false; },
+      .dispatch =
+          [](void* ctx, ibmw_function_base_t* task) {
+            auto* self = Self(ctx);
+            {
+              std::lock_guard lock(self->mutex_);
+              self->tasks_.emplace_back(task);
+            }
+            self->cv_.notify_all();
+          },
+      .now = [](void*) -> uint64_t { return 0; },
+      .dispatch_at_ns = nullptr,
+      .ctx = this};
+};
+
+// Copy-only type support for an int (no serialization), with distinct copy
+// functions per instance kind so the transport can tell them apart.
+template <int kTag>
+const ibmw_type_support_base_t* IntTypeSupport() {
+  static const ibmw_type_support_base_t ts{
+      .type_name = [](void*) { return ibmw::util::ToIbmwStringView("test:Int"); },
+      .create = [](void*) -> void* { return new int(0); },
+      .destroy = [](void*, void* msg) { delete static_cast<int*>(msg); },
+      .copy = [](void*, const void* from, void* to) {
+        *static_cast<int*>(to) = *static_cast<const int*>(from) + kTag;
+      },
+      .move = [](void*, void* from, void* to) { *static_cast<int*>(to) = *static_cast<int*>(from); },
+      .serialize = nullptr,
+      .deserialize = nullptr,
+      .serialization_types_supported_num = [](void*) -> size_t { return 0; },
+      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return nullptr; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .ctx = nullptr};
+  return &ts;
+}
+
+TransportInfo Info(std::string pkg, std::string module, const ibmw_type_support_base_t* ts) {
+  return {.msg_type = "test:Int",
+          .topic_name = "/int",
+          .pkg_path = std::move(pkg),
+          .module_name = std::move(module),
+          .msg_type_support_ref = ibmw::util::TypeSupportRef(ts)};
+}
+
+struct Fixture {
+  TransportCatalog catalog;
+  InProcessTransport transport;
+  std::atomic<int> calls{0};
+  std::atomic<int> last_value{-1};
+
+  void Subscribe(TransportInfo info) {
+    auto handler = std::make_unique<MessageHandlerWrapper>();
+    handler->info = std::move(info);
+    handler->callback = [this](MessageFrame& frame, std::function<void()>&&,
+                               const internal::CallbackInvocationEnvelopeV1*) {
+      if (frame.msg_ptr != nullptr) last_value = *static_cast<const int*>(frame.msg_ptr);
+      ++calls;
+    };
+    ASSERT_TRUE(transport.OnMessage(*handler));
+    ASSERT_TRUE(catalog.OnMessage(std::move(handler)));
+  }
+
+  void Publish(const TransportInfo& pub_info, int value) {
+    ibmw::transport::Context context;
+    MessageFrame frame{.info = pub_info, .msg_ptr = &value, .ctx_ref = ibmw::transport::ContextRef(context)};
+    transport.Send(frame);
+  }
+};
+
+// COMM-042: every option key is optional and keeps its default.
+TEST(InProcessTransportTest, OptionKeysAreOptional) {
+  for (const char* options : {"{}", "{subscriber_executor: gated}"}) {
+    Fixture f;
+    EXPECT_NO_THROW(f.transport.Initialize(YAML::Load(options))) << options;
+  }
+  GatedExecutor executor;
+  Fixture f;
+  std::string requested = "unset";
+  f.transport.RegisterGetExecutorFunc([&](std::string_view name) {
+    requested = name;
+    return executor.Handle();
+  });
+  EXPECT_NO_THROW(f.transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false}")));
+  EXPECT_EQ(requested, "");
+}
+
+// COMM-041: Initialize writes the effective options back into the caller's
+// tree (used by --dump_cfg).
+TEST(InProcessTransportTest, InitializeWritesEffectiveOptionsBack) {
+  Fixture f;
+  YAML::Node root = YAML::Load("{}");
+  f.transport.Initialize(root["inprocess"]);
+  ASSERT_TRUE(root["inprocess"]);
+  EXPECT_TRUE(root["inprocess"]["subscriber_use_inline_executor"]);
+}
+
+TEST(InProcessTransportTest, ShutdownDrainsQueuedAsyncDeliveries) {
+  GatedExecutor executor;
+  Fixture f;
+  f.transport.RegisterGetExecutorFunc([&](std::string_view) { return executor.Handle(); });
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false, subscriber_executor: gated}"));
+  f.Subscribe(Info("pkg", "sub", IntTypeSupport<0>()));
+  f.transport.Start();
+
+  const auto pub_info = Info("pkg", "pub", IntTypeSupport<0>());
+  f.Publish(pub_info, 7);
+  ASSERT_EQ(executor.Queued(), 1u);
+
+  auto shutdown = std::async(std::launch::async, [&] { f.transport.Shutdown(); });
+  // The queued delivery still references a catalog-owned handler, so
+  // Shutdown must not return before it ran.
+  EXPECT_EQ(shutdown.wait_for(200ms), std::future_status::timeout);
+  EXPECT_EQ(f.calls.load(), 0);
+  executor.Release();
+  EXPECT_EQ(shutdown.wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_EQ(f.last_value.load(), 7);
+}
+
+// A delivery the executor discards after an incomplete drain (here: shutdown
+// from the subscriber executor) releases its token after the transport is
+// destroyed; the counter must outlive the transport (run under ASan).
+TEST(InProcessTransportTest, DiscardedDeliveryAfterTransportDestroyedIsSafe) {
+  GatedExecutor executor;
+  {
+    auto f = std::make_unique<Fixture>();
+    f->transport.RegisterGetExecutorFunc([&](std::string_view) { return executor.Handle(); });
+    f->transport.SetTransportCatalog(&f->catalog);
+    f->transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false, subscriber_executor: gated}"));
+    f->Subscribe(Info("pkg", "sub", IntTypeSupport<0>()));
+    f->transport.Start();
+    f->Publish(Info("pkg", "pub", IntTypeSupport<0>()), 7);
+    ASSERT_EQ(executor.Queued(), 1u);
+
+    executor.PretendCurrent();
+    f->transport.Shutdown();  // drain skipped
+  }
+  executor.DiscardAll();
+  SUCCEED();
+}
+
+TEST(InProcessTransportTest, PublishWithoutSubscribersTakesNoToken) {
+  GatedExecutor executor;
+  Fixture f;
+  f.transport.RegisterGetExecutorFunc([&](std::string_view) { return executor.Handle(); });
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false, subscriber_executor: gated}"));
+  f.Subscribe(Info("pkg", "sub", IntTypeSupport<0>()));
+  f.transport.Start();
+  auto other = Info("pkg", "pub", IntTypeSupport<0>());
+  other.topic_name = "/nobody";
+  f.Publish(other, 1);
+  EXPECT_EQ(executor.Queued(), 0u);
+  // Nothing in flight: Shutdown returns without waiting.
+  auto shutdown = std::async(std::launch::async, [&] { f.transport.Shutdown(); });
+  EXPECT_EQ(shutdown.wait_for(1s), std::future_status::ready);
+}
+
+TEST(InProcessTransportTest, CrossPackageCopyRequiresSharedTypeSupport) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  f.Subscribe(Info("sub_pkg", "sub", IntTypeSupport<100>()));
+  f.transport.Start();
+
+  // Different copy implementation in another package: must not be copied.
+  f.Publish(Info("pub_pkg", "pub", IntTypeSupport<0>()), 7);
+  f.Publish(Info("pub_pkg", "pub", IntTypeSupport<0>()), 8);
+  EXPECT_EQ(f.calls.load(), 0);
+  f.transport.Shutdown();
+}
+
+TEST(InProcessTransportTest, CrossPackageCopyWithSameTypeSupportIsDelivered) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  f.Subscribe(Info("sub_pkg", "sub", IntTypeSupport<100>()));
+  f.transport.Start();
+
+  f.Publish(Info("pub_pkg", "pub", IntTypeSupport<100>()), 7);
+  EXPECT_EQ(f.calls.load(), 1);
+  EXPECT_EQ(f.last_value.load(), 107);
+  f.transport.Shutdown();
+}
+
+// Serializable int; serialize fails while `fail_next_serialize` is set.
+std::atomic<int> serialize_calls{0};
+std::atomic<bool> fail_next_serialize{false};
+const ibmw_type_support_base_t* SerializableIntTypeSupport() {
+  static const ibmw_string_view_t kTypes[] = {ibmw::util::ToIbmwStringView("test")};
+  static const ibmw_type_support_base_t ts{
+      .type_name = [](void*) { return ibmw::util::ToIbmwStringView("test:Int"); },
+      .create = [](void*) -> void* { return new int(0); },
+      .destroy = [](void*, void* msg) { delete static_cast<int*>(msg); },
+      .copy = [](void*, const void* from, void* to) { *static_cast<int*>(to) = *static_cast<const int*>(from); },
+      .move = [](void*, void* from, void* to) { *static_cast<int*>(to) = *static_cast<int*>(from); },
+      .serialize = [](void*, ibmw_string_view_t, const void*, const ibmw_buffer_array_allocator_t*,
+                      ibmw_buffer_array_t*) {
+        ++serialize_calls;
+        return !fail_next_serialize.exchange(false);
+      },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) { return true; },
+      .serialization_types_supported_num = [](void*) -> size_t { return 1; },
+      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return kTypes; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .ctx = nullptr};
+  return &ts;
+}
+
+TEST(InProcessTransportTest, FailingPackageDoesNotDropTheOthers) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  f.Subscribe(Info("pub_pkg", "same", SerializableIntTypeSupport()));
+  f.Subscribe(Info("other_a", "sub", SerializableIntTypeSupport()));
+  f.Subscribe(Info("other_b", "sub", SerializableIntTypeSupport()));
+  f.transport.Start();
+
+  // Whichever cross-package subscriber comes first fails to serialize; the
+  // retry for the second one succeeds.
+  fail_next_serialize = true;
+  f.Publish(Info("pub_pkg", "pub", SerializableIntTypeSupport()), 7);
+  EXPECT_EQ(f.calls.load(), 2);
+  f.transport.Shutdown();
+}
+
+TEST(InProcessTransportTest, InlineDeliveryKeepsSerializationCacheForNextDriver) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  f.transport.Initialize(YAML::Node());
+  f.Subscribe(Info("other_a", "sub", SerializableIntTypeSupport()));
+  f.Subscribe(Info("other_b", "sub", SerializableIntTypeSupport()));
+  f.transport.Start();
+
+  serialize_calls = 0;
+  const auto pub_info = Info("pub_pkg", "pub", SerializableIntTypeSupport());
+  int value = 7;
+  ibmw::transport::Context context;
+  MessageFrame frame{.info = pub_info, .msg_ptr = &value, .ctx_ref = ibmw::transport::ContextRef(context)};
+  f.transport.Send(frame);
+  EXPECT_EQ(f.calls.load(), 2);
+  // A driver after this one finds the bytes in the cache.
+  EXPECT_NE(SerializeMsgWithCache(frame, "test"), nullptr);
+  EXPECT_EQ(serialize_calls.load(), 1);
+  f.transport.Shutdown();
+}
+
+// Each subscriber of a package sees the publisher's metadata in a Context of
+// its own: what one sets is not seen by the next (COMM-037). With an executor
+// the queued deliveries, which may run concurrently, hold distinct Contexts.
+void ExpectOwnContextPerSubscriber(const ibmw_type_support_base_t* ts, const std::string& sub_pkg,
+                                   GatedExecutor* executor = nullptr) {
+  Fixture f;
+  f.transport.SetTransportCatalog(&f.catalog);
+  if (executor != nullptr) {
+    f.transport.RegisterGetExecutorFunc([executor](std::string_view) { return executor->Handle(); });
+    f.transport.Initialize(YAML::Load("{subscriber_use_inline_executor: false, subscriber_executor: gated}"));
+  } else {
+    f.transport.Initialize(YAML::Node());
+  }
+  std::mutex mutex;
+  std::vector<std::string> seen;
+  std::set<const void*> contexts;
+  for (const char* module : {"a", "b", "c"}) {
+    auto handler = std::make_unique<MessageHandlerWrapper>();
+    handler->info = Info(sub_pkg, module, ts);
+    handler->callback = [&, module](MessageFrame& frame, std::function<void()>&&,
+                                    const internal::CallbackInvocationEnvelopeV1*) {
+      std::lock_guard lock(mutex);
+      seen.emplace_back(std::string(frame.ctx_ref.GetMetaValue("pub_key")) + "|" +
+                        std::string(frame.ctx_ref.GetMetaValue("filter")));
+      contexts.insert(frame.ctx_ref.NativeHandle());
+      frame.ctx_ref.SetMetaValue("filter", module);
+      ++f.calls;
+    };
+    ASSERT_TRUE(f.transport.OnMessage(*handler));
+    ASSERT_TRUE(f.catalog.OnMessage(std::move(handler)));
+  }
+  f.transport.Start();
+
+  int value = 7;
+  ibmw::transport::Context context;
+  context.SetMetaValue("pub_key", "v");
+  const auto pub_info = Info("pub_pkg", "pub", ts);
+  MessageFrame frame{.info = pub_info, .msg_ptr = &value, .ctx_ref = ibmw::transport::ContextRef(context)};
+  f.transport.Send(frame);
+  if (executor != nullptr) {
+    // All three are queued, so all three Contexts are alive at once.
+    ASSERT_EQ(executor->Queued(), 3u);
+    executor->Release();
+    for (int i = 0; i < 500 && f.calls.load() < 3; ++i) std::this_thread::sleep_for(10ms);
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(contexts.size(), 3u);
+  }
+  ASSERT_EQ(f.calls.load(), 3);
+  {
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(seen, (std::vector<std::string>{"v|", "v|", "v|"}));
+  }
+  EXPECT_EQ(context.GetMetaValue("filter"), "");
+  f.transport.Shutdown();
+}
+
+TEST(InProcessTransportTest, CopyDeliveryGivesEachSubscriberItsOwnContext) {
+  ExpectOwnContextPerSubscriber(IntTypeSupport<0>(), "pub_pkg");
+}
+
+TEST(InProcessTransportTest, SerializedDeliveryGivesEachSubscriberItsOwnContext) {
+  ExpectOwnContextPerSubscriber(SerializableIntTypeSupport(), "sub_pkg");
+}
+
+TEST(InProcessTransportTest, QueuedDeliveriesHoldDistinctContexts) {
+  GatedExecutor executor;
+  ExpectOwnContextPerSubscriber(IntTypeSupport<0>(), "pub_pkg", &executor);
+}
+
+TEST(InProcessTransportTest, QueuedSerializedDeliveriesHoldDistinctContexts) {
+  GatedExecutor executor;
+  ExpectOwnContextPerSubscriber(SerializableIntTypeSupport(), "sub_pkg", &executor);
+}
+
+}  // namespace
+}  // namespace ibmw::runtime::core::transport

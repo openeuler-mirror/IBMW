@@ -351,7 +351,12 @@ apps: []
         self.assertIn("explicit _IbmwJsonRpcServerdemo_json_rpc_serverDemoServiceImpl(demo_json_rpc_server* owner);", inc_h)
         self.assertIn("namespace ibmw::demo {", inc_cc)
         self.assertIn("owner_->HandleAdd(req, rsp);", inc_cc)
-        self.assertIn("#define IBMW_TS_RPC_SERVER_HANDLER_IMPL(name) \\", inc_cc)
+        # GEN-001: handlers are plain functions; a // marker anchor inside a
+        # backslash-continued macro would comment out the rest of it.
+        self.assertIn("#define IBMW_TS_RPC_SERVER_HANDLER_IMPL(name)\n", inc_cc)
+        self.assertNotRegex(inc_cc, r"//[^\n]*\\\n")
+        # TOOL-046: an unedited handler reports itself as unimplemented.
+        self.assertIn("return IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED;", inc_cc)
 
     def test_json_rpc_server_method_scoped_marker_contract(self):
         mod = {
@@ -389,7 +394,7 @@ apps: []
             )
             begin = f"// {method_marker}_BEGIN"
             end = f"// {method_marker}_END"
-            handler_sig = f"uint32_t name::Handle{method_name}("
+            handler_sig = f"uint32_t demo_json_rpc_server::Handle{method_name}("
             self.assertIn(begin, inc_cc)
             self.assertIn(end, inc_cc)
             self.assertIn(handler_sig, inc_cc)

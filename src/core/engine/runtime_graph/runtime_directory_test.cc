@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <fstream>
 
 #include "engine/runtime_graph/runtime_directory.h"
@@ -14,7 +15,8 @@ namespace {
 class RuntimeDirectoryTest : public testing::Test {
  protected:
   void SetUp() override {
-    std::string path = "/tmp/ibmw-registry-security-XXXXXX";
+    std::string path =
+        (std::filesystem::temp_directory_path() / "ibmw-registry-security-XXXXXX").string();
     ASSERT_NE(::mkdtemp(path.data()), nullptr);
     root_ = path;
   }
@@ -82,6 +84,26 @@ TEST_F(RuntimeDirectoryTest, AgentRejectsSymlinkLock) {
   std::string content;
   std::ifstream(victim) >> content;
   EXPECT_EQ(content, "keep");
+}
+
+// COMM-031: the size limit counts the bytes read from the open file, so a
+// file that grows after a size check, or reports st_size 0, can not exceed it.
+TEST_F(RuntimeDirectoryTest, ReadRuntimeFileBelowBoundsTheBytesRead) {
+  const auto path = root_ / "data.json";
+  std::ofstream(path) << std::string(15, 'x');
+  {
+    const RuntimeFileDescriptor file(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    EXPECT_EQ(ReadRuntimeFileBelow(file.Get(), 16), std::string(15, 'x'));
+  }
+  {
+    const RuntimeFileDescriptor file(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    EXPECT_EQ(ReadRuntimeFileBelow(file.Get(), 15), std::nullopt);
+  }
+  const RuntimeFileDescriptor proc(::open("/proc/self/status", O_RDONLY | O_CLOEXEC));
+  struct stat status {};
+  ASSERT_EQ(::fstat(proc.Get(), &status), 0);
+  ASSERT_EQ(status.st_size, 0);
+  EXPECT_EQ(ReadRuntimeFileBelow(proc.Get(), 16), std::nullopt);
 }
 
 }  // namespace

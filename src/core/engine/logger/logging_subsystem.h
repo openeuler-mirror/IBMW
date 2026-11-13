@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -36,7 +37,7 @@ class LoggingSubsystem : public ISubsystem {
 
  public:
   LoggingSubsystem() = default;
-  ~LoggingSubsystem() override = default;
+  ~LoggingSubsystem() override;
 
   LoggingSubsystem(const LoggingSubsystem&) = delete;
   LoggingSubsystem& operator=(const LoggingSubsystem&) = delete;
@@ -50,6 +51,22 @@ class LoggingSubsystem : public ISubsystem {
    * @note  Should be called before resetting the core logger to drain queued entries.
    */
   void Flush();
+
+  /**
+   * @brief Bounded flush for the crash report (see LoggerDriverBase::FlushForCrash).
+   * @note  Waits about `timeout` at most in total for all drivers (one
+   *        deadline; see LoggerDriverBase::FlushForCrash for what it does not
+   *        bound). Called by the crash signal handler after it logged the
+   *        report.
+   * @return true when every driver wrote out what was logged before the call.
+   */
+  bool FlushForCrash(std::chrono::milliseconds timeout) noexcept;
+
+  // Upper bound of the wait in FlushForCrash() when called by the crash
+  // handler. Must stay well below the selfdev crash handler's report watchdog
+  // (Options::report_timeout_sec, 10 s), so a log executor that is stuck
+  // still lets the report finish and the process end with its signal.
+  static constexpr std::chrono::milliseconds kCrashFlushTimeout{500};
 
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);
@@ -75,7 +92,10 @@ class LoggingSubsystem : public ISubsystem {
  private:
   Options options_;
 
-  std::unique_ptr<CrashSignalHandling> crash_signal_handling_;
+  // Published to the crash handler while this object's crash log is on:
+  // waits (bounded) for the drivers to write the report.
+  const CrashSignalHandling::CrashFlushHook crash_flush_hook_{
+      [](void* self) { (void)static_cast<LoggingSubsystem*>(self)->FlushForCrash(kCrashFlushTimeout); }, this};
 
   std::function<ibmw::executor::ExecutorHandle(std::string_view)> get_executor_func_;
 
@@ -89,6 +109,10 @@ class LoggingSubsystem : public ISubsystem {
       ibmw::common::util::StringHash,
       std::equal_to<>>
       logger_access_map_;
+
+  // Last member: destroyed first, so its handlers are gone before the
+  // loggers they report through.
+  std::unique_ptr<CrashSignalHandling> crash_signal_handling_;
 };
 
 }  // namespace ibmw::runtime::core::logger

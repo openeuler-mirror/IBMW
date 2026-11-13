@@ -6,14 +6,19 @@
 # For each requested payload size, this script:
 #   1) Backs up cfg/<sample>/{publisher,subscriber}.yaml under the build tree.
 #   2) Patches `payload_bytes`, `label`, and `shm_init_size` in-place.
-#   3) Runs all 7 bench samples sequentially via build/start_<sample>.sh.
-#   4) Wipes /dev/shm/{fastdds,fastrtps,iceoryx,iox,fast_datasharing}_*
-#      between samples so phantom discovery state from a hard-killed prior
-#      run does not silence the next one.
+#   3) Runs the bench samples sequentially via build/start_<sample>.sh. The
+#      default list has 10 lanes (iceoryx, self-developed shm, DDS, net);
+#      lanes this build does not have (iox_* without iceoryx, shm_* without
+#      shm) are skipped. Samples named in IBMW_BENCH_SAMPLES must exist.
+#   4) Wipes /dev/shm/{fastdds,fastrtps,fast_datasharing}_* between samples so
+#      phantom discovery state from a hard-killed prior run does not silence
+#      the next one; /dev/shm/{iceoryx,iox}_* only before iox_* samples.
 #   5) Restores yaml from backup on EXIT (trap), even on Ctrl-C.
 #
-# Latency rows accumulate into ${IBMW_BENCH_CSV:-/tmp/ibmw_bench/iox_bench_lat.csv}
-# (one row per sample per size). Use --reset-csv to start a fresh sweep.
+# Latency rows accumulate into ${IBMW_BENCH_CSV} (one row per sample per
+# size). Its default is /tmp/ibmw_bench/iox_bench_lat.csv when an iox_* lane
+# runs (unchanged for iceoryx builds), else /tmp/ibmw_bench/bench_lat.csv.
+# Use --reset-csv to start a fresh sweep.
 #
 # Default size matrix matches industry DDS/ROS 2 perf reports:
 #   1KB / 4KB / 16KB / 64KB / 256KB / 1MB
@@ -27,6 +32,7 @@
 #   IBMW_BENCH_RETRIES=3 scripts/run_bench_sweep.sh  # retry failed sample/size runs
 #   IBMW_BUILD_DIR="<ibmw-build-dir>" scripts/run_bench_sweep.sh
 #   IBMW_BENCH_SAMPLES="dds_loaned dds_send_shm" scripts/run_bench_sweep.sh 4096 4KB
+#   IBMW_BENCH_LOG_DIR=<dir> scripts/run_bench_sweep.sh   # keep logs there (default: mktemp -d)
 #
 # Prerequisites:
 #   - cmake --build build && cmake --install build --prefix build
@@ -39,16 +45,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${IBMW_BUILD_DIR:-${REPO_ROOT}/build}"
 DURATION="${DURATION:-}"
-CSV_PATH="${IBMW_BENCH_CSV:-/tmp/ibmw_bench/iox_bench_lat.csv}"
+# Per-sample logs go to a private directory (default: new mktemp -d), not to
+# fixed names in the shared /tmp.
+LOG_DIR="${IBMW_BENCH_LOG_DIR:-}"
 IBMW_BENCH_RETRIES="${IBMW_BENCH_RETRIES:-1}"
 
-DEFAULT_SAMPLES=(iox_loaned_pod iox_loaned_ctx iox_send dds_loaned dds_send_shm dds_send_tcp net_send_tcp)
-if [[ -n "${IBMW_BENCH_SAMPLES:-}" ]]; then
-  # shellcheck disable=SC2206
-  SAMPLES=(${IBMW_BENCH_SAMPLES})
-else
-  SAMPLES=("${DEFAULT_SAMPLES[@]}")
-fi
+DEFAULT_SAMPLES=(iox_loaned_pod iox_loaned_ctx iox_send
+                 shm_loaned_pod shm_loaned_ctx shm_send
+                 dds_loaned dds_send_shm dds_send_tcp net_send_tcp)
 
 # Default 6-size matrix: "<bytes> <label>" per entry.
 DEFAULT_MATRIX=(
@@ -61,7 +65,7 @@ DEFAULT_MATRIX=(
 )
 
 usage() {
-  sed -n '3,33p' "${BASH_SOURCE[0]}"
+  sed -n '3,38p' "${BASH_SOURCE[0]}"
   exit "${1:-0}"
 }
 
@@ -107,12 +111,56 @@ if [[ ! -d "${BUILD_DIR}" ]]; then
 fi
 cd "${BUILD_DIR}"
 
-for s in "${SAMPLES[@]}"; do
-  if [[ ! -x "./start_${s}.sh" ]]; then
-    echo "error: missing build/start_${s}.sh — did you run cmake --install?" >&2
+if [[ -n "${IBMW_BENCH_SAMPLES:-}" ]]; then
+  # shellcheck disable=SC2206
+  SAMPLES=(${IBMW_BENCH_SAMPLES})
+  for s in "${SAMPLES[@]}"; do
+    if [[ ! -x "./start_${s}.sh" ]]; then
+      echo "error: missing build/start_${s}.sh — did you run cmake --install?" >&2
+      exit 2
+    fi
+  done
+else
+  # A default lane may be missing only when its transport is not built; a
+  # missing lane of a built transport is an install error, as before.
+  lane_transport_built() {
+    local opt
+    case "$1" in
+      iox_*) opt=IBMW_BUILD_ICEORYX_EXTENSION ;;
+      shm_*) opt=IBMW_BUILD_SHM_EXTENSION ;;
+      dds_*) opt=IBMW_BUILD_DDS_EXTENSION ;;
+      net_*) opt=IBMW_BUILD_NET_EXTENSION ;;
+      *) return 0 ;;
+    esac
+    [[ -f CMakeCache.txt ]] || return 0
+    grep -qiE "^${opt}:BOOL=(ON|YES|Y|TRUE|1)$" CMakeCache.txt
+  }
+  SAMPLES=()
+  for s in "${DEFAULT_SAMPLES[@]}"; do
+    if [[ -x "./start_${s}.sh" ]]; then
+      SAMPLES+=("${s}")
+    elif lane_transport_built "${s}"; then
+      echo "error: missing build/start_${s}.sh although its transport is built — did you run cmake --install?" >&2
+      exit 2
+    else
+      echo "[sweep] skip ${s}: its transport is not built"
+    fi
+  done
+  if (( ${#SAMPLES[@]} == 0 )); then
+    echo "error: no bench sample built in ${BUILD_DIR} — did you run cmake --install?" >&2
     exit 2
   fi
+fi
+
+RUN_IOX=0
+for s in "${SAMPLES[@]}"; do
+  [[ "${s}" == iox_* ]] && RUN_IOX=1
 done
+if (( RUN_IOX )); then
+  CSV_PATH="${IBMW_BENCH_CSV:-/tmp/ibmw_bench/iox_bench_lat.csv}"
+else
+  CSV_PATH="${IBMW_BENCH_CSV:-/tmp/ibmw_bench/bench_lat.csv}"
+fi
 
 mkdir -p "$(dirname "${CSV_PATH}")"
 if (( RESET_CSV )); then
@@ -154,10 +202,13 @@ patch_yaml() {
   done
 }
 
+# $1: the sample about to run. iceoryx files are only wiped for iox_* lanes.
 clean_shm() {
   rm -f /dev/shm/fastdds_* /dev/shm/fast_datasharing_* \
-        /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* \
-        /dev/shm/iceoryx_* /dev/shm/iox_* 2>/dev/null || true
+        /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true
+  if [[ "$1" == iox_* ]]; then
+    rm -f /dev/shm/iceoryx_* /dev/shm/iox_* 2>/dev/null || true
+  fi
 }
 
 validate_latest_row() {
@@ -204,11 +255,11 @@ run_one_size() {
 
   for s in "${SAMPLES[@]}"; do
     echo "--- ${s} @ ${label} ---"
-    local log="/tmp/sweep_${s}_${label}.log"
+    local log="${LOG_DIR}/sweep_${s}_${label}.log"
     local attempt=1
     local sample_ok=0
     while (( attempt <= IBMW_BENCH_RETRIES )); do
-      clean_shm
+      clean_shm "${s}"
       local status=0
       echo "  attempt ${attempt}/${IBMW_BENCH_RETRIES}"
       if [[ -n "${DURATION}" ]]; then
@@ -241,6 +292,12 @@ run_one_size() {
 }
 
 # --- main loop ---------------------------------------------------------------
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ibmw_bench_sweep.XXXXXX")"
+else
+  mkdir -p "${LOG_DIR}"
+fi
+echo "sweep logs: ${LOG_DIR}"
 backup_yaml
 
 if [[ -n "${SINGLE_SIZE}" ]]; then

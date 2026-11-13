@@ -84,17 +84,21 @@ RecordQueue::PushResult RecorderCoordinator::Accept(
   return queue_.Push(std::move(message));
 }
 
-void RecorderCoordinator::RegisterChannel(
+bool RecorderCoordinator::RegisterChannel(
     StorageChannelDescriptor channel) {
   MW_ASSERT(
       state_.load() == State::kRunning,
       "Recorder must be running before registering a Channel.");
   std::lock_guard storage_lock(storage_mutex_);
   const auto schema_id = FindOrRegisterSchema(channel.topic);
-  static_cast<void>(FindOrRegisterChannel(channel, schema_id));
+  if (!schema_id) {
+    return false;
+  }
+  static_cast<void>(FindOrRegisterChannel(channel, *schema_id));
+  return true;
 }
 
-void RecorderCoordinator::TriggerSnapshot() {
+bool RecorderCoordinator::TriggerSnapshot(std::chrono::milliseconds timeout) {
   MW_ASSERT(options_.snapshot_mode, "Recorder is not in snapshot mode.");
   uint64_t request_id = 0;
   {
@@ -111,12 +115,14 @@ void RecorderCoordinator::TriggerSnapshot() {
   queue_.WakeConsumer();
 
   std::unique_lock snapshot_lock(snapshot_mutex_);
-  snapshot_cv_.wait(snapshot_lock, [this, request_id] {
-    return completed_snapshot_id_ >= request_id ||
-           snapshot_writer_finished_;
-  });
+  if (!snapshot_cv_.wait_for(snapshot_lock, timeout, [this, request_id] {
+        return completed_snapshot_id_ >= request_id ||
+               snapshot_writer_finished_;
+      })) {
+    return false;
+  }
   if (completed_snapshot_id_ >= request_id) {
-    return;
+    return true;
   }
   snapshot_lock.unlock();
   std::exception_ptr error;
@@ -157,7 +163,8 @@ void RecorderCoordinator::Close() {
     std::lock_guard storage_lock(storage_mutex_);
     storage_->SetMessageStatistics(
         statistics.dropped + snapshot_dropped_ +
-            external_dropped_.load() + abandoned_messages,
+            external_dropped_.load() + schema_conflict_messages_.load() +
+            abandoned_messages,
         0);
     storage_->SetCloseStatus(!error, DescribeException(error));
     storage_->Close();
@@ -213,7 +220,12 @@ void RecorderCoordinator::WriteMessage(
   try {
     std::lock_guard storage_lock(storage_mutex_);
     const auto schema_id = FindOrRegisterSchema(message.topic);
-    const auto channel_id = FindOrRegisterChannel(message, schema_id);
+    if (!schema_id) [[unlikely]] {
+      // Only this topic is lost; the writer keeps recording the others.
+      ++schema_conflict_messages_;
+      return;
+    }
+    const auto channel_id = FindOrRegisterChannel(message, *schema_id);
     storage_->Write(channel_id, message);
   } catch (...) {
     ++writer_failed_messages_;
@@ -283,7 +295,7 @@ void RecorderCoordinator::FlushReadySnapshots(uint64_t popped_messages) {
   }
 }
 
-StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
+std::optional<StorageSchemaId> RecorderCoordinator::FindOrRegisterSchema(
     const ibmw::transport::TopicDescriptor& topic) {
   const std::string key = SchemaKey(topic);
   const auto existing = schema_ids_.find(key);
@@ -293,13 +305,13 @@ StorageSchemaId RecorderCoordinator::FindOrRegisterSchema(
         descriptor != schemas_by_key_.end(),
         "Recorder Schema index is inconsistent for type '{}'.",
         topic.msg_type);
-    MW_ASSERT(
-        descriptor->second.schema_hash == topic.schema.schema_hash &&
-            descriptor->second.schema_name == topic.schema.schema_name &&
-            descriptor->second.schema_encoding ==
-                topic.schema.schema_encoding,
-        "Conflicting Schema for type '{}' serialization '{}'.",
-        topic.msg_type, topic.serialization_type);
+    // A bag keeps one Schema per type and serialization: a publisher with
+    // another version of the type (a rolling upgrade) is not recorded.
+    if (descriptor->second.schema_hash != topic.schema.schema_hash ||
+        descriptor->second.schema_name != topic.schema.schema_name ||
+        descriptor->second.schema_encoding != topic.schema.schema_encoding) {
+      return std::nullopt;
+    }
     return existing->second;
   }
 

@@ -9,6 +9,10 @@
 // into the module after engine.Initialize() returns -- mirrors the
 // iox_loaned_pod and DDS loaned_message_demo patterns.
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <csignal>
 #include <chrono>
 #include <cstring>
@@ -26,22 +30,48 @@
 using namespace ibmw::runtime::core;
 namespace iox_ext = ibmw::extensions::iceoryx_extension;
 
-volatile sig_atomic_t g_shutdown_requested = 0;
+// SIGINT/SIGTERM only write the signal number to a pipe (async-signal-safe);
+// main blocks in read() on the other end instead of polling a flag.
+int g_signal_pipe[2] = {-1, -1};
 
 void SignalHandler(int sig) {
-  if (sig == SIGINT || sig == SIGTERM) g_shutdown_requested = 1;
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(sig);
+  [[maybe_unused]] auto ret = write(g_signal_pipe[1], &byte, 1);
+  errno = saved_errno;
+}
+
+bool InstallSignalHandlers() {
+  if (pipe2(g_signal_pipe, O_CLOEXEC) != 0 ||
+      fcntl(g_signal_pipe[1], F_SETFL, O_NONBLOCK) != 0) {
+    return false;
+  }
+  return std::signal(SIGINT, SignalHandler) != SIG_ERR &&
+         std::signal(SIGTERM, SignalHandler) != SIG_ERR;
+}
+
+// Blocks until SIGINT or SIGTERM has been received.
+void WaitForShutdownSignal() {
+  unsigned char sig = 0;
+  while (true) {
+    const ssize_t n = read(g_signal_pipe[0], &sig, 1);
+    if (n == 1) return;
+    if (n < 0 && errno == EINTR) continue;
+    std::cerr << "signal pipe read failed: " << std::strerror(errno) << "\n";
+    return;
+  }
 }
 
 int main(int argc, char** argv) {
-  signal(SIGINT, SignalHandler);
-  signal(SIGTERM, SignalHandler);
+  if (!InstallSignalHandlers()) {
+    std::cerr << "Failed to set up SIGINT/SIGTERM handling." << std::endl;
+    return -1;
+  }
 
   if (argc == 2 && (std::strcmp(argv[1], "--signal-regression") == 0 ||
                     std::strcmp(argv[1], "--signal-regression-stuck") == 0)) {
     std::cout << "SIGNAL_REGRESSION_ACTIVE" << std::endl;
-    while (!g_shutdown_requested) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    WaitForShutdownSignal();
     if (std::strcmp(argv[1], "--signal-regression-stuck") == 0) {
       for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -83,9 +113,7 @@ int main(int argc, char** argv) {
 
     std::cout << "PERF_PUBLISHER_READY" << std::endl;
     auto stopped = engine.AsyncStart();
-    while (!g_shutdown_requested) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    WaitForShutdownSignal();
     engine.Shutdown();
     stopped.get();
   } catch (const std::exception& e) {

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "scenario_contract": {
+    "deployment": {"hosts": 1, "transport": "shm", "topology": "single_process_direct_loan"},
+    "workload": {"attempts": 3, "payload_bytes": 20000, "terminal_failure_attempts": 1},
+    "semantics": {"publish_successes": 1, "release_successes": 1, "internal_retry_required": true},
+    "required_counters": ["logical_attempt", "logical_success", "logical_fail", "internal_retry", "publish", "release"]
+  }
+}

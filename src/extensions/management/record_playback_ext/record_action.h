@@ -3,13 +3,18 @@
 
 #pragma once
 
+#include <charconv>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -39,6 +44,7 @@ class RecordAction {
     Mode mode = Mode::kImd;
 
     struct StoragePolicy {
+      // A new bag file starts once the current one reaches this size; 0: never.
       uint32_t max_bag_size_m = 2048;
       uint32_t max_bag_num = 0;
       uint32_t msg_write_interval = 1000;
@@ -46,6 +52,20 @@ class RecordAction {
       std::string compression_mode = "zstd";
       std::string compression_level = "default";
       bool new_folder_daily = false;
+      // Disk usage limits, checked only when a bag file or folder is opened;
+      // 0 disables a limit.
+      // Writing pauses (messages are dropped) while the bag disk has less
+      // free space than this; rechecked at most once a second. While paused
+      // no new bag folder is created (a signal record fails to start).
+      uint32_t min_free_space_m = 0;
+      // Oldest ibmwbag_YYYYMMDD_hhmmss[_NN] folders under bag_path are removed so
+      // that at most this many remain, the current one included. bag_path
+      // must not be shared with another record action or writable by others.
+      uint32_t max_folder_num = 0;
+      // When a bag file is opened, the oldest files of the current folder are
+      // removed while their total size exceeds this limit (the new file is
+      // kept): the folder can grow up to this plus one max_bag_size_m.
+      uint32_t max_total_size_m = 0;
     };
 
     StoragePolicy storage_policy;
@@ -53,6 +73,10 @@ class RecordAction {
     YAML::Node extra_attributes;
 
     uint64_t max_preparation_duration_s = 0;
+    // Signal mode: the records cached before a start may take at most this
+    // much memory, the oldest are dropped first (the newest one is always
+    // kept); 0: only max_preparation_duration_s bounds the cache.
+    uint32_t max_preparation_cache_m = 0;
     std::string executor;
 
     bool record_enabled = true;
@@ -84,6 +108,12 @@ class RecordAction {
 
   const Options& GetOptions() const { return options_; }
 
+  // Replaces the free space query of min_free_space_m (for tests). Must be
+  // set before Initialize().
+  void SetFreeSpaceQuery(std::function<uintmax_t(const std::filesystem::path&)> query) {
+    free_space_query_ = std::move(query);
+  }
+
   struct StatusSnapshot {
     bool record_enabled = true;
     std::vector<TopicMeta> topic_meta_list;
@@ -107,10 +137,35 @@ class RecordAction {
   bool StartSignalRecord(uint64_t preparation_duration_s, uint64_t record_duration_s, std::string& filefolder);
   bool StopSignalRecord();
 
+  // New keys beyond this many extra attributes are dropped (each update
+  // rewrites the whole metadata file).
+  static constexpr size_t kMaxExtraAttributes = 1024;
   void UpdateMetadata(
       std::unordered_map<std::string, std::string>&& kv_pairs);
 
-  void UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled);
+  enum class UpdateResult { kOk, kNotRunning, kTopicNotFound };
+  // Applies all entries or none of them.
+  UpdateResult UpdateTopicMetaRecord(std::vector<TopicMeta>&& topic_meta_list, std::optional<bool> action_record_enabled);
+
+  // 0 disables sampling; otherwise the interval 1/freq must fit uint64 ns.
+  static constexpr double kMinSampleFreq = 1e-9;
+  static bool IsValidSampleFreq(double freq) {
+    return freq == 0 || (std::isfinite(freq) && freq >= kMinSampleFreq);
+  }
+  static uint64_t SampleIntervalNs(double freq) {
+    return freq > 0 ? static_cast<uint64_t>(1.0 / freq * 1000000000) : 0;
+  }
+
+  // Publisher timestamp/sequence metadata comes from the remote peer: an empty
+  // value is 0, a malformed one is nullopt (never throws).
+  static std::optional<uint64_t> ParsePubMeta(std::string_view value) {
+    uint64_t result = 0;
+    if (value.empty()) return result;
+    const char* end = value.data() + value.size();
+    const auto [ptr, ec] = std::from_chars(value.data(), end, result);
+    if (ec != std::errc() || ptr != end) [[unlikely]] return std::nullopt;
+    return result;
+  }
 
  private:
   struct TaskState {
@@ -160,16 +215,20 @@ class RecordAction {
 
   void AddRecordImpl(OneRecord&& record);
   void OpenNewMcapToRecord(uint64_t start_timestamp);
+  // Bag folders started in the same second: the base name, then _01.._99.
+  static constexpr uint32_t kMaxBagFolderSeq = 100;
   bool OpenNewFolderToRecord();
 
   void CloseRecord();
   void FlushToDisk();
-  void CopyExtraFilePathToNewFolder();
+  void CopyExtraFilePathToNewFolder(const std::filesystem::path& extra_file_dir) const;
 
   void SetMcapOptions();
 
   size_t GetFileSize() const;
   bool IsNewFolderNeeded(uint64_t timestamp) const;
+  bool HasEnoughFreeSpace();
+  void BoundPreparationCache();
 
   size_t GetDbFileSize() const;
 
@@ -214,7 +273,6 @@ class RecordAction {
 
   std::filesystem::path parent_bag_path_;
   std::filesystem::path real_bag_path_;
-  std::filesystem::path extra_file_path_;
 
   std::unordered_map<uint64_t, McapStruct> mcap_info_map_;  // use to record
 
@@ -251,10 +309,35 @@ class RecordAction {
 
   std::deque<OneRecord> last_cache_;
   std::deque<OneRecord> cur_cache_;
+  // Payload bytes of the caches, only counted with max_preparation_cache_m.
+  size_t max_preparation_cache_bytes_ = 0;
+  size_t last_cache_bytes_ = 0;
+  size_t cur_cache_bytes_ = 0;
+  uint64_t dropped_cache_records_ = 0;
 
   // Indicates whether currently in the process of writing cached messages,
   // used to avoid triggering splitting and causing recursion during cache flush.
   bool writing_cached_messages_ = false;
+
+  // Set while writing is paused for lack of free space (min_free_space_m).
+  bool write_paused_ = false;
+  std::chrono::steady_clock::time_point next_space_check_;
+  std::function<uintmax_t(const std::filesystem::path&)> free_space_query_;
 };
+
+// Bag retention helpers (EXT-021), used when a bag folder or file is opened.
+namespace bag_retention {
+
+// Removes the oldest "ibmwbag_YYYYMMDD_hhmmss[_NN]" directories directly under
+// `parent` so that at most `max_num` such directories remain, `keep`
+// included. Never removes `keep` or a newer folder, symbolic links or other
+// names.
+void PruneBagFolders(const std::filesystem::path& parent, const std::filesystem::path& keep, uint32_t max_num);
+
+// Removes the oldest of `files` (relative to `dir`), never the last one,
+// while their total size exceeds `max_bytes`.
+void PruneBagFiles(const std::filesystem::path& dir, std::deque<MetaData::FileMeta>& files, uint64_t max_bytes);
+
+}  // namespace bag_retention
 
 }  // namespace ibmw::extensions::record_playback_extension

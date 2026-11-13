@@ -13,6 +13,7 @@ namespace my_project {
 
 struct SensorReading {
   static constexpr const char* kTypeName = "my_project.SensorReading";
+  static constexpr const char* kJsonSchema = R"IBMW_JSON({"$id":"urn:ibmw:my_project.SensorReading","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"extra_values":{"items":{"type":"number"},"type":"array"},"humidity":{"type":"number"},"sensor_id":{"type":"string"},"temperature":{"type":"number"},"timestamp_ms":{"type":"integer"}},"required":["sensor_id","temperature","humidity","timestamp_ms","extra_values"],"title":"my_project.SensorReading","type":"object"})IBMW_JSON";
 
   std::string sensor_id{""};
   double temperature{0.0};
@@ -26,6 +27,7 @@ struct SensorReading {
 
 struct ComputeRequest {
   static constexpr const char* kTypeName = "my_project.ComputeRequest";
+  static constexpr const char* kJsonSchema = R"IBMW_JSON({"$id":"urn:ibmw:my_project.ComputeRequest","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"operand_a":{"type":"number"},"operand_b":{"type":"number"},"operation":{"type":"string"}},"required":["operation","operand_a","operand_b"],"title":"my_project.ComputeRequest","type":"object"})IBMW_JSON";
 
   std::string operation{""};
   double operand_a{0.0};
@@ -37,6 +39,7 @@ struct ComputeRequest {
 
 struct ComputeResponse {
   static constexpr const char* kTypeName = "my_project.ComputeResponse";
+  static constexpr const char* kJsonSchema = R"IBMW_JSON({"$id":"urn:ibmw:my_project.ComputeResponse","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"code":{"type":"integer"},"msg":{"type":"string"},"result":{"type":"number"}},"required":["code","msg","result"],"title":"my_project.ComputeResponse","type":"object"})IBMW_JSON";
 
   uint32_t code{0};
   std::string msg{""};

@@ -53,8 +53,9 @@ void NormalPublisherModule::PublishLoop() {
     example_ros2::msg::RosTestMsg msg;
     // IBMW_PUBSUB_PUBLISHER_BODY_BEGIN
     // IBMW: user code begin (publish_body)
-    // TODO: populate msg fields here
     msg_count_++;
+    msg.num = msg_count_;
+    msg.data = {'h', 'e', 'l', 'l', 'o'};
     // IBMW: user code end (publish_body)
     // IBMW_PUBSUB_PUBLISHER_BODY_END
 

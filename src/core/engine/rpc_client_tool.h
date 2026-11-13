@@ -5,14 +5,36 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <random>
+#include <stdexcept>
+#include <thread>
+#include <utility>
 
+#include <vector>
+
+#include "base/ibmw_config.h"
 #include "cpp/executor/executor.h"
 
-#include "tbb/concurrent_hash_map.h"
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  #include "ibmw_selfdev/concurrent/concurrent_hash_map.h"
+#else
+  #include "tbb/concurrent_hash_map.h"
+#endif
 
 namespace ibmw::runtime::core::util {
+
+// Start of a request id sequence: not predictable from outside, so an
+// injected answer has to guess it (ids on the wire are 32-bit).
+inline uint32_t RandomReqIdStart() noexcept {
+  try {
+    return std::random_device{}();
+  } catch (...) {
+    return static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+  }
+}
 
 template <typename MsgRecorder>
 class RpcClientTool {
@@ -20,8 +42,11 @@ class RpcClientTool {
   using TimeoutHandle = std::function<void(MsgRecorder&&)>;
 
  public:
-  RpcClientTool() : shutdown_flag_(std::make_shared<std::atomic_bool>(false)) {}
-  ~RpcClientTool() { shutdown_flag_->store(true); }
+  RpcClientTool() : state_(std::make_shared<State>()) {}
+  ~RpcClientTool() = default;
+
+  RpcClientTool(const RpcClientTool&) = delete;
+  RpcClientTool& operator=(const RpcClientTool&) = delete;
 
   void RegisterTimeoutExecutor(ibmw::executor::ExecutorHandle timeout_executor) {
     if (!timeout_executor.SupportsTimedDispatch())
@@ -31,54 +56,231 @@ class RpcClientTool {
   }
 
   void RegisterTimeoutHandle(const TimeoutHandle& timeout_handle) {
-    timeout_handle_ = timeout_handle;
+    state_->timeout_handle = timeout_handle;
   }
 
+  // False, leaving `msg_recorder` alone, when req_id is taken or after
+  // AbandonAll() (nothing would complete the record then).
   bool Record(uint32_t req_id, std::chrono::nanoseconds timeout, MsgRecorder&& msg_recorder) {
-    bool ret = client_msg_recorder_map_.emplace(req_id, std::move(msg_recorder));
+    if (state_->closed.load(std::memory_order_relaxed)) [[unlikely]]
+      return false;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    bool ret = state_->client_msg_recorder_map.Emplace(req_id, std::move(msg_recorder));
+#else
+    bool ret = state_->client_msg_recorder_map.emplace(req_id, std::move(msg_recorder));
+#endif
 
     if (!ret) [[unlikely]]
       return false;
 
     if (timeout_executor_) {
-      // Capture shutdown_flag by shared_ptr so the timeout lambda
-      // remains safe even after RpcClientTool is destroyed.
-      auto flag = shutdown_flag_;
-      timeout_executor_.DispatchAfter(timeout, [this, req_id, flag]() {
-        if (flag->load()) [[unlikely]]
-          return;
+      // The timeout task only holds a weak reference to the record map: it
+      // is a no-op once the tool is destroyed, and a task that already
+      // locked the state keeps it alive while it runs (no check-then-use
+      // race with the destructor).
+      std::weak_ptr<State> weak_state = state_;
+      try {
+        timeout_executor_.DispatchAfter(timeout, [weak_state = std::move(weak_state), req_id]() {
+          auto state = weak_state.lock();
+          if (!state) [[unlikely]]
+            return;
 
-        auto msg_recorder_op = GetRecord(req_id);
-        if (msg_recorder_op) [[unlikely]]
-          timeout_handle_(std::move(*msg_recorder_op));
-      });
+          // Pairs with AbandonAll(): either it sees this task or the task sees
+          // the closed flag (the counter lives on the timeout path only).
+          TimeoutTaskGuard running(*state);
+          if (state->closed.load()) [[unlikely]]
+            return;
+
+          auto msg_recorder_op = state->Take(req_id);
+          if (msg_recorder_op && state->timeout_handle) [[unlikely]] {
+            InTimeoutHandle in_handle(*state);
+            state->timeout_handle(std::move(*msg_recorder_op));
+          }
+        });
+      } catch (...) {
+        // A record without its timeout would never end: give it back, the
+        // caller reports the call as failed.
+        state_->Take(req_id);
+        return false;
+      }
     }
 
     return true;
   }
 
-  std::optional<MsgRecorder> GetRecord(uint32_t req_id) {
-    typename ClientMsgRecorderMap::accessor ac;
-    bool find_ret = client_msg_recorder_map_.find(ac, req_id);
+  // For a failed Record(): the id is taken by a call still pending after a wrap
+  // of the 32-bit ids, so try the next ones. Out of line, Record() stays the only
+  // cost of a normal call. `req_id` is the id recorded under on success.
+  template <typename NextId>
+  [[gnu::noinline, gnu::cold]] bool RetryRecord(
+      uint32_t& req_id, std::chrono::nanoseconds timeout, const MsgRecorder& msg_recorder, NextId&& next_id) {
+    for (int retry = 0; retry < 8; ++retry) {
+      req_id = next_id();
+      if (Record(req_id, timeout, MsgRecorder(msg_recorder))) return true;
+    }
+    return false;
+  }
 
-    if (!find_ret) [[unlikely]]
-      return {};
+  std::optional<MsgRecorder> GetRecord(uint32_t req_id) { return state_->Take(req_id); }
 
-    auto result = std::make_optional<MsgRecorder>(std::move(ac->second));
+  // Takes the record only if `matches(record)`: an answer that does not
+  // belong to the call (e.g. arrived for another function) leaves it pending.
+  template <typename Pred>
+  std::optional<MsgRecorder> GetRecordIf(uint32_t req_id, Pred&& matches) {
+    return state_->TakeIf(req_id, std::forward<Pred>(matches));
+  }
 
-    client_msg_recorder_map_.erase(ac);
+  // Hands every remaining record to `handle` exactly once, so no call is
+  // dropped without a result; an exception from `handle` only affects its
+  // own record. Later timeouts are no-ops and timeout tasks still running
+  // are waited for; called from this tool's timeout handle (a timeout that
+  // shuts the driver down) it does not wait for that task itself. It must
+  // not be called from another timeout task of this tool.
+  //
+  // Known limitation: concurrent Record()/GetRecord() calls are not
+  // synchronized with this (the map is iterated). Call it once no new calls
+  // are taken (Shutdown or the driver destructor); the service dispatcher
+  // does not yet drain in-flight Call()s (pre-existing, tracked separately).
+  void AbandonAll(const TimeoutHandle& handle) noexcept {
+    state_->closed.store(true);
+    const int self = InTimeoutHandle::Current() == state_.get() ? 1 : 0;
+    while (state_->running_timeout_tasks.load() != self) std::this_thread::yield();
 
-    return result;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    // handle runs outside the shard locks: collect the ids, then take each.
+    auto complete = [this, &handle](uint32_t req_id) {
+      auto msg_recorder_op = state_->Take(req_id);
+      if (!msg_recorder_op) return;
+      try {
+        handle(std::move(*msg_recorder_op));
+      } catch (...) {
+      }
+    };
+    std::vector<uint32_t> req_ids;
+    try {
+      state_->client_msg_recorder_map.ForEach(
+          [&req_ids](uint32_t req_id, const MsgRecorder&) { req_ids.push_back(req_id); });
+    } catch (...) {
+      // Out of memory: find the records one at a time instead (a full scan
+      // each, cold path). Record() fails once closed; the bound is a
+      // backstop.
+      req_ids.clear();
+      for (size_t left = state_->client_msg_recorder_map.Size(); left > 0; --left) {
+        std::optional<uint32_t> any;
+        state_->client_msg_recorder_map.ForEach([&any](uint32_t req_id, const MsgRecorder&) {
+          if (!any) any = req_id;
+        });
+        if (!any) break;
+        complete(*any);
+      }
+    }
+    for (uint32_t req_id : req_ids) complete(req_id);
+    state_->client_msg_recorder_map.Clear();
+#else
+    for (auto& item : state_->client_msg_recorder_map) {
+      try {
+        handle(std::move(item.second));
+      } catch (...) {
+      }
+    }
+    state_->client_msg_recorder_map.clear();
+#endif
   }
 
  private:
-  std::shared_ptr<std::atomic_bool> shutdown_flag_;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  using ClientMsgRecorderMap = ibmw::selfdev::concurrent::ConcurrentHashMap<uint32_t, MsgRecorder>;
+  // Few requests are in flight per client and every client has its own map:
+  // 64 shards keep the shard headers at ~8 KiB per client instead of the
+  // default ~64 KiB.
+  static constexpr size_t kRecorderShards = 64;
+#else
+  using ClientMsgRecorderMap = tbb::concurrent_hash_map<uint32_t, MsgRecorder>;
+#endif
+
+  struct State {
+    TimeoutHandle timeout_handle;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    ClientMsgRecorderMap client_msg_recorder_map{kRecorderShards};
+#else
+    ClientMsgRecorderMap client_msg_recorder_map;
+#endif
+    std::atomic<bool> closed{false};
+    std::atomic<int> running_timeout_tasks{0};
+
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    // Find and erase under one shard lock: a timeout racing the response for
+    // the same req_id gets the record exactly once.
+    std::optional<MsgRecorder> Take(uint32_t req_id) { return client_msg_recorder_map.Take(req_id); }
+
+    template <typename Pred>
+    std::optional<MsgRecorder> TakeIf(uint32_t req_id, Pred&& matches) {
+      return client_msg_recorder_map.TakeIf(req_id, std::forward<Pred>(matches));
+    }
+#else
+    std::optional<MsgRecorder> Take(uint32_t req_id) {
+      typename ClientMsgRecorderMap::accessor ac;
+      bool find_ret = client_msg_recorder_map.find(ac, req_id);
+
+      if (!find_ret) [[unlikely]]
+        return {};
+
+      auto result = std::make_optional<MsgRecorder>(std::move(ac->second));
+
+      client_msg_recorder_map.erase(ac);
+
+      return result;
+    }
+
+    // Take() for records that satisfy `matches` only (kept separate so that
+    // the plain Take() stays as it is).
+    template <typename Pred>
+    std::optional<MsgRecorder> TakeIf(uint32_t req_id, Pred&& matches) {
+      typename ClientMsgRecorderMap::accessor ac;
+      bool find_ret = client_msg_recorder_map.find(ac, req_id);
+
+      if (!find_ret || !matches(std::as_const(ac->second))) [[unlikely]]
+        return {};
+
+      auto result = std::make_optional<MsgRecorder>(std::move(ac->second));
+
+      client_msg_recorder_map.erase(ac);
+
+      return result;
+    }
+#endif
+  };
+
+  class TimeoutTaskGuard {
+   public:
+    explicit TimeoutTaskGuard(State& state) noexcept : state_(state) { state_.running_timeout_tasks.fetch_add(1); }
+    ~TimeoutTaskGuard() { state_.running_timeout_tasks.fetch_sub(1, std::memory_order_release); }
+    TimeoutTaskGuard(const TimeoutTaskGuard&) = delete;
+    TimeoutTaskGuard& operator=(const TimeoutTaskGuard&) = delete;
+
+   private:
+    State& state_;
+  };
+
+  // Marks the thread while it runs a timeout handle; only a timeout that
+  // fires pays for it.
+  class InTimeoutHandle {
+   public:
+    explicit InTimeoutHandle(const State& state) noexcept : outer_(current_) { current_ = &state; }
+    ~InTimeoutHandle() { current_ = outer_; }
+    InTimeoutHandle(const InTimeoutHandle&) = delete;
+    InTimeoutHandle& operator=(const InTimeoutHandle&) = delete;
+
+    static const State* Current() noexcept { return current_; }
+
+   private:
+    static inline thread_local const State* current_ = nullptr;
+    const State* outer_;
+  };
+
+  std::shared_ptr<State> state_;
 
   ibmw::executor::ExecutorHandle timeout_executor_;
-  TimeoutHandle timeout_handle_;
-
-  using ClientMsgRecorderMap = tbb::concurrent_hash_map<uint32_t, MsgRecorder>;
-  ClientMsgRecorderMap client_msg_recorder_map_;
 };
 
 }  // namespace ibmw::runtime::core::util

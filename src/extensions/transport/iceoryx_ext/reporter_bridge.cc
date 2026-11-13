@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include "iceoryx_ext/internal/reporter_bridge.h"
 
 #include "iceoryx_ext/iceoryx_bus.h"
@@ -5,18 +8,12 @@
 #include "iceoryx_ext/internal/reporter_sidecar.h"
 
 #include <cstddef>
-#if !defined(_WIN32)
 #include <dlfcn.h>
-#endif
 
 namespace ibmw::extensions::iceoryx_extension {
 namespace {
 template <typename Api>
 const Api* QueryHost(const char* symbol) noexcept {
-#if defined(_WIN32)
-  (void)symbol;
-  return nullptr;
-#else
   void* host = dlopen(nullptr, RTLD_NOW | RTLD_LOCAL);
   if (!host) return nullptr;
   using Query = const Api* (*)(void);
@@ -24,7 +21,6 @@ const Api* QueryHost(const char* symbol) noexcept {
   const Api* api = query ? query() : nullptr;
   dlclose(host);
   return api;
-#endif
 }
 }  // namespace
 

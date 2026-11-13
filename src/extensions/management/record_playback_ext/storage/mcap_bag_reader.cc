@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "record_playback_ext/storage/mcap_bag_reader.h"
+#include "record_playback_ext/storage/bag_reader_util.h"
 #include "record_playback_ext/storage/path_safety.h"
 
 #include <algorithm>
@@ -46,28 +47,6 @@ std::string ChannelIdentity(
     std::string_view schema_hash) {
   return std::string(topic) + '\0' + std::string(msg_type) + '\0' +
          std::string(serialization_type) + '\0' + std::string(schema_hash);
-}
-
-std::shared_ptr<ibmw::util::BufferArrayView> MakeOwnedPayload(
-    const std::byte* data,
-    size_t size) {
-  auto storage = std::make_shared<std::vector<uint8_t>>(size);
-  std::memcpy(storage->data(), data, size);
-  auto* view = new ibmw::util::BufferArrayView(
-      storage->data(), storage->size());
-  return std::shared_ptr<ibmw::util::BufferArrayView>(
-      view,
-      [storage](const ibmw::util::BufferArrayView* ptr) { delete ptr; });
-}
-
-std::shared_ptr<ibmw::util::BufferArrayView> MakeOwnedPayload(
-    std::string data) {
-  auto storage = std::make_shared<std::string>(std::move(data));
-  auto* view = new ibmw::util::BufferArrayView(
-      storage->data(), storage->size());
-  return std::shared_ptr<ibmw::util::BufferArrayView>(
-      view,
-      [storage](const ibmw::util::BufferArrayView* ptr) { delete ptr; });
 }
 
 class MemoryReader final : public mcap::IReadable {
@@ -162,19 +141,6 @@ mcap::ReadSummaryMethod McapSummaryMethod(std::string_view value) {
     return mcap::ReadSummaryMethod::ForceScan;
   }
   return mcap::ReadSummaryMethod::AllowFallbackScan;
-}
-
-bool MetadataFileMatches(
-    const YAML::Node& metadata,
-    const BagFileInfo& actual) {
-  return !metadata || !metadata.IsMap() ||
-         (metadata["size"].as<uint64_t>(actual.size) == actual.size &&
-          metadata["message_count"].as<uint64_t>(actual.message_count) ==
-              actual.message_count &&
-          metadata["start_timestamp"].as<uint64_t>(
-              actual.start_timestamp) == actual.start_timestamp &&
-          metadata["end_timestamp"].as<uint64_t>(actual.end_timestamp) ==
-              actual.end_timestamp);
 }
 
 }  // namespace

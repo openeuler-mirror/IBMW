@@ -4,17 +4,22 @@
 #pragma once
 
 #include <atomic>
+#include <coroutine>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "c/service/rpc_handle_base.h"
+#include "cpp/co/thread_ctx_scope.h"
 #include "cpp/context/details/thread_context.h"
 #include "cpp/service/rpc_co_filter.h"
 #include "cpp/util/function.h"
 #include "cpp/util/string.h"
+
+#define IBMW_RPC_AWAIT_SUSPEND_NOINLINE __attribute__((noinline))
 
 namespace ibmw::rpc {
 
@@ -289,6 +294,22 @@ class AccessBase {
   std::shared_ptr<Context> default_ctx_ptr_;
 };
 
+namespace details {
+// Shared + set-once completion for blocking RPC calls: a provider that completes
+// twice (or after the caller has returned) must neither terminate in the
+// noexcept invoker nor touch a dead stack promise.
+struct SyncCallResult {
+  std::promise<ibmw::rpc::Status> promise;
+  std::future<ibmw::rpc::Status> future = promise.get_future();
+  std::atomic_flag done = ATOMIC_FLAG_INIT;
+
+  void Set(ibmw::rpc::Status st) {
+    if (!done.test_and_set(std::memory_order_acq_rel)) promise.set_value(st);
+  }
+  ibmw::rpc::Status Get() { return future.get(); }
+};
+}  // namespace details
+
 class SyncAccessBase : public AccessBase {
  public:
   SyncAccessBase(ServiceRef service_ref, std::string_view rpc_type, std::string_view service_name)
@@ -302,33 +323,28 @@ class SyncAccessBase : public AccessBase {
       ibmw::rpc::ContextRef ctx_ref,
       const ReqType& req,
       RspType& rsp) {
-    std::promise<ibmw::rpc::Status> result_promise;
+    auto result = std::make_shared<details::SyncCallResult>();
+    auto on_done = [result](uint32_t code) { result->Set(ibmw::rpc::Status(code)); };
 
     if (ctx_ref) {
       ctx_ref.SetFunctionName(full_func_name);
-
-      service_ref_.Call(
-          full_func_name, ctx_ref, &req, &rsp,
-          [&result_promise](uint32_t code) {
-            result_promise.set_value(ibmw::rpc::Status(code));
-          });
-
-      return result_promise.get_future().get();
+      service_ref_.Call(full_func_name, ctx_ref, &req, &rsp, std::move(on_done));
+      return result->Get();
     }
 
     auto ctx_ptr = NewContextSharedPtr();
     ctx_ptr->SetFunctionName(full_func_name);
-
-    service_ref_.Call(
-        full_func_name, *ctx_ptr, &req, &rsp,
-        [&result_promise](uint32_t code) {
-          result_promise.set_value(ibmw::rpc::Status(code));
-        });
-
-    return result_promise.get_future().get();
+    service_ref_.Call(full_func_name, *ctx_ptr, &req, &rsp, std::move(on_done));
+    return result->Get();
   }
+
 };
 
+// NOTE: req/rsp are passed to the provider by address. With the reference
+// overloads of AsyncAccessBase and FutureAccessBase the caller must keep both
+// alive until the callback runs / the future becomes ready. The shared_ptr
+// overloads keep them alive until the provider drops its completion callback;
+// a null req or rsp completes with IBMW_RPC_STATUS_CLI_UNKNOWN.
 class AsyncAccessBase : public AccessBase {
  public:
   AsyncAccessBase(ServiceRef service_ref, std::string_view rpc_type, std::string_view service_name)
@@ -364,6 +380,25 @@ class AsyncAccessBase : public AccessBase {
           callback(ibmw::rpc::Status(code));
         });
   }
+
+  template <class ReqType, class RspType>
+  void Call(
+      std::string_view full_func_name,
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const ReqType> req,
+      std::shared_ptr<RspType> rsp,
+      std::function<void(ibmw::rpc::Status)>&& callback) {
+    if (!req || !rsp) [[unlikely]] {
+      callback(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_UNKNOWN));
+      return;
+    }
+    const ReqType& req_ref = *req;
+    RspType& rsp_ref = *rsp;
+    Call(full_func_name, ctx_ref, req_ref, rsp_ref,
+         [req{std::move(req)}, rsp{std::move(rsp)}, callback{std::move(callback)}](ibmw::rpc::Status status) {
+           callback(status);
+         });
+  }
 };
 
 class FutureAccessBase : public AccessBase {
@@ -387,7 +422,8 @@ class FutureAccessBase : public AccessBase {
 
       service_ref_.Call(
           full_func_name, ctx_ref, &req, &rsp,
-          [status_promise{std::move(status_promise)}](uint32_t code) mutable {
+          [status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
+            if (std::exchange(done, true)) return;  // ignore duplicate completion
             status_promise.set_value(ibmw::rpc::Status(code));
           });
 
@@ -399,7 +435,43 @@ class FutureAccessBase : public AccessBase {
 
     service_ref_.Call(
         full_func_name, *ctx_ptr, &req, &rsp,
-        [ctx_ptr, status_promise{std::move(status_promise)}](uint32_t code) mutable {
+        [ctx_ptr, status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
+          if (std::exchange(done, true)) return;  // ignore duplicate completion
+          status_promise.set_value(ibmw::rpc::Status(code));
+        });
+
+    return status_future;
+  }
+
+  template <class ReqType, class RspType>
+  std::future<ibmw::rpc::Status> Call(
+      std::string_view full_func_name,
+      ibmw::rpc::ContextRef ctx_ref,
+      std::shared_ptr<const ReqType> req,
+      std::shared_ptr<RspType> rsp) {
+    std::promise<ibmw::rpc::Status> status_promise;
+    std::future<ibmw::rpc::Status> status_future = status_promise.get_future();
+    if (!req || !rsp) [[unlikely]] {
+      status_promise.set_value(ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_UNKNOWN));
+      return status_future;
+    }
+
+    std::shared_ptr<Context> ctx_ptr;
+    if (ctx_ref) {
+      ctx_ref.SetFunctionName(full_func_name);
+    } else {
+      ctx_ptr = NewContextSharedPtr();
+      ctx_ptr->SetFunctionName(full_func_name);
+      ctx_ref = ibmw::rpc::ContextRef(*ctx_ptr);
+    }
+
+    const void* req_ptr = req.get();
+    void* rsp_ptr = rsp.get();
+    service_ref_.Call(
+        full_func_name, ctx_ref, req_ptr, rsp_ptr,
+        [ctx_ptr{std::move(ctx_ptr)}, req{std::move(req)}, rsp{std::move(rsp)},
+         status_promise{std::move(status_promise)}, done = false](uint32_t code) mutable {
+          if (std::exchange(done, true)) return;  // ignore duplicate completion
           status_promise.set_value(ibmw::rpc::Status(code));
         });
 
@@ -422,7 +494,28 @@ class CoAccessBase : public AccessBase {
   auto& GetFilterBus() { return filter_mgr_; }
 
  protected:
+  // Deliberately not an aggregate. GCC 11/12 destroy the members of an
+  // aggregate-initialized temporary twice when it is the operand of co_await
+  // (`co_await CallAwaitable{.x = ...}`): the shared_ptr members were released
+  // twice, a heap use-after-free on every coroutine RPC call. A user-declared
+  // constructor makes `co_await CallAwaitable(...)` / `{...}` safe on every
+  // compiler (see selfdev/coro/README.md, "Rules for awaiters").
   struct CallAwaitable {
+    CallAwaitable(ibmw::rpc::ServiceRef service_ref_in,
+                  std::shared_ptr<const std::string> full_func_name_in,
+                  ibmw::rpc::ContextRef ctx_ref_in,
+                  std::shared_ptr<Context> ctx_owner_in,
+                  ibmw::executor::ExecutorHandle resume_exe_in,
+                  const void* req_ptr_in,
+                  void* rsp_ptr_in)
+        : service_ref(std::move(service_ref_in)),
+          full_func_name(std::move(full_func_name_in)),
+          ctx_ref(ctx_ref_in),
+          ctx_owner(std::move(ctx_owner_in)),
+          resume_exe(std::move(resume_exe_in)),
+          req_ptr(req_ptr_in),
+          rsp_ptr(rsp_ptr_in) {}
+
     ibmw::rpc::ServiceRef service_ref;
     std::shared_ptr<const std::string> full_func_name;
     ibmw::rpc::ContextRef ctx_ref;
@@ -431,67 +524,76 @@ class CoAccessBase : public AccessBase {
     const void* req_ptr;
     void* rsp_ptr;
 
-    struct State {
-      ibmw::rpc::Status status;
+    ibmw::rpc::Status status;
+
+    // Owned by the completion callback. Resumes the caller exactly once: with
+    // the provider's code, or with CLI_DRIVER_INTERNAL_ERROR when every copy
+    // of the callback is destroyed without being called (a lost answer would
+    // otherwise leak the suspended coroutine frame).
+    struct Resumer {
+      Resumer(CallAwaitable* awaitable_in, std::coroutine_handle<> handle_in,
+              ibmw::executor::ExecutorHandle resume_exe_in)
+          : awaitable(awaitable_in), handle(handle_in), resume_exe(std::move(resume_exe_in)) {}
+
+      CallAwaitable* awaitable;
       std::coroutine_handle<> handle;
-      std::mutex mutex;
-      bool suspended = false;
-      bool completed = false;
-      bool resumed = false;
+      ibmw::executor::ExecutorHandle resume_exe;
+      std::atomic<bool> completed{false};
+
+      void Complete(uint32_t code) {
+        if (completed.exchange(true, std::memory_order_acq_rel)) return;
+        // The coroutine is suspended until the dispatched task resumes it.
+        awaitable->status = ibmw::rpc::Status(code);
+        resume_exe.Dispatch([handle{handle}, exe{resume_exe}]() {
+          // Resume with g_thread_ctx.exe set to the calling executor, as
+          // co::IbmwExecutor's resumers do, so code after co_await (for
+          // example the next RPC call, which takes its resume executor from
+          // there) sees it; the worker's own context is restored afterwards.
+          ibmw::co::details::ThreadCtxScope scope(exe);
+          handle.resume();
+        });
+      }
+
+      ~Resumer() {
+        try {
+          Complete(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+        } catch (...) {
+        }
+      }
     };
 
-    std::shared_ptr<State> state = std::make_shared<State>();
+    // Off an executor thread there is nowhere to resume: fail without suspending.
+    bool await_ready() noexcept {
+      if (resume_exe) [[likely]] return false;
+      status = ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_INVALID_CONTEXT);
+      return true;
+    }
 
-    bool await_ready() const noexcept { return false; }
-
-    void await_suspend(std::coroutine_handle<> h) {
-      auto state_copy = state;
+    // Once Call() has the callback, the coroutine may be resumed and its
+    // frame (which holds *this) destroyed on another thread. So everything
+    // used from there on is a local copy, and the function is kept out of
+    // line: Clang (before 19) may otherwise place the locals of an inlined
+    // await_suspend in the coroutine frame, where their destructors would
+    // run on freed memory.
+    IBMW_RPC_AWAIT_SUSPEND_NOINLINE void await_suspend(std::coroutine_handle<> h) {
       auto service_ref_copy = service_ref;
       auto full_func_name_copy = full_func_name;
       auto ctx_ref_copy = ctx_ref;
-      auto resume_exe_copy = resume_exe;
       auto req_ptr_copy = req_ptr;
       auto rsp_ptr_copy = rsp_ptr;
 
-      MW_ASSERT(resume_exe_copy, "Coroutine RPC resume executor is not set.");
-
-      {
-        std::lock_guard lock(state_copy->mutex);
-        state_copy->handle = h;
-        state_copy->suspended = true;
-      }
-
+      auto resumer = std::make_shared<Resumer>(this, h, resume_exe);
       service_ref_copy.Call(
           *full_func_name_copy, ctx_ref_copy, req_ptr_copy, rsp_ptr_copy,
-          [state{std::move(state_copy)}, resume_exe_copy](uint32_t code) mutable {
-            {
-              std::lock_guard lock(state->mutex);
-              if (state->completed) {
-                return;
-              }
-              state->status = ibmw::rpc::Status(code);
-              state->completed = true;
-            }
-
-            resume_exe_copy.Dispatch([state]() mutable {
-              std::coroutine_handle<> handle;
-              {
-                std::lock_guard lock(state->mutex);
-                if (state->resumed) {
-                  return;
-                }
-                state->resumed = true;
-                handle = std::exchange(state->handle, std::coroutine_handle<>{});
-              }
-              if (handle) {
-                handle.resume();
-              }
-            });
-          });
+          [resumer{std::move(resumer)}](uint32_t code) { resumer->Complete(code); });
     }
 
-    auto await_resume() noexcept { return state->status; }
+    auto await_resume() noexcept { return status; }
   };
+  // Regression guard for the GCC 11/12 double destruction above: removing the
+  // constructor (making it an aggregate again) must not compile.
+  static_assert(!std::is_aggregate_v<CallAwaitable>,
+                "CallAwaitable must not be an aggregate (GCC co_await double-destroy)");
 
   struct CallHandle {
     ibmw::rpc::ServiceRef service_ref;
@@ -505,14 +607,8 @@ class CoAccessBase : public AccessBase {
       auto ctx_owner_keep = ctx_owner;
       auto resume_exe_keep = resume_exe;
 
-      co_return co_await CallAwaitable{
-          .service_ref = service_ref_keep,
-          .full_func_name = full_func_name_keep,
-          .ctx_ref = ctx_ref,
-          .ctx_owner = ctx_owner_keep,
-          .resume_exe = resume_exe_keep,
-          .req_ptr = req_ptr,
-          .rsp_ptr = rsp_ptr};
+      co_return co_await CallAwaitable(
+          service_ref_keep, full_func_name_keep, ctx_ref, ctx_owner_keep, resume_exe_keep, req_ptr, rsp_ptr);
     }
   };
 

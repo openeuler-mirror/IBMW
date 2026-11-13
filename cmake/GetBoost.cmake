@@ -46,6 +46,9 @@ endif()
 set(boost_DOWNLOAD_URL
     "https://github.com/boostorg/boost/releases/download/boost-1.82.0/boost-1.82.0.tar.xz"
     CACHE STRING "")
+set(boost_DOWNLOAD_SHA256
+    "fd60da30be908eff945735ac7d4d9addc7f7725b1ff6fcdcaede5262d511d21e"
+    CACHE STRING "SHA256 of boost_DOWNLOAD_URL (update both together)")
 
 if(boost_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -56,6 +59,7 @@ else()
   FetchContent_Declare(
     boost
     URL ${boost_DOWNLOAD_URL}
+    URL_HASH SHA256=${boost_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP ON
     OVERRIDE_FIND_PACKAGE)
 endif()

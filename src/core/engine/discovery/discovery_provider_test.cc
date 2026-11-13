@@ -38,7 +38,8 @@ using ibmw::runtime::core::runtime_graph::TopicAdvertisement;
 class DiscoveryProviderTest : public testing::Test {
  protected:
   void SetUp() override {
-    std::string pattern = "/tmp/ibmw-discovery-test-XXXXXX";
+    std::string pattern =
+        (std::filesystem::temp_directory_path() / "ibmw-discovery-test-XXXXXX").string();
     ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
     options_.registry_path = pattern;
   }
@@ -162,6 +163,46 @@ struct FailingOwner {
     provider->Query(std::chrono::steady_clock::now());
   }
 };
+
+// COMM-033: an overridden plugin directory is only used when another user
+// cannot have planted the library.
+TEST(DiscoveryPluginDirectoryTest, OverrideRequiresTrustedDirectoryAndLibrary) {
+  std::string pattern =
+      (std::filesystem::temp_directory_path() / "ibmw-discovery-plugin-XXXXXX").string();
+  ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
+  const std::filesystem::path directory = pattern;
+  const auto plugin = directory / "libibmw_discovery_dds.so";
+  std::filesystem::copy_file(DISCOVERY_FAILURE_PLUGIN_PATH, plugin);
+  ScopedPluginDirectory override_directory(directory.c_str());
+  using std::filesystem::perms;
+  const auto expect_rejected = [&] {
+    try {
+      CreateDiscoveryProvider(DiscoveryBackend::kDds);
+      ADD_FAILURE() << "untrusted plugin was accepted";
+    } catch (const std::runtime_error& error) {
+      EXPECT_NE(std::string(error.what()).find("Untrusted discovery plugin"), std::string::npos)
+          << error.what();
+    }
+    void* loaded = ::dlopen(plugin.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    EXPECT_EQ(loaded, nullptr);
+    if (loaded) ::dlclose(loaded);
+  };
+
+  std::filesystem::permissions(plugin, perms::owner_all | perms::group_read | perms::group_exec |
+                                           perms::others_read | perms::others_exec);
+  std::filesystem::permissions(directory, perms::all);
+  expect_rejected();
+  std::filesystem::permissions(directory, perms::owner_all);
+  std::filesystem::permissions(plugin, perms::others_write, std::filesystem::perm_options::add);
+  expect_rejected();
+
+  std::filesystem::permissions(plugin, perms::others_write, std::filesystem::perm_options::remove);
+  EXPECT_NE(CreateDiscoveryProvider(DiscoveryBackend::kDds), nullptr);
+  std::filesystem::permissions(directory, perms::all | perms::sticky_bit);  // like /tmp
+  EXPECT_NE(CreateDiscoveryProvider(DiscoveryBackend::kDds), nullptr);
+  std::filesystem::permissions(directory, perms::owner_all);
+  std::filesystem::remove_all(directory);
+}
 
 class DiscoveryPluginFailureTest : public testing::TestWithParam<const char*> {};
 

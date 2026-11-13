@@ -35,11 +35,6 @@ target_link_libraries(
 # Set compile definitions of target
 target_compile_definitions(${CUR_TARGET_NAME} INTERFACE BOOST_ASIO_NO_DEPRECATED)
 
-# Set compile options of target
-if(WIN32)
-  target_compile_options(${CUR_TARGET_NAME} INTERFACE /bigobj)
-endif()
-
 # Set test of target
 if(IBMW_BUILD_TESTS AND test_files)
   add_gtest_target(TEST_TARGET ${CUR_TARGET_NAME} TEST_SRC ${test_files})

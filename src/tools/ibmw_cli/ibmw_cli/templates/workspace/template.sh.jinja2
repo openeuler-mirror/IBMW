@@ -11,7 +11,7 @@ cmake -B build \
 {%- for definition in workspace.definitions %}
     -D{{ definition.name }}={{ definition.status }} \
 {%- endfor %}
-    $@
+    "$@"
 
 if [ -d ./build/install ]; then
     rm -rf ./build/install

@@ -24,10 +24,19 @@ exec 9>"$LOCK_FILE"
 flock 9
 
 set +u
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
 set -u
 export AMENT_PREFIX_PATH="$BUILD_DIR/play_smoke_ros2_runtime:${AMENT_PREFIX_PATH:-}"
-export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/play_smoke_ros2_runtime/lib:/usr/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/play_smoke_ros2_runtime/lib:/usr/lib/$(uname -m)-linux-gnu:/opt/ros/${ROS_DISTRO:-humble}/lib:${LD_LIBRARY_PATH:-}"
+
+# Shared-memory transports built into this tree. The play_smoke_test target
+# writes one marker per built transport; a tree without either marker predates
+# them and always required Iceoryx.
+ICEORYX_BUILT=0
+SHM_BUILT=0
+[[ -f "$BUILD_DIR/play_smoke_iceoryx_required" ]] && ICEORYX_BUILT=1
+[[ -f "$BUILD_DIR/play_smoke_shm_required" ]] && SHM_BUILT=1
+[[ "$ICEORYX_BUILT" == 1 || "$SHM_BUILT" == 1 ]] || ICEORYX_BUILT=1
 
 mkdir -p "$RUN_PARENT"
 RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
@@ -77,6 +86,7 @@ PLAY_PID=""
 ROUDI_PID=""
 MOSQUITTO_PID=""
 FAILED_CASES=()
+SHM_ROOT_OWNED=""
 
 stop_pid() {
   local pid="${1:-}" signal="${2:-INT}"
@@ -104,8 +114,18 @@ cleanup() {
   stop_pid "$RUNTIME_PID"
   stop_pid "$ROUDI_PID" TERM
   stop_pid "$MOSQUITTO_PID" TERM
+  [[ -z "$SHM_ROOT_OWNED" ]] || rm -rf -- "$SHM_ROOT_OWNED"
 }
 trap cleanup EXIT INT TERM
+
+# The shm transport needs no daemon. Unless the caller chose a root, give this
+# run a private one so it never shares segments with another shm user. It is
+# under /tmp, not $TMPDIR: root + "/ibmw_shm.<uid>.<domain>" must fit in 63 bytes.
+if [[ "$SHM_BUILT" == 1 && -z "${IBMW_SHM_ROOT:-}" ]]; then
+  IBMW_SHM_ROOT="$(mktemp -d /tmp/ibmw-ps.XXXXXX)"
+  SHM_ROOT_OWNED="$IBMW_SHM_ROOT"
+  export IBMW_SHM_ROOT
+fi
 
 case_cleanup() {
   trap - EXIT INT TERM
@@ -159,6 +179,9 @@ start_runtime() {
     done
     fail_case "Runtime Agent '$runtime_id' did not register"
   fi
+  # Settle time for transport matching with the player started next. Kept as
+  # a sleep: the match happens with that later process, and the subscriber
+  # logs no per-transport "matched" line that could be waited on here.
   sleep 0.5
 }
 
@@ -300,13 +323,14 @@ run_case() {
 }
 
 required=(
-  "$IBMW_BIN" "$ROUDI_BIN"
+  "$IBMW_BIN"
   "$BAGS_DIR/cdr_mcap/metadata.yaml"
   "$BAGS_DIR/cdr_mcap_reader/metadata.yaml"
   "$BAGS_DIR/cdr_sqlite3/metadata.yaml"
   "$BAGS_DIR/ros2_mcap/metadata.yaml"
   "$BUILD_DIR/play_smoke_ros2_runtime/share/ament_index/resource_index/packages/example_ros2"
   "$BUILD_DIR/libplay_smoke_pkg.so" "$BUILD_DIR/libplay_smoke_ts.so")
+[[ "$ICEORYX_BUILT" == 1 ]] && required+=("$ROUDI_BIN")
 for artifact in "${required[@]}"; do
   [[ -e "$artifact" ]] || { echo "play smoke: missing $artifact" >&2; exit 2; }
 done
@@ -316,13 +340,16 @@ required_configs=(
   play_smoke_json_player.yaml play_smoke_mcap_reader.yaml
   play_smoke_sqlite_reader.yaml
   play_smoke_dds_subscriber.yaml play_smoke_dds_player.yaml
-  play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml
   play_smoke_mqtt_subscriber.yaml play_smoke_mqtt_player.yaml
   play_smoke_zenoh_subscriber.yaml play_smoke_zenoh_player.yaml
   play_smoke_ros2_subscriber.yaml play_smoke_ros2_player.yaml
   play_smoke_tcp_subscriber.yaml play_smoke_tcp_player.yaml
   play_smoke_udp_subscriber.yaml play_smoke_udp_player.yaml
   play_smoke_http_subscriber.yaml play_smoke_http_player.yaml)
+[[ "$ICEORYX_BUILT" == 1 ]] &&
+  required_configs+=(play_smoke_iceoryx_subscriber.yaml play_smoke_iceoryx_player.yaml)
+[[ "$SHM_BUILT" == 1 ]] &&
+  required_configs+=(play_smoke_shm_subscriber.yaml play_smoke_shm_player.yaml)
 for config in "${required_configs[@]}"; do
   [[ -f "$CFG_DIR/$config" ]] || {
     echo "play smoke: missing $CFG_DIR/$config" >&2
@@ -331,9 +358,11 @@ for config in "${required_configs[@]}"; do
 done
 required_libraries=(
   libibmw_record_playback.so libibmw_dds_transport.so
-  libibmw_iceoryx_transport.so libibmw_mqtt_transport.so
+  libibmw_mqtt_transport.so
   libibmw_zenoh_transport.so libibmw_ros2_transport.so
   libibmw_net_transport.so)
+[[ "$ICEORYX_BUILT" == 1 ]] && required_libraries+=(libibmw_iceoryx_transport.so)
+[[ "$SHM_BUILT" == 1 ]] && required_libraries+=(libibmw_shm_transport.so)
 for library in "${required_libraries[@]}"; do
   [[ -f "$BUILD_DIR/$library" || -f "$BUILD_DIR/lib/$library" ]] || {
     echo "play smoke: missing $library" >&2
@@ -347,15 +376,30 @@ for command in flock mosquitto mosquitto_pub ss python3; do
 done
 
 CURRENT_CASE=startup
-if ! pgrep -x iox-roudi >/dev/null 2>&1; then
+if [[ "$ICEORYX_BUILT" == 1 ]] && ! pgrep -x iox-roudi >/dev/null 2>&1; then
   "$ROUDI_BIN" >"$RUN_DIR/iox-roudi.log" 2>&1 &
   ROUDI_PID=$!
-  sleep 1
+  wait_for_log "$RUN_DIR/iox-roudi.log" "RouDi is ready for clients" "$ROUDI_PID" || {
+    tail -n 20 "$RUN_DIR/iox-roudi.log" >&2
+    fail_case "iox-roudi did not become ready"
+  }
 fi
 if ! ss -ltn "( sport = :$MQTT_PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
   mosquitto -p "$MQTT_PORT" -v >"$RUN_DIR/mosquitto.log" 2>&1 &
   MOSQUITTO_PID=$!
-  sleep 1
+  mqtt_listening=0
+  for _ in {1..100}; do
+    kill -0 "$MOSQUITTO_PID" 2>/dev/null || break
+    if ss -ltn "( sport = :$MQTT_PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
+      mqtt_listening=1
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$mqtt_listening" == 1 ]] || {
+    tail -n 20 "$RUN_DIR/mosquitto.log" >&2
+    fail_case "Mosquitto did not listen on port $MQTT_PORT"
+  }
 fi
 mosquitto_pub -h 127.0.0.1 -p "$MQTT_PORT" -t /ibmw_play_smoke/startup -m ready -q 1 ||
   fail_case "MQTT broker is unavailable"
@@ -750,7 +794,12 @@ run_log_level() {
 
 run_case transport_local run_local_basic
 run_case transport_dds run_external_transport dds
-run_case transport_iceoryx run_external_transport iceoryx
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  run_case transport_iceoryx run_external_transport iceoryx
+fi
+if [[ "$SHM_BUILT" == 1 ]]; then
+  run_case transport_shm run_external_transport shm
+fi
 run_case transport_mqtt run_external_transport mqtt
 run_case transport_zenoh run_external_transport zenoh
 run_case transport_ros2 run_external_transport ros2

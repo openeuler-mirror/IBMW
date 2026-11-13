@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -16,6 +17,7 @@
 #include "grpc_ext/http2/response.h"
 #include "grpc_ext/http2/server_session.h"
 #include "grpc_ext/server/options.h"
+#include "grpc_ext/server/recv_dump.h"
 #include "net_base/http_dispatcher.h"
 #include "base/string_util.h"
 
@@ -51,7 +53,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
         socket_strand_(asio::make_strand(*io_ptr)),
         socket_(socket_strand_),
         mgr_strand_(asio::make_strand(*io_ptr)),
-        timer_(socket_strand_),
+        timer_(mgr_strand_),
         logger_ptr_(logger_ptr),
         dispatcher_ptr_(dispatcher_ptr) {}
 
@@ -111,14 +113,32 @@ class Connection : public std::enable_shared_from_this<Connection> {
                   continue;
                 }
 
-                req_ptr->AddHeader("Remote-Endpoint", remote_addr_);  // To trace the request
+                req_ptr->SetHeader(http2::kRemoteEndpointKey, remote_addr_);  // To trace the request
 
                 asio::co_spawn(
                     io_ptr_->get_executor(),
                     [this, self, req_ptr = std::move(req_ptr), rsp_ptr = std::move(rsp_ptr), handle]() mutable -> Awaitable<void> {
                       // Send request to thread pool
                       co_await asio::post(asio::bind_executor(io_ptr_->get_executor(), asio::use_awaitable));
-                      co_await handle(req_ptr, rsp_ptr);
+                      bool failed = false;
+                      try {
+                        co_await handle(req_ptr, rsp_ptr);
+                      } catch (const std::exception& e) {
+                        MW_WARN("Http handle failed, remote addr {}, exception info: {}", RemoteAddr(), e.what());
+                        failed = true;
+                      } catch (...) {
+                        MW_WARN("Http handle failed, remote addr {}, unknown exception.", RemoteAddr());
+                        failed = true;
+                      }
+                      if (failed) {
+                        // Answer (headers, no message, status trailer) instead of
+                        // leaving the stream open until the connection closes; a
+                        // partly written response is dropped.
+                        rsp_ptr = std::make_shared<Response>(0);
+                        rsp_ptr->SetStreamId(req_ptr->GetStreamId());
+                        rsp_ptr->AddHeader("content-type", "application/grpc");
+                        rsp_ptr->AddTrailer("grpc-status", "13");  // INTERNAL
+                      }
 
                       // Submit response to http2 session in socket_strand_
                       co_await asio::post(asio::bind_executor(socket_strand_, asio::use_awaitable));
@@ -220,15 +240,9 @@ class Connection : public std::enable_shared_from_this<Connection> {
     auto nread = co_await socket_.async_read_some(asio::buffer(buffer), asio::use_awaitable);
 
 #ifndef NDEBUG
-    std::string data_hex;
-    for (size_t i = 0; i < nread; ++i) {
-      data_hex += fmt::format("{:02x} ", buffer[i]);
-    }
-    std::string data_str;
-    for (size_t i = 0; i < nread; ++i) {
-      data_str += fmt::format("{:2c} ", isprint(buffer[i]) ? buffer[i] : '.');
-    }
-    MW_TRACE("Http svr session get data, remote addr {}, data: \n{}\n{}", RemoteAddr(), data_hex, data_str);
+    // The dump is only built when trace is enabled, and only for the first bytes.
+    MW_TRACE("Http svr session get data, remote addr {}, {} bytes:\n{}", RemoteAddr(), nread,
+             FormatRecvDump(buffer.data(), nread));
 #endif
 
     auto recv_ok = nghttp2_session_.ParseRecvMessage(
@@ -276,7 +290,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   std::string remote_addr_;
   std::atomic<bool> tick_has_data_ = false;
-  bool close_connect_flag_ = false;
+  std::atomic<bool> close_connect_flag_ = false;
 
   http2::ServerSession nghttp2_session_;
 };

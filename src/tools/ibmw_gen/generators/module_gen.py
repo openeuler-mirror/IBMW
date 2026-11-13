@@ -13,6 +13,7 @@ import importlib
 # Shared snake_case and copyright helpers live in generators/_common.py
 # so transport plugins (transports/*.py) can use them too.
 from generators._common import _snake, _COPYRIGHT  # noqa: F401
+from generators.user_code import apply_user_code
 
 
 # ── Unified publisher skeleton ──────────────────────────────────────────────
@@ -1274,7 +1275,19 @@ _GENERATORS = {
 }
 
 
+class ModuleGenError(ValueError):
+    """A module the generator cannot emit."""
+
+
 def generate_modules(project: dict) -> list[tuple[str, str]]:
+    """Generate module .h and .cc files, then splice optional `user_code`."""
+    results = []
+    for mod in project.get("modules", []):
+        results.extend(apply_user_code(mod, _generate_module_files(project, [mod])))
+    return results
+
+
+def _generate_module_files(project: dict, modules: list) -> list[tuple[str, str]]:
     """Generate module .h and .cc files.
 
     Returns list of (rel_path, content) tuples.
@@ -1297,7 +1310,7 @@ def generate_modules(project: dict) -> list[tuple[str, str]]:
     ns = project["project"]["_namespace_cpp"]
     results = []
 
-    for mod in project.get("modules", []):
+    for mod in modules:
         _resolve_module_metadata(mod, project)
 
         mod_type = mod["type"]
@@ -1403,9 +1416,10 @@ def generate_modules(project: dict) -> list[tuple[str, str]]:
         # 3) Legacy dispatch.
         key = (mod_type, transport)
         if key not in _GENERATORS:
-            print(f"Warning: no generator for type={mod_type}, transport={transport}",
-                  flush=True)
-            continue
+            # The project CMake still lists the module's sources.
+            raise ModuleGenError(
+                f"no generator for module '{mod['name']}' "
+                f"(type={mod_type}, transport={transport})")
 
         gen_h, gen_cc = _GENERATORS[key]
         hdr = gen_h(mod, ns)

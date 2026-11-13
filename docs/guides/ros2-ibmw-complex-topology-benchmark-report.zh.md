@@ -6,7 +6,7 @@
 >
 > **测量与因果分开。** 主机 P99 618.9→444.5 us、总 CPU 3.67→2.80% 是历史报告值；relay／sink 降低而 source 上升，支持接收短路径假设，不能证明各机制贡献比例。同步业务占用 DDS 调用线程，重回调可能阻碍后续接收。§8 中注册和 match 等待属于启动阶段，不能直接解释 §5.4 的稳态 CPU。t0 实际在 Make 分配填充前；t1 在 relay 校验与 vector 深拷贝后、覆盖时间戳和发送前；t2 在 sink 回调入口、校验前，故 E2E 含准备与复制，hop 1 不是纯传输时间。
 >
-> **复现证据仍有缺口。** §11 四个 `/tmp/opencode` 原始结果／分析器／汇总路径本轮均不存在，无法复算逐轮结果。归档 OHOS 脚本对两 lane 都等待 source.ready／relay.ready，但 ROS2 endpoint 未实现 readiness 文件和 start gate，精确运行来源待恢复；下文 5/5 与 10/10 等仍是历史记录，不能视为此次重新确认。§8.3／§8.4 的旧百分比文字已按 §7.2 表格纠正，结果表未改。
+> **复现证据仍有缺口。** §11 所列原始结果／分析器／汇总均未归档，本轮不可得，无法复算逐轮结果。归档 OHOS 脚本对两 lane 都等待 source.ready／relay.ready，但 ROS2 endpoint 未实现 readiness 文件和 start gate，精确运行来源待恢复；下文 5/5 与 10/10 等仍是历史记录，不能视为此次重新确认。§8.3／§8.4 的旧百分比文字已按 §7.2 表格纠正，结果表未改。
 
 **报告版本：** V1.0
 **测试日期：** 2026-09-07
@@ -441,10 +441,10 @@ IBMW 当前总 CPU 仍然更低，但不能据此声称每个组件都比 ROS2 �
 | 证据 | 路径 |
 |---|---|
 | Topology 源码与 runner | `src/samples/cpp/transport_benchmark/topology_interop/` |
-| 主机正式原始结果 | `/tmp/opencode/topology-host-formal-final2/` |
-| OHOS 拉回原始结果 | `/tmp/opencode/topology-ohos-final-results/` |
-| 独立复算分析器 | `/tmp/opencode/analyze_topology.py` |
-| 完整派生汇总 | `/tmp/opencode/topology-comparison-summary.json` |
+| 主机正式原始结果 | 未归档，本轮不可得 |
+| OHOS 拉回原始结果 | 未归档，本轮不可得 |
+| 独立复算分析器 | 未归档，本轮不可得 |
+| 完整派生汇总 | 未归档，本轮不可得 |
 
 已完成验证：
 

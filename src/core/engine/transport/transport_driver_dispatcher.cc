@@ -38,6 +38,13 @@ void TransportDriverDispatcher::Initialize() {
 }
 
 void TransportDriverDispatcher::Start() {
+#ifdef IBMW_ENABLE_CORE_METRICS
+  // Must precede kStart: loan paths read this cache without the controller lock.
+  if (cached_metrics_gate_ && state_.load() == State::kInit) {
+    observability::CoreMetricsController().CacheLoanDriverSlots(
+        this, transport_driver_index_vec_);
+  }
+#endif
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
@@ -67,6 +74,7 @@ void TransportDriverDispatcher::Shutdown() {
       publish_taps.emplace_back(std::move(tap_state));
     }
     publish_taps_.clear();
+    publish_tap_count_.store(0, std::memory_order_release);
   }
   for (const auto& tap_state : publish_taps) {
     DeactivatePublishTap(tap_state);

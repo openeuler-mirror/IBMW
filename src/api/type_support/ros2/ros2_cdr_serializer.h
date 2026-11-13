@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 #include <stdexcept>
 
@@ -91,6 +92,9 @@ class ROS2CdrSerializer {
 
       if (payload->max_size < estimated_size) {
         payload->reserve(estimated_size);
+        if (payload->data == nullptr || payload->max_size < estimated_size) {
+          return false;
+        }
       }
 
       eprosima::fastcdr::FastBuffer fastbuffer(
@@ -144,7 +148,12 @@ class ROS2CdrSerializer {
   static uint32_t EstimateSize(const ROS2MsgType& msg) {
 #if IBMW_ROS2_HAS_FASTRTPS_CPP_CALLBACKS
     if (const auto* callbacks = GetFastRtpsCallbacks<ROS2MsgType>()) {
-      return 4U + callbacks->get_serialized_size(&msg);  // encapsulation + ROS2 payload
+      // encapsulation + ROS2 payload; the sum must still fit uint32_t.
+      const uint32_t body = callbacks->get_serialized_size(&msg);
+      if (body > std::numeric_limits<uint32_t>::max() - 4U) {
+        throw std::length_error("ROS2 message exceeds the CDR payload size limit");
+      }
+      return 4U + body;
     }
 #else
     static_cast<void>(msg);
@@ -189,6 +198,25 @@ class ROS2CdrSerializer {
     throw std::runtime_error(
         "ROS2CdrSerializer::DeserializeMessage: no specialization for this type. "
         "DDS transport requires generated FastRTPS callbacks or explicit CDR serialization support.");
+  }
+
+  // Largest serialized payload including the encapsulation header, from the
+  // generated FastRTPS callbacks. 0 when the type has unbounded members or no
+  // callbacks are available.
+  template <typename ROS2MsgType>
+  static uint32_t MaxSerializedSize() {
+#if IBMW_ROS2_HAS_FASTRTPS_CPP_CALLBACKS && defined(ROSIDL_TYPESUPPORT_FASTRTPS_UNBOUNDED_TYPE)
+    const auto* callbacks = GetFastRtpsCallbacks<ROS2MsgType>();
+    if (callbacks != nullptr && callbacks->max_serialized_size != nullptr) {
+      char bounds_info = ROSIDL_TYPESUPPORT_FASTRTPS_UNBOUNDED_TYPE;
+      const size_t size = callbacks->max_serialized_size(bounds_info);
+      if (bounds_info != ROSIDL_TYPESUPPORT_FASTRTPS_UNBOUNDED_TYPE &&
+          size <= std::numeric_limits<uint32_t>::max() - 4U) {
+        return 4U + static_cast<uint32_t>(size);  // encapsulation + ROS2 payload
+      }
+    }
+#endif
+    return 0;
   }
 
  private:

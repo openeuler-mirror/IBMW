@@ -53,8 +53,9 @@ void PublisherModule::PublishLoop() {
     ibmw::protocols::example::ExampleEventMsg msg;
     // IBMW_PUBSUB_PUBLISHER_BODY_BEGIN
     // IBMW: user code begin (publish_body)
-    // TODO: populate msg fields here
     msg_count_++;
+    msg.msg("hello");
+    msg.num(static_cast<int32_t>(msg_count_));
     // IBMW: user code end (publish_body)
     // IBMW_PUBSUB_PUBLISHER_BODY_END
 

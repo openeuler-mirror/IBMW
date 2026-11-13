@@ -3,6 +3,9 @@
 
 #include "zenoh_ext/zenoh_rpc_driver.h"
 
+#include <chrono>
+#include <thread>
+
 #include "cpp/service/rpc_handle.h"
 
 namespace YAML {
@@ -106,6 +109,7 @@ void ZenohRpcDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::Start) == State::Init,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->Freeze();
   zenoh_bus_ptr_->StartServiceDiscovery(limit_domain_);
 }
 
@@ -114,7 +118,43 @@ void ZenohRpcDriver::Shutdown() {
     return;
 
   zenoh_bus_ptr_->StopServiceDiscovery();
-  client_tool_ptr_.reset();
+  // The handlers use this driver and its client tool: none may run once they are destroyed.
+  // Servers go first: one waiting for an answer still gets it. So does a client
+  // of an answer already being sent; later answers are dropped, their clients time out.
+  auto unregister = [this](std::string_view prefix) {
+    for (const auto& keyexpr : sub_keyexprs_)
+      if (keyexpr.starts_with(prefix)) zenoh_bus_ptr_->UnregisterSubscriber(keyexpr);
+  };
+  unregister("req/");
+  CloseReplyGate();
+  unregister("rsp/");
+  // client_tool_ptr_ stays until destruction: a Call() past its state check
+  // still reaches it. Calls still waiting then get their result from the destructor.
+}
+
+void ZenohRpcDriver::CloseReplyGate() {
+  reply_gate_->closed.store(true);
+  // The caller of a shutdown from a bus callback keeps the driver until its answers ended.
+  if (ZenohBus::InCallback()) [[unlikely]] {
+    MW_WARN("Zenoh RPC shutdown from a bus callback: not waiting for running answers.");
+    return;
+  }
+  auto warn_at = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (reply_gate_->running.load() != 0) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (std::chrono::steady_clock::now() >= warn_at) {
+      MW_WARN("Zenoh RPC shutdown: still waiting for {} running answer(s).", reply_gate_->running.load());
+      warn_at += std::chrono::seconds(5);
+    }
+  }
+}
+
+ZenohRpcDriver::~ZenohRpcDriver() {
+  ZenohRpcDriver::Shutdown();
+  if (!client_tool_ptr_) return;
+  client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  });
 }
 
 bool ZenohRpcDriver::RegisterServiceFunc(
@@ -152,9 +192,13 @@ bool ZenohRpcDriver::RegisterServiceFunc(
 
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
-                          limit_domain_;
+                          key_suffix_;
 
     auto handle = [this, &service_func_wrapper, pattern](const z_loaned_sample_t* message) {
+      // The subscriber is live from registration on. Before Start other
+      // publishers are still being registered and the answer could not be
+      // looked up safely: the request is dropped, the client times out.
+      if (state_.load() != State::Start) [[unlikely]] return;
       try {
         // create service invoke wrapper
         auto service_invoke_wrapper_ptr = std::make_shared<runtime::core::service::ServiceMessageFrame>(
@@ -171,18 +215,23 @@ bool ZenohRpcDriver::RegisterServiceFunc(
         std::vector<char> serialized_data(serialized_size);
 
         // read data from payload
-        z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size);
+        serialized_data.resize(
+            z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size));
 
-        util::ConstBufferOperator buf_oper_tmp(serialized_data.data(), 4);
-        uint32_t pkg_size_with_len = buf_oper_tmp.GetUint32();
-
-        util::ConstBufferOperator buf_oper(serialized_data.data() + 4, pkg_size_with_len);
+        // The length prefix comes from the peer: validate it against the bytes actually received.
+        auto frame = util::GetLengthPrefixedPayload(serialized_data.data(), serialized_data.size());
+        util::ConstBufferOperator buf_oper(frame.data(), frame.size());
 
         // deserialize type
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
         ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, serialization_type);
 
-        std::string pattern(buf_oper.GetString(util::BufferLenType::kUInt8));
+        // The answer key is the registered one: a request naming another
+        // function would get its answer onto that function's answer key.
+        if (buf_oper.GetString(util::BufferLenType::kUInt8) != pattern) [[unlikely]] {
+          MW_WARN_INTERVAL(5000, "Drop zenoh rpc request for '{}': it names another answer key.", info.func_name);
+          return;
+        }
         char req_id_buf[4];
         buf_oper.GetBuffer(req_id_buf, 4);
 
@@ -220,13 +269,17 @@ bool ZenohRpcDriver::RegisterServiceFunc(
         // set callback
         service_invoke_wrapper_ptr->callback =
             [this,
+             reply_gate = reply_gate_,
              service_invoke_wrapper_ptr,
              ctx_ptr,
              service_req_ptr,
              service_rsp_ptr,
              serialization_type{std::move(serialization_type)},
-             pattern{std::move(pattern)},
+             pattern,
              req_id_buf](ibmw::rpc::Status status) {
+              const ReplyPass pass(*reply_gate);
+              if (!pass.Open()) [[unlikely]] return;
+
               if (!status.OK()) [[unlikely]] {
                 ReturnRspWithStatusCode(
                     pattern, serialization_type, req_id_buf, status.Code());
@@ -253,35 +306,21 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                 bool is_shm_loan_size_enough = true;
                 bool is_shm_pool_size_enough = true;
 
-                uint32_t msg_size = 0;
-                uint32_t header_len = 0;
-                z_buf_layout_alloc_result_t loan_result;
+                uint64_t msg_size = 0;
+                uint64_t header_len = 0;
+                ShmLoan loan;
+                const uint64_t pool_size = zenoh_bus_ptr_->ShmPoolSize();
 
                 do {
-                  // release old shm
-                  if (z_pub_loaned_shm_ptr != nullptr) {
-                    z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-                    z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
-                  }
-
-                  // loan a new size shm
-                  uint64_t loan_size = 0;
-                  {
-                    std::shared_lock lock(z_shared_mutex_);
-                    loan_size = z_node_shm_size_map_[node_pub_topic];
-                  }
-                  z_shm_provider_alloc_gc_defrag(&loan_result, z_loan(zenoh_bus_ptr_->shm_provider_), loan_size, zenoh_bus_ptr_->alignment_);
+                  // loan a new size shm (a loan that was too small is dropped)
+                  const uint64_t loan_size = shm_loan_sizes_.Get(node_pub_topic, shm_init_loan_size_);
+                  z_pub_loaned_shm_ptr = loan.Alloc(z_loan(zenoh_bus_ptr_->shm_provider_), loan_size, zenoh_bus_ptr_->alignment_);
 
                   // if shm pool is not enough, use net buffer instead
-                  if (loan_result.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
+                  if (z_pub_loaned_shm_ptr == nullptr) {
                     is_shm_pool_size_enough = false;
-                    z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-                    z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
-                    MW_WARN("Zenoh Extension shm pool is not enough, use net buffer instead.");
                     break;
                   }
-
-                  z_pub_loaned_shm_ptr = z_shm_mut_data_mut(z_loan_mut(loan_result.buf));
 
                   // write info pkg on loaned shm : the first FIXED_LEN bytes needs to write the length of pkg
                   util::BufferOperator buf_oper(reinterpret_cast<char*>(z_pub_loaned_shm_ptr) + 4, loan_size - 4);
@@ -312,9 +351,9 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                         if (msg_size > buf_oper.GetRemainingSize()) {
                           // in this case means the msg has serialization cache but the size is too large, then expand suitable size
                           is_shm_loan_size_enough = false;
-                          {
-                            std::unique_lock lock(z_shared_mutex_);
-                            z_node_shm_size_map_[node_pub_topic] = 4 + header_len + msg_size;
+                          if (!shm_loan_sizes_.Need(node_pub_topic, uint64_t{4} + header_len + msg_size, pool_size)) {
+                            is_shm_pool_size_enough = false;
+                            break;
                           }
                         } else {
                           // in this case means the msg has serialization cache and the size is suitable, then use cachema
@@ -324,13 +363,12 @@ bool ZenohRpcDriver::RegisterServiceFunc(
 
                     } catch (const std::exception& e) {
                       if (!z_allocator.IsShmEnough()) {
-                        // the shm is not enough, need to expand a double size
-                        {
-                          std::unique_lock lock(z_shared_mutex_);
-                          auto& ret = z_node_shm_size_map_[node_pub_topic];
-                          ret = ret << 1;
-                        }
+                        // the shm is not enough, need to expand a double size (within the pool)
                         is_shm_loan_size_enough = false;
+                        if (!shm_loan_sizes_.Grow(node_pub_topic, loan_size, pool_size)) {
+                          is_shm_pool_size_enough = false;
+                          break;
+                        }
                       } else {
                         MW_ERROR(
                             "Msg serialization failed, serialization_type {}, pattern: {}, exception: {}",
@@ -338,38 +376,42 @@ bool ZenohRpcDriver::RegisterServiceFunc(
                         return;
                       }
                     }
+                  } else {
+                    // the cache was loaned its size (Need above): it fits now
+                    is_shm_loan_size_enough = true;
                   }
 
                 } while (!is_shm_loan_size_enough);
 
+                // too long for its length prefix: refused by the network path below
+                if (is_shm_pool_size_enough && !FitsFrame(header_len + msg_size)) [[unlikely]]
+                  is_shm_pool_size_enough = false;
+
                 if (is_shm_pool_size_enough) {
                   // if has cache, the copy it to shm to replace the serialization
                   if (buffer_array_cache_ptr != nullptr) {
-                    unsigned char* strat_pos = z_pub_loaned_shm_ptr + 4 + header_len;
-                    for (size_t ii = 0; ii < buffer_array_cache_ptr->Size(); ++ii) {
-                      std::memcpy(strat_pos, buffer_array_cache_ptr.get()[ii].Data()->data, buffer_array_cache_ptr.get()[ii].Data()->len);
-                      strat_pos += buffer_array_cache_ptr.get()[ii].Data()->len;
-                    }
+                    CopyBuffers(*buffer_array_cache_ptr, z_pub_loaned_shm_ptr + 4 + header_len);
 
                     buffer_array_cache_ptr = nullptr;
                   }
 
-                  // write info pkg length on loaned shm
-                  util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len);
+                  // write the frame length (header + msg) on loaned shm, like the non-shm path
+                  util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len + msg_size);
 
                   z_owned_bytes_t z_payload;
-                  if (loan_result.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
-                    z_bytes_from_shm_mut(&z_payload, z_move(loan_result.buf));
-                  }
+                  loan.MoveTo(&z_payload);
                   z_publisher_put(z_loan(z_pub_ctx_ptr->z_pub), z_move(z_payload), &zenoh_bus_ptr_->z_pub_options_);
 
-                  // collect garbage and defragment shared memory, whose reference counting is zero
+                  // collect shared memory whose reference counting is zero (defragment only when short)
                   z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-                  z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
 
                   MW_TRACE("Zenoh Invoke req  with '{}'", pattern);
                   return;
                 }
+                // the loan that did not fit (up to the whole pool) is collected now, not at the next shortage
+                loan.Reset();
+                z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
+                MW_WARN_INTERVAL(5000, "Zenoh Extension shm pool is not enough, use net buffer instead.");
               }
 
               // shm disabled
@@ -387,6 +429,12 @@ bool ZenohRpcDriver::RegisterServiceFunc(
               size_t rsp_size = buffer_array_view_ptr->BufferSize();
 
               size_t z_data_size = 1 + serialization_type.size() + 4 + 4 + rsp_size;
+              if (!FitsFrame(z_data_size)) [[unlikely]] {
+                MW_ERROR("Zenoh rpc answer of {} bytes is too long, pattern: {}", rsp_size, pattern);
+                ReturnRspWithStatusCode(
+                    pattern, serialization_type, req_id_buf, IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED);
+                return;
+              }
               size_t pkg_size = z_data_size + 4;
 
               // get buf to store data
@@ -424,11 +472,26 @@ bool ZenohRpcDriver::RegisterServiceFunc(
         MW_WARN("Handle zenoh rpc msg failed, exception info: {}", e.what());
       }
     };
-    zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled);
-    zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
-                                 info.rsp_type_support_ref.TypeName());
-
-    z_node_shm_size_map_["rsp/" + pattern] = shm_init_loan_size_;
+    shm_loan_sizes_.Set("rsp/" + pattern, shm_init_loan_size_);
+    const std::string request_key = "req/" + pattern;
+    // A function registered again keeps its first server (RegisterRpcNode
+    // declares nothing then); only a node this call declares is undone below.
+    // This driver is the only RPC user of its bus.
+    const bool declared_here = !sub_keyexprs_.contains(request_key);
+    if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "server", shm_enabled)) return false;
+    try {
+      sub_keyexprs_.insert(request_key);
+      zenoh_bus_ptr_->RecordService(info.func_name, info.req_type_support_ref.TypeName(),
+                                    info.rsp_type_support_ref.TypeName());
+    } catch (...) {
+      // A failed registration serves nothing: undeclare its node again. Its
+      // answer publisher stays until the bus shuts down; nothing sends on it.
+      if (declared_here) {
+        zenoh_bus_ptr_->UnregisterSubscriber(request_key);
+        sub_keyexprs_.erase(request_key);
+      }
+      throw;
+    }
     return true;
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
@@ -471,8 +534,9 @@ bool ZenohRpcDriver::RegisterClientFunc(
 
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
-                          limit_domain_;
-    auto handle = [this](const z_loaned_sample_t* message) {
+                          key_suffix_;
+    auto handle = [this, func = std::string(rpc::GetFuncNameWithoutPrefix(info.func_name))](
+                      const z_loaned_sample_t* message) {
       std::shared_ptr<runtime::core::service::ServiceMessageFrame> client_call_wrapper_ptr;
       try {
         // read data
@@ -481,18 +545,21 @@ bool ZenohRpcDriver::RegisterClientFunc(
         z_bytes_reader_t reader = z_bytes_get_reader(payload);
         std::vector<char> serialized_data(serialized_size);
 
-        z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size);
+        serialized_data.resize(
+            z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size));
 
-        util::ConstBufferOperator buf_oper_tmp(serialized_data.data(), 4);
-        uint32_t data_size_with_len = buf_oper_tmp.GetUint32();
-
-        util::ConstBufferOperator buf_oper(serialized_data.data() + 4, data_size_with_len);
+        // The length prefix comes from the peer: validate it against the bytes actually received.
+        auto frame = util::GetLengthPrefixedPayload(serialized_data.data(), serialized_data.size());
+        util::ConstBufferOperator buf_oper(frame.data(), frame.size());
 
         std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
         uint32_t req_id = buf_oper.GetUint32();
         uint32_t code = buf_oper.GetUint32();
 
-        auto msg_recorder = client_tool_ptr_->GetRecord(req_id);
+        // Only an answer on the key of the called function completes the call.
+        auto msg_recorder = client_tool_ptr_->GetRecordIf(req_id, [&func](const auto& record) {
+          return rpc::GetFuncNameWithoutPrefix(record->info.func_name) == func;
+        });
         if (!msg_recorder) [[unlikely]] {
           // can't find recorder, which means timeout
           MW_TRACE("Can not get req id {} from recorder.", req_id);
@@ -538,9 +605,9 @@ bool ZenohRpcDriver::RegisterClientFunc(
         CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
     };
 
-    zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "client", shm_enabled);
-
-    z_node_shm_size_map_["req/" + pattern] = shm_init_loan_size_;
+    shm_loan_sizes_.Set("req/" + pattern, shm_init_loan_size_);
+    if (!zenoh_bus_ptr_->RegisterRpcNode(pattern, std::move(handle), "client", shm_enabled)) return false;
+    sub_keyexprs_.insert("rsp/" + pattern);
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
     return false;
@@ -552,7 +619,7 @@ bool ZenohRpcDriver::IsClientReady(std::string_view, std::string_view function) 
   try {
     if (state_.load() != State::Start) return false;
     const auto key = "req/ibmw_rpc/" +
-                     common::util::UrlEncode(rpc::GetFuncNameWithoutPrefix(function)) + limit_domain_;
+                     common::util::UrlEncode(rpc::GetFuncNameWithoutPrefix(function)) + key_suffix_;
     const auto& publishers = zenoh_bus_ptr_->GetPublisherRegisterMap();
     const auto publisher = publishers.find(key);
     if (publisher == publishers.end()) return false;
@@ -575,7 +642,7 @@ void ZenohRpcDriver::Call(
 
     std::string pattern = std::string("ibmw_rpc/") +
                           util::UrlEncode(rpc::GetFuncNameWithoutPrefix(info.func_name)) +
-                          limit_domain_;
+                          key_suffix_;
 
     std::string node_pub_topic = "req/" + pattern;
 
@@ -619,6 +686,10 @@ void ZenohRpcDriver::Call(
 
     // record this req with timeout
     bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::move(record_ptr));
+    if (!ret) [[unlikely]] {
+      ret = client_tool_ptr_->RetryRecord(
+          cur_req_id, timeout, client_call_wrapper_ptr, [this] { return req_id_++; });
+    }
 
     if (!ret) [[unlikely]] {
       MW_ERROR("Failed to record msg.");
@@ -634,35 +705,21 @@ void ZenohRpcDriver::Call(
       bool is_shm_loan_size_enough = true;
       bool is_shm_pool_size_enough = true;
 
-      uint32_t msg_size = 0;
-      uint32_t header_len = 0;
-      z_buf_layout_alloc_result_t loan_result;
+      uint64_t msg_size = 0;
+      uint64_t header_len = 0;
+      ShmLoan loan;
+      const uint64_t pool_size = zenoh_bus_ptr_->ShmPoolSize();
 
       do {
-        // release old shm
-        if (z_pub_loaned_shm_ptr != nullptr) {
-          z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-          z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
-        }
-
-        // loan a new size shm
-        uint64_t loan_size = 0;
-        {
-          std::shared_lock lock(z_shared_mutex_);
-          loan_size = z_node_shm_size_map_[node_pub_topic];
-        }
-        z_shm_provider_alloc_gc_defrag(&loan_result, z_loan(zenoh_bus_ptr_->shm_provider_), loan_size, zenoh_bus_ptr_->alignment_);
+        // loan a new size shm (a loan that was too small is dropped)
+        const uint64_t loan_size = shm_loan_sizes_.Get(node_pub_topic, shm_init_loan_size_);
+        z_pub_loaned_shm_ptr = loan.Alloc(z_loan(zenoh_bus_ptr_->shm_provider_), loan_size, zenoh_bus_ptr_->alignment_);
 
         // if shm pool is not enough, use net buffer instead
-        if (loan_result.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
+        if (z_pub_loaned_shm_ptr == nullptr) {
           is_shm_pool_size_enough = false;
-          z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-          z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
-          MW_WARN("Zenoh Extension shm pool is not enough, use net buffer instead.");
           break;
         }
-
-        z_pub_loaned_shm_ptr = z_shm_mut_data_mut(z_loan_mut(loan_result.buf));
 
         // write info pkg on loaned shm : the first FIXED_LEN bytes needs to write the length of pkg
         util::BufferOperator buf_oper(reinterpret_cast<char*>(z_pub_loaned_shm_ptr) + 4, loan_size - 4);
@@ -702,9 +759,9 @@ void ZenohRpcDriver::Call(
               if (msg_size > buf_oper.GetRemainingSize()) {
                 // in this case means the msg has serialization cache but the size is too large, then expand suitable size
                 is_shm_loan_size_enough = false;
-                {
-                  std::unique_lock lock(z_shared_mutex_);
-                  z_node_shm_size_map_[node_pub_topic] = 4 + header_len + msg_size;
+                if (!shm_loan_sizes_.Need(node_pub_topic, uint64_t{4} + header_len + msg_size, pool_size)) {
+                  is_shm_pool_size_enough = false;
+                  break;
                 }
               } else {
                 // in this case means the msg has serialization cache and the size is suitable, then use cachema
@@ -714,13 +771,12 @@ void ZenohRpcDriver::Call(
 
           } catch (const std::exception& e) {
             if (!z_allocator.IsShmEnough()) {
-              // the shm is not enough, need to expand a double size
-              {
-                std::unique_lock lock(z_shared_mutex_);
-                auto& ret = z_node_shm_size_map_[node_pub_topic];
-                ret = ret << 1;
-              }
+              // the shm is not enough, need to expand a double size (within the pool)
               is_shm_loan_size_enough = false;
+              if (!shm_loan_sizes_.Grow(node_pub_topic, loan_size, pool_size)) {
+                is_shm_pool_size_enough = false;
+                break;
+              }
             } else {
               MW_ERROR(
                   "Msg serialization failed, serialization_type {}, pkg_path: {}, module_name: {}, func_name: {}, exception: {}",
@@ -728,37 +784,41 @@ void ZenohRpcDriver::Call(
               return;
             }
           }
+        } else {
+          // the cache was loaned its size (Need above): it fits now
+          is_shm_loan_size_enough = true;
         }
       } while (!is_shm_loan_size_enough);
+
+      // too long for its length prefix: refused by the network path below
+      if (is_shm_pool_size_enough && !FitsFrame(header_len + msg_size)) [[unlikely]]
+        is_shm_pool_size_enough = false;
 
       if (is_shm_pool_size_enough) {
         // if has cache, the copy it to shm to replace the serialization
         if (buffer_array_cache_ptr != nullptr) {
-          unsigned char* strat_pos = z_pub_loaned_shm_ptr + 4 + header_len;
-          for (size_t ii = 0; ii < buffer_array_cache_ptr->Size(); ++ii) {
-            std::memcpy(strat_pos, buffer_array_cache_ptr.get()[ii].Data()->data, buffer_array_cache_ptr.get()[ii].Data()->len);
-            strat_pos += buffer_array_cache_ptr.get()[ii].Data()->len;
-          }
+          CopyBuffers(*buffer_array_cache_ptr, z_pub_loaned_shm_ptr + 4 + header_len);
 
           buffer_array_cache_ptr = nullptr;
         }
 
-        // write info pkg length on loaned shm
-        util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len);
+        // write the frame length (header + msg) on loaned shm, like the non-shm path
+        util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), header_len + msg_size);
 
         z_owned_bytes_t z_payload;
-        if (loan_result.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
-          z_bytes_from_shm_mut(&z_payload, z_move(loan_result.buf));
-        }
+        loan.MoveTo(&z_payload);
         z_publisher_put(z_loan(z_pub_ctx_ptr->z_pub), z_move(z_payload), &zenoh_bus_ptr_->z_pub_options_);
 
-        // collect garbage and defragment shared memory, whose reference counting is zero
+        // collect shared memory whose reference counting is zero (defragment only when short)
         z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-        z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
 
         MW_TRACE("Zenoh Invoke req  with '{}'", pattern);
         return;
       }
+      // the loan that did not fit (up to the whole pool) is collected now, not at the next shortage
+      loan.Reset();
+      z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
+      MW_WARN_INTERVAL(5000, "Zenoh Extension shm pool is not enough, use net buffer instead.");
     }
 
     // shm disabled
@@ -781,6 +841,13 @@ void ZenohRpcDriver::Call(
                          4 +
                          context_meta_kv_size +
                          req_size;
+    if (!FitsFrame(z_data_size)) [[unlikely]] {
+      MW_ERROR("Zenoh rpc request of {} bytes is too long, func_name: {}", req_size, info.func_name);
+      // Taking the record releases the cached request and races no timeout.
+      if (client_tool_ptr_->GetRecord(cur_req_id))
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_SERIALIZATION_FAILED));
+      return;
+    }
 
     size_t pkg_size = z_data_size + 4;
     // create buffer for serialization

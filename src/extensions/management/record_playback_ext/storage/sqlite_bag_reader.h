@@ -37,6 +37,7 @@ class SqliteBagReader final : public BagReader {
   BagInfo info_;
   int busy_timeout_ms_ = 0;
   std::vector<std::pair<std::string, int64_t>> pragmas_;
+  bool integrity_check_ = true;
   std::unordered_map<FileChannelKey, BagChannelInfo, FileChannelKeyHash>
       file_channels_;
 };

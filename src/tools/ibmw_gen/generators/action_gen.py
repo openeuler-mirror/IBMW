@@ -58,6 +58,7 @@ _INTERNAL_ACTION_DDS_HEADERS = [
     "action_client_observer.h",
 ]
 _PUBLIC_ACTION_HEADERS = [
+    "action_log.h",
     "action_traits.h",
     "server.h",
     "server_runtime.h",

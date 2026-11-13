@@ -43,6 +43,9 @@ class LoggerDriverBase {
 
   virtual std::string_view Type() const noexcept = 0;  // It should always return the same value
 
+  // Implementations assign their effective options back to options_node.
+  // YAML::Node shares storage with the caller's tree, so this fills in the
+  // config that --dump_cfg writes out; it is not a dead store.
   virtual void Initialize(YAML::Node options_node) = 0;
   virtual void Start() = 0;
   virtual void Shutdown() = 0;
@@ -54,6 +57,27 @@ class LoggerDriverBase {
    *        Default implementation is a no-op (suitable for sync drivers).
    */
   virtual void Flush() noexcept {}
+
+  /**
+   * @brief Write out the entries logged so far, for the crash report.
+   * @note  Called by the crash signal handler after it logged the report and
+   *        before the process ends, possibly on any thread (including the
+   *        driver's own log executor). Must stop waiting for the log
+   *        executor at `deadline` and must not wait on its own thread.
+   *        Returns true when everything logged before the call has been
+   *        written. The console and rotate_file drivers (FlushOnLogExecutor)
+   *        poll every 1 ms, so they return up to about one poll interval
+   *        after `deadline`; handing the flush task to the executor can
+   *        block without bound on the executor's queue lock if the crash
+   *        interrupted a thread holding it (the selfdev handler's report
+   *        watchdog ends the process then; backward-cpp has none).
+   *        Default: Flush() (suitable for sync drivers).
+   */
+  virtual bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept {
+    (void)deadline;
+    Flush();
+    return true;
+  }
 
   virtual std::list<std::pair<std::string, std::string>> GenInitializationReport() const noexcept { return {}; }
 

@@ -36,7 +36,8 @@ class DirectPublishTap final : public PublishTapCapability {
 };
 
 TEST(RuntimeTapStreamTest, SharesOwnedFormatsAndRemovesPublisherIndexEntries) {
-  std::string directory = "/tmp/ibmw-tap-formats-XXXXXX";
+  std::string directory =
+      (std::filesystem::temp_directory_path() / "ibmw-tap-formats-XXXXXX").string();
   ASSERT_NE(::mkdtemp(directory.data()), nullptr);
   DirectPublishTap tap;
   RuntimeTapServer server(tap, "runtime", directory);
@@ -91,6 +92,61 @@ TEST(RuntimeTapStreamTest, SharesOwnedFormatsAndRemovesPublisherIndexEntries) {
   for (const auto& session : sessions) EXPECT_TRUE(server.StopSession(session.session_id));
   EXPECT_TRUE(server.StopSession(unrelated.session_id));
   EXPECT_FALSE(tap.callback);
+  server.Shutdown();
+  std::filesystem::remove_all(directory);
+}
+
+// COMM-034: publishes are pre-filtered by topic. The filter must never hide
+// a topic that still has a session, including after other sessions stop and
+// with more topics than filter bits.
+TEST(RuntimeTapStreamTest, TopicFilterKeepsEveryOpenSessionVisible) {
+  std::string directory =
+      (std::filesystem::temp_directory_path() / "ibmw-tap-filter-XXXXXX").string();
+  ASSERT_NE(::mkdtemp(directory.data()), nullptr);
+  DirectPublishTap tap;
+  RuntimeTapServer server(tap, "runtime", directory);
+  server.Start();
+  TopicAdvertisement advertisement;
+  advertisement.runtime_id = "runtime";
+  advertisement.publisher_id = "module-7";
+  advertisement.topic = {.msg_type = "test:Bytes", .serialization_type = "cdr"};
+  constexpr int kTopics = 600;
+  std::vector<std::string> session_ids;
+  for (int i = 0; i < kTopics; ++i) {
+    advertisement.topic.topic = "/t" + std::to_string(i);
+    session_ids.push_back(server.StartSession(advertisement).session_id);
+  }
+
+  std::string bytes = "payload";
+  unsigned acquired = 0;
+  ibmw::transport::Context context;
+  const auto publish = [&](const std::string& topic) {
+    const unsigned before = acquired;
+    ibmw::extension::MessageView view{
+        .topic = topic, .msg_type = "test:Bytes", .module_name = "module", .endpoint_index = 7,
+        .context = ibmw::transport::ContextRef(context), .available_serialization_types = {"cdr"},
+        .acquire_serialized = [&](std::string_view) {
+          ++acquired;
+          return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
+        }};
+    tap.callback(view);
+    return acquired != before;
+  };
+
+  for (int i = 0; i < kTopics; ++i) EXPECT_TRUE(publish("/t" + std::to_string(i))) << i;
+  // Stop every even topic: the odd ones stay visible.
+  for (int i = 0; i < kTopics; i += 2) ASSERT_TRUE(server.StopSession(session_ids[i]));
+  for (int i = 0; i < kTopics; ++i) {
+    EXPECT_EQ(publish("/t" + std::to_string(i)), i % 2 == 1) << i;
+  }
+  for (int i = 1; i < kTopics; i += 2) ASSERT_TRUE(server.StopSession(session_ids[i]));
+  EXPECT_FALSE(tap.callback);
+
+  // A new session after the filter was emptied is visible again.
+  advertisement.topic.topic = "/again";
+  const auto again = server.StartSession(advertisement);
+  EXPECT_TRUE(publish("/again"));
+  EXPECT_FALSE(publish("/t1"));
   server.Shutdown();
   std::filesystem::remove_all(directory);
 }
@@ -235,6 +291,65 @@ publishers:
 
   EXPECT_FALSE(timed_out) << "StopSession remained blocked in socket send";
   EXPECT_TRUE(stopped);
+}
+
+TEST(RuntimeTapStreamTest, QueueRespectsByteBudget) {
+  // COMM-009: 20 x 4 MiB frames queued before the reader connects must be
+  // capped by the 64 MiB byte budget (16 frames), not only by the count limit.
+  std::string directory =
+      (std::filesystem::temp_directory_path() / "ibmw-tap-budget-XXXXXX").string();
+  ASSERT_NE(::mkdtemp(directory.data()), nullptr);
+  DirectPublishTap tap;
+  RuntimeTapServer server(tap, "runtime", directory);
+  server.Start();
+  TopicAdvertisement advertisement;
+  advertisement.runtime_id = "runtime";
+  advertisement.publisher_id = "module-7";
+  advertisement.topic = {.topic = "/bytes", .msg_type = "test:Bytes", .serialization_type = "cdr"};
+  const auto session = server.StartSession(advertisement);
+  std::string bytes(4 * 1024 * 1024, 'p');
+  for (int i = 0; i < 20; ++i) {
+    ibmw::transport::Context context;
+    ibmw::extension::MessageView view{
+        .topic = "/bytes", .msg_type = "test:Bytes", .module_name = "module", .endpoint_index = 7,
+        .context = ibmw::transport::ContextRef(context), .available_serialization_types = {"cdr"},
+        .acquire_serialized = [&](std::string_view) {
+          return std::make_shared<ibmw::util::BufferArrayView>(bytes.data(), bytes.size());
+        }};
+    tap.callback(view);
+  }
+
+  runtime_graph::RuntimeFileDescriptor fd(::socket(AF_UNIX, SOCK_STREAM, 0));
+  ASSERT_GE(fd.Get(), 0);
+  sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  ASSERT_LT(session.stream_socket.size(), sizeof(address.sun_path));
+  std::strcpy(address.sun_path, session.stream_socket.c_str());
+  ASSERT_EQ(::connect(fd.Get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
+  timeval timeout{.tv_sec = 1, .tv_usec = 0};
+  ASSERT_EQ(::setsockopt(fd.Get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)), 0);
+  size_t messages = 0;
+  bool saw_drop_report = false;
+  std::string frame;
+  while (true) {
+    runtime_graph::RuntimeStreamHeader header{};
+    if (::recv(fd.Get(), &header, sizeof(header), MSG_WAITALL) != sizeof(header)) break;
+    const size_t metadata_size = ntohl(header.json_size);
+    const size_t payload_size = be64toh(header.payload_size);
+    frame.resize(metadata_size + payload_size);
+    ASSERT_EQ(::recv(fd.Get(), frame.data(), frame.size(), MSG_WAITALL), static_cast<ssize_t>(frame.size()));
+    if (frame.find("\"dropped\"") < metadata_size) {
+      saw_drop_report = true;
+    } else {
+      EXPECT_EQ(payload_size, bytes.size());
+      ++messages;
+    }
+  }
+  EXPECT_EQ(messages, 16u);
+  EXPECT_TRUE(saw_drop_report);
+  EXPECT_TRUE(server.StopSession(session.session_id));
+  server.Shutdown();
+  std::filesystem::remove_all(directory);
 }
 
 }  // namespace

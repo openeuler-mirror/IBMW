@@ -8,6 +8,9 @@ message(STATUS "get yaml-cpp ...")
 set(yaml-cpp_DOWNLOAD_URL
     "https://github.com/jbeder/yaml-cpp/archive/0.8.0.tar.gz"
     CACHE STRING "")
+set(yaml-cpp_DOWNLOAD_SHA256
+    "fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16"
+    CACHE STRING "SHA256 of yaml-cpp_DOWNLOAD_URL (update both together)")
 
 if(yaml-cpp_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     yaml-cpp
     URL ${yaml-cpp_DOWNLOAD_URL}
+    URL_HASH SHA256=${yaml-cpp_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

@@ -36,6 +36,9 @@ class RuntimePlaybackServer {
   RuntimePlaybackServer(const RuntimePlaybackServer&) = delete;
   RuntimePlaybackServer& operator=(const RuntimePlaybackServer&) = delete;
 
+  // Sessions whose stream has not ended yet; each holds a thread.
+  static constexpr size_t kMaxActiveSessions = 64;
+
   void Start();
   TapSessionDescriptor StartSession(
       const TopicAdvertisement& advertisement);

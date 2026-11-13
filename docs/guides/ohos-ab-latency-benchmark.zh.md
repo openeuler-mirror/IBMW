@@ -32,11 +32,11 @@
 
 ```bash
 export IBMW_ROOT="$PWD"
-export OHOS_ROS2_PREFIX=/path/to/full-ohos-ros2/install
-export OHOS_MINIMAL_SDK_PREFIX=/path/to/ros2-minimal-humble-ohos-arm64-fastrtps-product-sdk
-export OHOS_SDK_NATIVE_ROOT=/path/to/ohos-sdk/native
-export A_BUILD=/tmp/opencode/ibmw-ohos-abc-a
-export B_BUILD=/tmp/opencode/ibmw-ohos-abc-b
+export OHOS_ROS2_PREFIX=/absolute/full-ohos-ros2/install
+export OHOS_MINIMAL_SDK_PREFIX=/absolute/ros2-minimal-humble-ohos-arm64-fastrtps-product-sdk
+export OHOS_SDK_NATIVE_ROOT=/absolute/ohos-sdk/native
+export A_BUILD=/tmp/ibmw-ohos-abc-a
+export B_BUILD=/tmp/ibmw-ohos-abc-b
 
 AMENT_PREFIX_PATH="$OHOS_ROS2_PREFIX" \
 PYTHONPATH="$OHOS_ROS2_PREFIX/lib/python3.12/site-packages" \
@@ -74,7 +74,7 @@ foonathan memory 版本互相覆盖。部署包是从各 endpoint 的递归 `DT_
 最小 bundle，并额外加入动态加载的 RMW/typesupport 库；所选子目录不是完整 prefix 副本。
 
 ```bash
-export BUNDLE=/tmp/opencode/ibmw-ohos-abc
+export BUNDLE=/tmp/ibmw-ohos-abc
 mkdir -p "$BUNDLE"/{bin,lib-a,lib-b,cfg,share}
 cp "$A_BUILD/ibmw_abc_ros2_endpoint" "$BUNDLE/bin/"
 cp "$B_BUILD/ibmw_abc_dds_endpoint" "$BUNDLE/bin/"
@@ -93,9 +93,9 @@ IBMW_ABC_ROOT=/data/local/tmp/ibmw-ohos-abc \
 MATRIX_ID=ohos-ab-5block-YYYYMMDD \
 src/samples/cpp/transport_benchmark/abc_interop/run_ohos_matrix.sh
 
-mkdir -p /tmp/opencode/ibmw-ohos-ab-results
+mkdir -p /tmp/ibmw-ohos-ab-results
 hdc file recv /data/local/tmp/ibmw-ohos-abc/runs \
-  /tmp/opencode/ibmw-ohos-ab-results/
+  /tmp/ibmw-ohos-ab-results/
 ```
 
 每个 lane 先启动 publisher，记录其 PID，并读取 `/proc/$pid/stat` 第 22 字段作为 producer
@@ -161,7 +161,7 @@ CPU 使用发生重叠；summary 缺失或数值无效时 lane 不会标记为 `
 - RSS 会重复计算共享页，跨 lane 观察优先看同一采样点的 pair PSS。
 - A 每个进程退出时报告 `Failed to delete participant`，但进程返回 0、完整 artifact
   已落盘且后续 block 未发现残留 endpoint；formal run 前仍应消除或资格化该告警。
-- 本轮 artifact 位于 `/tmp/opencode/ibmw-ohos-ab-results-20260904/`，不进入版本库。
+- 本轮 artifact 未归档，不进入版本库。
 - 本文不改变 OHOS physical formal P0a、通用 exact、其它 transport/type 的验收状态。
 - 当前 standalone CMake lane 面向 Release 交付；未声明 OHOS sanitizer runtime 可用性，不能把 sanitizer 构建当作本 lane 的验证结果。
 
@@ -210,5 +210,5 @@ pair_cpu_pct = publisher_cpu_pct + subscriber_cpu_pct
 subscriber 约低 71.9%。这只能作为当前设备和当前合同的探索性观察，不能推广
 为所有负载或所有 OHOS 平台的结论。
 
-CPU 补测结果位于 `/tmp/opencode/ibmw-ohos-ab-cpu-coherent-final-20260906/`，其中包含
+CPU 补测结果未归档，不进入版本库，其中包含
 每轮 `top` 快照、proc stat 快照和重新计算的 `exploratory-matrix-cpu.json`。

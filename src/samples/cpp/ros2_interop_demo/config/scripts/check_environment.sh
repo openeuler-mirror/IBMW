@@ -9,7 +9,7 @@ echo "ROS2-Ibmw Environment Check"
 echo "=========================================="
 
 # Source ROS2 environment
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
 
 echo ""
 echo "1. Checking for running Ibmw processes..."
@@ -78,7 +78,7 @@ if ros2 pkg list | grep -q "demo_nodes_cpp"; then
     fi
 else
     echo "❌ ERROR: demo_nodes_cpp package not found!"
-    echo "   Please install: sudo apt install ros-humble-demo-nodes-cpp"
+    echo "   Please install: sudo apt install ros-${ROS_DISTRO:-humble}-demo-nodes-cpp"
     exit 1
 fi
 

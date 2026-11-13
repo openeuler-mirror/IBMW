@@ -59,7 +59,6 @@ class ModuleGenerator(GeneratorBase):
                 module_compile_tags[module_name] = module_info['build_mode_tag']
             else:
                 module_compile_tags[module_name] = []
-            # module_options = module_info['options']
             split_names = module_name.split('_')
             class_name = ''
             for name in split_names:
@@ -68,7 +67,6 @@ class ModuleGenerator(GeneratorBase):
             expand_info = ModuleExpandInfo(
                 module_name,
                 class_name,
-                # module_options,
             )
             self.expand_infos_.append(expand_info)
 

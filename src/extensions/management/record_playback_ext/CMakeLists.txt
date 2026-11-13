@@ -62,6 +62,18 @@ target_include_directories(
 
 # Set link libraries of target
 find_package(SQLite3 REQUIRED)
+# TBB / backward are not used by record_playback sources; they stay on the
+# link line only when the selfdev replacements are switched off, to preserve
+# the previous link line. (Plain if(), not generator expressions, so exported
+# target names are mapped correctly.)
+set(_ibmw_record_playback_legacy_libs)
+if(NOT IBMW_SELFDEV_CONCURRENT)
+  list(APPEND _ibmw_record_playback_legacy_libs TBB::tbb)
+endif()
+if(NOT IBMW_SELFDEV_CRASH_HANDLER)
+  list(APPEND _ibmw_record_playback_legacy_libs backward_iface)
+endif()
+
 target_link_libraries(
   ${CUR_TARGET_NAME}_cli_support
   PUBLIC ibmw::core::extension_api
@@ -71,8 +83,7 @@ target_link_libraries(
           ${CMAKE_DL_LIBS}
           asio::asio
           yaml-cpp::yaml-cpp
-          TBB::tbb
-          backward_iface
+          ${_ibmw_record_playback_legacy_libs}
           nlohmann_json::nlohmann_json
           mcap::mcap
           SQLite::SQLite3)
@@ -85,8 +96,7 @@ target_link_libraries(
           ${CMAKE_DL_LIBS}
           asio::asio
           yaml-cpp::yaml-cpp
-          TBB::tbb
-          backward_iface
+          ${_ibmw_record_playback_legacy_libs}
           nlohmann_json::nlohmann_json
           mcap::mcap)
 target_link_libraries(

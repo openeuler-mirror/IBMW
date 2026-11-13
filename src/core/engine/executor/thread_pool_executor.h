@@ -4,8 +4,10 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -80,6 +82,15 @@ class ThreadPoolExecutor : public ExecutorBase {
 
   static thread_local const ThreadPoolExecutor* tl_current_executor_;
   std::list<std::thread> threads_;
+
+  // Worker threads still inside io_context::run(); Shutdown() waits on it
+  // with a bounded grace period before forcing io_context::stop().
+  std::mutex exit_mutex_;
+  std::condition_variable exit_cv_;
+  uint32_t running_threads_ = 0;
+  // YAML option 'shutdown_grace_ms' (kept out of Options so the installed
+  // layout of existing members does not change). Negative: wait forever.
+  int32_t shutdown_grace_ms_ = 1000;
 };
 
 }  // namespace ibmw::runtime::core::executor

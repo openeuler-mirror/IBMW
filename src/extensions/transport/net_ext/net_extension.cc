@@ -45,25 +45,29 @@ struct convert<ibmw::extensions::net_extension::NetExtension::Options> {
   static bool decode(const Node& node, Options& rhs) {
     if (!node.IsMap()) return false;
 
+    MW_REQUIRE(node["thread_num"], "net_extension option thread_num is required.");
     rhs.thread_num = node["thread_num"].as<uint32_t>();
 
     if (node["http_options"]) {
+      MW_REQUIRE(node["http_options"]["listen_port"], "net_extension option http_options.listen_port is required.");
       rhs.http_options = Options::HttpOptions{
-          .listen_ip = node["http_options"]["listen_ip"].as<std::string>(),
+          .listen_ip = node["http_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["http_options"]["listen_port"].as<uint16_t>(),
       };
     }
 
     if (node["tcp_options"]) {
+      MW_REQUIRE(node["tcp_options"]["listen_port"], "net_extension option tcp_options.listen_port is required.");
       rhs.tcp_options = Options::TcpOptions{
-          .listen_ip = node["tcp_options"]["listen_ip"].as<std::string>(),
+          .listen_ip = node["tcp_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["tcp_options"]["listen_port"].as<uint16_t>(),
       };
     }
 
     if (node["udp_options"]) {
+      MW_REQUIRE(node["udp_options"]["listen_port"], "net_extension option udp_options.listen_port is required.");
       rhs.udp_options = Options::UdpOptions{
-          .listen_ip = node["udp_options"]["listen_ip"].as<std::string>(),
+          .listen_ip = node["udp_options"]["listen_ip"].as<std::string>(Options::kDefaultListenIp),
           .listen_port = node["udp_options"]["listen_port"].as<uint16_t>(),
       };
       if (node["udp_options"]["max_pkg_size"]) {
@@ -96,18 +100,39 @@ auto WrapIbmwLoggerRef(ibmw::logger::LoggerRef logger_ref)
           }});
 }
 
+// Resolves g_logger on every call: executor threads are joined after the
+// logging subsystem stops, when g_logger has reverted to its fallback.
+auto WrapExtensionLogger() -> std::shared_ptr<ibmw::common::util::LoggerWrapper> {
+  return std::make_shared<ibmw::common::util::LoggerWrapper>(
+      ibmw::common::util::LoggerWrapper{
+          .get_log_level_func = []() -> uint32_t { return g_logger.Get().GetLogLevel(); },
+          .log_func = [](uint32_t lvl,
+                         uint32_t line,
+                         const char* file_name,
+                         const char* function_name,
+                         const char* log_data,
+                         size_t log_data_size) {
+            g_logger.Get().Log(lvl, line, file_name, function_name, log_data, log_data_size);
+          }});
+}
+
 NetExtension::NetExtension() {
   SetExtensionLogger(&g_logger);
+}
+
+NetExtension::Options NetExtension::ParseOptions(const YAML::Node& node) {
+  return node.as<Options>();
 }
 
 bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
   YAML::Node extension_options_node = core_ptr_->GetExtensionBus().GetExtensionOptionsNode(Name());
 
   if (extension_options_node && !extension_options_node.IsNull()) {
-    options_ = extension_options_node.as<Options>();
+    options_ = ParseOptions(extension_options_node);
   }
 
   asio_executor_ptr_ = std::make_shared<ibmw::common::net::AsioExecutor>(options_.thread_num);
+  asio_executor_ptr_->SetLogger(WrapExtensionLogger());
 
   // http
   http_cli_pool_ptr_ = std::make_shared<ibmw::common::net::AsioHttpClientPool>(asio_executor_ptr_->IO());
@@ -141,7 +166,7 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
         [this] {
           http_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
           http_svr_ptr_->Initialize(ibmw::common::net::AsioHttpServer::Options{
-              .ep = {boost::asio::ip::make_address_v4(options_.http_options->listen_ip),
+              .ep = {boost::asio::ip::make_address(options_.http_options->listen_ip),
                      options_.http_options->listen_port}});
           http_svr_ptr_->Start();
         });
@@ -173,12 +198,6 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
                                                   runtime::core::Subsystem::kTransport),
                           [this] { RegisterTcpTransportDriver(); });
 
-  core_ptr_->RegisterHook(
-      runtime::core::AfterPhase(runtime::core::Phase::kStopping),
-      [this] {
-        tcp_cli_pool_ptr_->Shutdown();
-      });
-
   if (options_.tcp_options) {
     tcp_msg_handle_catalog_ptr_ = std::make_shared<MsgHandleCatalog<boost::asio::ip::tcp::endpoint>>();
     tcp_svr_ptr_ = std::make_shared<ibmw::common::net::AsioTcpServer>(asio_executor_ptr_->IO());
@@ -189,7 +208,7 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
           tcp_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
           tcp_svr_ptr_->RegisterMsgHandle(tcp_msg_handle_catalog_ptr_->GetMsgHandleFunc());
           tcp_svr_ptr_->Initialize(ibmw::common::net::AsioTcpServer::Options{
-              .ep = {boost::asio::ip::make_address_v4(options_.tcp_options->listen_ip),
+              .ep = {boost::asio::ip::make_address(options_.tcp_options->listen_ip),
                      options_.tcp_options->listen_port}});
           tcp_svr_ptr_->Start();
         });
@@ -232,7 +251,7 @@ bool NetExtension::OnInit(runtime::core::Engine* core_ptr) {
           udp_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
           udp_svr_ptr_->RegisterMsgHandle(udp_msg_handle_catalog_ptr_->GetMsgHandleFunc());
           udp_svr_ptr_->Initialize(ibmw::common::net::AsioUdpServer::Options{
-              .ep = {boost::asio::ip::make_address_v4(options_.udp_options->listen_ip),
+              .ep = {boost::asio::ip::make_address(options_.udp_options->listen_ip),
                      options_.udp_options->listen_port},
               .max_package_size = options_.udp_options->max_pkg_size});
           udp_svr_ptr_->Start();

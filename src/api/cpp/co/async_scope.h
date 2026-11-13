@@ -5,15 +5,29 @@
 
 #include "base/ibmw_config.h"
 
-#ifdef IBMW_EXECUTOR_USE_STDEXEC
+#if defined(IBMW_EXECUTOR_USE_STDEXEC)
 
   #include <exec/async_scope.hpp>
 
 namespace ibmw::co {
 
-using AsyncScope = exec::async_scope;
+// unifex::async_scope spells "wait until all work is done" complete(); this
+// keeps that spelling without a macro that rewrites every `complete` token in
+// the including translation units (API-046).
+class AsyncScope : public exec::async_scope {
+ public:
+  [[nodiscard]] auto complete() noexcept { return on_empty(); }
+};
 
-  #define complete on_empty
+}  // namespace ibmw::co
+
+#elif defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+
+  #include "ibmw_selfdev/coro/async_scope.h"
+
+namespace ibmw::co {
+
+using AsyncScope = ibmw::selfdev::coro::AsyncScope;
 
 }  // namespace ibmw::co
 

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -135,12 +136,17 @@ class StatusListener final : public dds::DataReaderListener {
   StatusState& state_;
 };
 
-uint32_t ReadDefaultDomainId() {
+std::optional<uint32_t> ReadDefaultDomainId() {
   const char* domain = std::getenv("ROS_DOMAIN_ID");
   if (domain == nullptr || std::strlen(domain) == 0U) {
-    return 0;
+    return 0U;
   }
-  return static_cast<uint32_t>(std::stoul(domain));
+  uint32_t domain_id = 0;
+  if (!action_common::ParseInteger<uint32_t>(domain, 0, action_common::kMaxDomainId, domain_id)) {
+    std::cerr << "[FAIL] Invalid value for ROS_DOMAIN_ID: '" << domain << "'" << std::endl;
+    return std::nullopt;
+  }
+  return domain_id;
 }
 
 void PrintUsage() {
@@ -157,7 +163,14 @@ void PrintUsage() {
 
 std::optional<Options> ParseArgs(int argc, char* argv[]) {
   Options options;
-  options.domain_id = ReadDefaultDomainId();
+  bool domain_id_set = false;
+  auto parse_int = [](const char* flag, const char* value, int& out) {
+    if (!action_common::ParseInteger(value, std::numeric_limits<int>::min(), std::numeric_limits<int>::max(), out)) {
+      std::cerr << "[FAIL] Invalid value for " << flag << ": '" << value << "'" << std::endl;
+      return false;
+    }
+    return true;
+  };
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto require_value = [&](const char* flag) -> const char* {
@@ -180,7 +193,9 @@ std::optional<Options> ParseArgs(int argc, char* argv[]) {
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.order = std::stoi(value);
+      if (!parse_int("--order", value, options.order)) {
+        return std::nullopt;
+      }
     } else if (arg == "--action-name") {
       const char* value = require_value("--action-name");
       if (value == nullptr) {
@@ -192,19 +207,27 @@ std::optional<Options> ParseArgs(int argc, char* argv[]) {
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.domain_id = static_cast<uint32_t>(std::stoul(value));
+      if (!action_common::ParseInteger<uint32_t>(value, 0, action_common::kMaxDomainId, options.domain_id)) {
+        std::cerr << "[FAIL] Invalid value for --domain-id: '" << value << "'" << std::endl;
+        return std::nullopt;
+      }
+      domain_id_set = true;
     } else if (arg == "--server-wait-seconds") {
       const char* value = require_value("--server-wait-seconds");
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.server_wait_seconds = std::stoi(value);
+      if (!parse_int("--server-wait-seconds", value, options.server_wait_seconds)) {
+        return std::nullopt;
+      }
     } else if (arg == "--result-wait-seconds") {
       const char* value = require_value("--result-wait-seconds");
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.result_wait_seconds = std::stoi(value);
+      if (!parse_int("--result-wait-seconds", value, options.result_wait_seconds)) {
+        return std::nullopt;
+      }
     } else if (arg == "--help" || arg == "-h") {
       options.show_help = true;
       PrintUsage();
@@ -215,6 +238,13 @@ std::optional<Options> ParseArgs(int argc, char* argv[]) {
     }
   }
 
+  if (!domain_id_set) {
+    const auto domain_id = ReadDefaultDomainId();
+    if (!domain_id.has_value()) {
+      return std::nullopt;
+    }
+    options.domain_id = *domain_id;
+  }
   if (options.mode != "success" && options.mode != "cancel") {
     std::cerr << "[FAIL] --mode must be success or cancel" << std::endl;
     return std::nullopt;
@@ -297,7 +327,7 @@ class FibonacciActionClient {
     send_goal_request.goal.order = options_.order;
     const auto send_goal_call = CallService(send_goal_, send_goal_request, send_goal_sequence,
                                             std::chrono::seconds(options_.server_wait_seconds),
-                                            "[FAIL] send_goal write failed");
+                                            "send_goal write failed");
     if (!send_goal_call.write_ok) {
       return 1;
     }
@@ -316,7 +346,7 @@ class FibonacciActionClient {
     result_request.goal_id = goal_id;
     const auto result_call = CallService(get_result_, result_request, get_result_sequence,
                                          std::chrono::seconds(options_.result_wait_seconds),
-                                         "[FAIL] get_result write failed");
+                                         "get_result write failed");
     if (!result_call.write_ok) {
       return 1;
     }
@@ -362,7 +392,7 @@ class FibonacciActionClient {
     send_goal_request.goal.order = options_.order;
     const auto send_goal_call = CallService(send_goal_, send_goal_request, send_goal_sequence,
                                             std::chrono::seconds(options_.server_wait_seconds),
-                                            "[FAIL] send_goal write failed");
+                                            "send_goal write failed");
     if (!send_goal_call.write_ok) {
       return 1;
     }
@@ -383,7 +413,7 @@ class FibonacciActionClient {
     cancel_request.goal_info.stamp.nanosec = 0;
     const auto cancel_call = CallService(cancel_goal_, cancel_request, cancel_sequence,
                                          std::chrono::seconds(options_.server_wait_seconds),
-                                         "[FAIL] cancel_goal write failed");
+                                         "cancel_goal write failed");
     if (!cancel_call.write_ok) {
       return 1;
     }
@@ -410,7 +440,7 @@ class FibonacciActionClient {
     result_request.goal_id = goal_id;
     const auto result_call = CallService(get_result_, result_request, get_result_sequence,
                                          std::chrono::seconds(options_.result_wait_seconds),
-                                         "[FAIL] get_result write failed");
+                                         "get_result write failed");
     if (!result_call.write_ok) {
       return 1;
     }

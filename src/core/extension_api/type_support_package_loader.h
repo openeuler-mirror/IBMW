@@ -21,6 +21,8 @@ class TypeSupportPackageLoader {
   TypeSupportPackageLoader& operator=(const TypeSupportPackageLoader&) = delete;
 
   void Load(std::string_view path);
+  // Returns false when path is not a TypeSupport package; throws when a library
+  // given by path could be replaced by other users (CORE-017).
   bool TryLoad(std::string_view path);
   void Unload();
 

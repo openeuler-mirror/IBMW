@@ -28,6 +28,7 @@ class ExecutorAccess {
  private:
   static ibmw_executor_base_t GenBase(void* ctx) {
     return ibmw_executor_base_t{
+        .struct_size = sizeof(ibmw_executor_base_t),
         .type = [](void* ctx) -> ibmw_string_view_t {
           return ibmw::util::ToIbmwStringView(
               static_cast<ExecutorBase*>(ctx)->Type());
@@ -94,6 +95,7 @@ class ExecutorBusAccess {
 
   static ibmw_executor_bus_base_t GenBase(void* ctx) {
     return ibmw_executor_bus_base_t{
+        .struct_size = sizeof(ibmw_executor_bus_base_t),
         .get_executor = [](void* ctx, ibmw_string_view_t executor_name) -> const ibmw_executor_base_t* {
           return static_cast<ExecutorBusAccess*>(ctx)->GetExecutor(executor_name);
         },

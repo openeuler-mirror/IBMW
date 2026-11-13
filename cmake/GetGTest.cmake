@@ -8,6 +8,9 @@ message(STATUS "get googletest ...")
 set(googletest_DOWNLOAD_URL
     "https://github.com/google/googletest/archive/v1.13.0.tar.gz"
     CACHE STRING "")
+set(googletest_DOWNLOAD_SHA256
+    "ad7fdba11ea011c1d925b3289cf4af2c66a352e18d4c7264392fead75e919363"
+    CACHE STRING "SHA256 of googletest_DOWNLOAD_URL (update both together)")
 
 if(googletest_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     googletest
     URL ${googletest_DOWNLOAD_URL}
+    URL_HASH SHA256=${googletest_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()
@@ -26,9 +30,6 @@ endif()
 function(get_googletest)
   FetchContent_GetProperties(googletest)
   if(NOT googletest_POPULATED)
-    if(WIN32)
-      set(gtest_force_shared_crt ON)
-    endif()
     set(INSTALL_GTEST OFF)
 
     FetchContent_MakeAvailable(googletest)

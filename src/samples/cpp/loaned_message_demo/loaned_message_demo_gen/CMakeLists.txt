@@ -26,7 +26,7 @@ endif()
 find_package(ibmw 0.1.0 REQUIRED)
 
 # --------------------------------------------------------------------------
-# ROS2 message packages required by ros2_interop / loaned_* / direct_iceoryx_* modules.
+# ROS2 message packages required by ros2_interop / loaned_* / direct_iceoryx_* / direct_shm_* modules.
 # --------------------------------------------------------------------------
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)

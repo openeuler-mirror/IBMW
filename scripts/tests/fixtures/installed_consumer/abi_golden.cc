@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include <engine/transport/loaned_sample_handle.h>
 #include <engine/transport/message_frame.h>
 #include <engine/transport/transport_driver.h>

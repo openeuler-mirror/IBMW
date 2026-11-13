@@ -6,7 +6,17 @@
 #include <algorithm>
 #include "parameter_ext/global.h"
 
+#include <utility>
+#include <vector>
+
 namespace ibmw::extensions::parameter_extension {
+
+void ParameterServiceImpl::LogHandlerFailure(const char* what) noexcept {
+  try {
+    MW_ERROR_INTERVAL(1000, "Parameter service handler failed: {}", what);
+  } catch (...) {
+  }
+}
 
 void ParameterServiceImpl::HandleSet(
     const ibmw::protocols::parameter_extension::SetParameterReq& req,
@@ -16,7 +26,6 @@ void ParameterServiceImpl::HandleSet(
     SetErrorCode(ErrorCode::kInvalidModuleName, rsp);
     return;
   }
-
   if (req.parameter_key.empty()) {
     SetErrorCode(ErrorCode::kInvalidParameterName, rsp);
     return;
@@ -66,6 +75,7 @@ void ParameterServiceImpl::HandleDump(
 
     // Check the legality of module name
     if (parameter_handle_ptr == nullptr) {
+      rsp.module_parameter_map.clear();
       SetErrorCode(ErrorCode::kInvalidModuleName, rsp);
       return;
     }
@@ -88,6 +98,10 @@ void ParameterServiceImpl::HandleDump(
 void ParameterServiceImpl::HandleLoad(
     const ibmw::protocols::parameter_extension::LoadParameterReq& req,
     ibmw::protocols::parameter_extension::LoadParameterRsp& rsp) {
+  // Validate the whole request before applying anything, so that a bad
+  // module name or key does not leave the parameters half loaded.
+  std::vector<std::pair<ibmw::runtime::core::parameter::ParameterHandle*, const decltype(req.module_parameter_map)::mapped_type*>> targets;
+  targets.reserve(req.module_parameter_map.size());
   for (const auto& [module_name, parameter_map] : req.module_parameter_map) {
     auto* parameter_handle_ptr = parameter_store_ptr_->GetParams(module_name);
 
@@ -96,8 +110,17 @@ void ParameterServiceImpl::HandleLoad(
       SetErrorCode(ErrorCode::kInvalidModuleName, rsp);
       return;
     }
-
     for (const auto& [key, value] : parameter_map.value) {
+      if (key.empty()) {
+        SetErrorCode(ErrorCode::kInvalidParameterName, rsp);
+        return;
+      }
+    }
+    targets.emplace_back(parameter_handle_ptr, &parameter_map);
+  }
+
+  for (const auto& [parameter_handle_ptr, parameter_map] : targets) {
+    for (const auto& [key, value] : parameter_map->value) {
       parameter_handle_ptr->SetParameter(key, value);
     }
   }

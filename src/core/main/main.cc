@@ -2,16 +2,24 @@
 // All rights reserved.
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #include "engine/engine.h"
@@ -21,15 +29,106 @@
 
 using namespace ibmw::runtime::core;
 
-Engine* global_core_ptr = nullptr;
+namespace {
 
-void SignalHandler(int sig) {
-  if (global_core_ptr && (sig == SIGINT || sig == SIGTERM)) {
-    global_core_ptr->Shutdown();
-    return;
+// SIGINT/SIGTERM only write the signal number to a self-pipe (async-signal
+// safe). A watcher thread turns that into Engine::Shutdown() (logging,
+// promises, full teardown on a second signal), so it never runs in
+// async-signal context. No signal mask is changed, so threads created earlier
+// and child processes keep the default signal behaviour.
+std::mutex g_core_mutex;
+Engine* global_core_ptr = nullptr;
+int g_signal_pipe[2] = {-1, -1};
+
+class ScopedSignalCore {
+ public:
+  explicit ScopedSignalCore(Engine* core) { Set(core); }
+  ~ScopedSignalCore() { Set(nullptr); }  // also on exception unwind
+  ScopedSignalCore(const ScopedSignalCore&) = delete;
+  ScopedSignalCore& operator=(const ScopedSignalCore&) = delete;
+
+ private:
+  static void Set(Engine* core) {
+    std::lock_guard<std::mutex> lck(g_core_mutex);
+    global_core_ptr = core;
   }
-  raise(sig);
+};
+
+void OnShutdownSignal(int sig) {
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(sig);
+  // Non-blocking: if the pipe is full a shutdown request is already pending.
+  [[maybe_unused]] auto ret = write(g_signal_pipe[1], &byte, 1);
+  errno = saved_errno;
 }
+
+// No engine (yet / anymore): die from the signal like the default disposition
+// would, so the parent sees WIFSIGNALED.
+[[noreturn]] void DieFromSignal(int sig) {
+  std::signal(sig, SIG_DFL);
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, sig);
+  pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+  raise(sig);
+  _exit(128 + sig);
+}
+
+bool StartSignalThread() {
+  if (pipe2(g_signal_pipe, O_CLOEXEC) != 0) return false;
+  const int flags = fcntl(g_signal_pipe[1], F_GETFL);
+  if (flags < 0 || fcntl(g_signal_pipe[1], F_SETFL, flags | O_NONBLOCK) != 0) return false;
+
+  try {
+    std::thread([] {
+      while (true) {
+        unsigned char byte = 0;
+        const ssize_t n = read(g_signal_pipe[0], &byte, 1);
+        if (n != 1) {
+          if (n < 0 && errno == EINTR) continue;
+          return;
+        }
+        std::lock_guard<std::mutex> lck(g_core_mutex);
+        if (global_core_ptr == nullptr) DieFromSignal(byte);
+        global_core_ptr->Shutdown();
+      }
+    }).detach();
+  } catch (const std::exception&) {
+    return false;
+  }
+
+  struct sigaction sa {};
+  sa.sa_handler = &OnShutdownSignal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  return sigaction(SIGINT, &sa, nullptr) == 0 && sigaction(SIGTERM, &sa, nullptr) == 0;
+}
+
+// Accepts a whole non-negative number of seconds.
+bool ParseDuration(std::string_view text, int32_t& seconds) {
+  const char* end = text.data() + text.size();
+  const auto [ptr, ec] = std::from_chars(text.data(), end, seconds);
+  return ec == std::errc() && ptr == end && seconds >= 0;
+}
+
+template <typename T>
+void DumpToFile(const std::string& path, const T& content) {
+  std::ofstream ofs(path, std::ios::trunc);
+  ofs << content;
+  ofs.close();
+  if (!ofs) throw std::runtime_error("failed to write " + path);
+}
+
+// _exit() skips static destructors (see RunRuntimeCommand) and stdio flushing,
+// so flush first.
+[[noreturn]] void FlushAndExit(int code) {
+  std::cout.flush();
+  std::cerr.flush();
+  std::fflush(nullptr);
+  _exit(code);
+}
+
+}  // namespace
 
 void PrintVersion() {
   std::cout << "ibmw " << util::GetIbmwVersion() << std::endl;
@@ -48,40 +147,30 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
   std::string dump_report_path =
       invocation.OptionValue("--dump-report", "./init_report.txt");
 
-  try {
-    running_duration = std::stoi(invocation.OptionValue("--duration", "0"));
-  } catch (const std::exception&) {
-    std::cerr << "Error: --duration requires an integer number of seconds.\n";
+  if (!ParseDuration(invocation.OptionValue("--duration", "0"), running_duration)) {
+    std::cerr << "Error: --duration requires a non-negative integer number of seconds.\n";
     return 1;
   }
 
-  if (register_signal) {
-    signal(SIGINT, SignalHandler);
-    signal(SIGTERM, SignalHandler);
+  if (register_signal && !StartSignalThread()) {
+    std::cerr << "Error: failed to set up SIGINT/SIGTERM handling.\n";
+    return 1;
   }
 
   std::cout << "IBMW v" << util::GetIbmwVersion() << " starting..." << std::endl;
 
   try {
     Engine core;
-    global_core_ptr = &core;
+    ScopedSignalCore signal_core(&core);
 
     Engine::Options options;
     options.cfg_file_path = cfg_file_path;
 
     core.Initialize(options);
 
-    if (dump_cfg) {
-      std::ofstream ofs(dump_cfg_path, std::ios::trunc);
-      ofs << core.GetConfigSubsystem().GetRootOptionsNode();
-      ofs.close();
-    }
+    if (dump_cfg) DumpToFile(dump_cfg_path, core.GetConfigSubsystem().GetRootOptionsNode());
 
-    if (dump_report) {
-      std::ofstream ofs(dump_report_path, std::ios::trunc);
-      ofs << core.GenInitializationReport();
-      ofs.close();
-    }
+    if (dump_report) DumpToFile(dump_report_path, core.GenInitializationReport());
 
     if (running_duration == 0) {
       core.Start();  // Blocked here
@@ -91,11 +180,11 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
       core.Shutdown();
       fu.wait();
     }
-
-    global_core_ptr = nullptr;
   } catch (const std::exception& e) {
-    std::cout << "IBMW fatal: " << e.what() << std::endl;
-    return -1;
+    std::cerr << "IBMW fatal: " << e.what() << std::endl;
+    // Same exit status as the former `return -1`; static destructors are
+    // skipped for the reason given below.
+    FlushAndExit(255);
   }
 
   std::cout << "IBMW stopped." << std::endl;
@@ -105,7 +194,7 @@ int RunRuntimeCommand(const ibmw::cli::Invocation& invocation) {
   // reference already-freed resources, causing "double free or corruption"
   // crashes during normal process teardown. All managed shutdown has already
   // completed above (Engine destructor ran, all modules stopped).
-  _exit(0);
+  FlushAndExit(0);
 }
 
 int RunCli(int argc, char** argv) {

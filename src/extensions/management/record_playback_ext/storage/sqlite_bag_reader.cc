@@ -2,6 +2,7 @@
 // All rights reserved.
 
 #include "record_playback_ext/storage/sqlite_bag_reader.h"
+#include "record_playback_ext/storage/bag_reader_util.h"
 #include "record_playback_ext/storage/path_safety.h"
 
 #include <algorithm>
@@ -47,15 +48,7 @@ std::shared_ptr<ibmw::util::BufferArrayView> CopyBlob(
       sqlite3_column_blob(statement, column));
   const size_t size = static_cast<size_t>(
       sqlite3_column_bytes(statement, column));
-  auto storage = std::make_shared<std::vector<uint8_t>>(size);
-  if (size != 0) {
-    std::memcpy(storage->data(), data, size);
-  }
-  auto* view = new ibmw::util::BufferArrayView(
-      storage->data(), storage->size());
-  return std::shared_ptr<ibmw::util::BufferArrayView>(
-      view,
-      [storage](const ibmw::util::BufferArrayView* ptr) { delete ptr; });
+  return MakeOwnedPayload(data, size);
 }
 
 int64_t ReadInteger(const YAML::Node& node, std::string_view name) {
@@ -73,9 +66,11 @@ int64_t ReadInteger(const YAML::Node& node, std::string_view name) {
 void LoadSqliteReaderConfiguration(
     const std::filesystem::path& path,
     int& busy_timeout_ms,
-    std::vector<std::pair<std::string, int64_t>>& pragmas) {
+    std::vector<std::pair<std::string, int64_t>>& pragmas,
+    bool& integrity_check) {
   busy_timeout_ms = 0;
   pragmas.clear();
+  integrity_check = true;
   if (path.empty()) {
     return;
   }
@@ -86,10 +81,17 @@ void LoadSqliteReaderConfiguration(
         entry.first.IsScalar(), "SQLite reader config keys must be strings.");
     const std::string key = entry.first.as<std::string>();
     MW_ASSERT(
-        key == "busy_timeout_ms" || key == "pragmas",
+        key == "busy_timeout_ms" || key == "pragmas" || key == "integrity_check",
         "Unknown SQLite reader config key '{}'. Supported keys are "
-        "busy_timeout_ms and pragmas.",
+        "busy_timeout_ms, pragmas and integrity_check.",
         key);
+    if (key == "integrity_check") {
+      // PRAGMA quick_check reads the whole file; large trusted bags may skip
+      // it (EXT-036).
+      MW_ASSERT(entry.second.IsScalar(), "SQLite reader config 'integrity_check' must be a boolean.");
+      integrity_check = entry.second.as<bool>();
+      continue;
+    }
     if (key == "busy_timeout_ms") {
       const int64_t value = ReadInteger(entry.second, key);
       MW_ASSERT(
@@ -141,8 +143,16 @@ void ApplySqliteReaderConfiguration(
   }
 }
 
+// Finalizes a statement on scope exit, also when a check throws: an
+// unfinalized statement makes sqlite3_close fail and leak the connection.
+struct StatementGuard {
+  sqlite3_stmt** statement;
+  ~StatementGuard() { sqlite3_finalize(*statement); }
+};
+
 bool SqliteIntegrityOk(sqlite3* database) {
   sqlite3_stmt* statement = nullptr;
+  StatementGuard statement_guard{&statement};
   if (sqlite3_prepare_v2(
           database, "PRAGMA quick_check", -1, &statement, nullptr) !=
       SQLITE_OK) {
@@ -153,23 +163,22 @@ bool SqliteIntegrityOk(sqlite3* database) {
   int result = SQLITE_ROW;
   while ((result = sqlite3_step(statement)) == SQLITE_ROW) {
     saw_result = true;
-    valid = valid && ColumnText(statement, 0) == "ok";
+    valid = valid && ColumnText(statement, 0) == "ok";  // may throw bad_alloc
   }
-  sqlite3_finalize(statement);
   return saw_result && valid && result == SQLITE_DONE;
 }
 
-bool MetadataFileMatches(
-    const YAML::Node& metadata,
-    const BagFileInfo& actual) {
-  return !metadata || !metadata.IsMap() ||
-         (metadata["size"].as<uint64_t>(actual.size) == actual.size &&
-          metadata["message_count"].as<uint64_t>(actual.message_count) ==
-              actual.message_count &&
-          metadata["start_timestamp"].as<uint64_t>(
-              actual.start_timestamp) == actual.start_timestamp &&
-          metadata["end_timestamp"].as<uint64_t>(actual.end_timestamp) ==
-              actual.end_timestamp);
+// qos_json comes from the bag file: reject anything but a flat object of
+// strings with an MW exception (EXT-036).
+std::map<std::string, std::string> ParseQos(const std::string& text, uint16_t channel_id) {
+  const auto json = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+  MW_ASSERT(json.is_object(), "SQLite channel {} has invalid qos_json.", channel_id);
+  std::map<std::string, std::string> policies;
+  for (const auto& [name, value] : json.items()) {
+    MW_ASSERT(value.is_string(), "SQLite channel {} has a non-string qos policy '{}'.", channel_id, name);
+    policies.emplace(name, value.get<std::string>());
+  }
+  return policies;
 }
 
 }  // namespace
@@ -180,7 +189,7 @@ void SqliteBagReader::Open(
   info_ = {};
   file_channels_.clear();
   LoadSqliteReaderConfiguration(
-      options.storage_config_file, busy_timeout_ms_, pragmas_);
+      options.storage_config_file, busy_timeout_ms_, pragmas_, integrity_check_);
   const auto absolute_path = std::filesystem::absolute(bag_path);
   const bool direct_file = std::filesystem::is_regular_file(absolute_path);
   MW_ASSERT(
@@ -239,24 +248,27 @@ void SqliteBagReader::Open(
   std::unordered_map<std::string, size_t> schema_indices;
   std::unordered_map<std::string, size_t> channel_indices;
   for (size_t file_index = 0; file_index < files.size(); ++file_index) {
+    // sqlite3_open_v2 returns a connection also when it fails: closed by the
+    // guard. close_v2 frees it even if a statement is still unfinalized.
     sqlite3* database = nullptr;
+    struct DatabaseGuard {
+      sqlite3** database;
+      ~DatabaseGuard() { sqlite3_close_v2(*database); }
+    } guard{&database};
     MW_ASSERT(
         sqlite3_open_v2(
             files[file_index].c_str(), &database, SQLITE_OPEN_READONLY,
             nullptr) == SQLITE_OK,
         "Cannot open SQLite bag file.");
-    struct DatabaseGuard {
-      sqlite3* database;
-      ~DatabaseGuard() { sqlite3_close(database); }
-    } guard{database};
     ApplySqliteReaderConfiguration(database, busy_timeout_ms_, pragmas_);
-    const bool integrity_ok = SqliteIntegrityOk(database);
-    MW_ASSERT(
-        integrity_ok, "SQLite integrity check failed for '{}'.",
-        files[file_index].string());
-    info_.closed_cleanly = direct_file
-                               ? integrity_ok
-                               : info_.closed_cleanly && integrity_ok;
+    if (integrity_check_) {
+      MW_ASSERT(
+          SqliteIntegrityOk(database), "SQLite integrity check failed for '{}'.",
+          files[file_index].string());
+      // A single file has no metadata: it counts as cleanly closed when it
+      // passes the check, and stays unverified when the check is skipped.
+      if (direct_file) info_.closed_cleanly = true;
+    }
 
     BagFileInfo file{
         .path = files[file_index],
@@ -267,6 +279,7 @@ void SqliteBagReader::Open(
                 ? file_nodes[file_index]["split_reason"].as<std::string>("")
                 : ""};
     sqlite3_stmt* statistics = nullptr;
+    StatementGuard statistics_guard{&statistics};
     MW_ASSERT(sqlite3_prepare_v2(
         database,
         "SELECT COUNT(*),COALESCE(MIN(log_time),0),COALESCE(MAX(log_time),0) "
@@ -277,7 +290,6 @@ void SqliteBagReader::Open(
     file.message_count = static_cast<uint64_t>(sqlite3_column_int64(statistics, 0));
     file.start_timestamp = static_cast<uint64_t>(sqlite3_column_int64(statistics, 1));
     file.end_timestamp = static_cast<uint64_t>(sqlite3_column_int64(statistics, 2));
-    sqlite3_finalize(statistics);
     info_.closed_cleanly =
         info_.closed_cleanly &&
         MetadataFileMatches(file_nodes[file_index], file);
@@ -297,6 +309,7 @@ void SqliteBagReader::Open(
 
     std::unordered_map<uint16_t, BagSchemaInfo> schemas;
     sqlite3_stmt* schema_query = nullptr;
+    StatementGuard schema_query_guard{&schema_query};
     MW_ASSERT(sqlite3_prepare_v2(
         database,
         "SELECT id,type_name,serialization_type,schema_name,schema_encoding,"
@@ -331,14 +344,57 @@ void SqliteBagReader::Open(
     }
     MW_ASSERT(schema_result == SQLITE_DONE,
               "Cannot read SQLite schemas: {}.", sqlite3_errmsg(database));
-    sqlite3_finalize(schema_query);
+
+    // messages has no index on channel_id, so each COUNT(*) is a full scan.
+    // With few channels one scan per channel is cheapest; beyond that one
+    // GROUP BY pass wins despite its sort (measured crossover ~4, EXT-036).
+    constexpr int64_t kPerChannelCountLimit = 3;
+    sqlite3_stmt* count_query = nullptr;
+    StatementGuard count_query_guard{&count_query};
+    const auto prepare_count = [&](const char* sql) {
+      MW_ASSERT(sqlite3_prepare_v2(database, sql, -1, &count_query, nullptr) == SQLITE_OK &&
+                    count_query != nullptr,
+                "Cannot prepare SQLite channel count query: {}.", sqlite3_errmsg(database));
+    };
+    prepare_count("SELECT COUNT(*) FROM channels");
+    MW_ASSERT(sqlite3_step(count_query) == SQLITE_ROW,
+              "Cannot count SQLite channels: {}.", sqlite3_errmsg(database));
+    const bool count_per_channel = sqlite3_column_int64(count_query, 0) <= kPerChannelCountLimit;
+    sqlite3_finalize(count_query);
+    count_query = nullptr;
+
+    std::unordered_map<int64_t, uint64_t> channel_message_counts;
+    if (count_per_channel) {
+      prepare_count("SELECT COUNT(*) FROM messages WHERE channel_id=?");
+    } else {
+      prepare_count("SELECT channel_id,COUNT(*) FROM messages GROUP BY channel_id");
+      int count_result = SQLITE_ROW;
+      while ((count_result = sqlite3_step(count_query)) == SQLITE_ROW) {
+        if (sqlite3_column_type(count_query, 0) != SQLITE_INTEGER) continue;
+        channel_message_counts[sqlite3_column_int64(count_query, 0)] =
+            static_cast<uint64_t>(sqlite3_column_int64(count_query, 1));
+      }
+      MW_ASSERT(count_result == SQLITE_DONE,
+                "Cannot count SQLite channel messages: {}.", sqlite3_errmsg(database));
+    }
+    const auto message_count = [&](int64_t channel_id) -> uint64_t {
+      if (!count_per_channel) {
+        const auto count = channel_message_counts.find(channel_id);
+        return count == channel_message_counts.end() ? 0 : count->second;
+      }
+      sqlite3_reset(count_query);
+      sqlite3_bind_int64(count_query, 1, channel_id);
+      MW_ASSERT(sqlite3_step(count_query) == SQLITE_ROW,
+                "Cannot count SQLite channel messages: {}.", sqlite3_errmsg(database));
+      return static_cast<uint64_t>(sqlite3_column_int64(count_query, 0));
+    };
 
     sqlite3_stmt* channel_query = nullptr;
+    StatementGuard channel_query_guard{&channel_query};
     MW_ASSERT(sqlite3_prepare_v2(
         database,
         "SELECT c.id,c.schema_id,c.topic,c.msg_type,c.serialization_type,"
-        "c.qos_json,(SELECT COUNT(*) FROM messages m WHERE m.channel_id=c.id) "
-        "FROM channels c ORDER BY c.id",
+        "c.qos_json FROM channels c ORDER BY c.id",
         -1, &channel_query, nullptr) == SQLITE_OK && channel_query != nullptr,
         "Cannot prepare SQLite channels query: {}.", sqlite3_errmsg(database));
     int channel_result = SQLITE_ROW;
@@ -353,11 +409,9 @@ void SqliteBagReader::Open(
                .msg_type = ColumnText(channel_query, 3),
                .serialization_type = ColumnText(channel_query, 4),
                .schema = schemas.at(schema_id).descriptor},
-          .message_count = static_cast<uint64_t>(
-              sqlite3_column_int64(channel_query, 6))};
-      channel.topic.qos.policies =
-          nlohmann::json::parse(ColumnText(channel_query, 5))
-              .get<std::map<std::string, std::string>>();
+          .message_count = 0};
+      channel.message_count = message_count(channel.id);
+      channel.topic.qos.policies = ParseQos(ColumnText(channel_query, 5), channel.id);
       MW_ASSERT(
           file_channels_.emplace(
           FileChannelKey{
@@ -380,7 +434,6 @@ void SqliteBagReader::Open(
     }
     MW_ASSERT(channel_result == SQLITE_DONE,
               "Cannot read SQLite channels: {}.", sqlite3_errmsg(database));
-    sqlite3_finalize(channel_query);
   }
   if (metadata && metadata.IsMap()) {
     info_.closed_cleanly =
@@ -408,7 +461,7 @@ void SqliteBagReader::ReadMessages(
 
     ~FileCursor() {
       sqlite3_finalize(query);
-      sqlite3_close(database);
+      sqlite3_close_v2(database);
     }
   };
   struct PendingMessage {

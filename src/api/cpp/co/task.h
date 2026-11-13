@@ -5,7 +5,7 @@
 
 #include "base/ibmw_config.h"
 
-#ifdef IBMW_EXECUTOR_USE_STDEXEC
+#if defined(IBMW_EXECUTOR_USE_STDEXEC)
 
   #include <exec/task.hpp>
 
@@ -13,6 +13,17 @@ namespace ibmw::co {
 
 template <typename T>
 using Task = typename exec::task<T>;
+
+}
+
+#elif defined(IBMW_EXECUTOR_USE_SELFDEV_CORO)
+
+  #include "ibmw_selfdev/coro/task.h"
+
+namespace ibmw::co {
+
+template <typename T>
+using Task = typename ibmw::selfdev::coro::Task<T>;
 
 }
 

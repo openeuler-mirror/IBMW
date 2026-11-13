@@ -3,11 +3,16 @@
 
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
 namespace ibmw::common::util {
 
+// A manual-reset event: Notify wakes every current and later waiter until
+// Reset. A waiter that starts after Reset waits for the next Notify, so a
+// Notify followed by Reset before a slow waiter checks the flag is missed by
+// that waiter.
 class LightSignal {
  public:
   LightSignal() = default;

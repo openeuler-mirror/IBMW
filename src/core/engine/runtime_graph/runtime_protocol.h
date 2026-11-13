@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #pragma once
 
 #include <chrono>
@@ -26,6 +29,11 @@ inline constexpr size_t kRuntimeMaxControlMessage = 4 * 1024 * 1024;
 inline constexpr size_t kRuntimeMaxStreamHeader = 1024 * 1024;
 inline constexpr uint64_t kRuntimeMaxStreamPayload = 256ull * 1024ull * 1024ull;
 inline constexpr auto kRuntimeSocketTimeout = std::chrono::seconds(5);
+// A control request must arrive within this time (up to twice it for a peer
+// trickling bytes): the agent serves one connection at a time.
+inline constexpr auto kRuntimeRequestTimeout = std::chrono::seconds(1);
+// Another process holds a Runtime ID lock only to check and update its files.
+inline constexpr auto kRuntimeIdLockTimeout = std::chrono::seconds(2);
 
 struct RuntimeStreamHeader {
   uint32_t magic;
@@ -36,14 +44,16 @@ struct RuntimeStreamHeader {
 };
 static_assert(sizeof(RuntimeStreamHeader) == 24);
 
-inline void ConfigureRuntimeSocket(int fd) {
+inline void ConfigureRuntimeSocket(
+    int fd, std::chrono::seconds receive_timeout = kRuntimeSocketTimeout) {
   const timeval timeout{
       .tv_sec = static_cast<time_t>(
           std::chrono::duration_cast<std::chrono::seconds>(
               kRuntimeSocketTimeout).count()),
       .tv_usec = 0};
+  const timeval receive{.tv_sec = static_cast<time_t>(receive_timeout.count()), .tv_usec = 0};
   MW_ASSERT(
-      ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+      ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receive, sizeof(receive)) == 0 &&
           ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
                        sizeof(timeout)) == 0,
       "Cannot configure Runtime IPC socket timeout: {}.",

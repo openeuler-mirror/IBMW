@@ -18,7 +18,7 @@ counts or measurements as proof for a new checkout.
 - **Generator or schema:** run pytest, regenerate maintained examples, and check
   byte equality unless fixture changes are intentional.
 - **Package ABI/export:** compile a consumer and inspect the exported
-  `IbmwPkgEntry` where applicable.
+  `IbmwPkgEntryV2` where applicable.
 - **Transport/loan path:** cover enabled and disabled feature combinations;
   verify unsupported loans fail and supported loans preserve ownership.
 - **Extension:** load representative YAML and exercise its messaging/RPC path.

@@ -38,6 +38,7 @@ int OnFrameNotSendCallback(nghttp2_session* session, const nghttp2_frame* frame,
 }  // namespace
 
 int ServerSession::InitSession(Http2Settings settings) {
+  settings_ = settings;
   nghttp2_session_callbacks* callbacks = nullptr;
   auto new_ok = nghttp2_session_callbacks_new(&callbacks);
   if (new_ok != 0) {
@@ -196,6 +197,7 @@ void ServerSession::OnFullRequest(const RequestPtr& request_ptr) {
 }
 
 std::forward_list<RequestPtr> ServerSession::GetFullRequestList() {
+  full_request_list_.reverse();  // OnFullRequest pushes to the front
   return std::move(full_request_list_);
 }
 
@@ -223,7 +225,8 @@ int OnHeaderCallback(nghttp2_session* session, const nghttp2_frame* frame, const
                      const uint8_t* value, size_t value_len, uint8_t flags, void* user_data) {
   MW_TRACE("stream on header, stream id: {}, name: {}, value: {}", frame->hd.stream_id,
               std::string_view(reinterpret_cast<const char*>(name), name_len),
-              std::string_view(reinterpret_cast<const char*>(value), value_len));
+              LoggableHeaderValue(std::string_view(reinterpret_cast<const char*>(name), name_len),
+                                  std::string_view(reinterpret_cast<const char*>(value), value_len)));
   if (frame->hd.type != NGHTTP2_HEADERS || frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
     return 0;
   }
@@ -266,37 +269,24 @@ int OnFrameRecvCallback(nghttp2_session* session, const nghttp2_frame* frame, vo
     return 0;
   }
 
-  if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-    server_session->OnFullRequest(stream->GetRequest());
-    MW_TRACE("stream recv frame, stream id: {}, OnFullRequest", frame->hd.stream_id);
-    return 0;
-  }
-
-  auto request = stream->GetRequest();
   switch (frame->hd.type) {
     case NGHTTP2_DATA:
+    case NGHTTP2_HEADERS:
+      // END_STREAM on the last DATA frame, on request HEADERS without a body
+      // or on trailers completes the request.
       if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        server_session->OnFullRequest(request);
+        server_session->OnFullRequest(stream->GetRequest());
         MW_TRACE("stream recv frame, stream id: {}, OnFullRequest", frame->hd.stream_id);
       }
       break;
-    case NGHTTP2_HEADERS:
-      if (frame->headers.cat != NGHTTP2_HCAT_REQUEST) {
-        MW_TRACE("stream recv frame, stream id: {}, NGHTTP2_HEADERS, but not request", frame->hd.stream_id);
-        break;
-      }
-      if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        server_session->OnFullRequest(request);
-        MW_TRACE("stream recv frame, stream id: {}, OnFullRequest", frame->hd.stream_id);
-        break;
-        case NGHTTP2_RST_STREAM:
-          // call OnRst
-          MW_TRACE("stream recv frame, stream id: {}, OnRst", frame->hd.stream_id);
-          break;
-        default:
-          MW_TRACE("stream recv frame, stream id: {}, default", frame->hd.stream_id);
-          break;
-      }
+    case NGHTTP2_RST_STREAM:
+      // The stream is released in OnStreamCloseCallback, which nghttp2 calls
+      // after RST_STREAM.
+      MW_TRACE("stream recv frame, stream id: {}, RST_STREAM", frame->hd.stream_id);
+      break;
+    default:
+      MW_TRACE("stream recv frame, stream id: {}, type: {}", frame->hd.stream_id, frame->hd.type);
+      break;
   }
 
   return 0;
@@ -311,7 +301,16 @@ int OnDataChunkRecvCallback(nghttp2_session* session, uint8_t flags, int32_t str
     return 0;
   }
 
-  auto request = stream->GetRequest();
+  const auto& request = stream->GetRequest();
+  if (len > server_session->MaxRequestBodySize() - request->GetBody().GetReadableSize()) [[unlikely]] {
+    // EXT-002: refuse the stream and drop what it buffered; later frames of
+    // the stream find no stream and are ignored.
+    MW_WARN("Request body of stream {} exceeds {} bytes, stream reset.", stream_id,
+            server_session->MaxRequestBodySize());
+    server_session->SubmitReset(stream_id, NGHTTP2_ENHANCE_YOUR_CALM);
+    server_session->RemoveStream(stream_id);
+    return 0;
+  }
   request->Write(data, len);
 
   return 0;

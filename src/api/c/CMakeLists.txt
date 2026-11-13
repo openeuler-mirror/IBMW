@@ -37,3 +37,19 @@ if(IBMW_INSTALL)
     FILE_SET HEADERS
     DESTINATION include/ibmw/${CUR_DIR})
 endif()
+
+# Every C ABI header must compile on its own as C11 (API-025).
+if(IBMW_BUILD_TESTS)
+  set(c_header_test_srcs)
+  foreach(head_file ${head_files})
+    file(RELATIVE_PATH rel_path ${CMAKE_CURRENT_SOURCE_DIR}/.. ${head_file})
+    string(MAKE_C_IDENTIFIER ${rel_path} test_name)
+    set(test_src ${CMAKE_CURRENT_BINARY_DIR}/c_header_test/${test_name}.c)
+    file(CONFIGURE OUTPUT ${test_src} CONTENT "#include \"${rel_path}\"\n")
+    list(APPEND c_header_test_srcs ${test_src})
+  endforeach()
+  add_library(ibmw_c_header_self_contained_test OBJECT ${c_header_test_srcs})
+  target_link_libraries(ibmw_c_header_self_contained_test PRIVATE ${CUR_TARGET_NAME})
+  set_target_properties(ibmw_c_header_self_contained_test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON
+                                                                     C_EXTENSIONS OFF)
+endif()

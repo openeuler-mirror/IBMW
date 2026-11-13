@@ -17,7 +17,7 @@ extern "C" const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackage
       .struct_size = sizeof(ibmw_schema_support_package_v1_t),
       .entry_count = 1, .entries = schemas};
   static const ibmw_type_support_package_v1_t package{
-      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
       .struct_size = sizeof(ibmw_type_support_package_v1_t),
       .entry_count = 3, .entries = entries, .schema_support = &schema_package};
   return &package;

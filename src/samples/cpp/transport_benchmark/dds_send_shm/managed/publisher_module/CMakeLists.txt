@@ -19,4 +19,6 @@ target_link_libraries(${CUR_TARGET_NAME}
          ibmw::core::engine
          ibmw::samples::cpp::transport_benchmark::bench_payload
          ibmw::samples::cpp::transport_benchmark::bench_common
-         ibmw::extensions::dds_types)
+         ibmw::extensions::dds_types
+         # DdsTransportDriver::GetPublicationMatchedCount (pre-publish match wait)
+         ibmw_dds_extension)

@@ -30,6 +30,7 @@ import difflib
 import io
 import os
 import sys
+import tempfile
 from typing import Optional
 
 # ruamel.yaml is required for round-trip-preserving edits (comments, key
@@ -64,6 +65,9 @@ _V1_MODULE_TO_V2_WIRE = {
     "iceoryx": [
         ("iceoryx_msg_type", "msg_type"),
     ],
+    "shm": [
+        ("shm_msg_type", "msg_type"),
+    ],
 }
 
 # Module-level fields that semantically belong to the message envelope but
@@ -97,6 +101,8 @@ def _module_implicit_transports(mod: dict) -> set[str]:
         return {"ros2"}
     if mtype.startswith("direct_iceoryx_"):
         return {"iceoryx"}
+    if mtype.startswith("direct_shm_"):
+        return {"shm"}
     return set()
 
 
@@ -298,6 +304,22 @@ def _load_yaml(path: str):
             return _pyyaml.safe_load(f)
 
 
+def _write_atomic(path: str, text: str) -> None:
+    """Replaces `path` with `text`; an interrupted write leaves it unchanged."""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=".migrate-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
 def run_cli(argv: Optional[list[str]] = None) -> int:
     """Entry point usable both standalone and as `ibmw-gen migrate-yaml`."""
     parser = argparse.ArgumentParser(
@@ -338,10 +360,15 @@ def run_cli(argv: Optional[list[str]] = None) -> int:
 
     if args.in_place:
         bak = args.yaml_file + ".v1.bak"
-        with open(bak, "w", encoding="utf-8") as f:
-            f.write(original)
-        with open(args.yaml_file, "w", encoding="utf-8") as f:
-            f.write(new_text)
+        # Never overwrite an earlier backup: a second run would replace the
+        # original v1 file with v2 content.
+        try:
+            with open(bak, "x", encoding="utf-8") as f:
+                f.write(original)
+        except FileExistsError:
+            print(f"error: backup already exists: {bak}", file=sys.stderr)
+            return 1
+        _write_atomic(args.yaml_file, new_text)
         print(f"migrated: {args.yaml_file}  (backup: {bak})", file=sys.stderr)
         return 0
 

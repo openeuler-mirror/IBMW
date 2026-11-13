@@ -47,7 +47,9 @@ void PublisherModule::Stop() {
 void PublisherModule::PublishLoop() {
   while (running_) {
     std_msgs::msg::String msg;
-    // TODO: populate msg fields here
+    // IBMW: user code begin (publish_body)
+    msg.data = "hello #" + std::to_string(publish_count_ + 1);
+    // IBMW: user code end (publish_body)
     publish_count_++;
 
     ibmw::ros2::transport::Send(

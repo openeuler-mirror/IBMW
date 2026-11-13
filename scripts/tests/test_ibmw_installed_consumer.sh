@@ -71,7 +71,7 @@ run_lane() {
     fail "$lane plugin defines reporter query"
   readelf -Ws "$runtime" | grep -E 'GLOBAL +DEFAULT +[0-9]+ +ibmw_reporter_query_v1$' >/dev/null ||
     fail "$lane installed runtime does not export ibmw_reporter_query_v1"
-  readelf -d "$host" "$plugin" | grep -E '(RPATH|RUNPATH).*(build-|/home/oee/ibmw_together_dev/IBMW)' >/dev/null &&
+  readelf -d "$host" "$plugin" | grep -E "(RPATH|RUNPATH).*(build-|${REPO_ROOT})" >/dev/null &&
     fail "$lane binary RPATH points to source/build"
   note "$lane symbols: host=$(nm -D --defined-only "$host" | grep ' ibmw_reporter_query_v1$') plugin-query-definitions=0"
 }

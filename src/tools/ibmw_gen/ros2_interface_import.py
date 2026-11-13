@@ -905,7 +905,7 @@ def _message_capability(message: Ros2MessageIR) -> dict:
 
 def _zero_copy_capability(is_plain: bool) -> dict:
     value = "yes" if is_plain else "no"
-    return {"dds_loaned": value, "iceoryx": value}
+    return {"dds_loaned": value, "iceoryx": value, "shm": value}
 
 
 def _transport_capability(is_plain: bool) -> dict:
@@ -914,6 +914,7 @@ def _transport_capability(is_plain: bool) -> dict:
         "dds_native": "yes" if is_plain else "warn",
         "json": "yes",
         "iceoryx": "yes" if is_plain else "no",
+        "shm": "yes" if is_plain else "no",
     }
 
 
@@ -3654,17 +3655,25 @@ def _emit_requested_backend_metadata(
             format_diagnosis_json(_dds_native_lowering_plan(package, files, mode=mode, source_root=source_root)),
         )
         generated_files.append(plan_rel)
-    if "iceoryx" in set(targets):
-        rel = f"{package}_iceoryx_backend_metadata.json"
+    # shm shares the iceoryx loan contract, so its metadata and plan are the
+    # iceoryx ones under its own target name.
+    for shm_target in ("iceoryx", "shm"):
+        if shm_target not in set(targets):
+            continue
+        rel = f"{package}_{shm_target}_backend_metadata.json"
         _write_text(
             os.path.join(out_root, rel),
-            format_diagnosis_json(_iceoryx_backend_metadata(package, files, mode=mode, source_root=source_root)),
+            format_diagnosis_json(
+                _iceoryx_backend_metadata(package, files, mode=mode, source_root=source_root, target=shm_target)
+            ),
         )
         metadata_files.append(rel)
-        plan_rel = f"{package}_iceoryx_lowering_plan.json"
+        plan_rel = f"{package}_{shm_target}_lowering_plan.json"
         _write_text(
             os.path.join(out_root, plan_rel),
-            format_diagnosis_json(_iceoryx_lowering_plan(package, files, mode=mode, source_root=source_root)),
+            format_diagnosis_json(
+                _iceoryx_lowering_plan(package, files, mode=mode, source_root=source_root, target=shm_target)
+            ),
         )
         generated_files.append(plan_rel)
     if "json" in set(targets):
@@ -4134,46 +4143,51 @@ def _dds_native_lowering_plan(package: str, files: list[str], *, mode: str, sour
     }
 
 
-def _iceoryx_backend_metadata(package: str, files: list[str], *, mode: str, source_root: str) -> dict:
+def _iceoryx_backend_metadata(
+    package: str, files: list[str], *, mode: str, source_root: str, target: str = "iceoryx"
+) -> dict:
     interfaces = _backend_interface_metadata(package, files, source_root=source_root)
-    eligible = [entry["canonical"] for entry in interfaces if entry["capability"]["zero_copy"]["iceoryx"] == "yes"]
-    blocked = [entry["canonical"] for entry in interfaces if entry["capability"]["zero_copy"]["iceoryx"] != "yes"]
+    eligible = [entry["canonical"] for entry in interfaces if entry["capability"]["zero_copy"][target] == "yes"]
+    blocked = [entry["canonical"] for entry in interfaces if entry["capability"]["zero_copy"][target] != "yes"]
     return {
         "schema_version": 1,
-        "target": "iceoryx",
+        "target": target,
         "status": "degraded",
         "mode": mode,
         "package": package,
         "source_root": os.path.abspath(source_root),
         "runtime_lowering_generated": False,
         "metadata_only": True,
-        "reason": "iceoryx eligibility metadata emitted; zero-copy runtime/module lowering from ROS2 interface IR is not generated yet",
+        "reason": f"{target} eligibility metadata emitted; zero-copy runtime/module lowering from ROS2 interface IR is not generated yet",
         "eligible_interfaces": eligible,
         "blocked_interfaces": blocked,
         "interfaces": interfaces,
     }
 
 
-def _iceoryx_lowering_plan(package: str, files: list[str], *, mode: str, source_root: str) -> dict:
+def _iceoryx_lowering_plan(
+    package: str, files: list[str], *, mode: str, source_root: str, target: str = "iceoryx"
+) -> dict:
     interfaces = _backend_interface_metadata(package, files, source_root=source_root)
+    title = target.capitalize()
     eligible = []
     blocked = []
     for entry in interfaces:
         capability = entry["capability"]
         canonical = entry["canonical"]
-        if capability["zero_copy"]["iceoryx"] == "yes":
+        if capability["zero_copy"][target] == "yes":
             eligible.append(
                 {
                     "canonical": canonical,
                     "kind": entry["kind"],
                     "name": entry["name"],
                     "max_serialized_size_bytes": capability.get("max_serialized_size_bytes"),
-                    "future_type_name": f"{package}::{entry['name']}IceoryxType",
+                    "future_type_name": f"{package}::{entry['name']}{title}Type",
                     "future_module_names": {
-                        "publisher": f"{entry['name']}IceoryxPublisherModule",
-                        "subscriber": f"{entry['name']}IceoryxSubscriberModule",
+                        "publisher": f"{entry['name']}{title}PublisherModule",
+                        "subscriber": f"{entry['name']}{title}SubscriberModule",
                     },
-                    "required_gate": "iceoryx_compile_smoke_then_runtime_zero_copy_gate",
+                    "required_gate": f"{target}_compile_smoke_then_runtime_zero_copy_gate",
                 }
             )
         else:
@@ -4182,7 +4196,7 @@ def _iceoryx_lowering_plan(package: str, files: list[str], *, mode: str, source_
                     "canonical": canonical,
                     "kind": entry["kind"],
                     "name": entry["name"],
-                    "reason": "not plain/fixed-size iceoryx zero-copy eligible",
+                    "reason": f"not plain/fixed-size {target} zero-copy eligible",
                     "suggestions": capability.get("suggestions") or [],
                     "contains_heap": capability.get("contains_heap"),
                     "contains_unbounded_sequence": capability.get("contains_unbounded_sequence"),
@@ -4191,8 +4205,8 @@ def _iceoryx_lowering_plan(package: str, files: list[str], *, mode: str, source_
             )
     return {
         "schema_version": 1,
-        "target": "iceoryx",
-        "artifact": "iceoryx_lowering_plan",
+        "target": target,
+        "artifact": f"{target}_lowering_plan",
         "status": "plan_only",
         "mode": mode,
         "package": package,
@@ -4313,8 +4327,8 @@ def _target_backend_status_report(targets: list[str], files: list[str], backend_
                     "next_step": "add native DDS emitter and field-level ROS2-to-IBMW type mapping",
                 }
             )
-        elif target == "iceoryx":
-            reasons = ["iceoryx lowering from ROS2 interface IR is not implemented yet"]
+        elif target in ("iceoryx", "shm"):
+            reasons = [f"{target} lowering from ROS2 interface IR is not implemented yet"]
             if has_srv or has_action:
                 reasons.append("service/action semantics require adapter design beyond fixed-size message lowering")
             if has_msg:
@@ -4322,9 +4336,9 @@ def _target_backend_status_report(targets: list[str], files: list[str], backend_
             degraded = _metadata_only_degraded_backend_status(
                 target,
                 metadata_files,
-                runtime_boundary="metadata_only_no_iceoryx_lowering",
-                reason="iceoryx eligibility metadata emitted, but zero-copy runtime/module lowering from ROS2 interface IR is not generated yet",
-                next_step="consume eligibility metadata from the iceoryx emitter and generate wrappers only for plain/fixed-size messages",
+                runtime_boundary=f"metadata_only_no_{target}_lowering",
+                reason=f"{target} eligibility metadata emitted, but zero-copy runtime/module lowering from ROS2 interface IR is not generated yet",
+                next_step=f"consume eligibility metadata from the {target} emitter and generate wrappers only for plain/fixed-size messages",
             )
             entries.append(
                 degraded
@@ -4333,7 +4347,7 @@ def _target_backend_status_report(targets: list[str], files: list[str], backend_
                     "status": "blocked",
                     "runtime_boundary": "not_generated",
                     "reason": "; ".join(reasons),
-                    "next_step": "add plain/fixed-size classifier backed by iceoryx emitter diagnostics",
+                    "next_step": f"add plain/fixed-size classifier backed by {target} emitter diagnostics",
                 }
             )
         elif target == "json":

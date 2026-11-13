@@ -81,12 +81,14 @@ class LoanedMessage {
         fallback_msg_(nullptr),
         published_(false) {}
 
-  // Fallback (heap) constructor
+  // Fallback (heap) constructor. `writer` lets SendLoaned() publish the heap
+  // sample by copy; without it the fallback can never be written.
   LoanedMessage(MsgType* fallback_msg,
                 bool is_plain,
-                const std::string& error_msg = "")
+                const std::string& error_msg = "",
+                eprosima::fastdds::dds::DataWriter* writer = nullptr)
       : loaned_ptr_(nullptr),
-        writer_(nullptr),
+        writer_(writer),
         is_loaned_(false),
         is_plain_(is_plain),
         fallback_msg_(fallback_msg),

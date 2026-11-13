@@ -32,11 +32,19 @@ modules:
     transport: ros2
     topic: test_topic
     message: "example_ros2::msg::RosTestMsg"
+    user_code:
+      publish_body: |
+        msg_count_++;
+        msg.num = msg_count_;
+        msg.data = {'h', 'e', 'l', 'l', 'o'};
   - name: NormalSubscriberModule
     type: subscriber
     transport: ros2
     topic: test_topic
     message: "example_ros2::msg::RosTestMsg"
+    user_code:
+      on_message_body: |
+        MW_INFO("Received message: num={}, data size={}", msg->num, msg->data.size());
 apps:
   - name: ros2_chn_app
     type: pubsub

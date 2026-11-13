@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ibmw.example/schemas/mw-perf-collect/comparison-plan.schema.v2.json",
+  "title": "mw-perf formal comparison plan v2 with a declared lane set",
+  "type": "object",
+  "required": ["schema", "schema_version", "lanes", "contract", "profile", "workload", "resource_scope", "order", "blocks"],
+  "properties": {
+    "schema": {"const": "mw_perf.comparison-plan.v2"},
+    "schema_version": {"const": 2},
+    "lanes": {"oneOf": [{"const": ["A", "B", "C"]}, {"const": ["A", "B", "S"]}]},
+    "validation_profile": {"enum": ["standard", "p0a"]},
+    "order_policy": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+    "order_seed": {"type": "integer", "minimum": 0},
+    "contract": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+    "profile": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+    "workload": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+    "resource_scope": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "minProperties": 1}]},
+    "order": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"enum": ["A", "B", "C", "S"]}, "uniqueItems": true},
+    "blocks": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["block_id", "runs"],
+        "properties": {
+          "block_id": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "integer"}]},
+          "runs": {
+            "type": "array", "minItems": 3, "maxItems": 3,
+            "items": {"type": "object", "required": ["lane", "path"],
+              "properties": {"lane": {"enum": ["A", "B", "C", "S"]}, "path": {"type": "string", "minLength": 1}}}
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"lanes": {"const": ["A", "B", "C"]}}, "required": ["lanes"]},
+     "then": {"properties": {
+       "order": {"items": {"enum": ["A", "B", "C"]}},
+       "blocks": {"items": {"properties": {"runs": {"items": {"properties": {"lane": {"enum": ["A", "B", "C"]}}}}}}}}}},
+    {"if": {"properties": {"lanes": {"const": ["A", "B", "S"]}}, "required": ["lanes"]},
+     "then": {"properties": {
+       "order": {"items": {"enum": ["A", "B", "S"]}},
+       "blocks": {"items": {"properties": {"runs": {"items": {"properties": {"lane": {"enum": ["A", "B", "S"]}}}}}}}}}}
+  ]
+}

@@ -13,8 +13,11 @@ payload registry, so latency numbers are directly comparable across rows.
 
 The whole subtree is gated by `IBMW_BUILD_BENCHMARKS=ON` (declared in the
 top-level `CMakeLists.txt`). The `full` preset does not enable it. The benchmark
-option depends on `IBMW_BUILD_EXAMPLES=ON` and
-`IBMW_BUILD_ICEORYX_EXTENSION=ON`.
+option depends on `IBMW_BUILD_EXAMPLES=ON` and on
+`IBMW_BUILD_ICEORYX_EXTENSION=ON` or `IBMW_BUILD_SHM_EXTENSION=ON`. Each lane is
+skipped when its transport is off, so a shm-only build gets the `shm_*` lanes
+and no `iox_*` lane (Linux host; the OHOS cross build only builds
+`iox_loaned_ctx`). The payloads are CDR, so Fast CDR/Fast DDS is still needed.
 
 ```bash
 cmake -S . -B ./build \

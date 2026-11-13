@@ -5,6 +5,7 @@
 
 #include "c/executor/executor_bus_base.h"
 #include "cpp/executor/executor.h"
+#include "cpp/util/abi_table.h"
 #include "cpp/util/string.h"
 
 namespace ibmw::executor {
@@ -24,8 +25,9 @@ class ExecutorBusRef {
 
   ExecutorHandle GetExecutor(std::string_view executor_name) const {
     MW_ASSERT(base_ptr_, "Reference is null.");
-    return ExecutorHandle(base_ptr_->get_executor(
-        base_ptr_->ctx, ibmw::util::ToIbmwStringView(executor_name)));
+    const auto* executor = base_ptr_->get_executor(
+        base_ptr_->ctx, ibmw::util::ToIbmwStringView(executor_name));
+    return ibmw::util::IsCompleteAbiTable(executor) ? ExecutorHandle(executor) : ExecutorHandle();
   }
 
  private:

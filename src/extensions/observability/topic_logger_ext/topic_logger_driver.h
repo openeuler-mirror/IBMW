@@ -54,15 +54,16 @@ class TopicLoggerDriver : public runtime::core::logger::LoggerDriverBase {
 
   void SetMaxMsgSize() { max_msg_size_ = options_.max_msg_size; }
 
-  void StartupPulisher() {
+  // Both are no-ops for the timer if Initialize() did not create it.
+  void StartupPublisher() {
     publish_flag_ = true;
-    timer_ptr->Reset();
+    if (timer_ptr_) timer_ptr_->Reset();
   }
 
-  void StopPulisher() {
+  void StopPublisher() {
     run_flag_.store(false);
     publish_flag_ = false;
-    timer_ptr->Cancel();
+    if (timer_ptr_) timer_ptr_->Cancel();
   }
 
   bool AllowDuplicates() const noexcept override { return true; }
@@ -77,7 +78,7 @@ class TopicLoggerDriver : public runtime::core::logger::LoggerDriverBase {
 
   std::function<ibmw::executor::ExecutorHandle(std::string_view)> get_executor_func_;
   ibmw::executor::ExecutorHandle timer_executor_;
-  std::shared_ptr<ibmw::executor::TimerBase> timer_ptr;
+  std::shared_ptr<ibmw::executor::TimerBase> timer_ptr_;
 
   std::function<ibmw::transport::SenderRef(std::string_view)> get_publisher_ref_func_;
   ibmw::transport::SenderRef log_publisher_;

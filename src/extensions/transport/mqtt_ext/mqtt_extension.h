@@ -4,14 +4,20 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <climits>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "MQTTAsync.h"
+#include "yaml-cpp/yaml.h"
 
 #include "engine/extension/extension_base.h"
 #include "mqtt_ext/msg_handle_catalog.h"
-#include "base/light_signal.h"
 
 namespace ibmw::extensions::mqtt_extension {
 
@@ -27,11 +33,26 @@ class MqttExtension : public ExtensionBase {
     std::string client_key;
     std::string client_key_password;
     std::string callback_executor_name;
+    std::string username;
+    std::string password;
+    uint32_t keep_alive_s = 20;
+    bool clean_session = true;
+    // Check that the broker certificate matches the host name (TLS only).
+    bool tls_verify_hostname = true;
+    // How long startup waits for the first connect attempt (0: no wait).
+    // The wait runs inside engine start: a shutdown request during it is
+    // served once it ends.
+    uint32_t start_connect_wait_ms = 3000;
   };
+
+  // Paho takes the payload length as int: larger packages can not be sent.
+  static constexpr uint32_t kMaxPkgSizeK = INT_MAX / 1024;
+
+  static Options ParseOptions(const YAML::Node &node);
 
  public:
   MqttExtension();
-  ~MqttExtension() override = default;
+  ~MqttExtension() override;
 
   std::string_view Name() const noexcept override { return "mqtt_extension"; }
 
@@ -43,8 +64,20 @@ class MqttExtension : public ExtensionBase {
   void RegisterMqttRpcDriver();
   void RegisterMqttTransportDriver();
 
-  void AsyncConnect();
+  // Connection management (TRANS-006/007/012): every attempt, initial or
+  // after a lost connection, is made from connect_thread_ with the same full
+  // option set (TLS, credentials). Paho callback threads never sleep, block
+  // or recurse; they only record state and wake the thread.
+  void BuildConnectOptions(MQTTAsync_connectOptions &conn_opts, MQTTAsync_SSLOptions &ssl_opts);
+  int StartConnect();
+  void RequestConnect(bool delayed);
+  void ConnectLoop();
+  void WaitFirstConnectAttempt();
+  void MarkAttemptDone();
+  void OnConnected();
+  void OnConnectFailed(const char *message);
   void OnConnectLost(const char *cause);
+  void RunReconnectHooksLocked();
   int OnMsgRecv(char *topic, int topic_len, MQTTAsync_message *message);
 
  private:
@@ -52,12 +85,23 @@ class MqttExtension : public ExtensionBase {
 
   std::atomic_bool stop_flag_ = false;
 
-  MQTTAsync client_;
+  MQTTAsync client_ = nullptr;
   std::shared_ptr<MsgHandleCatalog> msg_handle_catalog_ptr_;
 
   std::vector<std::function<void()>> reconnect_hook_;
 
-  common::util::LightSignal signal_;
+
+  std::mutex conn_mutex_;
+  std::condition_variable conn_cv_;
+  bool connect_requested_ = false;
+  std::chrono::steady_clock::time_point next_attempt_;
+  bool connected_ = false;
+  bool first_attempt_done_ = false;
+  bool started_ = false;
+  // Hooks call into drivers owned by the transport/service buses, which are
+  // destroyed before this extension: disabled when the engine starts stopping.
+  bool hooks_enabled_ = true;
+  std::thread connect_thread_;
 };
 
 }  // namespace ibmw::extensions::mqtt_extension

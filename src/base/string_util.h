@@ -102,9 +102,10 @@ inline std::string JoinMap(const std::map<StringType, StringType>& kvmap,
 template <class StringType = std::string_view>
   requires(std::is_same_v<StringType, std::string_view> ||
            std::is_same_v<StringType, std::string>)
-inline const StringType& GetMapItemWithDef(const std::map<StringType, StringType>& m,
-                                           const StringType& key,
-                                           const StringType& defval = "") {
+// Returns by value: the default argument is a temporary that dies with the call.
+inline StringType GetMapItemWithDef(const std::map<StringType, StringType>& m,
+                                    const StringType& key,
+                                    const StringType& defval = "") {
   auto finditr = m.find(key);
   return (finditr != m.end()) ? (finditr->second) : defval;
 }
@@ -357,32 +358,31 @@ inline std::string& ReplaceString(std::string& str,
     vec_pos.emplace_back(pos);
     pos += old_len;
   }
-  size_t& vec_len = pos = vec_pos.size();
+  const size_t vec_len = vec_pos.size();
   if (vec_len) {
     if (old_len == new_len) {
       for (size_t ii = 0; ii < vec_len; ++ii)
-        memcpy(const_cast<char*>(str.c_str() + vec_pos[ii]), nv.data(),
-               new_len);
+        memcpy(str.data() + vec_pos[ii], nv.data(), new_len);
     } else if (old_len > new_len) {
-      char* p = const_cast<char*>(str.c_str()) + vec_pos[0];
+      char* p = str.data() + vec_pos[0];
       vec_pos.emplace_back(str.size());
       for (size_t ii = 0; ii < vec_len; ++ii) {
         memcpy(p, nv.data(), new_len);
         p += new_len;
         size_t cplen = vec_pos[ii + 1] - vec_pos[ii] - old_len;
-        memmove(p, str.c_str() + vec_pos[ii] + old_len, cplen);
+        memmove(p, str.data() + vec_pos[ii] + old_len, cplen);
         p += cplen;
       }
-      str.resize(p - str.c_str());
+      str.resize(static_cast<size_t>(p - str.data()));
     } else {
       size_t diff = new_len - old_len;
       vec_pos.emplace_back(str.size());
       str.resize(str.size() + diff * vec_len);
-      char* p = const_cast<char*>(str.c_str()) + str.size();
+      char* p = str.data() + str.size();
       for (size_t ii = vec_len - 1; ii < vec_len; --ii) {
         size_t cplen = vec_pos[ii + 1] - vec_pos[ii] - old_len;
         p -= cplen;
-        memmove(p, str.c_str() + vec_pos[ii] + old_len, cplen);
+        memmove(p, str.data() + vec_pos[ii] + old_len, cplen);
         p -= new_len;
         memcpy(p, nv.data(), new_len);
       }
@@ -397,7 +397,7 @@ inline std::string& ReplaceString(std::string& str,
 inline bool IsAlnumStr(std::string_view str) {
   if (str.length() == 0) return false;
   for (const auto& c : str) {
-    if (!isalnum(c)) return false;
+    if (!isalnum(static_cast<unsigned char>(c))) return false;
   }
   return true;
 }
@@ -636,26 +636,31 @@ inline std::string FormatTree(
  * @brief Replace the part of the string in the form of ${XXX_ENV} with the value of the corresponding environment variable
  */
 inline std::string ReplaceEnvVars(std::string_view input) {
-  std::regex pattern(R"(\$\{([^}]+)\})");
-  std::smatch match;
+  // A linear scan instead of a std::regex built on every call (API-040).
+  // Same rules as before: the name is everything up to the first '}', must
+  // be non-empty, and inserted values are not expanded again.
   std::string result(input);
   size_t cur_pos = 0;
-
-  while (std::regex_search(result.cbegin() + cur_pos, result.cend(), match, pattern)) {
-    std::string env_name = match[1].str();
+  while ((cur_pos = result.find("${", cur_pos)) != std::string::npos) {
+    const size_t close = result.find('}', cur_pos + 2);
+    if (close == std::string::npos) break;
+    if (close == cur_pos + 2) {  // "${}" is kept literally
+      ++cur_pos;
+      continue;
+    }
+    const std::string env_name = result.substr(cur_pos + 2, close - cur_pos - 2);
     const char* env_val = std::getenv(env_name.c_str());
     if (env_val == nullptr) env_val = "";
-
-    result.replace(cur_pos + match.position(0), match.length(0), env_val);
-
-    cur_pos += (match.position(0) + strlen(env_val));
+    result.replace(cur_pos, close + 1 - cur_pos, env_val);
+    cur_pos += strlen(env_val);
   }
-
   return result;
 }
 
-inline char CharToLower(char c) { return static_cast<char>(tolower(c)); }
-inline char CharToUpper(char c) { return static_cast<char>(toupper(c)); }
+// The <cctype> functions need the value as unsigned char: a UTF-8 byte is a
+// negative char, which is undefined behavior for them.
+inline char CharToLower(char c) { return static_cast<char>(tolower(static_cast<unsigned char>(c))); }
+inline char CharToUpper(char c) { return static_cast<char>(toupper(static_cast<unsigned char>(c))); }
 
 inline std::string& StrToLower(std::string& str) {
   std::transform(str.begin(), str.end(), str.begin(), CharToLower);
@@ -684,10 +689,11 @@ inline std::string StrToUpper(std::string_view str) {
 inline bool CheckIEqual(std::string_view str1, std::string_view str2) {
   if (str1.size() != str2.size()) return false;
   return std::equal(str1.begin(), str1.end(), str2.begin(),
-                    [](char a, char b) { return std::tolower(a) == std::tolower(b); });
+                    [](char a, char b) { return CharToLower(a) == CharToLower(b); });
 }
 
 inline std::string& StrToTitleCase(std::string& str) {
+  if (str.empty()) return str;
   std::string::iterator it = str.begin();
   *it = CharToUpper(*it);
   for (; it != str.end() - 1; ++it) {
@@ -714,7 +720,7 @@ inline bool StartsWith(std::string_view str,
 
   if (ignore_case) {
     for (size_t i = 0; i < pattern_len; ++i) {
-      if (tolower(pattern[i]) != tolower(str[i])) return false;
+      if (CharToLower(pattern[i]) != CharToLower(str[i])) return false;
     }
     return true;
   }
@@ -734,7 +740,7 @@ inline bool EndsWith(std::string_view str,
   const size_t& begin_pos = str_len - pattern_len;
   if (ignore_case) {
     for (size_t i = 0; i < pattern_len; ++i) {
-      if (tolower(pattern[i]) != tolower(str[begin_pos + i])) return false;
+      if (CharToLower(pattern[i]) != CharToLower(str[begin_pos + i])) return false;
     }
     return true;
   }

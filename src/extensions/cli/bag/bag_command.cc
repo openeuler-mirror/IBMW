@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstring>
 #include <cstdlib>
@@ -294,6 +297,30 @@ std::filesystem::path DefaultOutputPath() {
   return name.str();
 }
 
+// The whole value must parse: no sign, whitespace or trailing text, and no
+// out-of-range value (std::stoull wraps "-1" and accepts "10abc").
+template <typename T>
+T ParseUnsigned(std::string_view value, std::string_view option) {
+  T result{};
+  const char* end = value.data() + value.size();
+  const auto [ptr, ec] = std::from_chars(value.data(), end, result);
+  MW_ASSERT(ec == std::errc() && ptr == end, "{} requires a valid non-negative integer.", option);
+  return result;
+}
+
+size_t ParseSize(std::string_view value, std::string_view option) {
+  return ParseUnsigned<size_t>(value, option);
+}
+
+double ParseDouble(std::string_view value, std::string_view option) {
+  double result = 0;
+  const char* end = value.data() + value.size();
+  const auto [ptr, ec] = std::from_chars(value.data(), end, result);
+  MW_ASSERT(ec == std::errc() && ptr == end && std::isfinite(result),
+            "{} requires a numeric value.", option);
+  return result;
+}
+
 RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
   RecordCliOptions options;
   for (int index = 2; index < argc; ++index) {
@@ -328,10 +355,10 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
     } else if (argument == "-p" || argument == "--polling-interval") {
       MW_ASSERT(index + 1 < argc, "{} requires milliseconds.", argument);
       options.polling_interval_ms =
-          static_cast<uint32_t>(std::stoul(argv[++index]));
+          ParseUnsigned<uint32_t>(argv[++index], argument);
     } else if (argument.starts_with("--polling-interval=")) {
-      options.polling_interval_ms = static_cast<uint32_t>(std::stoul(
-          argument.substr(std::string("--polling-interval=").size())));
+      options.polling_interval_ms = ParseUnsigned<uint32_t>(
+          argument.substr(std::string("--polling-interval=").size()), argument);
     } else if (argument == "-s" || argument == "--storage") {
       MW_ASSERT(index + 1 < argc, "{} requires a storage ID.", argument);
       options.storage_id = argv[++index];
@@ -345,22 +372,22 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
           std::string("--serialization-format=").size());
     } else if (argument == "-b" || argument == "--max-bag-size") {
       MW_ASSERT(index + 1 < argc, "{} requires bytes.", argument);
-      options.max_bag_size = std::stoull(argv[++index]);
+      options.max_bag_size = ParseUnsigned<uint64_t>(argv[++index], argument);
     } else if (argument.starts_with("--max-bag-size=")) {
-      options.max_bag_size = std::stoull(
-          argument.substr(std::string("--max-bag-size=").size()));
+      options.max_bag_size = ParseUnsigned<uint64_t>(
+          argument.substr(std::string("--max-bag-size=").size()), argument);
     } else if (argument == "-d" || argument == "--max-bag-duration") {
       MW_ASSERT(index + 1 < argc, "{} requires seconds.", argument);
-      options.max_bag_duration_seconds = std::stod(argv[++index]);
+      options.max_bag_duration_seconds = ParseDouble(argv[++index], argument);
     } else if (argument.starts_with("--max-bag-duration=")) {
-      options.max_bag_duration_seconds = std::stod(
-          argument.substr(std::string("--max-bag-duration=").size()));
+      options.max_bag_duration_seconds = ParseDouble(
+          argument.substr(std::string("--max-bag-duration=").size()), argument);
     } else if (argument == "--max-cache-size") {
       MW_ASSERT(index + 1 < argc, "{} requires bytes.", argument);
-      options.max_cache_size = static_cast<size_t>(std::stoull(argv[++index]));
+      options.max_cache_size = ParseSize(argv[++index], argument);
     } else if (argument.starts_with("--max-cache-size=")) {
-      options.max_cache_size = static_cast<size_t>(std::stoull(
-          argument.substr(std::string("--max-cache-size=").size())));
+      options.max_cache_size = ParseSize(
+          argument.substr(std::string("--max-cache-size=").size()), argument);
     } else if (argument == "--compression-mode") {
       MW_ASSERT(index + 1 < argc, "{} requires a mode.", argument);
       options.compression_mode = argv[++index];
@@ -376,18 +403,17 @@ RecordCliOptions ParseRecordOptions(int argc, const char* const* argv) {
     } else if (argument == "--compression-queue-size") {
       MW_ASSERT(index + 1 < argc, "{} requires a count.", argument);
       options.compression_queue_size =
-          static_cast<size_t>(std::stoull(argv[++index]));
+          ParseSize(argv[++index], argument);
     } else if (argument.starts_with("--compression-queue-size=")) {
-      options.compression_queue_size = static_cast<size_t>(std::stoull(
-          argument.substr(
-              std::string("--compression-queue-size=").size())));
+      options.compression_queue_size = ParseSize(
+          argument.substr(std::string("--compression-queue-size=").size()), argument);
     } else if (argument == "--compression-threads") {
       MW_ASSERT(index + 1 < argc, "{} requires a count.", argument);
       options.compression_threads =
-          static_cast<size_t>(std::stoull(argv[++index]));
+          ParseSize(argv[++index], argument);
     } else if (argument.starts_with("--compression-threads=")) {
-      options.compression_threads = static_cast<size_t>(std::stoull(
-          argument.substr(std::string("--compression-threads=").size())));
+      options.compression_threads = ParseSize(
+          argument.substr(std::string("--compression-threads=").size()), argument);
     } else if (argument == "--snapshot-mode") {
       options.snapshot_mode = true;
     } else if (argument == "--storage-preset-profile") {
@@ -496,23 +522,6 @@ InfoCliOptions ParseInfoOptions(int argc, const char* const* argv) {
   }
   MW_ASSERT(!options.bag_path.empty(), "bag info requires a bag path.");
   return options;
-}
-
-double ParseDouble(std::string_view value, std::string_view option) {
-  size_t consumed = 0;
-  const double result = std::stod(std::string(value), &consumed);
-  MW_ASSERT(
-      consumed == value.size(), "{} requires a numeric value.", option);
-  return result;
-}
-
-size_t ParseSize(std::string_view value, std::string_view option) {
-  size_t consumed = 0;
-  const auto result = std::stoull(std::string(value), &consumed);
-  MW_ASSERT(
-      consumed == value.size() && result <= std::numeric_limits<size_t>::max(),
-      "{} requires a valid size.", option);
-  return static_cast<size_t>(result);
 }
 
 void ParseRemap(std::string_view value, PlayCliOptions& options) {
@@ -691,10 +700,10 @@ ConvertCliOptions ParseConvertOptions(int argc, const char* const* argv) {
           std::string("--input-storage=").size());
     } else if (argument == "-b" || argument == "--max-bag-size") {
       MW_ASSERT(index + 1 < argc, "{} requires bytes.", argument);
-      options.max_bag_size = std::stoull(argv[++index]);
+      options.max_bag_size = ParseUnsigned<uint64_t>(argv[++index], argument);
     } else if (argument.starts_with("--max-bag-size=")) {
-      options.max_bag_size = std::stoull(
-          argument.substr(std::string("--max-bag-size=").size()));
+      options.max_bag_size = ParseUnsigned<uint64_t>(
+          argument.substr(std::string("--max-bag-size=").size()), argument);
     } else if (argument == "-d" || argument == "--max-bag-duration") {
       MW_ASSERT(index + 1 < argc, "{} requires seconds.", argument);
       options.max_bag_duration_seconds = ParseDouble(argv[++index], argument);
@@ -869,6 +878,34 @@ std::optional<uint64_t> ExtractSimTime(
   return std::nullopt;
 }
 
+// Writes `root` to a new file in the temporary directory, created exclusively
+// (O_EXCL, mode 0600) under an unpredictable name: another local user can
+// neither plant a file or symlink at the path nor read the config (EXT-045).
+std::filesystem::path WriteTemporaryConfig(const std::string& prefix, const YAML::Node& root, const char* what) {
+  std::stringstream text;
+  text << root;
+  const std::string data = text.str();
+  constexpr int kSuffixLen = 5;  // ".yaml"
+  std::string path = (std::filesystem::temp_directory_path() / (prefix + "-XXXXXX.yaml")).string();
+  const int fd = ::mkstemps(path.data(), kSuffixLen);
+  const int create_errno = errno;
+  MW_ASSERT(fd >= 0, "Cannot create temporary {} config: {}", what, std::strerror(create_errno));
+  size_t written = 0;
+  while (written < data.size()) {
+    const ssize_t n = ::write(fd, data.data() + written, data.size() - written);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    written += static_cast<size_t>(n);
+  }
+  const bool ok = written == data.size() && ::close(fd) == 0;
+  if (!ok) {
+    if (written != data.size()) ::close(fd);
+    ::unlink(path.c_str());
+  }
+  MW_ASSERT(ok, "Failed to write temporary {} config.", what);
+  return path;
+}
+
 std::filesystem::path WriteRecorderConfig(const RecordConnection& connection, std::string log_level) {
   auto root = YAML::Clone(connection.runtime_config);
   std::transform(log_level.begin(), log_level.end(), log_level.begin(),
@@ -877,14 +914,7 @@ std::filesystem::path WriteRecorderConfig(const RecordConnection& connection, st
   YAML::Node backend;
   backend["type"] = "console";
   root["ibmw"]["logging"]["backends"].push_back(backend);
-  const auto path = std::filesystem::temp_directory_path() /
-                    ("ibmw-bag-recorder-" + std::to_string(::getpid()) + ".yaml");
-  std::ofstream output(path, std::ios::trunc);
-  MW_ASSERT(output.is_open(), "Cannot write temporary Recorder config.");
-  output << root;
-  output.close();
-  MW_ASSERT(output.good(), "Failed to write temporary Recorder config.");
-  return path;
+  return WriteTemporaryConfig("ibmw-bag-recorder", root, "Recorder");
 }
 
 using PlaybackDriverSet = std::set<std::string>;
@@ -1242,15 +1272,7 @@ std::filesystem::path WritePlayerConfig(
   }
   ibmw["messaging"] = messaging;
 
-  const auto config_path = std::filesystem::temp_directory_path() /
-                           ("ibmw-bag-player-" +
-                            std::to_string(::getpid()) + ".yaml");
-  std::ofstream output(config_path, std::ios::trunc);
-  MW_ASSERT(output.is_open(), "Cannot write temporary Player config.");
-  output << root;
-  output.close();
-  MW_ASSERT(output.good(), "Failed to write temporary Player config.");
-  return config_path;
+  return WriteTemporaryConfig("ibmw-bag-player", root, "Player");
 }
 
 void LoadPlayerTypeSupportPackages(
@@ -1762,6 +1784,21 @@ int RunConvert(int argc, const char* const* argv) {
   return 0;
 }
 
+// While a bag plays, the main, keyboard, signal and player threads all print:
+// each line is composed first and written whole under one lock.
+void PrintPlaybackLine(std::string_view line) {
+  static std::mutex mutex;
+  std::string text;
+  text.reserve(line.size() + 1);
+  text.append(line).push_back('\n');
+  const std::lock_guard lock(mutex);
+  std::cout << text;
+}
+
+std::string PlaybackPauseMessage(const PlayerControl& control) {
+  return control.IsPaused() ? "Playback paused." : "Playback resumed.";
+}
+
 class KeyboardControlGuard {
  public:
   KeyboardControlGuard(
@@ -1797,8 +1834,7 @@ class KeyboardControlGuard {
         char input = 0;
         if (::read(STDIN_FILENO, &input, 1) == 1 && input == ' ') {
           control_.TogglePause();
-          std::cout << (control_.IsPaused() ? "Playback paused.\n"
-                                            : "Playback resumed.\n");
+          PrintPlaybackLine(PlaybackPauseMessage(control_));
         }
       }
     });
@@ -1929,8 +1965,7 @@ int RunPlay(int argc, const char* const* argv) {
       if (g_pause_toggle_requested.exchange(false)) {
         control.TogglePause();
         if (options.log_level == "debug" || options.log_level == "info") {
-          std::cout << (control.IsPaused() ? "Playback paused.\n"
-                                          : "Playback resumed.\n");
+          PrintPlaybackLine(PlaybackPauseMessage(control));
         }
       }
       if (g_stop_requested.load()) {
@@ -1944,13 +1979,14 @@ int RunPlay(int argc, const char* const* argv) {
   BagPlayer::EventCallback event_callback;
   if (options.log_level == "debug" || options.log_level == "info") {
     event_callback =
-        [](std::string_view message) { std::cout << message << '\n'; };
+        [](std::string_view message) { PrintPlaybackLine(message); };
   }
   if (options.log_level == "debug") {
-    std::cout << "Playback read-ahead queue: "
-              << options.read_ahead_queue_size
-              << ", selected topics: " << options.topics.size()
-              << ", remaps: " << options.remaps.size() << '\n';
+    std::ostringstream line;
+    line << "Playback read-ahead queue: " << options.read_ahead_queue_size
+         << ", selected topics: " << options.topics.size()
+         << ", remaps: " << options.remaps.size();
+    PrintPlaybackLine(line.str());
   }
   BagPlayer player(
       *reader,
@@ -1982,12 +2018,16 @@ int RunPlay(int argc, const char* const* argv) {
       },
       route_compatible,
       transcode);
-  std::cout << "Playing bag '" << reader->Info().bag_path.string()
-            << "' at " << options.rate << "x.\n";
+  {
+    std::ostringstream line;
+    line << "Playing bag '" << reader->Info().bag_path.string()
+         << "' at " << options.rate << "x.";
+    PrintPlaybackLine(line.str());
+  }
   if (options.start_paused &&
       (options.disable_keyboard_controls || ::isatty(STDIN_FILENO) == 0)) {
-    std::cout << "Playback starts paused: send SIGUSR2 to PID " << ::getpid()
-              << " to toggle pause.\n";
+    PrintPlaybackLine("Playback starts paused: send SIGUSR2 to PID " +
+                      std::to_string(::getpid()) + " to toggle pause.");
   }
   const uint64_t published = player.Play();
   if (options.wait_for_all_acked_seconds >= 0.0) {
@@ -2003,7 +2043,7 @@ int RunPlay(int argc, const char* const* argv) {
   if (player_engine_guard) {
     player_engine_guard->Stop();
   }
-  std::cout << "Published " << published << " message(s).\n";
+  PrintPlaybackLine("Published " + std::to_string(published) + " message(s).");
   return 0;
 }
 
@@ -2294,8 +2334,12 @@ int RunRecord(int argc, const char* const* argv) {
     }
     if (g_snapshot_requested.exchange(false)) {
       if (options.snapshot_mode) {
-        coordinator.TriggerSnapshot();
-        std::cout << "Snapshot completed.\n";
+        // Bounded, so a stuck storage does not keep the loop from stopping.
+        if (coordinator.TriggerSnapshot(std::chrono::seconds(5))) {
+          std::cout << "Snapshot completed.\n";
+        } else {
+          std::cout << "Snapshot is still being written.\n";
+        }
       } else {
         std::cout << "Ignoring SIGUSR1 because snapshot mode is disabled.\n";
       }
@@ -2363,6 +2407,10 @@ int RunRecord(int argc, const char* const* argv) {
   const auto& summary = coordinator.Summary();
   std::cout << "Recorded " << summary.message_count << " message(s) to '"
             << summary.output_path.string() << "'.\n";
+  if (const auto conflicts = coordinator.SchemaConflictMessages(); conflicts != 0) {
+    std::cerr << "Warning: dropped " << conflicts
+              << " message(s) whose Schema conflicts with the one recorded for the same type.\n";
+  }
   return 0;
 }
 

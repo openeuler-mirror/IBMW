@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include "uint8_multi_array_serializer.h"
 
 #include <limits>
@@ -13,6 +16,9 @@ bool ROS2CdrSerializer::Serialize<std_msgs::msg::UInt8MultiArray>(
     const uint32_t estimated_size = EstimateSize(msg);
     if (payload->max_size < estimated_size) {
       payload->reserve(estimated_size);
+      if (payload->data == nullptr || payload->max_size < estimated_size) {
+        return false;
+      }
     }
 
     eprosima::fastcdr::FastBuffer fastbuffer(

@@ -12,7 +12,8 @@
 namespace ibmw::samples::transport_benchmark::iox_loaned_ctx {
 
 namespace {
-// MUST exactly match publisher_module.cc.
+// MUST exactly match publisher_module.cc. bench_options.topic overrides it for
+// lanes that build this module against another publisher.
 constexpr std::string_view kTopic = "iox_bench_ctx_topic";
 }  // namespace
 
@@ -37,7 +38,8 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
   // GetSubscriber(kTopic) call returns the same SubscriberRef each time
   // (the transport bus de-dups on topic name); each typed OnMessage adds
   // its own iceoryx receive URL keyed on (topic, msg_type).
-  auto subscriber = core_.GetTransport().GetSubscriber(std::string(kTopic));
+  auto subscriber = core_.GetTransport().GetSubscriber(
+      opts_.topic.empty() ? std::string(kTopic) : opts_.topic);
 
 #define IBMW_SUB_SETUP_REGISTER(LBL, N, ALIAS)                                 \
   {                                                                            \
@@ -104,7 +106,7 @@ bool SubscriberModule::Setup(ibmw::Runtime core) {
 bool SubscriberModule::Run() {
   if (driver_ == nullptr) {
     MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
-           "SubscriberModule: iceoryx driver not injected before Run()");
+           "SubscriberModule: transport driver not injected before Run()");
     return false;
   }
   const auto now = std::chrono::steady_clock::now();

@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <stddef.h>
+
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "c/util/function_base.h"
@@ -28,6 +31,13 @@ typedef struct {
  *
  */
 typedef struct {
+  /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
   /// Function to get executor type
   ibmw_string_view_t (*type)(void* ctx);
 

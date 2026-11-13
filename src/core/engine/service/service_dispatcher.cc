@@ -106,11 +106,13 @@ void ServiceDispatcher::Shutdown() {
 
   MW_INFO("[RPC] stopped");
 
-  service_access_map_.clear();
-
+  // Stop and destroy the drivers first: their threads may still be inside
+  // callbacks that use the access objects, the catalog or the filters.
   service_driver_dispatcher_.Shutdown();
 
   rpc_driver_vec_.clear();
+
+  service_access_map_.clear();
 
   service_catalog_ptr_.reset();
 

@@ -3,36 +3,48 @@
 #
 # run_dual_build_matrix.sh — IBMW dual-build matrix harness.
 #
-# Drives a 7-entry transport-flag matrix to verify that the build, the
+# Drives a transport-flag matrix to verify that the build, the
 # unit tests, and the smoke subset all survive when each transport
 # extension is individually disabled, plus an all-off entry that
-# exercises the framework + local-transport-only path.
+# exercises the framework + local-transport-only path. Two more entries
+# cover the self-developed shm transport (off in BASE_FLAGS): shm_only
+# (shm replaces iceoryx) and shm_both (shm next to iceoryx).
 #
 # Scope: build + ctest + smoke per entry, driven by
 # scripts/dual_build_matrix.yaml.
 #
-# Entries (7) — see scripts/dual_build_matrix.yaml for the canonical
+# Entries — see scripts/dual_build_matrix.yaml for the canonical
 # definition (cmake_flags / ctest_exclude / smoke_excludes / excluded_samples):
-#   dds_off, ros2_off, iceoryx_off, zenoh_off, mqtt_off, net_off, all_off.
+#   dds_off, ros2_off, iceoryx_off, zenoh_off, mqtt_off, net_off, all_off,
+#   shm_only, shm_both, plus the r8_iceoryx_* / r8_shm_* / r12 validation
+#   entries.
 #
 # Usage:
-#   bash scripts/run_dual_build_matrix.sh                     # all 7 entries
+#   bash scripts/run_dual_build_matrix.sh                     # all entries
 #   bash scripts/run_dual_build_matrix.sh dds_off net_off     # subset
-#   bash scripts/run_dual_build_matrix.sh --strict ...        # fail on any per-entry FAIL
+#   bash scripts/run_dual_build_matrix.sh --report ...        # report only: exit 0 on per-entry FAIL
 #   bash scripts/run_dual_build_matrix.sh --skip-ctest ...    # build + smoke only
 #   bash scripts/run_dual_build_matrix.sh --skip-smoke ...    # build + ctest only
 #   bash scripts/run_dual_build_matrix.sh --build-only ...    # build only (commit #3 behaviour)
 #
 # Environment:
-#   IBMW_MATRIX_ROOT   override build root (default /tmp/ibmw_matrix)
+#   IBMW_MATRIX_ROOT   override build root (default /tmp/ibmw_matrix); must be
+#                      a real directory of the current user (entries in it are
+#                      deleted with rm -rf)
 #   IBMW_MATRIX_JOBS   override -j parallelism (default $(nproc))
 #   IBMW_MATRIX_YAML   override yaml config path (default scripts/dual_build_matrix.yaml)
+#   IBMW_ROS2_SETUP    ROS 2 setup script sourced for ctest/smoke (default
+#                      /opt/ros/humble/setup.bash when it exists; empty: none)
+#   IBMW_HOST_LIBDIR   library dir put first on LD_LIBRARY_PATH for ctest/smoke
+#                      (default /usr/lib/<gcc -print-multiarch> when it exists;
+#                      empty: none)
 #
-# Exit code:
-#   0  by default — harness ran end-to-end. Per-entry results are reported
-#      in the SUMMARY table and per-entry artefacts under
-#      ${IBMW_MATRIX_ROOT}/<entry>/.
-#   1  with --strict if any entry's enabled phases FAILed.
+# Exit code (TOOL-040):
+#   0  every entry's enabled phases passed, or --report was given (the harness
+#      ran end-to-end; per-entry results are in the SUMMARY table and the
+#      artefacts under ${IBMW_MATRIX_ROOT}/<entry>/).
+#   1  any entry's enabled phases FAILed (the default; --strict is accepted
+#      for compatibility and changes nothing).
 #   2  bad CLI usage (unknown entry / missing yaml).
 
 set -uo pipefail
@@ -41,6 +53,37 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MATRIX_ROOT="${IBMW_MATRIX_ROOT:-/tmp/ibmw_matrix}"
 JOBS="${IBMW_MATRIX_JOBS:-$(nproc)}"
 YAML_PATH="${IBMW_MATRIX_YAML:-${REPO_ROOT}/scripts/dual_build_matrix.yaml}"
+
+# Host-specific paths (TOOL-042). An explicitly set path must exist.
+if [[ -n "${IBMW_ROS2_SETUP+set}" ]]; then
+  ROS2_SETUP="${IBMW_ROS2_SETUP}"
+  if [[ -n "${ROS2_SETUP}" && ! -f "${ROS2_SETUP}" ]]; then
+    echo "[matrix] ERROR: IBMW_ROS2_SETUP not found: ${ROS2_SETUP}" >&2
+    exit 2
+  fi
+else
+  ROS2_SETUP=/opt/ros/humble/setup.bash
+  [[ -f "${ROS2_SETUP}" ]] || ROS2_SETUP=""
+fi
+export IBMW_ROS2_SETUP="${ROS2_SETUP}"  # stage_smoke.sh uses the same one.
+if [[ -n "${IBMW_HOST_LIBDIR+set}" ]]; then
+  HOST_LIBDIR="${IBMW_HOST_LIBDIR}"
+  if [[ -n "${HOST_LIBDIR}" && ! -d "${HOST_LIBDIR}" ]]; then
+    echo "[matrix] ERROR: IBMW_HOST_LIBDIR not found: ${HOST_LIBDIR}" >&2
+    exit 2
+  fi
+else
+  HOST_LIBDIR="/usr/lib/$(gcc -print-multiarch 2>/dev/null || true)"
+  [[ "${HOST_LIBDIR}" != /usr/lib/ && -d "${HOST_LIBDIR}" ]] || HOST_LIBDIR=""
+fi
+
+echo "[matrix] ROS 2 setup: ${ROS2_SETUP:-none}; host libdir: ${HOST_LIBDIR:-none}"
+
+source_ros2_setup() {
+  if [[ -n "${ROS2_SETUP}" ]]; then
+    set +u; source "${ROS2_SETUP}" 2>/dev/null || true; set -u
+  fi
+}
 
 BASE_FLAGS=(
   "-DCMAKE_BUILD_TYPE=Release"
@@ -76,7 +119,7 @@ fi
 # regex commonly contains '|' (alternation) and the smoke_excludes glob
 # list is joined with '|' as the inner separator. Field syntax:
 #   ENTRIES\t<comma-separated names in declared order>
-#   FLAGS\t<entry>\t<space-joined cmake_flags>
+#   FLAGS\t<entry>\t<cmake_flags joined with \x1f (unit separator)>
 #   CTEST\t<entry>\t<ctest_exclude regex, may contain '|'>
 #   SMOKE\t<entry>\t<glob1>|<glob2>|...
 PARSED="$(python3 - "${YAML_PATH}" <<'PY'
@@ -87,7 +130,7 @@ entries = cfg.get("entries") or []
 names = [e["name"] for e in entries]
 print("ENTRIES\t" + ",".join(names))
 for e in entries:
-    flags = " ".join(e.get("cmake_flags") or [])
+    flags = "\x1f".join(e.get("cmake_flags") or [])
     print(f"FLAGS\t{e['name']}\t{flags}")
     print(f"CTEST\t{e['name']}\t{e.get('ctest_exclude','') or ''}")
     smoke = e.get("smoke_excludes") or []
@@ -151,7 +194,7 @@ if [[ ${#ALL_ENTRIES[@]} -eq 0 ]]; then
   exit 2
 fi
 
-STRICT=0
+STRICT=1
 SKIP_CTEST=0
 SKIP_SMOKE=0
 BUILD_ONLY=0
@@ -159,6 +202,7 @@ ARGS=()
 for arg in "$@"; do
   case "${arg}" in
     --strict)      STRICT=1 ;;
+    --report)      STRICT=0 ;;
     --skip-ctest)  SKIP_CTEST=1 ;;
     --skip-smoke)  SKIP_SMOKE=1 ;;
     --build-only)  BUILD_ONLY=1 ;;
@@ -185,6 +229,13 @@ else
 fi
 
 mkdir -p "${MATRIX_ROOT}"
+# The default root is in the shared /tmp and each entry below it is removed
+# with rm -rf: refuse a planted link or another user's directory.
+if [[ -L "${MATRIX_ROOT%/}" || ! -d "${MATRIX_ROOT}" || ! -O "${MATRIX_ROOT}" ]]; then
+  echo "[matrix] ${MATRIX_ROOT} must be a directory owned by $(id -un), not a link;" \
+       "set IBMW_MATRIX_ROOT" >&2
+  exit 2
+fi
 
 declare -A CONFIG_RC
 declare -A BUILD_RC
@@ -192,19 +243,28 @@ declare -A FEATURES_RC
 declare -A CTEST_RC
 declare -A SMOKE_RC
 
+# Columns, in order: DDS ROS2 ICEORYX ZENOH MQTT NET SELFDEV_SHM (the names
+# array in verify_features_h). SELFDEV_SHM is 0 unless the entry turns
+# IBMW_BUILD_SHM_EXTENSION on.
 declare -A EXPECT_FEATURES
-EXPECT_FEATURES[dds_off]="0 1 1 1 1 1"
-EXPECT_FEATURES[ros2_off]="1 0 1 1 1 1"
-EXPECT_FEATURES[iceoryx_off]="1 1 0 1 1 1"
-EXPECT_FEATURES[zenoh_off]="1 1 1 0 1 1"
-EXPECT_FEATURES[mqtt_off]="1 1 1 1 0 1"
-EXPECT_FEATURES[net_off]="1 1 1 1 1 0"
-EXPECT_FEATURES[all_off]="0 0 0 0 0 0"
-EXPECT_FEATURES[r8_iceoryx_publisher_ok]="1 1 1 1 1 1"
-EXPECT_FEATURES[r8_iceoryx_subscriber_ok]="1 1 1 1 1 1"
-EXPECT_FEATURES[r8_iceoryx_mixed_api_fail]="1 1 1 1 1 1"
-EXPECT_FEATURES[r8_iceoryx_no_anchor_fail]="1 1 1 1 1 1"
-EXPECT_FEATURES[r12_runtime_use_fail]="1 1 1 1 1 1"
+EXPECT_FEATURES[dds_off]="0 1 1 1 1 1 0"
+EXPECT_FEATURES[ros2_off]="1 0 1 1 1 1 0"
+EXPECT_FEATURES[iceoryx_off]="1 1 0 1 1 1 0"
+EXPECT_FEATURES[zenoh_off]="1 1 1 0 1 1 0"
+EXPECT_FEATURES[mqtt_off]="1 1 1 1 0 1 0"
+EXPECT_FEATURES[net_off]="1 1 1 1 1 0 0"
+EXPECT_FEATURES[all_off]="0 0 0 0 0 0 0"
+EXPECT_FEATURES[shm_only]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[shm_both]="1 1 1 1 1 1 1"
+EXPECT_FEATURES[r8_iceoryx_publisher_ok]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_iceoryx_subscriber_ok]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_iceoryx_mixed_api_fail]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_iceoryx_no_anchor_fail]="1 1 1 1 1 1 0"
+EXPECT_FEATURES[r8_shm_publisher_ok]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r8_shm_subscriber_ok]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r8_shm_mixed_api_fail]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r8_shm_no_anchor_fail]="1 1 0 1 1 1 1"
+EXPECT_FEATURES[r12_runtime_use_fail]="1 1 1 1 1 1 0"
 
 verify_features_h() {
   local entry="$1" build_dir="$2"
@@ -217,7 +277,7 @@ verify_features_h() {
     return 2
   fi
   local expected=(${EXPECT_FEATURES[$entry]})
-  local names=(DDS ROS2 ICEORYX ZENOH MQTT NET)
+  local names=(DDS ROS2 ICEORYX ZENOH MQTT NET SELFDEV_SHM)
   local i mismatch=0
   for i in "${!names[@]}"; do
     local n="${names[$i]}" want="${expected[$i]}"
@@ -236,8 +296,8 @@ run_ctest() {
   local pattern="${ENTRY_CTEST[$entry]}"
   (
     cd "${build_dir}"
-    set +u; source /opt/ros/humble/setup.bash 2>/dev/null || true; set -u
-    export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    source_ros2_setup
+    export LD_LIBRARY_PATH="${HOST_LIBDIR:+${HOST_LIBDIR}:}${LD_LIBRARY_PATH:-}"
     if [[ -n "${pattern}" ]]; then
       ctest -E "${pattern}" --output-on-failure
     else
@@ -264,7 +324,7 @@ run_smoke() {
   local excludes="${ENTRY_SMOKE[$entry]}"
   rm -rf "${stage}"
   (
-    set +u; source /opt/ros/humble/setup.bash 2>/dev/null || true; set -u
+    source_ros2_setup
     export REPO_ROOT="${REPO_ROOT}" BUILD="${build_dir}" STAGE="${stage}"
     bash "${REPO_ROOT}/scripts/stage_smoke.sh"
   ) >"${smoke_log}" 2>&1
@@ -275,7 +335,7 @@ run_smoke() {
   fi
   (
     cd "${stage}"
-    export LD_LIBRARY_PATH="${stage}/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="${stage}/lib${HOST_LIBDIR:+:${HOST_LIBDIR}}:${LD_LIBRARY_PATH:-}"
     ./run_all_tests.sh 2>&1 || true
   ) >>"${smoke_log}" 2>&1
 
@@ -323,14 +383,16 @@ run_entry() {
   local smoke_log="${entry_dir}/smoke.log"
 
   echo "===================================================================="
-  echo "[matrix] entry=${entry}  flags=${ENTRY_FLAGS[$entry]}"
+  echo "[matrix] entry=${entry}  flags=${ENTRY_FLAGS[$entry]//$'\x1f'/ }"
   echo "[matrix] build_dir=${build_dir}"
   echo "===================================================================="
 
   rm -rf "${entry_dir}"
   mkdir -p "${entry_dir}"
 
-  local entry_extra=(${ENTRY_FLAGS[$entry]})
+  # One array element per cmake_flags item: no word splitting, no globbing.
+  local entry_extra=()
+  IFS=$'\x1f' read -ra entry_extra <<< "${ENTRY_FLAGS[$entry]}"
   (
     cd "${REPO_ROOT}"
     cmake -B "${build_dir}" -S "${REPO_ROOT}" \
@@ -347,7 +409,7 @@ run_entry() {
     return
   fi
 
-  # Entries declaring extra_targets (e.g. r8_iceoryx_*) skip the
+  # Entries declaring extra_targets (e.g. r8_iceoryx_*, r8_shm_*) skip the
   # monolithic build because their default-include neighbours (R8.2 mixed-API
   # _fail samples) trigger unconditional static_assert at TU compile time and
   # would tank the full-tree build. The extra_targets loop below builds only
@@ -537,10 +599,10 @@ if [[ ${overall} -ne 0 ]]; then
   echo "[matrix] per-entry artefacts under ${MATRIX_ROOT}/<entry>/"
   echo "[matrix] features.h warns: ${features_warns}  (non-blocking)"
   if [[ ${STRICT} -eq 1 ]]; then
-    echo "[matrix] OVERALL: FAIL (--strict)"
+    echo "[matrix] OVERALL: FAIL (use --report to exit 0)"
     exit 1
   fi
-  echo "[matrix] OVERALL: HARNESS-OK, ENTRIES-PARTIAL — see SUMMARY above."
+  echo "[matrix] OVERALL: HARNESS-OK, ENTRIES-PARTIAL (--report) — see SUMMARY above."
   exit 0
 fi
 

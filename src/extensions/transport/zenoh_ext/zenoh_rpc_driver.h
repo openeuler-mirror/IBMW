@@ -3,6 +3,11 @@
 
 #pragma once
 
+#include <atomic>
+#include <memory>
+#include <string>
+#include <unordered_set>
+
 #include "cpp/service/rpc_status.h"
 #include "cpp/util/type_support.h"
 #include "engine/service/service_driver.h"
@@ -12,6 +17,7 @@
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
 #include "zenoh.h"
+#include "zenoh_ext/key_expr.h"
 #include "zenoh_ext/util.h"
 #include "zenoh_ext/zenoh_buffer_array_allocator.h"
 #include "zenoh_ext/zenoh_bus.h"
@@ -37,10 +43,11 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
 
  public:
   ZenohRpcDriver(
-      std::shared_ptr<ZenohBus>& zenoh_bus_ptr, std::string& limit_domain)
+      std::shared_ptr<ZenohBus>& zenoh_bus_ptr, const std::string& limit_domain)
       : zenoh_bus_ptr_(zenoh_bus_ptr),
-        limit_domain_(limit_domain) {}
-  ~ZenohRpcDriver() = default;
+        limit_domain_(NormalizeLimitDomain(limit_domain)),
+        key_suffix_(LimitDomainKeySuffix(limit_domain_)) {}
+  ~ZenohRpcDriver();
 
   std::string_view Name() const noexcept override { return "zenoh"; }
 
@@ -65,6 +72,30 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
       const char* req_id_buf,
       uint32_t code);
 
+  // Shared with the answer callbacks, which a service function may keep past
+  // the driver: a closed gate tells them not to touch it.
+  struct ReplyGate {
+    std::atomic<bool> closed{false};
+    std::atomic<int> running{0};
+  };
+
+  // Held while an answer uses the driver. Pairs with CloseReplyGate(): either
+  // it sees this answer or the answer sees the closed flag.
+  class ReplyPass {
+   public:
+    explicit ReplyPass(ReplyGate& gate) noexcept : gate_(gate) { gate_.running.fetch_add(1); }
+    ~ReplyPass() { gate_.running.fetch_sub(1); }
+    ReplyPass(const ReplyPass&) = delete;
+    ReplyPass& operator=(const ReplyPass&) = delete;
+
+    bool Open() const noexcept { return !gate_.closed.load(); }
+
+   private:
+    ReplyGate& gate_;
+  };
+
+  void CloseReplyGate();
+
   enum class State : uint32_t {
     PreInit,
     Init,
@@ -77,16 +108,18 @@ class ZenohRpcDriver : public runtime::core::service::ServiceDriver,
 
   std::function<executor::ExecutorHandle(std::string_view)> get_executor_func_;
 
-  std::atomic_uint32_t req_id_ = 0;
-
-  std::shared_mutex z_shared_mutex_;
+  std::atomic_uint32_t req_id_{runtime::core::util::RandomReqIdStart()};
 
   std::shared_ptr<ZenohBus> zenoh_bus_ptr_;
   std::string limit_domain_;
+  std::string key_suffix_;
 
   std::unique_ptr<runtime::core::util::RpcClientTool<std::shared_ptr<runtime::core::service::ServiceMessageFrame>>> client_tool_ptr_;
 
-  std::unordered_map<std::string, uint64_t> z_node_shm_size_map_;
+  std::shared_ptr<ReplyGate> reply_gate_ = std::make_shared<ReplyGate>();
+
+  ShmLoanSizes shm_loan_sizes_;
+  std::unordered_set<std::string> sub_keyexprs_;  // bus subscribers of the handlers, removed by Shutdown
 
   uint64_t shm_init_loan_size_ = 1024;
 };

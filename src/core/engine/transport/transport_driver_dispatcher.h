@@ -158,6 +158,8 @@ class TransportDriverDispatcher {
   // PublishLoaned() / ReleaseLoaned() route through handle.source_driver
   // populated by the issuing driver. Both clear the handle on completion,
   // and are no-ops on an empty/already-consumed handle.
+  // A handle whose source_driver is not registered here is dropped without
+  // being dereferenced.
   LoanedSampleHandle Loan(LoanAccessInfoWrapper&& wrapper);
   void PublishLoaned(LoanedSampleHandle& handle);
   void ReleaseLoaned(LoanedSampleHandle& handle);
@@ -200,6 +202,16 @@ class TransportDriverDispatcher {
   std::vector<LoanedPodTopicInfo> GetLoanedPodTopics() const;
 
  private:
+  // The list only changes before Start and holds a handful of drivers.
+  bool IsRegisteredDriver(const TransportDriver* driver) const noexcept {
+    for (const auto* registered : transport_driver_index_vec_) {
+      if (registered == driver) return true;
+    }
+    return false;
+  }
+  bool CommitSendType(std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr,
+                      const std::vector<TransportDriver*>& drivers);
+
   std::vector<TransportDriver*> GetDriversByRules(
       std::string_view topic_name,
       const std::vector<std::pair<std::string, std::vector<std::string>>>& rules);
@@ -258,7 +270,7 @@ class TransportDriverDispatcher {
 
   std::unordered_map<
       std::string,
-      std::atomic<uint32_t>,
+      std::atomic<uint64_t>,
       ibmw::common::util::StringHash,
       std::equal_to<>>
       pub_topic_seq_map_;
@@ -268,6 +280,10 @@ class TransportDriverDispatcher {
     size_t initial_size_hint;
     size_t alignment;
     TransportDriver* driver;
+#ifdef IBMW_ENABLE_CORE_METRICS
+    // Read only under an admitted CachedMetricsReadGuard.
+    observability::PodMetricsEntry* cached_metrics = nullptr;
+#endif
   };
   std::unordered_map<std::string, std::unique_ptr<PodRegistration>>
       pod_registration_map_;
@@ -279,6 +295,8 @@ class TransportDriverDispatcher {
       owned_legacy_message_handler_pool_;
 
   std::mutex publish_taps_mutex_;
+  // Mirrors publish_taps_.size() so publishes without taps skip the mutex.
+  std::atomic_size_t publish_tap_count_{0};
   struct PublishTapState {
     struct InvocationToken {
       PublishTapState* state;

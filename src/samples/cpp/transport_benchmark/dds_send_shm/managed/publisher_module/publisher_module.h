@@ -43,7 +43,10 @@
 //   same bank is shared across iox_loaned_ctx / iox_send / dds_loaned /
 //   dds_send_shm / tcp_send so all rows compare a byte-identical message.
 //
-// No driver pointer is needed because no extension-only API is called.
+// Publishing itself needs no driver pointer. The standalone main injects
+// the dds driver only so PublishLoop can wait (bounded) until the selected
+// DataWriter has matched a subscriber instead of sleeping blindly; without
+// a driver the loop starts immediately as before.
 
 #pragma once
 
@@ -54,6 +57,12 @@
 
 #include "bench_options.h"
 #include "bench_send_payloads.h"
+
+// IBMW_R2_EXEMPT_BEGIN: driver only used for the bounded publication-match wait
+namespace ibmw::extensions::dds_extension {
+class DdsTransportDriver;
+}  // namespace ibmw::extensions::dds_extension
+// IBMW_R2_EXEMPT_END
 
 namespace ibmw::samples::transport_benchmark::dds_send_shm {
 
@@ -66,14 +75,31 @@ class PublisherModule : public ibmw::Module {
     return ibmw::ModuleDescriptor{.module_name = "DdsSendPublisherModule"};
   }
 
+  // Optional: injected from the standalone main between
+  // engine.Initialize() and engine.Start(); stable for the engine lifetime.
+  // IBMW_R2_EXEMPT_BEGIN
+  // IBMW_R3_EXEMPT_BEGIN
+  void SetDdsDriver(
+      ibmw::extensions::dds_extension::DdsTransportDriver* d) {
+    driver_ = d;
+  }
+  // IBMW_R3_EXEMPT_END
+  // IBMW_R2_EXEMPT_END
+
   bool Setup(ibmw::Runtime core) override;
   bool Run() override;
   void Stop() override;
 
  private:
   void PublishLoop();
+  bool WaitForSelectedPublisherMatch();
 
   ibmw::Runtime core_;
+  // IBMW_R2_EXEMPT_BEGIN
+  // IBMW_R3_EXEMPT_BEGIN
+  ibmw::extensions::dds_extension::DdsTransportDriver* driver_{nullptr};
+  // IBMW_R3_EXEMPT_END
+  // IBMW_R2_EXEMPT_END
 
   // One named SenderRef per non-plain bench type. Generated from
   // IBMW_BENCH_SEND_FOR_EACH (the dds_send_shm-specific bank) so the static

@@ -3,6 +3,8 @@
 
 #include "record_playback_ext/coordinator/bag_capture_planner.h"
 
+#include <filesystem>
+
 #include "gtest/gtest.h"
 #include "engine/runtime_graph/topic_graph.h"
 #include "engine/transport/serialized_transport_driver.h"
@@ -104,6 +106,32 @@ TEST(BagCaptureGraphTest, CachedSinglePublisherPriorityAndDynamicEligibility) {
   EXPECT_EQ(RegistryGraph({first}).Subscriptions("/topic")[0].driver, "runtime-tap");
 }
 
+// The planner routes by capability, not by driver name: a "shm" driver with the
+// capability shm_extension registers (cached_serialized, priority 0, as
+// iceoryx_extension does; see shm_extension.cc) gets the iceoryx route.
+TEST(BagCaptureGraphTest, ShmNamedCachedDriverRoutesLikeIceoryx) {
+  EXPECT_EQ(RegistryGraph({RegistryPublisher("shm", "cached_serialized", 0)}).Subscriptions("/topic")[0].driver, "shm");
+  auto first = RegistryPublisher("shm", "cached_serialized", 0);
+  const auto dds = RegistryPublisher("dds");
+  first.topic.available_drivers.push_back("dds");
+  first.capture_capabilities["dds"] = dds.capture_capabilities.at("dds");
+  EXPECT_EQ(RegistryGraph({first}).Subscriptions("/topic")[0].driver, "shm");
+  auto second = first;
+  second.publisher_id = "other";
+  EXPECT_EQ(RegistryGraph({first, second}).Subscriptions("/topic")[0].driver, "dds");
+  const auto no_typed = [](const io::RegistrySubscription& subscription) { return subscription.driver != "shm"; };
+  EXPECT_EQ(RegistryGraph({first}).Subscriptions("/topic", no_typed)[0].driver, "dds");
+  first.capture_capabilities.erase("dds");
+  second.capture_capabilities.erase("dds");
+  EXPECT_EQ(RegistryGraph({first}).Subscriptions("/topic", no_typed)[0].driver, "runtime-tap");
+  const auto taps = RegistryGraph({first, second}).Subscriptions("/topic");
+  ASSERT_EQ(taps.size(), 2u);
+  EXPECT_EQ(taps[0].driver, "runtime-tap");
+  EXPECT_EQ(taps[1].driver, "runtime-tap");
+  first.type_support_package.clear();
+  EXPECT_EQ(RegistryGraph({first}).Subscriptions("/topic")[0].driver, "runtime-tap");
+}
+
 TEST(BagCaptureGraphTest, NativeAddressMappingAndIsolatedObserverConfiguration) {
   auto ros = RegistryPublisher("ros2");
   ros.topic.msg_type = "ros2:std_msgs/msg/String";
@@ -122,6 +150,7 @@ TEST(BagCaptureGraphTest, NativeAddressMappingAndIsolatedObserverConfiguration) 
   EXPECT_FALSE(io::RegistrySubscriptionConfig({zenoh, "zenoh"})["ibmw"]["extensions"]["items"][0]["options"]["limit_domain"]);
   const auto config = io::RegistrySubscriptionConfig({ros, "ros2"})["ibmw"];
   EXPECT_FALSE(config["runtime_graph"]["enabled"].as<bool>());
+  EXPECT_EQ(config["config"]["temp_cfg_path"].as<std::string>(), std::filesystem::temp_directory_path().string());
   EXPECT_EQ(config["extensions"]["items"].size(), 1u);
   EXPECT_NE(config["extensions"]["items"][0]["options"]["participant_name"].as<std::string>(), "publisher");
 }

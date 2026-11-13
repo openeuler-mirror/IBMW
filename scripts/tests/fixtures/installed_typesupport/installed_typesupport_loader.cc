@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include <engine/type_support_pkg_loader.h>
 
 #include <cpp/util/schema_support.h>

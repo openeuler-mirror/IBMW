@@ -23,7 +23,7 @@ class Status {
     return code_ == ibmw_rpc_status_code_t::IBMW_RPC_STATUS_OK;
   }
 
-  operator bool() const { return OK(); }
+  explicit operator bool() const { return OK(); }
 
   void SetCode(uint32_t code) { code_ = code; }
   void SetCode(ibmw_rpc_status_code_t code) { code_ = code; }

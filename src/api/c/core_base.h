@@ -45,7 +45,7 @@ typedef struct {
  * ibmw_core_base_t, changes. Plugins compiled against a different ABI version
  * can detect the mismatch before calling an incompatible function pointer.
  */
-#define IBMW_CORE_ABI_VERSION 2
+#define IBMW_CORE_ABI_VERSION 3
 
 /**
  * @brief IBMW runtime framework interface
@@ -59,6 +59,13 @@ typedef struct {
    * Consumers should check this value before accessing any other field.
    */
   uint32_t abi_version;
+
+  /**
+   * @brief Size of ibmw_core_base_t in bytes, set by the core. Occupies the
+   * padding after abi_version on LP64. Since ABI 3, every table reachable from
+   * this one also starts with its own struct_size.
+   */
+  uint32_t struct_size;
 
   /**
    * @brief Function to get module info for current core instance

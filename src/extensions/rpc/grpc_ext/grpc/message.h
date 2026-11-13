@@ -11,6 +11,8 @@
 namespace ibmw::extensions::grpc_extension::grpc {
 
 constexpr size_t kGrpcMessagePrefixSize = 5;
+// The prefix stores the message length in 32 bits.
+constexpr size_t kMaxGrpcMessageLength = UINT32_MAX;
 
 struct GrpcMessagePrefix {
   uint8_t compression_flag;

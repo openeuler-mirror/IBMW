@@ -41,8 +41,13 @@ class Stream {
   [[nodiscard]] const ResponsePtr& GetResponse() const { return response_ptr_; }
   ResponsePtr GetMutableResponse() { return std::move(response_ptr_); }
 
+  // Client side: the response was handed over (end of stream received).
+  void SetResponseComplete() { response_complete_ = true; }
+  [[nodiscard]] bool IsResponseComplete() const { return response_complete_; }
+
  private:
   int32_t stream_id_ = 0;
+  bool response_complete_ = false;
   Session* session_ = nullptr;
   RequestPtr request_ptr_ = nullptr;
   ResponsePtr response_ptr_ = nullptr;
@@ -54,6 +59,10 @@ class Session {
   struct Http2Settings {
     uint32_t max_concurrent_streams = 100;
     uint32_t initial_window_size = (1U << 31) - 1;
+    // Server only: a request whose body grows past this is reset
+    // (ENHANCE_YOUR_CALM). A connection can buffer up to
+    // max_concurrent_streams times this.
+    size_t max_request_body_size = 16U << 20;
   };
 
  public:

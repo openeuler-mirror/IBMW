@@ -13,6 +13,12 @@ project(my_ibmw_project LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(CMAKE_CROSSCOMPILING)
+  set(CMAKE_SKIP_RPATH ON)
+  set(CMAKE_SKIP_BUILD_RPATH ON)
+  set(CMAKE_SKIP_INSTALL_RPATH ON)
+  set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
+endif()
 
 # --------------------------------------------------------------------------
 # Find IBMW (also loads IbmwHelpers.cmake: ibmw_add_module/pkg/app/etc.)
@@ -20,6 +26,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(ibmw 0.1.0 REQUIRED)
 
 find_package(example_ros2 REQUIRED)
+
+# --------------------------------------------------------------------------
+# JSON TypeSupport Package for Bag schema discovery and playback.
+# --------------------------------------------------------------------------
+add_library(my_ibmw_project_json_ts SHARED
+  src/json_type_support_pkg_main.cc)
+target_include_directories(my_ibmw_project_json_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(my_ibmw_project_json_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::cpp
+  nlohmann_json::nlohmann_json)
+set_target_properties(my_ibmw_project_json_ts PROPERTIES
+  OUTPUT_NAME "my_ibmw_project_json_ts")
+install(TARGETS my_ibmw_project_json_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_module(my_module
   SRCS src/my_module/my_module.cc
@@ -43,11 +66,11 @@ ibmw_add_module(rpc_client_module
 
 ibmw_add_module(ros2_publisher_module
   SRCS src/ros2_publisher_module/ros2_publisher_module.cc
-  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp)
+  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
 
 ibmw_add_module(ros2_subscriber_module
   SRCS src/ros2_subscriber_module/ros2_subscriber_module.cc
-  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp)
+  DEPS ibmw::extensions::ros2_types example_ros2::example_ros2__rosidl_generator_cpp example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
 
 ibmw_add_module(ros2_rpc_server_module
   SRCS src/ros2_rpc_server_module/ros2_rpc_server_module.cc
@@ -60,18 +83,22 @@ ibmw_add_module(ros2_rpc_client_module
 ibmw_add_module(json_publisher_module
   SRCS src/json_publisher_module/json_publisher_module.cc
   DEPS nlohmann_json::nlohmann_json)
+target_include_directories(json_publisher_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 ibmw_add_module(json_subscriber_module
   SRCS src/json_subscriber_module/json_subscriber_module.cc
   DEPS nlohmann_json::nlohmann_json)
+target_include_directories(json_subscriber_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 ibmw_add_module(json_rpc_server_module
   SRCS src/json_rpc_server_module/json_rpc_server_module.cc
   DEPS nlohmann_json::nlohmann_json)
+target_include_directories(json_rpc_server_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 ibmw_add_module(json_rpc_client_module
   SRCS src/json_rpc_client_module/json_rpc_client_module.cc
   DEPS nlohmann_json::nlohmann_json)
+target_include_directories(json_rpc_client_module PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 ibmw_add_pkg(my_module_pkg
   SRCS src/my_module_pkg/pkg_main.cc
@@ -83,6 +110,21 @@ target_link_libraries(my_app PRIVATE ibmw::core::engine)
 ibmw_add_pkg(pubsub_pkg
   SRCS src/pubsub_pkg/pkg_main.cc
   MODULES publisher_module subscriber_module)
+
+add_library(pubsub_pkg_ts SHARED
+  src/pubsub_pkg/type_support_pkg_main.cc)
+target_include_directories(pubsub_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(pubsub_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::dds_type_support
+  ibmw::schema::example_idl_gencode)
+set_target_properties(pubsub_pkg_ts PROPERTIES
+  OUTPUT_NAME "pubsub_pkg_ts")
+install(TARGETS pubsub_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(pubsub_app
   SRCS src/pubsub_app/main.cc
@@ -100,6 +142,22 @@ ibmw_add_pkg(ros2_pubsub_pkg
   SRCS src/ros2_pubsub_pkg/pkg_main.cc
   MODULES ros2_publisher_module ros2_subscriber_module)
 
+add_library(ros2_pubsub_pkg_ts SHARED
+  src/ros2_pubsub_pkg/type_support_pkg_main.cc)
+target_include_directories(ros2_pubsub_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ros2_pubsub_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  example_ros2::example_ros2__rosidl_generator_cpp
+  example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
+set_target_properties(ros2_pubsub_pkg_ts PROPERTIES
+  OUTPUT_NAME "ros2_pubsub_pkg_ts")
+install(TARGETS ros2_pubsub_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(ros2_pubsub_app
   SRCS src/ros2_pubsub_app/main.cc
   MODULES ros2_publisher_module ros2_subscriber_module)
@@ -107,6 +165,22 @@ ibmw_add_app(ros2_pubsub_app
 ibmw_add_pkg(ros2_rpc_pkg
   SRCS src/ros2_rpc_pkg/pkg_main.cc
   MODULES ros2_rpc_server_module ros2_rpc_client_module)
+
+add_library(ros2_rpc_pkg_ts SHARED
+  src/ros2_rpc_pkg/type_support_pkg_main.cc)
+target_include_directories(ros2_rpc_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(ros2_rpc_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::ros2_type_support
+  example_ros2::example_ros2__rosidl_generator_cpp
+  example_ros2::example_ros2__rosidl_typesupport_introspection_cpp)
+set_target_properties(ros2_rpc_pkg_ts PROPERTIES
+  OUTPUT_NAME "ros2_rpc_pkg_ts")
+install(TARGETS ros2_rpc_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(ros2_rpc_app
   SRCS src/ros2_rpc_app/main.cc
@@ -116,6 +190,21 @@ ibmw_add_pkg(json_pubsub_pkg
   SRCS src/json_pubsub_pkg/pkg_main.cc
   MODULES json_publisher_module json_subscriber_module)
 
+add_library(json_pubsub_pkg_ts SHARED
+  src/json_pubsub_pkg/type_support_pkg_main.cc)
+target_include_directories(json_pubsub_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(json_pubsub_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::cpp
+  nlohmann_json::nlohmann_json)
+set_target_properties(json_pubsub_pkg_ts PROPERTIES
+  OUTPUT_NAME "json_pubsub_pkg_ts")
+install(TARGETS json_pubsub_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
+
 ibmw_add_app(json_pubsub_app
   SRCS src/json_pubsub_app/main.cc
   MODULES json_publisher_module json_subscriber_module)
@@ -123,6 +212,21 @@ ibmw_add_app(json_pubsub_app
 ibmw_add_pkg(json_rpc_pkg
   SRCS src/json_rpc_pkg/pkg_main.cc
   MODULES json_rpc_server_module json_rpc_client_module)
+
+add_library(json_rpc_pkg_ts SHARED
+  src/json_rpc_pkg/type_support_pkg_main.cc)
+target_include_directories(json_rpc_pkg_ts PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(json_rpc_pkg_ts PRIVATE
+  ibmw::api::type_support
+  ibmw::api::cpp
+  nlohmann_json::nlohmann_json)
+set_target_properties(json_rpc_pkg_ts PROPERTIES
+  OUTPUT_NAME "json_rpc_pkg_ts")
+install(TARGETS json_rpc_pkg_ts
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
 ibmw_add_app(json_rpc_app
   SRCS src/json_rpc_app/main.cc

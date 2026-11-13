@@ -24,7 +24,7 @@ inline void _ibmw_ros2_rpc_client_loop_body_impl(SelfT* self) {
     example_ros2::srv::RosTestRpc_Response rsp;
 
     // IBMW_RPC_CLIENT_REQUEST_PARAMETER_BUILD_ROS_TEST_RPC_BEGIN
-    // TODO: populate req fields here
+    req.data.assign(count % 8 + 1, static_cast<uint8_t>(count));
     // IBMW_RPC_CLIENT_REQUEST_PARAMETER_BUILD_ROS_TEST_RPC_END
 
     auto ctx_ptr = self->access_->NewContextSharedPtr();

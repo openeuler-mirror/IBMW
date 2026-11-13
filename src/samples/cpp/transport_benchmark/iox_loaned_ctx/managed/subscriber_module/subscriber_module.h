@@ -14,10 +14,11 @@
 //   we have to claim every iceoryx receive URL up-front. Idle URLs cost
 //   nothing on the iceoryx side beyond a registry entry.
 //
-// We still inject the iceoryx driver pointer so we can confirm the
-// transport selected at runtime and emit a clear log line for diagnostic
-// parity with the publisher side, but we never call any
-// extension-specific APIs from the receive path.
+// We still inject the driver pointer so we can confirm the transport selected
+// at runtime and emit a clear log line for diagnostic parity with the publisher
+// side, but we never call any extension-specific APIs from the receive path.
+// The module has no iceoryx dependency: the shm core_metrics gate compiles it
+// into shm_loaned_ctx_lossless_subscriber_app.
 
 #pragma once
 
@@ -29,9 +30,10 @@
 
 #include "base/benchmark_util.h"
 #include "bench_options.h"
-// IBMW_R1_EXEMPT_BEGIN
-#include "iceoryx_ext/iceoryx_transport_driver.h"
-// IBMW_R1_EXEMPT_END
+
+namespace ibmw::runtime::core::transport {
+class TransportDriver;
+}  // namespace ibmw::runtime::core::transport
 
 namespace ibmw::samples::transport_benchmark::iox_loaned_ctx {
 
@@ -44,10 +46,7 @@ class SubscriberModule : public ibmw::Module {
     return ibmw::ModuleDescriptor{.module_name = "IoxLoanedCtxSubscriberModule"};
   }
 
-  void SetIceoryxDriver(
-      ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* d) {
-    driver_ = d;
-  }
+  void SetDriver(ibmw::runtime::core::transport::TransportDriver* d) { driver_ = d; }
 
   bool Setup(ibmw::Runtime core) override;
   bool Run() override;
@@ -55,7 +54,7 @@ class SubscriberModule : public ibmw::Module {
 
  private:
   ibmw::Runtime core_;
-  ibmw::extensions::iceoryx_extension::IceoryxTransportDriver* driver_{nullptr};
+  ibmw::runtime::core::transport::TransportDriver* driver_{nullptr};
   BenchOptions opts_;
 
   // The DDS-style subscription executor delivers callbacks from the

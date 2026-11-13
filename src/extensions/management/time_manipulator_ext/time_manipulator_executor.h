@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <condition_variable>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -21,9 +22,15 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
     std::string bind_executor;
     std::chrono::nanoseconds dt = std::chrono::microseconds(100000);  // 100 ms
     double init_ratio = 1.0;
+    // Largest accepted fast-forward ratio: each dt advances this many ticks
+    // under the tick lock.
+    double max_ratio = 1000.0;
     std::vector<size_t> wheel_size = {100, 360};  // 1 h
     std::string thread_sched_policy;
     std::vector<uint32_t> thread_bind_cpu;
+    // Clock the ticks are paced by. Virtual time always starts at the
+    // system time of Start(), so Now() and DispatchAt() use the system clock
+    // domain either way.
     bool use_system_clock = false;
   };
 
@@ -59,11 +66,15 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   void RegisterGetExecutorFunc(
       const std::function<ibmw::executor::ExecutorHandle(std::string_view)>& get_executor_func);
 
-  void SetTimeRatio(double ratio);
+  // Ratios are applied in whole steps: N (fast) or 1/N (slow), N rounded to
+  // the nearest integer; 0 or negative pauses. Returns false, leaving the
+  // ratio unchanged, for NaN, infinity or a ratio above max_ratio.
+  bool SetTimeRatio(double ratio);
   double GetTimeRatio() const;
 
  private:
-  void TimerLoop();
+  void TimerLoop(std::chrono::system_clock::time_point start_sys_tp,
+                 std::chrono::steady_clock::time_point start_std_tp);
 
   struct TaskWithTimestamp {
     uint64_t tick_count;  // Tick count since start_time
@@ -75,6 +86,8 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   struct TimingWheelTool {
     uint64_t current_pos;
     uint64_t scale;
+    uint64_t unit;   // ticks per slot (the scale of the level below)
+    uint64_t limit;  // first tick that does not fit into this level yet (levels >= 1)
     std::vector<TaskList> wheel;
     std::function<void()> borrow_func;
 
@@ -106,8 +119,10 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   mutable std::shared_mutex ratio_mutex_;
   bool ratio_direction_ = true;
   uint32_t real_ratio_ = 1;
+  std::condition_variable_any pause_cv_;  // waits with ratio_mutex_
 
-  uint64_t start_time_point_ = 0;
+  // Set before the timer thread starts; read by DispatchAt() from any thread.
+  std::atomic<uint64_t> start_time_point_ = 0;
   std::atomic_bool start_flag_ = false;
 
   mutable std::shared_mutex tick_mutex_;
@@ -115,6 +130,7 @@ class TimeManipulatorExecutor : public ibmw::runtime::core::executor::ExecutorBa
   std::vector<TimingWheelTool> timing_wheel_vec_;
   uint64_t timing_task_map_pos_ = 0;
   std::unordered_map<uint64_t, TaskList> timing_task_map_;
+  uint64_t timing_task_map_unit_ = 1;  // ticks per far map key
 
   std::unique_ptr<std::thread> timer_thread_ptr_;
 };

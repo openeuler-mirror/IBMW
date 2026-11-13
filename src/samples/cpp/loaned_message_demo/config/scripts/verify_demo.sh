@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CFG_DIR="$SCRIPT_DIR/../cfg"
 BUILD_DIR="${BUILD_DIR:-$(cd "$SCRIPT_DIR/../../../../build" 2>/dev/null && pwd)}"
 
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+source "/opt/ros/${ROS_DISTRO:-humble}/setup.bash" 2>/dev/null ||
+  echo "warning: /opt/ros/${ROS_DISTRO:-humble}/setup.bash not sourced" >&2
 export LD_LIBRARY_PATH=$BUILD_DIR:$LD_LIBRARY_PATH
 
 PASS=0

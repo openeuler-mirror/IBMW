@@ -5,8 +5,13 @@
 
 #include <thread>
 
+#include "base/ibmw_config.h"
 #include "engine/executor/executor_base.h"
-#include "tbb/concurrent_queue.h"
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  #include "ibmw_selfdev/concurrent/bounded_blocking_queue.h"
+#else
+  #include "tbb/concurrent_queue.h"
+#endif
 #include "base/log_util.h"
 
 namespace ibmw::runtime::core::executor {
@@ -66,7 +71,11 @@ class ParallelExecutor : public ExecutorBase {
   uint32_t queue_warn_threshold_;
   std::atomic_uint32_t queue_task_num_ = 0;
 
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  ibmw::selfdev::concurrent::BoundedBlockingQueue<ibmw::executor::Task> qu_;
+#else
   tbb::concurrent_bounded_queue<ibmw::executor::Task> qu_;
+#endif
   std::atomic_uint32_t work_thread_num_ = 0;
 
   static thread_local const ParallelExecutor* tl_current_executor_;

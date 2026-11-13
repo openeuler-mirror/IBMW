@@ -23,7 +23,7 @@ static const ibmw_schema_support_package_v1_t schema_support_package{
     .reserved = {}};
 
 static const ibmw_type_support_package_v1_t type_support_package{
-    .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+    .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
     .struct_size = sizeof(ibmw_type_support_package_v1_t),
     .entry_count = sizeof(type_support_array) / sizeof(type_support_array[0]),
     .entries = type_support_array,

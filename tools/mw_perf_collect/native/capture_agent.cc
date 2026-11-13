@@ -1,3 +1,6 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -600,6 +603,9 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
   }
   std::set<std::string> names;
   size_t env_bytes = 0;
+  // v1 names the variables to pass; their values are read once here, so the
+  // canonical request and the child see exactly the validated values.
+  std::vector<std::string> assignments;
   for (const auto&n:r->env)
   {
     const size_t equal = n.find('=');
@@ -615,7 +621,9 @@ bool Parse(int argc, char**argv, Request*r, std::string*why)
       *why = "invalid_env_allowlist";
       return false;
     }
+    assignments.push_back(name + "=" + v);
   }
+  r->env = std::move(assignments);
   return true;
 }
 std::string CanonicalRequest(const Request&r)
@@ -642,7 +650,7 @@ std::string CanonicalRequest(const Request&r)
     {
       o << ',';
     }
-    o << J(g_protocol_v2 ? r.env[i] : r.env[i] + "=" + getenv(r.env[i].c_str()));
+    o << J(r.env[i]);
   }
   o << "],\"exact_required\":" << (r.exact?"true":"false");
   if (g_protocol_v2) o << ",\"fault\":" << J(r.fault);
@@ -1374,6 +1382,11 @@ void Octal(char*p, size_t n, uint64_t v)
 bool TarHeader(int fd, const std::string&name, uint64_t size, Deadline deadline)
 {
   std::array<char, 512>h{};
+  // The ustar name field holds 100 bytes; keep a terminating NUL.
+  if (name.empty() || name.size() > 99)
+  {
+    return false;
+  }
   memcpy(h.data(), name.data(), name.size());
   Octal(h.data() + 100, 8, 0600);
   Octal(h.data() + 108, 8, 0);
@@ -1680,11 +1693,7 @@ int main(int argc, char**argv)
     Result(false, r.challenge, "", "", 0, 0, 0, {"containment_setup_failed"});
     return 2;
   }
-  std::vector<std::string>envs;
-  for (const auto&n:r.env)
-  {
-    envs.push_back(g_protocol_v2 ? n : n + "=" + getenv(n.c_str()));
-  }
+  std::vector<std::string>envs = r.env;
   auto add = [&](const std::string&n, const std::string&v){
                envs.push_back(n + "=" + v);
              };

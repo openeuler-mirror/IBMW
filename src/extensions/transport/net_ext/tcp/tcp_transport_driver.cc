@@ -3,13 +3,15 @@
 
 #include "net_ext/tcp/tcp_transport_driver.h"
 
+#include <limits>
 #include <regex>
 
 #include "cpp/util/type_support.h"
 #include "net_ext/global.h"
 #include "base/buffer_util.h"
 #include "base/url_encode.h"
-#include "base/url_parser.h"
+#include "net_ext/meta_filter.h"
+#include "net_base/asio_endpoint_parse.h"
 
 namespace YAML {
 template <>
@@ -108,12 +110,13 @@ bool TcpTransportDriver::RegisterSendType(
 
     std::vector<boost::asio::ip::tcp::endpoint> server_ep_vec;
     for (const auto& publish_add : server_url_list) {
-      auto v = util::SplitToVec<std::string>(publish_add, ":");
-      boost::asio::ip::tcp::endpoint ep{
-          boost::asio::ip::make_address(v[0].c_str()),
-          static_cast<uint16_t>(atoi(v[1].c_str()))};
-
-      server_ep_vec.emplace_back(ep);
+      auto ep = ibmw::common::net::ParseIpEndpoint<boost::asio::ip::tcp>(publish_add);
+      if (!ep) {
+        MW_ERROR("Invalid server url: '{}' for topic: {}, expect 'ip:port' or '[ipv6]:port'",
+                 publish_add, info.topic_name);
+        return false;
+      }
+      server_ep_vec.emplace_back(*ep);
     }
 
     pub_cfg_info_map_.emplace(
@@ -180,16 +183,17 @@ bool TcpTransportDriver::OnMessage(
       buf_oper.GetString(util::BufferLenType::kUInt8);
 
       std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
-      ctx_ptr->SetSerializationType(serialization_type);
-
-      // Get context
+      // Get context; framework fields are set afterwards so a peer cannot
+      // override them.
       size_t ctx_num = buf_oper.GetUint8();
       for (size_t ii = 0; ii < ctx_num; ++ii) {
         auto key = buf_oper.GetString(util::BufferLenType::kUInt16);
         auto val = buf_oper.GetString(util::BufferLenType::kUInt16);
+        if (!IsPeerMetaKeyAllowed(key)) continue;
         ctx_ptr->SetMetaValue(key, val);
       }
 
+      ctx_ptr->SetSerializationType(serialization_type);
       ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
 
       // Get message buf
@@ -230,11 +234,9 @@ void TcpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
       if (!to_addr.starts_with(tcp_prefix)) {
         continue;
       }
-      if (auto url_op = util::ParseUrl<std::string>(to_addr.substr(tcp_prefix.size()))) {
-        boost::asio::ip::tcp::endpoint ep{
-            boost::asio::ip::make_address(url_op->host.c_str()),
-            static_cast<uint16_t>(std::stoi(url_op->service))};
-        to_addr_server_ep_vec.emplace_back(ep);
+      if (auto ep = ibmw::common::net::ParseIpEndpoint<boost::asio::ip::tcp>(
+              ibmw::common::net::ExtractUrlAuthority(std::string_view(to_addr).substr(tcp_prefix.size())))) {
+        to_addr_server_ep_vec.emplace_back(*ep);
       } else {
         MW_WARN("Can not parse to_addr: {} for topic: {}", to_addr, info.topic_name);
       }
@@ -277,7 +279,7 @@ void TcpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
       MW_REQUIRE(meta_key_vals_array.len / 2 <= 255,
                               "Too much context meta, require less than 255, but actually {}.", meta_key_vals_array.len / 2);
       meta_key_vals.reserve(meta_key_vals_array.len / 2);
-      for (size_t ii = 0; ii < meta_key_vals_array.len; ii += 2) {
+      for (size_t ii = 0; ii + 1 < meta_key_vals_array.len; ii += 2) {
         meta_key_vals.emplace_back(
             std::string(ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii])),
             std::string(ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii + 1])));
@@ -302,10 +304,12 @@ void TcpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrappe
     const size_t buffer_array_len = buffer_array_view_ptr->Size();
     size_t msg_size = buffer_array_view_ptr->BufferSize();
 
-    uint32_t pkg_size = 1 + pattern.size() +
-                        1 + serialization_type.size() +
-                        context_meta_kv_size +
-                        msg_size;
+    const size_t pkg_size = 1 + pattern.size() +
+                            1 + serialization_type.size() +
+                            context_meta_kv_size +
+                            msg_size;
+    MW_REQUIRE(pkg_size <= std::numeric_limits<uint32_t>::max(),
+               "Package of {} bytes for topic {} exceeds the 4 GiB - 1 limit.", pkg_size, info.topic_name);
 
     auto buf = msg_buf_ptr->prepare(pkg_size);
 

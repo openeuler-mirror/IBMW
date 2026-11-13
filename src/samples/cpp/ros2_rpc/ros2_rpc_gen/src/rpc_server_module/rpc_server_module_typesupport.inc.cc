@@ -14,9 +14,8 @@ inline ibmw::rpc::Status _ibmw_ros2_rpc_server_marshalling_helper_ros_test_rpc(
   (void)req;
   (void)rsp;
   // IBMW_RPC_SERVER_HANDLER_BODY_ROS_TEST_RPC_BEGIN
-  // TODO: implement your service logic here
-  // Example: echo back request data
-  rsp.code = 0;
+  MW_INFO("RosTestRpc request with {} data bytes", req.data.size());
+  rsp.code = static_cast<int64_t>(req.data.size());
   return ibmw::rpc::Status();
   // IBMW_RPC_SERVER_HANDLER_BODY_ROS_TEST_RPC_END
 }

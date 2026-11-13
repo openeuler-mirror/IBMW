@@ -244,15 +244,12 @@ class AsioHttpClient : public std::enable_shared_from_this<AsioHttpClient> {
                 stream_.socket().close();
                 ++stop_step;
               case 4:
-                stream_.socket().release();
-                ++stop_step;
-              case 5:
                 stream_.cancel();
                 ++stop_step;
-              case 6:
+              case 5:
                 stream_.close();
                 ++stop_step;
-              case 7:
+              case 6:
                 stream_.release_socket();
                 ++stop_step;
               default:
@@ -550,7 +547,7 @@ class AsioHttpClientPool
       const AsioHttpClient::Options& client_options) {
     return boost::asio::co_spawn(
         mgr_strand_,
-        [this, &client_options]() -> Awaitable<std::shared_ptr<AsioHttpClient>> {
+        [this, client_options]() -> Awaitable<std::shared_ptr<AsioHttpClient>> {
           if (state_.load() != State::kStart) [[unlikely]] {
             MW_WARN("Http cli pool is closed, will not return cli instance.");
             co_return std::shared_ptr<AsioHttpClient>();

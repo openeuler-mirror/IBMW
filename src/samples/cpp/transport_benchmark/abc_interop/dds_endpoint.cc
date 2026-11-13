@@ -1,9 +1,16 @@
+// Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+// All rights reserved.
+
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -44,6 +51,7 @@ struct Options {
   uint32_t count{3000};
 };
 Options g_options;
+using ibmw::runtime::core::Engine;
 ibmw::runtime::core::Engine* g_engine = nullptr;
 
 bool Uint(const char* text, uint32_t* value) {
@@ -308,21 +316,73 @@ class SubscriberModule final : public ibmw::Module {
   bool artifact_ok_{true};
 };
 
-void SignalHandler(int signal) {
-  if (g_engine && (signal == SIGINT || signal == SIGTERM)) g_engine->Shutdown();
+// SIGINT/SIGTERM only write the signal number to a pipe (async-signal-safe);
+// a watcher thread calls Engine::Shutdown(), which logs and locks.
+std::mutex g_core_mutex;
+int g_signal_pipe[2] = {-1, -1};
+
+// Makes `core` the target of SIGINT/SIGTERM while in scope.
+class ScopedSignalCore {
+ public:
+  explicit ScopedSignalCore(Engine* core) { Set(core); }
+  ~ScopedSignalCore() { Set(nullptr); }
+  ScopedSignalCore(const ScopedSignalCore&) = delete;
+  ScopedSignalCore& operator=(const ScopedSignalCore&) = delete;
+
+ private:
+  static void Set(Engine* core) {
+    std::lock_guard<std::mutex> lck(g_core_mutex);
+    g_engine = core;
+  }
+};
+
+void SignalHandler(int sig) {
+  const int saved_errno = errno;
+  const unsigned char byte = static_cast<unsigned char>(sig);
+  [[maybe_unused]] auto ret = write(g_signal_pipe[1], &byte, 1);
+  errno = saved_errno;
+}
+
+bool InstallSignalHandlers() {
+  if (pipe2(g_signal_pipe, O_CLOEXEC) != 0 ||
+      fcntl(g_signal_pipe[1], F_SETFL, O_NONBLOCK) != 0) {
+    return false;
+  }
+  std::thread([] {
+    unsigned char sig = 0;
+    while (true) {
+      const ssize_t n = read(g_signal_pipe[0], &sig, 1);
+      if (n != 1) {
+        if (n < 0 && errno == EINTR) continue;
+        return;
+      }
+      std::lock_guard<std::mutex> lck(g_core_mutex);
+      if (g_engine == nullptr) {
+        // No engine (anymore): die from the signal.
+        std::signal(sig, SIG_DFL);
+        raise(sig);
+        continue;
+      }
+      g_engine->Shutdown();
+    }
+  }).detach();
+  return std::signal(SIGINT, SignalHandler) != SIG_ERR &&
+         std::signal(SIGTERM, SignalHandler) != SIG_ERR;
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   if (!Parse(argc, argv)) { Usage(argv[0]); return 2; }
-  signal(SIGINT, SignalHandler);
-  signal(SIGTERM, SignalHandler);
+  if (!InstallSignalHandlers()) {
+    std::cerr << "Failed to set up SIGINT/SIGTERM handling." << std::endl;
+    return 1;
+  }
   try {
     ibmw::runtime::core::Engine engine;
     PublisherModule publisher;
     SubscriberModule subscriber;
     if (g_options.role == "sub" && !subscriber.ArtifactReady()) return 1;
-    g_engine = &engine;
+    ScopedSignalCore signal_core(&engine);
     if (g_options.role == "pub")
       engine.GetModuleBus().RegisterModule(publisher.NativeHandle());
     else
@@ -332,7 +392,6 @@ int main(int argc, char** argv) {
     engine.Initialize(options);
     engine.Start();
     engine.Shutdown();
-    g_engine = nullptr;
     if (g_options.role == "pub" && !publisher.PublisherOk()) return 1;
     if (g_options.role == "sub" && !subscriber.ArtifactOk()) return 1;
   } catch (const std::exception& error) {

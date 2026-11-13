@@ -3,6 +3,8 @@
 
 #include "engine/thread_tools.h"
 
+#include <atomic>
+#include <charconv>
 #include <cstdlib>
 #include <thread>
 
@@ -11,42 +13,14 @@
 
 #include <pthread.h>
 #include <sched.h>
-
-#if defined(_WIN32)
-  #include <windows.h>
-const DWORD MS_VC_EXCEPTION = 0x406D1388;
-  #pragma pack(push, 8)
-typedef struct tagTHREADNAME_INFO {
-  DWORD dwType;      // Must be 0x1000.
-  LPCSTR szName;     // Pointer to name (in user addr space).
-  DWORD dwThreadID;  // Thread ID (-1=caller thread).
-  DWORD dwFlags;     // Reserved for future use, must be zero.
-} THREADNAME_INFO;
-  #pragma pack(pop)
-void SetThreadName(DWORD dwThreadID, const char* threadName) {
-  THREADNAME_INFO info;
-  info.dwType = 0x1000;
-  info.szName = threadName;
-  info.dwThreadID = dwThreadID;
-  info.dwFlags = 0;
-  #pragma warning(push)
-  #pragma warning(disable : 6320 6322)
-  __try {
-    RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR), (ULONG_PTR*)&info);
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
-  }
-  #pragma warning(pop)
-}
-#endif
+#include <signal.h>
+#include <sys/mman.h>
 
 namespace ibmw::runtime::core::util {
 
 void SetNameForCurrentThread(std::string_view thread_name) {
   std::string name(thread_name);
 
-#if defined(_WIN32)
-  SetThreadName((DWORD)-1, name.c_str());
-#else
   if (name.size() < 15) {
     pthread_setname_np(pthread_self(), name.data());
   } else {
@@ -54,18 +28,17 @@ void SetNameForCurrentThread(std::string_view thread_name) {
         name.substr(0, 8) + ".." + name.substr(name.size() - 5, name.size());
     pthread_setname_np(pthread_self(), real_name.c_str());
   }
-
-#endif
 }
 
 void BindCpuForCurrentThread(const std::vector<uint32_t>& cpu_set) {
   if (cpu_set.empty()) return;
 
-#if defined(_WIN32)
-  throw ibmw::common::util::IbmwException(
-      "BindCpuForCurrentThread currently not supported on the Windows platform.");
-#else
-  static const uint32_t kMaxCpuIdx = std::thread::hardware_concurrency();
+  // hardware_concurrency() may be 0 when unknown; CPU_SET must stay inside
+  // cpu_set_t either way.
+  static const uint32_t kMaxCpuIdx = [] {
+    const uint32_t count = std::thread::hardware_concurrency();
+    return (count == 0 || count > CPU_SETSIZE) ? static_cast<uint32_t>(CPU_SETSIZE) : count;
+  }();
   for (auto cpu_idx : cpu_set) {
     if (cpu_idx >= kMaxCpuIdx) {
       throw ibmw::common::util::IbmwException(::ibmw_fmt::format(
@@ -93,16 +66,11 @@ void BindCpuForCurrentThread(const std::vector<uint32_t>& cpu_set) {
         "Call 'sched_setaffinity' get error, ret code '{}'", ret));
   }
 #endif
-#endif
 }
 
 void SetCpuSchedForCurrentThread(std::string_view sched) {
   if (sched.empty()) return;
 
-#if defined(_WIN32)
-  throw ibmw::common::util::IbmwException(
-      "SetCpuSchedForCurrentThread currently not supported on the Windows platform.");
-#else
   if (sched == "SCHED_OTHER") {
     sched_param param;
     param.sched_priority = 0;
@@ -137,7 +105,14 @@ void SetCpuSchedForCurrentThread(std::string_view sched) {
 
     struct sched_param param;
     auto sched_priority_str = sched.substr(pos + 1);
-    param.sched_priority = atoi(sched_priority_str.data());
+    const auto* priority_end = sched_priority_str.data() + sched_priority_str.size();
+    const auto [parsed_end, parse_error] =
+        std::from_chars(sched_priority_str.data(), priority_end, param.sched_priority);
+    if (parse_error != std::errc() || parsed_end != priority_end) {
+      throw ibmw::common::util::IbmwException(::ibmw_fmt::format(
+          "Invalid sched priority '{}', required range {}~{}",
+          sched_priority_str, priority_min, priority_max));
+    }
     if (param.sched_priority < priority_min ||
         param.sched_priority > priority_max) {
       throw ibmw::common::util::IbmwException(::ibmw_fmt::format(
@@ -165,8 +140,48 @@ void SetCpuSchedForCurrentThread(std::string_view sched) {
           policy, param.sched_priority, check_policy, check_param.sched_priority));
     }
   }
+}
 
-#endif
+namespace {
+std::atomic<bool> alt_signal_stacks_enabled{false};
+
+struct ThreadAltSignalStack {
+  void* base = nullptr;
+
+  ~ThreadAltSignalStack() {
+    if (base == nullptr) return;
+    stack_t current{};
+    if (sigaltstack(nullptr, &current) == 0 && current.ss_sp == base) {
+      stack_t disable{};
+      disable.ss_flags = SS_DISABLE;
+      if (sigaltstack(&disable, nullptr) != 0) return;  // still in use: keep it
+    }
+    munmap(base, kCrashAltStackSize);
+  }
+};
+
+thread_local ThreadAltSignalStack tl_alt_signal_stack;
+}  // namespace
+
+void EnableAltSignalStacks(bool enable) {
+  alt_signal_stacks_enabled.store(enable, std::memory_order_relaxed);
+}
+
+void EnsureAltSignalStackForCurrentThread() {
+  if (!alt_signal_stacks_enabled.load(std::memory_order_relaxed)) return;
+  stack_t current{};
+  if (sigaltstack(nullptr, &current) != 0 || (current.ss_flags & SS_DISABLE) == 0) return;
+  void* base = mmap(nullptr, kCrashAltStackSize, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (base == MAP_FAILED) return;
+  stack_t stack{};
+  stack.ss_sp = base;
+  stack.ss_size = kCrashAltStackSize;
+  if (sigaltstack(&stack, nullptr) != 0) {
+    munmap(base, kCrashAltStackSize);
+    return;
+  }
+  tl_alt_signal_stack.base = base;
 }
 
 }  // namespace ibmw::runtime::core::util

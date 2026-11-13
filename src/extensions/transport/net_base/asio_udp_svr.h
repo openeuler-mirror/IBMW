@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -33,9 +34,10 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
 
   struct Options {
     /// Listening address
-    Udp::endpoint ep = Udp::endpoint{boost::asio::ip::address_v4(), 53927};
+    Udp::endpoint ep = Udp::endpoint{boost::asio::ip::address_v4::loopback(), 53927};
 
-    /// Maximum number of connections
+    /// Maximum number of sessions (remote endpoints). When reached, datagrams
+    /// from new endpoints are dropped; known endpoints are still served.
     size_t max_session_num = 1000000;
 
     /// Managing coroutine timer intervals
@@ -67,10 +69,8 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
   explicit AsioUdpServer(const std::shared_ptr<IOCtx>& io_ptr)
       : io_ptr_(io_ptr),
         mgr_strand_(boost::asio::make_strand(*io_ptr_)),
-        acceptor_timer_(mgr_strand_),
         mgr_timer_(mgr_strand_),
-        socket_strand_(boost::asio::make_strand(*io_ptr_)),
-        sock_(socket_strand_),
+        sock_(mgr_strand_),  // used only on the mgr strand
         logger_ptr_(std::make_shared<ibmw::common::util::LoggerWrapper>()) {}
 
   ~AsioUdpServer() = default;
@@ -111,6 +111,22 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
 
   void Start() {
     MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    sock_.open(options_.ep.protocol(), ec);
+    if (!ec) sock_.bind(options_.ep, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      sock_.close(ignored);
+      MW_THROW("udp svr failed to bind {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
+    MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
 
@@ -118,25 +134,21 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          sock_.open(options_.ep.protocol());
-          sock_.bind(options_.ep);
-
           while (state_.load() == State::kStart) {
             try {
-              // If the number of connections reaches the upper limit, wait for a while before trying
-              if (session_ptr_map_.size() >= options_.max_session_num) {
-                acceptor_timer_.expires_after(options_.mgr_timer_dt);
-                co_await acceptor_timer_.async_wait(boost::asio::use_awaitable);
-                continue;
-              }
-
               auto msg_buf = std::make_shared<boost::asio::streambuf>();
               boost::asio::ip::udp::endpoint remote_ep;
+              // One spare byte: a datagram that fills it was longer than the
+              // limit and has been truncated by the kernel, so drop it.
               size_t read_data_size = co_await sock_.async_receive_from(
-                  msg_buf->prepare(options_.max_package_size), remote_ep,
+                  msg_buf->prepare(options_.max_package_size + 1), remote_ep,
                   boost::asio::use_awaitable);
               MW_TRACE("udp svr session async read {} bytes from {}",
                           read_data_size, ibmw::common::util::SSToString(remote_ep));
+              if (read_data_size > options_.max_package_size) [[unlikely]] {
+                OnTruncatedDatagram(remote_ep);
+                continue;
+              }
               msg_buf->commit(read_data_size);
 
               std::shared_ptr<Session> session_ptr;
@@ -144,9 +156,14 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
               auto finditr = session_ptr_map_.find(remote_ep);
               if (finditr != session_ptr_map_.end()) {
                 session_ptr = finditr->second;
+              } else if (session_ptr_map_.size() >= options_.max_session_num) [[unlikely]] {
+                // Not stopping the receive loop: that would also block the
+                // known endpoints (TRANS-032).
+                OnSessionTableFull(remote_ep);
+                continue;
               } else {
                 session_ptr = std::make_shared<Session>(
-                    io_ptr_, logger_ptr_, msg_handle_ptr_);
+                    io_ptr_, logger_ptr_, msg_handle_ptr_, remote_ep);
                 session_ptr->Initialize(session_options_ptr_);
                 session_ptr->Start();
                 session_ptr_map_.emplace(remote_ep, session_ptr);
@@ -181,6 +198,7 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
                 else
                   session_ptr_map_.erase(itr++);
               }
+              if (session_ptr_map_.size() < options_.max_session_num) table_full_ = false;
             } catch (const std::exception& e) {
               MW_TRACE(
                   "udp svr timer get exception and exit, exception info: {}",
@@ -215,12 +233,6 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
               sock_.close();
               ++stop_step;
             case 4:
-              sock_.release();
-              ++stop_step;
-            case 5:
-              acceptor_timer_.cancel();
-              ++stop_step;
-            case 6:
               mgr_timer_.cancel();
               ++stop_step;
             default:
@@ -256,12 +268,14 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
    public:
     Session(const std::shared_ptr<IOCtx>& io_ptr,
             const std::shared_ptr<ibmw::common::util::LoggerWrapper>& logger_ptr,
-            const std::shared_ptr<MsgHandle>& msg_handle_ptr)
+            const std::shared_ptr<MsgHandle>& msg_handle_ptr,
+            const Udp::endpoint& remote_ep)
         : io_ptr_(io_ptr),
           session_mgr_strand_(boost::asio::make_strand(*io_ptr_)),
           timer_(session_mgr_strand_),
           logger_ptr_(logger_ptr),
-          msg_handle_ptr_(msg_handle_ptr) {}
+          msg_handle_ptr_(msg_handle_ptr),
+          remote_ep_(remote_ep) {}
 
     ~Session() = default;
 
@@ -395,12 +409,25 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
     kShutdown,
   };
 
+  [[gnu::cold, gnu::noinline]] void OnTruncatedDatagram(const Udp::endpoint& remote_ep) {
+    // Log the 1st, 2nd, 4th, 8th, ... drop so a flood cannot flood the log.
+    const uint64_t count = ++truncated_count_;
+    if ((count & (count - 1)) != 0) return;
+    MW_WARN("udp svr dropped a datagram longer than max_package_size {} from {} ({} dropped so far).",
+            options_.max_package_size, ibmw::common::util::SSToString(remote_ep), count);
+  }
+
+  [[gnu::cold, gnu::noinline]] void OnSessionTableFull(const Udp::endpoint& remote_ep) {
+    if (table_full_) return;
+    table_full_ = true;
+    MW_WARN("udp svr session table is full ({} sessions), dropping datagrams from new endpoints such as {}.",
+            session_ptr_map_.size(), ibmw::common::util::SSToString(remote_ep));
+  }
+
   // IO CTX
   std::shared_ptr<IOCtx> io_ptr_;
   Strand mgr_strand_;
-  Timer acceptor_timer_;
   Timer mgr_timer_;
-  Strand socket_strand_;
   Udp::socket sock_;
 
   // Log handle
@@ -419,6 +446,8 @@ class AsioUdpServer : public std::enable_shared_from_this<AsioUdpServer> {
   std::shared_ptr<const SessionOptions> session_options_ptr_;
   std::unordered_map<Udp::endpoint, std::shared_ptr<Session>, AsioEndpointHash>
       session_ptr_map_;
+  bool table_full_ = false;  // warned for the current full episode (mgr strand)
+  uint64_t truncated_count_ = 0;  // datagrams dropped as truncated (receive loop on mgr strand)
 };
 
 }  // namespace ibmw::common::net

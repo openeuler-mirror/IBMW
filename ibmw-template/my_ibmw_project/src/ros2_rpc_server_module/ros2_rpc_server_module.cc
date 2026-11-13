@@ -3,23 +3,13 @@
 
 #include "ros2_rpc_server_module/ros2_rpc_server_module.h"
 
+#include "ros2_rpc_server_module/ros2_rpc_server_module_typesupport.inc.cc"
+
 namespace my_project {
 
 bool Ros2RpcServerModule::Setup(ibmw::Runtime core) {
   core_ = core;
-
-  try {
-    // TODO: Create and register your ROS2 RPC service
-    // service_ptr_ = std::make_shared<YourServiceImpl>();
-    // bool ret = core_.GetService().RegisterService(service_ptr_.get());
-    // MW_REQUIRE(ret, "Register ROS2 RPC service failed.");
-
-    MW_INFO("Ros2RpcServerModule::Setup succeeded.");
-  } catch (const std::exception& e) {
-    MW_ERROR("Setup failed: {}", e.what());
-    return false;
-  }
-
+  IBMW_TS_RPC_SERVER_SETUP(core);
   return true;
 }
 
@@ -31,5 +21,7 @@ bool Ros2RpcServerModule::Run() {
 void Ros2RpcServerModule::Stop() {
   MW_INFO("Ros2RpcServerModule::Stop succeeded.");
 }
+
+IBMW_TS_RPC_SERVER_HANDLER_IMPL(Ros2RpcServerModule)
 
 }  // namespace my_project

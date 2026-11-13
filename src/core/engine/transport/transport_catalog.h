@@ -20,7 +20,7 @@
 #endif
 #include "base/log_util.h"
 
-namespace ibmw::runtime::core::observability { struct MetricsEntry; struct CachedMetricsGate; }
+namespace ibmw::runtime::core::observability { struct MetricsEntry; struct PodMetricsEntry; struct CachedMetricsGate; }
 namespace ibmw::runtime::core::transport {
 
 // Forward decls for cached pointers in SendTypeWrapper (Phase 7 §7.2 C2).
@@ -91,7 +91,7 @@ struct SendTypeWrapper {
 #ifdef IBMW_ENABLE_COMM_TRACE
   std::vector<internal::CommTraceSendOverlayV1*> cached_send_overlays;
 #endif
-  std::atomic<uint32_t>* cached_seq_counter = nullptr;
+  std::atomic<uint64_t>* cached_seq_counter = nullptr;
   const FrameworkAsyncTransportFilterCollector* cached_filter_collector = nullptr;
   ibmw::runtime::core::observability::MetricsEntry* cached_metrics = nullptr;
   std::shared_ptr<ibmw::runtime::core::observability::CachedMetricsGate>
@@ -126,6 +126,11 @@ class TransportCatalog {
 
   bool RegisterSendType(
       std::unique_ptr<SendTypeWrapper>&& send_type_wrapper_ptr);
+
+  // Removes a registered publisher from every lookup. The wrapper stays
+  // allocated until the catalog is destroyed, because drivers that accepted it
+  // may still reference it. Only valid before 'Start'.
+  void RetireSendType(const SendTypeWrapper& send_type_wrapper);
 
   const MessageHandlerWrapper* GetMessageHandlerWrapperPtr(
       std::string_view msg_type,
@@ -203,6 +208,8 @@ class TransportCatalog {
   // index map, topic:wrapper
   std::unordered_map<std::string_view, std::vector<SendTypeWrapper*>>
       pub_topic_index_map_;
+
+  std::vector<std::unique_ptr<SendTypeWrapper>> retired_send_type_wrappers_;
 
   std::unordered_map<Key, std::unique_ptr<MessageHandlerWrapper>, Key::Hash>
       message_handler_map_;

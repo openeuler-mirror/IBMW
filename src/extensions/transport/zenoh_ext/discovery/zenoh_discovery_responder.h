@@ -23,7 +23,7 @@ class ZenohDiscoveryResponder {
 
  private:
   zenoh_protocol::Snapshot Snapshot() const;
-  void Serve(std::stop_token stop);
+  void Serve();
 
   mutable std::mutex mutex_;
   std::map<std::pair<EndpointRole, std::string>, DiscoveredEndpoint> endpoints_;
@@ -32,7 +32,7 @@ class ZenohDiscoveryResponder {
   std::string domain_;
   std::string key_;
   zenoh_detail::Owned<z_owned_queryable_t> queryable_;
-  zenoh_detail::Owned<z_owned_fifo_handler_query_t> queries_;
+  zenoh_detail::Owned<z_owned_ring_handler_query_t> queries_;
   std::jthread worker_;
 };
 

@@ -8,6 +8,9 @@ message(STATUS "get backward ...")
 set(backward_DOWNLOAD_URL
     "https://github.com/bombela/backward-cpp/archive/refs/tags/v1.6.tar.gz"
     CACHE STRING "")
+set(backward_DOWNLOAD_SHA256
+    "c654d0923d43f1cea23d086729673498e4741fb2457e806cfaeaea7b20c97c10"
+    CACHE STRING "SHA256 of backward_DOWNLOAD_URL (update both together)")
 
 if(backward_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -18,6 +21,7 @@ else()
   FetchContent_Declare(
     backward
     URL ${backward_DOWNLOAD_URL}
+    URL_HASH SHA256=${backward_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()

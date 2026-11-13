@@ -477,7 +477,7 @@ def test_ros2_subprocess_uses_absolute_command_and_sanitized_environment():
 
     result = Ros2Adapter(runner=runner, environ={
         "PATH": "/trusted/bin", "ROS_DOMAIN_ID": "41", "PYTHONPATH": "/sut/python",
-        "PYTHONHOME": "/sut/home", "LD_PRELOAD": "/sut/preload.so",
+        "PYTHONHOME": "/sut/python-home", "LD_PRELOAD": "/sut/preload.so",
         "LD_LIBRARY_PATH": "/sut/lib", "LD_AUDIT": "/sut/audit.so",
         "DYLD_INSERT_LIBRARIES": "/sut/dyld", "BASH_ENV": "/sut/bash", "ENV": "/sut/env",
     }).doctor()
@@ -499,7 +499,7 @@ def test_trusted_prefix_derives_environment_without_inherited_contamination(tmp_
 
     result = Ros2Adapter(runner=runner, environ={
         "PATH": "/usr/bin", "PYTHONPATH": "/untrusted/python",
-        "LD_LIBRARY_PATH": "/untrusted/lib", "PYTHONHOME": "/untrusted/home",
+        "LD_LIBRARY_PATH": "/untrusted/lib", "PYTHONHOME": "/untrusted/python-home",
     }, ros2_prefix=str(prefix)).doctor()
     runtime = result["observations"][-1]["value"]
     assert result["status"] == "ready"

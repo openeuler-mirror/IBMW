@@ -5,8 +5,7 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <fstream>
-
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -43,16 +42,23 @@ std::vector<RuntimeRegistration> RuntimeRegistry::DiscoverLocalRuntimesImpl(
       continue;
     }
     try {
-      std::ifstream input(entry.path());
-      if (!input.is_open()) {
+      // Checks and reads the opened file: the entry may be replaced or grow
+      // after the lstat above.
+      const RuntimeFileDescriptor file(::openat(
+          directory.Get(), entry.path().filename().c_str(),
+          O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
+      struct stat file_stat {};
+      if (file.Get() < 0 || ::fstat(file.Get(), &file_stat) != 0 ||
+          !S_ISREG(file_stat.st_mode) || file_stat.st_uid != ::geteuid() ||
+          (file_stat.st_mode & 077) != 0) {
         continue;
       }
-      if (std::filesystem::file_size(entry.path()) >=
-          kRuntimeMaxControlMessage) {
+      const auto data =
+          ReadRuntimeFileBelow(file.Get(), kRuntimeMaxControlMessage);
+      if (!data.has_value()) {
         continue;
       }
-      nlohmann::json value;
-      input >> value;
+      const auto value = nlohmann::json::parse(*data);
       auto registration = RuntimeRegistrationFromJson(value);
       const auto expected_socket_name =
           registration.runtime_id + ".sock";

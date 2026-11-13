@@ -71,6 +71,7 @@ void ParallelExecutor::Initialize(std::string_view name, YAML::Node options_node
         threadname = threadname + "." + std::to_string(ii);
 
       try {
+        util::EnsureAltSignalStackForCurrentThread();
         util::SetNameForCurrentThread(threadname);
         util::BindCpuForCurrentThread(options_.thread_bind_cpu);
         util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);
@@ -81,6 +82,30 @@ void ParallelExecutor::Initialize(std::string_view name, YAML::Node options_node
 
       ibmw::executor::Task task;
       while (true) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+        try {
+          while (qu_.TryPop(task)) {
+            task();
+            --queue_task_num_;
+          }
+        } catch (const std::exception& e) {
+          MW_FATAL("Tbb pool executor '{}' run loop get exception, {}",
+                      Name(), e.what());
+        }
+
+        if (state_.load() == State::kShutdown) break;
+
+        try {
+          // Pop() returns false once Shutdown() aborted the queue.
+          if (qu_.Pop(task)) {
+            task();
+            --queue_task_num_;
+          }
+        } catch (const std::exception& e) {
+          MW_FATAL("Tbb pool executor '{}' run loop get exception, {}",
+                      Name(), e.what());
+        }
+#else
         try {
           while (qu_.try_pop(task)) {
             task();
@@ -102,6 +127,7 @@ void ParallelExecutor::Initialize(std::string_view name, YAML::Node options_node
           MW_FATAL("Tbb pool executor '{}' run loop get exception, {}",
                       Name(), e.what());
         }
+#endif
       }
 
       tl_current_executor_ = nullptr;
@@ -124,7 +150,11 @@ void ParallelExecutor::Shutdown() {
     return;
 
   while (work_thread_num_.load()) {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    qu_.Abort();  // sticky: one call is enough, repeating is harmless
+#else
     qu_.abort();
+#endif
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 
@@ -132,6 +162,22 @@ void ParallelExecutor::Shutdown() {
     if (itr->joinable()) itr->join();
     threads_.erase(itr++);
   }
+
+  // A Dispatch() that passed its state check may have queued a task after the
+  // workers' final try_pop; run such stragglers here rather than drop them.
+  // (Lifecycle-only: keeps Dispatch() free of extra synchronization.)
+  const auto* prev_executor = tl_current_executor_;
+  tl_current_executor_ = this;
+  ibmw::executor::Task task;
+#if defined(IBMW_SELFDEV_CONCURRENT)
+  while (qu_.TryPop(task)) {  // still drains after Abort()
+#else
+  while (qu_.try_pop(task)) {
+#endif
+    task();
+    --queue_task_num_;
+  }
+  tl_current_executor_ = prev_executor;
 }
 
 bool ParallelExecutor::IsInCurrentExecutor() const noexcept {
@@ -164,10 +210,23 @@ void ParallelExecutor::Dispatch(ibmw::executor::Task&& task) noexcept {
                         name_, cur_queue_task_num, queue_threshold_);
   }
 
+  // Count before inserting: a worker may pop and decrement the task before
+  // this thread runs another instruction, which would otherwise wrap the
+  // unsigned counter and make the threshold check reject tasks.
+  ++queue_task_num_;
   try {
+#if defined(IBMW_SELFDEV_CONCURRENT)
+    if (!qu_.Emplace(std::move(task))) [[unlikely]] {
+      --queue_task_num_;
+      MW_ERROR("Tbb pool executor '{}' can only execute task when state is 'Init' or 'Start'.",
+                  name_);
+      return;
+    }
+#else
     qu_.emplace(std::move(task));
-    ++queue_task_num_;
+#endif
   } catch (const std::exception& e) {
+    --queue_task_num_;
     MW_ERROR("Tbb pool executor '{}' execute task get exception, {}", name_, e.what());
   }
 }

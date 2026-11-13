@@ -79,6 +79,11 @@ bench_results/
 *.bench.json
 perf.data
 perf.data.old
+# Metrics/trace/bench runs write JSONL under many names; none are tracked.
+# Commit a JSONL fixture deliberately with `git add -f` or a `!path` rule.
+*.jsonl
+managed_exact_candidate_runs/
+topology-artifacts/
 
 # ---- Python virtualenv ------------------------------------------------------
 venv/
@@ -90,6 +95,7 @@ env/
 local.cmake
 .envrc
 .omc/
+.opencode/
 
 # ---- Generated regen tmp ----------------------------------------------------
 *.regen.tmp
@@ -108,3 +114,5 @@ local.cmake
 # The log CLI source directory is not a colcon log output directory.
 !src/extensions/cli/log/
 !src/extensions/cli/log/**
+# Test fixtures in JSONL (the `*.jsonl` rule is for run output).
+!scripts/tests/fixtures/*.jsonl

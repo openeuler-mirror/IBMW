@@ -26,6 +26,9 @@ struct convert<ibmw::extensions::grpc_extension::GrpcExtension::Options> {
     if (!rhs.listen_ip.empty() && rhs.listen_port != 0) {
       node["listen_ip"] = rhs.listen_ip;
       node["listen_port"] = rhs.listen_port;
+      node["max_request_body_size"] = rhs.max_request_body_size;
+      node["max_connection_num"] = rhs.max_connection_num;
+      node["max_concurrent_streams"] = rhs.max_concurrent_streams;
     }
 
     return node;
@@ -42,6 +45,15 @@ struct convert<ibmw::extensions::grpc_extension::GrpcExtension::Options> {
 
     if (node["listen_port"])
       rhs.listen_port = node["listen_port"].as<uint16_t>();
+
+    if (node["max_request_body_size"])
+      rhs.max_request_body_size = node["max_request_body_size"].as<uint32_t>();
+
+    if (node["max_connection_num"])
+      rhs.max_connection_num = node["max_connection_num"].as<uint32_t>();
+
+    if (node["max_concurrent_streams"])
+      rhs.max_concurrent_streams = node["max_concurrent_streams"].as<uint32_t>();
 
     return true;
   }
@@ -68,6 +80,22 @@ auto WrapIbmwLoggerRef(ibmw::logger::LoggerRef logger_ref)
           }});
 }
 
+// Resolves g_logger on every call: executor threads are joined after the
+// logging subsystem stops, when g_logger has reverted to its fallback.
+auto WrapExtensionLogger() -> std::shared_ptr<ibmw::common::util::LoggerWrapper> {
+  return std::make_shared<ibmw::common::util::LoggerWrapper>(
+      ibmw::common::util::LoggerWrapper{
+          .get_log_level_func = []() -> uint32_t { return g_logger.Get().GetLogLevel(); },
+          .log_func = [](uint32_t lvl,
+                         uint32_t line,
+                         const char* file_name,
+                         const char* function_name,
+                         const char* log_data,
+                         size_t log_data_size) {
+            g_logger.Get().Log(lvl, line, file_name, function_name, log_data, log_data_size);
+          }});
+}
+
 GrpcExtension::GrpcExtension() {
   SetExtensionLogger(&g_logger);
 }
@@ -78,8 +106,14 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
   if (extension_options_node && !extension_options_node.IsNull()) {
     options_ = extension_options_node.as<Options>();
   }
+  // A gRPC message has a 5-byte prefix: a smaller limit rejects every request.
+  MW_REQUIRE(options_.max_request_body_size >= 5, "Grpc max_request_body_size must be at least 5, got {}.",
+             options_.max_request_body_size);
+  MW_REQUIRE(options_.max_connection_num >= 1, "Grpc max_connection_num must be at least 1.");
+  MW_REQUIRE(options_.max_concurrent_streams >= 1, "Grpc max_concurrent_streams must be at least 1.");
 
   asio_executor_ptr_ = std::make_shared<ibmw::common::net::AsioExecutor>(options_.thread_num);
+  asio_executor_ptr_->SetLogger(WrapExtensionLogger());
 
   http2_cli_pool_ptr_ = std::make_shared<client::AsioHttp2ClientPool>(asio_executor_ptr_->IO());
 
@@ -98,15 +132,29 @@ bool GrpcExtension::OnInit(runtime::core::Engine* core_ptr) {
   });
 
   if (!options_.listen_ip.empty() && options_.listen_port != 0) {
+    // Checked here so that a bad address fails initialization, not start.
+    bool loopback = false;
+    try {
+      loopback = IsLoopbackListenAddress(options_.listen_ip);
+    } catch (const std::invalid_argument& e) {
+      MW_THROW("{}", e.what());
+    }
+    MW_CHECK_WARN(loopback,
+                  "Grpc server listens on {}:{} in plaintext without authentication: every host that can reach it "
+                  "can call all services. Listen on 127.0.0.1 or put it behind a TLS proxy.",
+                  options_.listen_ip, options_.listen_port);
+
     http2_svr_ptr_ = std::make_shared<server::AsioHttp2Server>(asio_executor_ptr_->IO());
     core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStart), [this] {
       http2_svr_ptr_->SetLogger(WrapIbmwLoggerRef(g_logger.Get()));
       http2_svr_ptr_->Initialize(server::ServerOptions{
           .ep = {boost::asio::ip::make_address_v4(options_.listen_ip),
                  options_.listen_port},
+          .max_connection_num = options_.max_connection_num,
           .http2_settings = {
-              .max_concurrent_streams = 100,
+              .max_concurrent_streams = options_.max_concurrent_streams,
               .initial_window_size = (1U << 31) - 1,
+              .max_request_body_size = options_.max_request_body_size,
           }});
       http2_svr_ptr_->Start();
     });

@@ -24,8 +24,14 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
     node["truststore"] = rhs.truststore;
     node["client_cert"] = rhs.client_cert;
     node["client_key"] = rhs.client_key;
-    node["client_key_password"] = rhs.client_key_password;
+    // Secrets (client_key_password, password) are deliberately not written
+    // back: the encoded node is exported with the effective configuration.
     node["callback_executor_name"] = rhs.callback_executor_name;
+    node["username"] = rhs.username;
+    node["keep_alive_s"] = rhs.keep_alive_s;
+    node["clean_session"] = rhs.clean_session;
+    node["tls_verify_hostname"] = rhs.tls_verify_hostname;
+    node["start_connect_wait_ms"] = rhs.start_connect_wait_ms;
 
     return node;
   }
@@ -38,6 +44,9 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
 
     if (node["max_pkg_size_k"])
       rhs.max_pkg_size_k = node["max_pkg_size_k"].as<uint32_t>();
+    MW_REQUIRE(rhs.max_pkg_size_k <= ibmw::extensions::mqtt_extension::MqttExtension::kMaxPkgSizeK,
+               "mqtt_extension option max_pkg_size_k must be at most {}, got {}.",
+               ibmw::extensions::mqtt_extension::MqttExtension::kMaxPkgSizeK, rhs.max_pkg_size_k);
 
     if (node["truststore"])
       rhs.truststore = node["truststore"].as<std::string>();
@@ -57,6 +66,22 @@ struct convert<ibmw::extensions::mqtt_extension::MqttExtension::Options> {
     if (node["callback_executor_name"])
       rhs.callback_executor_name = node["callback_executor_name"].as<std::string>();
 
+    if (node["username"])
+      rhs.username = node["username"].as<std::string>();
+
+    if (node["password"])
+      rhs.password = node["password"].as<std::string>();
+
+    if (node["keep_alive_s"])
+      rhs.keep_alive_s = node["keep_alive_s"].as<uint32_t>();
+
+    if (node["clean_session"])
+      rhs.clean_session = node["clean_session"].as<bool>();
+    if (node["tls_verify_hostname"])
+      rhs.tls_verify_hostname = node["tls_verify_hostname"].as<bool>();
+    if (node["start_connect_wait_ms"])
+      rhs.start_connect_wait_ms = node["start_connect_wait_ms"].as<uint32_t>();
+
     return true;
   }
 };
@@ -68,17 +93,40 @@ MqttExtension::MqttExtension() {
   SetExtensionLogger(&g_logger);
 }
 
+MqttExtension::Options MqttExtension::ParseOptions(const YAML::Node &node) {
+  return node.as<Options>();
+}
+
 bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
   YAML::Node extension_options_node = core_ptr_->GetExtensionBus().GetExtensionOptionsNode(Name());
 
   if (extension_options_node && !extension_options_node.IsNull()) {
-    options_ = extension_options_node.as<Options>();
+    options_ = ParseOptions(extension_options_node);
   }
 
-  // initialize mqtt
-  MQTTAsync_create(
-      &client_, options_.broker_addr.c_str(), options_.client_id.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
+  // Validate the connection options (URL, TLS files) up front so that a
+  // misconfiguration fails initialization instead of retrying forever.
+  {
+    MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
+    MQTTAsync_SSLOptions ssl_opts = MQTTAsync_SSLOptions_initializer;
+    BuildConnectOptions(conn_opts, ssl_opts);
+  }
 
+  // The catalog must exist before the client can deliver any message.
+  msg_handle_catalog_ptr_ = std::make_shared<MsgHandleCatalog>();
+
+  // initialize mqtt
+  const int create_rc = MQTTAsync_create(
+      &client_, options_.broker_addr.c_str(), options_.client_id.c_str(), MQTTCLIENT_PERSISTENCE_NONE, NULL);
+  if (create_rc != MQTTASYNC_SUCCESS) {
+    client_ = nullptr;
+    MW_ERROR("Failed to create mqtt client for '{}', rc: {}", options_.broker_addr, create_rc);
+    return false;
+  }
+
+  // From here on a failure must not leave a client whose callbacks point
+  // at this object (OnShutdown does not run after a failed OnInit).
+  try {
   MQTTAsync_setCallbacks(
       client_,
       this,
@@ -89,11 +137,6 @@ bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
         return static_cast<MqttExtension *>(context)->OnMsgRecv(topicName, topicLen, message);
       },
       NULL);
-
-  // connect to broker, which is an async operation
-  AsyncConnect();
-
-  msg_handle_catalog_ptr_ = std::make_shared<MsgHandleCatalog>();
 
   msg_handle_catalog_ptr_->RegisterGetExecutorFunc([this](std::string_view name) -> ibmw::executor::ExecutorHandle {
     return core_ptr_->GetExecutorBus().GetExecutor(name);
@@ -112,23 +155,105 @@ bool MqttExtension::OnInit(runtime::core::Engine *core_ptr) {
                                                  runtime::core::Subsystem::kTransport),
                           [this] { RegisterMqttTransportDriver(); });
 
+  // The first connect is made once the engine starts: every message handler
+  // is registered by then (the catalog map is not synchronized), and with
+  // clean_session=false the broker may deliver queued messages right after
+  // CONNACK. Subscriptions are made on connect (and after every reconnect),
+  // without blocking Paho callback threads (TRANS-012). Startup waits
+  // (bounded) for the outcome of the first attempt, so that modules starting
+  // next do not publish into a connection that is not there yet.
   core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStart),
-                          [this] { signal_.Notify(); });
+                          [this] {
+                            msg_handle_catalog_ptr_->Seal();
+                            {
+                              std::lock_guard<std::mutex> lock(conn_mutex_);
+                              started_ = true;
+                            }
+                            if (!connect_thread_.joinable())
+                              connect_thread_ = std::thread([this] { ConnectLoop(); });
+                            RequestConnect(false);
+                            WaitFirstConnectAttempt();
+                          });
+
+  core_ptr_->RegisterHook(runtime::core::BeforePhase(runtime::core::Phase::kStopping),
+                          [this] {
+                            std::lock_guard<std::mutex> lock(conn_mutex_);
+                            hooks_enabled_ = false;
+                          });
 
   extension_options_node = options_;
   core_ptr_->GetExtensionBus().UpdateExtensionOptionsNode(Name(), extension_options_node);
+  } catch (...) {
+    MQTTAsync_destroy(&client_);
+    client_ = nullptr;
+    throw;
+  }
 
   return true;
 }
 
+MqttExtension::~MqttExtension() {
+  // Normally done by OnShutdown; covers an engine that never shut down.
+  if (connect_thread_.joinable()) {
+    stop_flag_ = true;
+    {
+      std::lock_guard<std::mutex> lock(conn_mutex_);
+      hooks_enabled_ = false;
+    }
+    conn_cv_.notify_all();
+    connect_thread_.join();
+  }
+  if (client_ != nullptr) {
+    // Stop intake (and wait for running handlers) before destroying the client.
+    if (msg_handle_catalog_ptr_) msg_handle_catalog_ptr_->Shutdown();
+    MQTTAsync_destroy(&client_);
+  }
+}
+
 void MqttExtension::OnShutdown() {
   stop_flag_ = true;
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    hooks_enabled_ = false;
+  }
+  conn_cv_.notify_all();
+  if (connect_thread_.joinable()) connect_thread_.join();
 
-  msg_handle_catalog_ptr_->Shutdown();
+  if (msg_handle_catalog_ptr_) msg_handle_catalog_ptr_->Shutdown();
 
-  MQTTAsync_disconnect(client_, NULL);
+  if (client_ == nullptr) return;
+
+  // Wait (bounded) for the disconnect to complete before destroying the
+  // client, instead of destroying it under an in-flight disconnect (TRANS-011).
+  // Paho (1.3.x) runs these callbacks with its global mqttasync_mutex held and
+  // MQTTAsync_destroy takes that mutex and frees the pending command, so no
+  // Done() can run after destroy returns. Re-check this on a Paho upgrade.
+  struct DisconnectWait {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    static void Done(void *context) {
+      auto *self = static_cast<DisconnectWait *>(context);
+      std::lock_guard<std::mutex> lock(self->mutex);
+      self->done = true;
+      self->cv.notify_all();
+    }
+  };
+  auto wait = std::make_shared<DisconnectWait>();
+  MQTTAsync_disconnectOptions disc_opts = MQTTAsync_disconnectOptions_initializer;
+  disc_opts.timeout = 1000;
+  disc_opts.onSuccess = [](void *context, MQTTAsync_successData *) { DisconnectWait::Done(context); };
+  disc_opts.onFailure = [](void *context, MQTTAsync_failureData *) { DisconnectWait::Done(context); };
+  disc_opts.context = wait.get();
+  if (MQTTAsync_disconnect(client_, &disc_opts) == MQTTASYNC_SUCCESS) {
+    std::unique_lock<std::mutex> lock(wait->mutex);
+    if (!wait->cv.wait_for(lock, std::chrono::milliseconds(2000), [&] { return wait->done; })) {
+      MW_WARN("Mqtt disconnect did not complete in time.");
+    }
+  }
 
   MQTTAsync_destroy(&client_);
+  client_ = nullptr;
 }
 
 void MqttExtension::RegisterMqttTransportDriver() {
@@ -177,15 +302,14 @@ void MqttExtension::RegisterMqttRpcDriver() {
   core_ptr_->GetServiceDispatcher().RegisterRpcDriver(std::move(mqtt_rpc_driver_ptr));
 }
 
-void MqttExtension::AsyncConnect() {
-  if (stop_flag_.load()) return;
+void MqttExtension::BuildConnectOptions(MQTTAsync_connectOptions &conn_opts, MQTTAsync_SSLOptions &ssl_opts) {
+  conn_opts.keepAliveInterval = static_cast<int>(options_.keep_alive_s);
+  conn_opts.cleansession = options_.clean_session ? 1 : 0;
 
-  // connect to broker
-  MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
-  MQTTAsync_SSLOptions ssl_opts = MQTTAsync_SSLOptions_initializer;
-
-  conn_opts.keepAliveInterval = 20;
-  conn_opts.cleansession = 1;
+  if (!options_.username.empty()) {
+    conn_opts.username = options_.username.c_str();
+    if (!options_.password.empty()) conn_opts.password = options_.password.c_str();
+  }
 
   // check broker_add protocol is ssl/mqtts or not
   auto ret = common::util::ParseUrl(options_.broker_addr);
@@ -199,78 +323,118 @@ void MqttExtension::AsyncConnect() {
     MW_CHECK_WARN(options_.client_cert.empty(), "Broker protocol is not ssl/mqtts, the client_cert you set will be ignored.");
     MW_CHECK_WARN(options_.client_key.empty(), "Broker protocol is not ssl/mqtts, the client_key you set will be ignored.");
     MW_CHECK_WARN(options_.client_key_password.empty(), "Broker protocol is not ssl/mqtts, the client_key_password you set will be ignored.");
+    MW_CHECK_WARN(options_.username.empty(), "Mqtt credentials are sent without TLS.");
   }
+}
 
-  // if connect success, call all registered hook functions to subscribe mqtt topic
-  conn_opts.onSuccess = [](void *context, MQTTAsync_successData *response) {
-    MW_INFO("Connect to mqtt broker success.");
-    auto *mqtt_extension_ptr = static_cast<MqttExtension *>(context);
+int MqttExtension::StartConnect() {
+  MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
+  MQTTAsync_SSLOptions ssl_opts = MQTTAsync_SSLOptions_initializer;
+  BuildConnectOptions(conn_opts, ssl_opts);
 
-    mqtt_extension_ptr->signal_.Wait();
-    mqtt_extension_ptr->signal_.Reset();
-
-    for (const auto &f : mqtt_extension_ptr->reconnect_hook_)
-      f();
+  conn_opts.onSuccess = [](void *context, MQTTAsync_successData *) {
+    static_cast<MqttExtension *>(context)->OnConnected();
   };
-
-  // if connect failed, call connect again
   conn_opts.onFailure = [](void *context, MQTTAsync_failureData *response) {
-    MW_WARN("Failed to connect mqtt broker: {}", (!response || !response->message) ? "Unknown error" : response->message);
-    auto *mqtt_extension_ptr = static_cast<MqttExtension *>(context);
-    std::this_thread::sleep_for(std::chrono::milliseconds(mqtt_extension_ptr->options_.reconnect_interval_ms));
-    mqtt_extension_ptr->AsyncConnect();
+    static_cast<MqttExtension *>(context)->OnConnectFailed(
+        (!response || !response->message) ? "Unknown error" : response->message);
   };
   conn_opts.context = this;
-  int rc = MQTTAsync_connect(client_, &conn_opts);
+  // Paho copies the options (including TLS settings) before returning.
+  return MQTTAsync_connect(client_, &conn_opts);
+}
 
-  if (rc != MQTTASYNC_SUCCESS) {
-    MW_ERROR("Failed to start connection, rc: {}", rc);
-    std::this_thread::sleep_for(std::chrono::milliseconds(options_.reconnect_interval_ms));
-    AsyncConnect();  // todo: avoid stack overflow
+void MqttExtension::RequestConnect(bool delayed) {
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    connect_requested_ = true;
+    next_attempt_ = std::chrono::steady_clock::now() +
+                    (delayed ? std::chrono::milliseconds(options_.reconnect_interval_ms) : std::chrono::milliseconds(0));
   }
+  conn_cv_.notify_all();
+}
+
+void MqttExtension::WaitFirstConnectAttempt() {
+  if (options_.start_connect_wait_ms == 0) return;
+  std::unique_lock<std::mutex> lock(conn_mutex_);
+  if (!conn_cv_.wait_for(lock, std::chrono::milliseconds(options_.start_connect_wait_ms),
+                         [this] { return first_attempt_done_ || stop_flag_.load(); })) {
+    MW_WARN("Mqtt broker '{}' did not answer within {} ms; starting without a connection.",
+            options_.broker_addr, options_.start_connect_wait_ms);
+  }
+}
+
+void MqttExtension::ConnectLoop() {
+  std::unique_lock<std::mutex> lock(conn_mutex_);
+  while (true) {
+    conn_cv_.wait(lock, [this] { return stop_flag_.load() || connect_requested_; });
+    if (stop_flag_.load()) return;
+    if (conn_cv_.wait_until(lock, next_attempt_, [this] { return stop_flag_.load(); })) return;
+    connect_requested_ = false;
+    lock.unlock();
+    int rc = MQTTASYNC_FAILURE;
+    try {
+      rc = StartConnect();
+    } catch (const std::exception &e) {
+      MW_ERROR("Failed to build mqtt connect options: {}", e.what());
+    }
+    if (rc != MQTTASYNC_SUCCESS) {
+      MW_ERROR("Failed to start connection, rc: {}", rc);
+      MarkAttemptDone();
+      RequestConnect(true);
+    }
+    lock.lock();
+  }
+}
+
+void MqttExtension::OnConnected() {
+  MW_INFO("Connect to mqtt broker success.");
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    connected_ = true;
+    first_attempt_done_ = true;
+    if (started_) RunReconnectHooksLocked();
+  }
+  conn_cv_.notify_all();
+}
+
+void MqttExtension::OnConnectFailed(const char *message) {
+  MW_WARN("Failed to connect mqtt broker: {}", message);
+  MarkAttemptDone();
+  if (!stop_flag_.load()) RequestConnect(true);
+}
+
+void MqttExtension::MarkAttemptDone() {
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    first_attempt_done_ = true;
+  }
+  conn_cv_.notify_all();
 }
 
 void MqttExtension::OnConnectLost(const char *cause) {
   MW_WARN("Lost connect to mqtt broker, cause {}", (cause == nullptr) ? "nil" : cause);
+  {
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    connected_ = false;
+  }
+  if (!stop_flag_.load()) RequestConnect(false);
+}
 
-  if (stop_flag_.load()) return;
-
-  MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
-  conn_opts.keepAliveInterval = 20;
-  conn_opts.cleansession = 1;
-  conn_opts.onSuccess = [](void *context, MQTTAsync_successData *response) {
-    MW_INFO("Reconnect to mqtt broker success.");
-
-    auto *mqtt_extension_ptr = static_cast<MqttExtension *>(context);
-
-    for (const auto &f : mqtt_extension_ptr->reconnect_hook_)
+void MqttExtension::RunReconnectHooksLocked() {
+  if (!hooks_enabled_) return;
+  for (const auto &f : reconnect_hook_) {
+    try {
       f();
-  };
-  conn_opts.onFailure = [](void *context, MQTTAsync_failureData *response) {
-    auto *mqtt_extension_ptr = static_cast<MqttExtension *>(context);
-    std::this_thread::sleep_for(std::chrono::milliseconds(mqtt_extension_ptr->options_.reconnect_interval_ms));
-    mqtt_extension_ptr->OnConnectLost("Reconnect failed");
-  };
-  conn_opts.context = this;
-  int rc = MQTTAsync_connect(client_, &conn_opts);
-
-  if (rc != MQTTASYNC_SUCCESS) {
-    MW_ERROR("Failed to reconnect mqtt broker, return code: {}", rc);
-    std::this_thread::sleep_for(std::chrono::milliseconds(options_.reconnect_interval_ms));
-    OnConnectLost("Reconnect failed");  // TODO: Need to prevent stack overflow
+    } catch (const std::exception &e) {
+      MW_ERROR("Mqtt resubscribe failed: {}", e.what());
+    }
   }
 }
 
 int MqttExtension::OnMsgRecv(char *topic, int topic_len, MQTTAsync_message *message) {
   std::string_view topic_str = topic_len ? std::string_view(topic, topic_len) : std::string_view(topic);
-  msg_handle_catalog_ptr_->HandleServerMsg(topic_str, message);
-
-  if (options_.callback_executor_name.empty()) {
-    MQTTAsync_freeMessage(&message);
-    MQTTAsync_free(topic);
-    return 1;
-  }
-
+  msg_handle_catalog_ptr_->HandleServerMsg(topic_str, topic, message);
   return 1;
 }
 
@@ -278,6 +442,9 @@ void MqttExtension::SetSSL(MQTTAsync_connectOptions &conn_opts, MQTTAsync_SSLOpt
   // check if set ca file
   MW_REQUIRE(!options_.truststore.empty(), "Use ssl/mqtts must set truststore");
   ssl_opts.trustStore = options_.truststore.c_str();
+  // Paho defaults to no host name check: any certificate from the trusted CA
+  // would be accepted for any broker.
+  ssl_opts.verify = options_.tls_verify_hostname ? 1 : 0;
 
   bool has_cert = !options_.client_cert.empty();
   bool has_key = !options_.client_key.empty();

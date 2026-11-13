@@ -1,12 +1,19 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdlib>
+#include <filesystem>
+#include <string>
 #include <string_view>
 
 #include <gtest/gtest.h>
 
 #include "base/exception.h"
 #include "engine/type_support_pkg_loader.h"
+#include "extension_api/type_support_package_loader.h"
 
 namespace ibmw::runtime::core::util {
 namespace {
@@ -72,6 +79,18 @@ TEST(TypeSupportPkgLoader, RejectsTruncatedSchemaPackage) {
   EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
 }
 
+// COMM-024: packages built before msg_min_size existed must be rebuilt.
+TEST(TypeSupportPkgLoader, RejectsOlderPackageAbi) {
+  TypeSupportPkgLoader loader;
+  try {
+    loader.TryLoadTypeSupportPkg(TYPE_SUPPORT_OLD_PACKAGE_FIXTURE_PATH);
+    FAIL() << "older package ABI was accepted";
+  } catch (const ibmw::common::util::IbmwException& e) {
+    EXPECT_NE(std::string(e.what()).find("older ABI"), std::string::npos) << e.what();
+  }
+  EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
+}
+
 TEST(TypeSupportPkgLoader, RejectsNullTypeSupportEntry) {
   TypeSupportPkgLoader loader;
   EXPECT_THROW(
@@ -79,6 +98,68 @@ TEST(TypeSupportPkgLoader, RejectsNullTypeSupportEntry) {
       ibmw::common::util::IbmwException);
   EXPECT_FALSE(loader.GetDynamicLib().IsLoaded());
   EXPECT_TRUE(loader.GetTypeSupportArray().empty());
+}
+
+// CORE-042: the runtime loader and the extension loader share one set of
+// checks, so they accept and reject the same packages with the same message.
+TEST(TypeSupportPkgLoader, ExtensionLoaderMatchesRuntimeLoader) {
+  {
+    TypeSupportPkgLoader runtime_loader;
+    ibmw::extension::TypeSupportPackageLoader extension_loader;
+    ASSERT_TRUE(runtime_loader.TryLoadTypeSupportPkg(TYPE_SUPPORT_V1_FIXTURE_PATH));
+    ASSERT_TRUE(extension_loader.TryLoad(TYPE_SUPPORT_V1_FIXTURE_PATH));
+    EXPECT_EQ(extension_loader.TypeSupports().size(), runtime_loader.GetTypeSupportArray().size());
+    EXPECT_EQ(extension_loader.SchemaSupports().size(), runtime_loader.GetSchemaSupportArray().size());
+    extension_loader.Unload();
+  }
+  for (const char* path : {TYPE_SUPPORT_BAD_V1_FIXTURE_PATH, TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH,
+                           TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH, TYPE_SUPPORT_OLD_PACKAGE_FIXTURE_PATH,
+                           TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH}) {
+    std::string runtime_error;
+    std::string extension_error;
+    try {
+      TypeSupportPkgLoader loader;
+      loader.TryLoadTypeSupportPkg(path);
+    } catch (const ibmw::common::util::IbmwException& e) {
+      runtime_error = e.what();
+    }
+    try {
+      ibmw::extension::TypeSupportPackageLoader loader;
+      loader.TryLoad(path);
+    } catch (const ibmw::common::util::IbmwException& e) {
+      extension_error = e.what();
+    }
+    ASSERT_FALSE(runtime_error.empty()) << path;
+    // what() carries the source location, which is the shared header for both.
+    EXPECT_EQ(extension_error, runtime_error) << path;
+  }
+}
+
+// CORE-017: both loaders refuse a package that other users could replace.
+TEST(TypeSupportPkgLoader, BothLoadersRefuseLibraryWritableByOthers) {
+  std::string pattern = (std::filesystem::temp_directory_path() / "ibmw_tsdir_XXXXXX").string();
+  ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
+  const std::filesystem::path dir = pattern;
+  const auto lib = dir / "libts.so";
+  std::filesystem::copy_file(TYPE_SUPPORT_V1_FIXTURE_PATH, lib);
+  ASSERT_EQ(::chmod(lib.c_str(), 0646), 0);
+  const auto refused = [](auto&& load) {
+    try {
+      load();
+    } catch (const ibmw::common::util::IbmwException& e) {
+      return std::string(e.what()).find("Refusing to load") != std::string::npos;
+    }
+    return false;
+  };
+  EXPECT_TRUE(refused([&] { TypeSupportPkgLoader().TryLoadTypeSupportPkg(lib.string()); }));
+  EXPECT_TRUE(refused([&] { ibmw::extension::TypeSupportPackageLoader().TryLoad(lib.string()); }));
+  ASSERT_EQ(::chmod(lib.c_str(), 0644), 0);
+  {
+    ibmw::extension::TypeSupportPackageLoader loader;
+    EXPECT_TRUE(loader.TryLoad(lib.string()));
+    loader.Unload();
+  }
+  std::filesystem::remove_all(dir);
 }
 
 }  // namespace

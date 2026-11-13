@@ -3,7 +3,14 @@
 
 #include "net_ext/http/http_rpc_driver.h"
 
+#include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <mutex>
+#include <optional>
 #include <regex>
+
+#include <boost/asio/any_completion_handler.hpp>
 
 #include "cpp/service/rpc_handle.h"
 #include "cpp/service/rpc_status.h"
@@ -12,6 +19,8 @@
 #include "engine/service/service_driver_tools.h"
 #include "net_ext/global.h"
 #include "base/url_encode.h"
+#include "net_base/http_media_type.h"
+#include "net_ext/meta_filter.h"
 
 namespace YAML {
 template <>
@@ -36,6 +45,9 @@ struct convert<ibmw::extensions::net_extension::HttpRpcDriver::Options> {
       node["servers"].push_back(server_options_node);
     }
 
+    for (const auto& origin : rhs.cors_allow_origins)
+      node["cors_allow_origins"].push_back(origin);
+
     return node;
   }
 
@@ -57,6 +69,13 @@ struct convert<ibmw::extensions::net_extension::HttpRpcDriver::Options> {
 
         rhs.servers_options.emplace_back(std::move(server_options));
       }
+    }
+
+    if (const auto origins = node["cors_allow_origins"]; origins && origins.IsSequence()) {
+      for (const auto& origin_node : origins)
+        rhs.cors_allow_origins.emplace_back(origin_node.as<std::string>());
+    } else if (origins && origins.IsScalar()) {  // a single origin (or "*")
+      rhs.cors_allow_origins.emplace_back(origins.as<std::string>());
     }
 
     return true;
@@ -108,6 +127,35 @@ void HttpRpcDriver::Shutdown() {
   http_cli_pool_ptr_->Shutdown();
 }
 
+bool HttpRpcDriver::SetCorsAllowOrigin(
+    const boost::beast::http::request<boost::beast::http::dynamic_body>& req,
+    boost::beast::http::response<boost::beast::http::dynamic_body>& rsp) const {
+  namespace http = boost::beast::http;
+  if (options_.cors_allow_origins.empty()) return false;
+
+  const bool any_origin =
+      std::find(options_.cors_allow_origins.begin(), options_.cors_allow_origins.end(), "*") !=
+      options_.cors_allow_origins.end();
+  // The answer depends on the origin, also when it is rejected or missing (caches).
+  if (!any_origin) rsp.set(http::field::vary, "Origin");
+
+  auto origin_itr = req.find(http::field::origin);
+  if (origin_itr == req.end()) return false;
+  std::string_view origin(origin_itr->value().data(), origin_itr->value().size());
+
+  if (any_origin) {
+    rsp.set(http::field::access_control_allow_origin, "*");
+    return true;
+  }
+  for (const auto& allowed : options_.cors_allow_origins) {
+    if (allowed == origin) {
+      rsp.set(http::field::access_control_allow_origin, origin_itr->value());
+      return true;
+    }
+  }
+  return false;
+}
+
 bool HttpRpcDriver::RegisterServiceFunc(
     const runtime::core::service::ServiceFuncWrapper& service_func_wrapper) noexcept {
   try {
@@ -147,14 +195,16 @@ bool HttpRpcDriver::RegisterServiceFunc(
       // Serialization type
       std::string serialization_type;
 
-      // set access_control_allow_origin (this is set all)
-      rsp.set(http::field::access_control_allow_origin, "*");
+      // CORS only for configured origins
+      const bool cors_allowed = SetCorsAllowOrigin(req, rsp);
 
       // if is a options request
       if (req.method() == http::verb::options) {
-        rsp.set(http::field::access_control_allow_methods, "POST, OPTIONS");
-        rsp.set(http::field::access_control_allow_headers, "Content-Type, Authorization, X-Requested-With");
-        rsp.set(http::field::access_control_max_age, "86400");
+        if (cors_allowed) {
+          rsp.set(http::field::access_control_allow_methods, "POST, OPTIONS");
+          rsp.set(http::field::access_control_allow_headers, "Content-Type, Authorization, X-Requested-With");
+          rsp.set(http::field::access_control_max_age, "86400");
+        }
 
         rsp.result(http::status::ok);
         rsp.keep_alive(req.keep_alive());
@@ -162,37 +212,52 @@ bool HttpRpcDriver::RegisterServiceFunc(
         co_return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
       }
 
+      // Keeps the CORS headers already set on rsp.
+      auto reply_error = [&req, &rsp](uint32_t code, std::string_view msg) {
+        rsp.result(http::status::internal_server_error);
+        rsp.set(kRpcStatusHeader, std::to_string(code));
+        rsp.set(http::field::content_type, "text/html");
+        boost::beast::ostream(rsp.body()) << "An error occurred: '" << msg << "'";
+        rsp.keep_alive(req.keep_alive());
+        rsp.prepare_payload();
+        return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
+      };
+
       auto req_content_type_itr = req.find(http::field::content_type);
-      MW_REQUIRE(req_content_type_itr != req.end(),
-                              "Http req has no content type.");
+      if (req_content_type_itr == req.end()) [[unlikely]] {
+        MW_WARN_INTERVAL(5000, "Http req has no content type, func: {}.", info.func_name);
+        co_return reply_error(IBMW_RPC_STATUS_SVR_INVALID_DESERIALIZATION_TYPE, "Http req has no content type.");
+      }
 
       auto req_content_type_boost_sw = req_content_type_itr->value();
       std::string_view req_content_type(req_content_type_boost_sw.data(), req_content_type_boost_sw.size());
-      if (req_content_type == "application/json" ||
-          req_content_type == "application/json charset=utf-8") {
+      if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/json")) {
         serialization_type = "json";
         rsp.set(http::field::content_type, "application/json");
-      } else if (req_content_type == "application/cdr") {
+      } else if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/cdr")) {
         serialization_type = "cdr";
         rsp.set(http::field::content_type, "application/cdr");
-      } else if (req_content_type == "application/ros2") {
+      } else if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/ros2")) {
         serialization_type = "ros2";
         rsp.set(http::field::content_type, "application/ros2");
       } else {
-        MW_THROW("Http req has invalid content type {}.", req_content_type);
+        MW_WARN_INTERVAL(5000, "Http req has invalid content type {}, func: {}.", req_content_type, info.func_name);
+        co_return reply_error(IBMW_RPC_STATUS_SVR_INVALID_DESERIALIZATION_TYPE, "Http req has invalid content type.");
       }
 
-      ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, serialization_type);
-
-      // Read other fields from http header into context
+      // Read other fields from http header into context; framework fields are
+      // set afterwards so a peer cannot override them.
       for (auto const& field : req) {
+        auto key = ibmw::common::util::HttpHeaderDecode(
+            ibmw::common::net::ToStdStringView(field.name_string()));
+        if (!IsPeerMetaKeyAllowed(key)) continue;
         ctx_ptr->SetMetaValue(
-            ibmw::common::util::HttpHeaderDecode(
-                ibmw::common::net::ToStdStringView(field.name_string())),
+            key,
             ibmw::common::util::HttpHeaderDecode(
                 ibmw::common::net::ToStdStringView(field.value())));
       }
 
+      ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, serialization_type);
       ctx_ptr->SetFunctionName(info.func_name);
       ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_DRIVER, Name());
 
@@ -218,87 +283,166 @@ bool HttpRpcDriver::RegisterServiceFunc(
       bool deserialize_ret = info.req_type_support_ref.Deserialize(
           serialization_type, buffer_array_view, service_req_ptr.get());
 
-      MW_REQUIRE(deserialize_ret, "Http req deserialize failed.");
+      if (!deserialize_ret) [[unlikely]] {
+        MW_WARN_INTERVAL(5000, "Http req deserialize failed, func: {}.", info.func_name);
+        co_return reply_error(IBMW_RPC_STATUS_SVR_DESERIALIZATION_FAILED, "Http req deserialize failed.");
+      }
 
       // Create service rsp
       std::shared_ptr<void> service_rsp_ptr = info.rsp_type_support_ref.CreateSharedPtr();
       service_invoke_wrapper_ptr->rsp_ptr = service_rsp_ptr.get();
 
-      // Set callback
-      uint32_t ret_code = 0;
-      auto sig_timer_ptr = std::make_shared<asio::steady_timer>(*io_ptr_, std::chrono::nanoseconds::max());
+      // The callback may run on any thread, before or after this coroutine
+      // suspends, and after it gave up. All hand-over goes through CallState
+      // under its mutex: whoever finishes the call first (answer or timeout)
+      // takes the suspended coroutine's handler and resumes it. Nothing but
+      // this coroutine touches the timer.
+      struct CallState {
+        std::mutex mutex;
+        std::atomic<bool> finished{false};  // written under mutex; also read as a hint
+        uint32_t ret_code = 0;
+        std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
+        asio::any_completion_handler<void()> waiter;
+      };
+      auto call_state = std::make_shared<CallState>();
+
+      const auto deadline =
+          timeout >= std::chrono::steady_clock::time_point::max() - std::chrono::steady_clock::now()
+              ? std::chrono::steady_clock::time_point::max()
+              : std::chrono::steady_clock::now() + timeout;
+
+      // Resumes the coroutine on its io_context. If that is already gone the
+      // coroutine frame is leaked: destroying it here would touch dead services.
+      auto resume = [](const std::weak_ptr<asio::io_context>& io_weak, asio::any_completion_handler<void()> waiter) {
+        if (auto io = io_weak.lock()) {
+          asio::post(io->get_executor(), std::move(waiter));
+        } else {
+          new asio::any_completion_handler<void()>(std::move(waiter));
+        }
+      };
 
       service_invoke_wrapper_ptr->callback =
           [service_invoke_wrapper_ptr,
            ctx_ptr,
-           &req,
-           &rsp,
            service_req_ptr,
            service_rsp_ptr,
            serialization_type{std::move(serialization_type)},
-           sig_timer_ptr,
-           &ret_code](ibmw::rpc::Status status) {
+           io_weak = std::weak_ptr<asio::io_context>(io_ptr_),
+           resume,
+           call_state](ibmw::rpc::Status status) {
+            // Abandoned (timed out): skip the serialization.
+            if (call_state->finished.load(std::memory_order_relaxed)) return;
+
+            uint32_t ret_code = 0;
+            std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
             if (!status.OK()) [[unlikely]] {
               ret_code = status.Code();
-
             } else {
               // service rsp serialization
-              auto buffer_array_view_ptr = ibmw::runtime::core::service::TrySerializeRspWithCache(*service_invoke_wrapper_ptr, serialization_type);
-
-              if (!buffer_array_view_ptr) [[unlikely]] {
+              rsp_buf = ibmw::runtime::core::service::TrySerializeRspWithCache(*service_invoke_wrapper_ptr, serialization_type);
+              if (!rsp_buf) [[unlikely]]
                 ret_code = IBMW_RPC_STATUS_SVR_SERIALIZATION_FAILED;
-              } else {
-                // Fill http rsp package and copy it directly
-                size_t rsp_size = buffer_array_view_ptr->BufferSize();
-                auto rsp_beast_buf = rsp.body().prepare(rsp_size);
-
-                const auto* data = buffer_array_view_ptr->Data();
-                auto buffer_array_pos = 0;
-                size_t buffer_pos = 0;
-
-                for (auto buf : boost::beast::buffers_range_ref(rsp_beast_buf)) {
-                  size_t cur_beast_buf_pos = 0;
-                  while (cur_beast_buf_pos < buf.size()) {
-                    size_t cur_beast_buffer_size = buf.size() - cur_beast_buf_pos;
-                    size_t cur_buffer_size = data[buffer_array_pos].len - buffer_pos;
-
-                    size_t cur_copy_size = std::min(cur_beast_buffer_size, cur_buffer_size);
-
-                    memcpy(static_cast<char*>(buf.data()) + cur_beast_buf_pos,
-                           static_cast<const char*>(data[buffer_array_pos].data) + buffer_pos,
-                           cur_copy_size);
-
-                    buffer_pos += cur_copy_size;
-                    if (buffer_pos == data[buffer_array_pos].len) {
-                      ++buffer_array_pos;
-                      buffer_pos = 0;
-                    }
-
-                    cur_beast_buf_pos += cur_copy_size;
-                  }
-                }
-                rsp.body().commit(rsp_size);
-
-                rsp.keep_alive(req.keep_alive());
-                rsp.prepare_payload();
-              }
             }
-            sig_timer_ptr->expires_at(std::chrono::steady_clock::time_point::min());
+
+            asio::any_completion_handler<void()> waiter;
+            {
+              std::lock_guard lock(call_state->mutex);
+              if (call_state->finished.load(std::memory_order_relaxed)) return;
+              call_state->finished.store(true, std::memory_order_relaxed);
+              call_state->ret_code = ret_code;
+              call_state->rsp_buf = std::move(rsp_buf);
+              waiter = std::move(call_state->waiter);
+            }
+            if (waiter) resume(io_weak, std::move(waiter));
           };
 
       // Call service rpc
       service_func_wrapper.service_func(service_invoke_wrapper_ptr);
 
-      try {
-        co_await sig_timer_ptr->async_wait(asio::use_awaitable);
-      } catch (const boost::system::system_error& e) {
-        if (e.code() != boost::asio::error::operation_aborted) [[unlikely]] {
-          MW_ERROR("Http handle for service, async_wait get exception: {}", e.what());
-          ret_code = ibmw_rpc_status_code_t::IBMW_RPC_STATUS_SVR_DRIVER_INTERNAL_ERROR;
+      // A synchronous answer (the common case) needs no wait at all.
+      if (!call_state->finished.load(std::memory_order_acquire)) {
+        std::optional<asio::steady_timer> timer;
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+          timer.emplace(*io_ptr_, deadline);
+          timer->async_wait([call_state, io_weak = std::weak_ptr<asio::io_context>(io_ptr_), resume](
+                                const boost::system::error_code& ec) {
+            if (ec) return;  // cancelled: the call finished first
+            asio::any_completion_handler<void()> waiter;
+            {
+              std::lock_guard lock(call_state->mutex);
+              if (call_state->finished.load(std::memory_order_relaxed)) return;
+              call_state->finished.store(true, std::memory_order_relaxed);
+              call_state->ret_code = IBMW_RPC_STATUS_TIMEOUT;
+              waiter = std::move(call_state->waiter);
+            }
+            if (waiter) resume(io_weak, std::move(waiter));
+          });
         }
+
+        // The initiation runs once this coroutine is suspended, so the handler
+        // can be resumed from another thread as soon as it is stored.
+        co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
+            [&call_state, ex = io_ptr_->get_executor()](auto handler) {
+              asio::any_completion_handler<void()> waiter(std::move(handler));
+              {
+                std::lock_guard lock(call_state->mutex);
+                if (!call_state->finished.load(std::memory_order_relaxed)) {
+                  call_state->waiter = std::move(waiter);
+                  return;
+                }
+              }
+              // Finished between the check above and now.
+              asio::post(ex, std::move(waiter));
+            },
+            asio::use_awaitable);
+
+        if (timer) timer->cancel();
       }
 
-      MW_REQUIRE(ret_code == 0, "Handle rpc failed, code: {}.", ret_code);
+      uint32_t ret_code = 0;
+      std::shared_ptr<ibmw::util::BufferArrayView> rsp_buf;
+      {
+        std::lock_guard lock(call_state->mutex);
+        ret_code = call_state->ret_code;
+        rsp_buf = std::move(call_state->rsp_buf);
+      }
+
+      if (ret_code != 0) [[unlikely]]
+        co_return reply_error(ret_code, "Handle rpc failed, code: " + std::to_string(ret_code) + ".");
+
+      // Fill http rsp package and copy it directly
+      size_t rsp_size = rsp_buf->BufferSize();
+      auto rsp_beast_buf = rsp.body().prepare(rsp_size);
+
+      const auto* data = rsp_buf->Data();
+      size_t buffer_array_pos = 0;
+      size_t buffer_pos = 0;
+
+      for (auto buf : boost::beast::buffers_range_ref(rsp_beast_buf)) {
+        size_t cur_beast_buf_pos = 0;
+        while (cur_beast_buf_pos < buf.size()) {
+          size_t cur_beast_buffer_size = buf.size() - cur_beast_buf_pos;
+          size_t cur_buffer_size = data[buffer_array_pos].len - buffer_pos;
+
+          size_t cur_copy_size = std::min(cur_beast_buffer_size, cur_buffer_size);
+
+          memcpy(static_cast<char*>(buf.data()) + cur_beast_buf_pos,
+                 static_cast<const char*>(data[buffer_array_pos].data) + buffer_pos,
+                 cur_copy_size);
+
+          buffer_pos += cur_copy_size;
+          if (buffer_pos == data[buffer_array_pos].len) {
+            ++buffer_array_pos;
+            buffer_pos = 0;
+          }
+
+          cur_beast_buf_pos += cur_copy_size;
+        }
+      }
+      rsp.body().commit(rsp_size);
+
+      rsp.keep_alive(req.keep_alive());
+      rsp.prepare_payload();
 
       co_return ibmw::common::net::AsioHttpServer::HttpHandleStatus::kOk;
     };
@@ -356,6 +500,29 @@ bool HttpRpcDriver::RegisterClientFunc(
   }
 }
 
+uint32_t HttpRpcDriver::RpcStatusFromHttp(unsigned http_status, std::string_view rpc_status_header) noexcept {
+  uint32_t code = 0;
+  const char* end = rpc_status_header.data() + rpc_status_header.size();
+  const auto [ptr, ec] = std::from_chars(rpc_status_header.data(), end, code);
+  if (ec == std::errc() && ptr == end && code != IBMW_RPC_STATUS_OK) return code;
+
+  switch (http_status) {
+    case 404:
+      return IBMW_RPC_STATUS_SVR_NOT_FOUND;
+    case 408:
+    case 504:
+      return IBMW_RPC_STATUS_TIMEOUT;
+    case 500:
+      return IBMW_RPC_STATUS_SVR_HANDLE_FAILED;
+    case 501:
+      return IBMW_RPC_STATUS_SVR_NOT_IMPLEMENTED;
+    case 503:
+      return IBMW_RPC_STATUS_SVR_NOT_READY;
+    default:
+      return IBMW_RPC_STATUS_SVR_UNKNOWN;
+  }
+}
+
 void HttpRpcDriver::Call(
     const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
   try {
@@ -386,6 +553,8 @@ void HttpRpcDriver::Call(
       }
     }
 
+    // The views point into the call's context meta or into options_, both of
+    // which outlive the call (the coroutine reads ctx_ref as well).
     auto url = util::ParseUrl<std::string_view>(to_addr);
     if (!url) {
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_INVALID_ADDR));
@@ -424,8 +593,10 @@ void HttpRpcDriver::Call(
             auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();
             if (timeout <= std::chrono::nanoseconds(0))
               timeout = std::chrono::seconds(5);
+            // Rounded up: the header has whole seconds and the server must not
+            // give up before the client does.
             req.set(http::field::timeout,
-                    std::to_string(std::chrono::duration_cast<std::chrono::seconds>(timeout).count()));
+                    std::to_string(std::chrono::ceil<std::chrono::seconds>(timeout).count()));
 
             std::string serialization_type(
                 client_call_wrapper_ptr->ctx_ref.GetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE));
@@ -442,7 +613,7 @@ void HttpRpcDriver::Call(
 
             // Set other context meta fields to http header
             auto [meta_key_vals_array, meta_key_vals_array_len] = client_call_wrapper_ptr->ctx_ref.GetMetaKeyValsArray();
-            for (size_t ii = 0; ii < meta_key_vals_array_len; ii += 2) {
+            for (size_t ii = 0; ii + 1 < meta_key_vals_array_len; ii += 2) {
               auto key = ibmw::util::ToStdStringView(meta_key_vals_array[ii]);
               auto val = ibmw::util::ToStdStringView(meta_key_vals_array[ii + 1]);
               req.set(
@@ -495,7 +666,13 @@ void HttpRpcDriver::Call(
             auto rsp = co_await client_ptr->HttpSendRecvCo<http::dynamic_body, http::dynamic_body>(req, timeout);
 
             if (rsp.result() != http::status::ok) [[unlikely]] {
-              CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_SVR_NOT_FOUND));
+              const auto status_itr = rsp.find(kRpcStatusHeader);
+              CallResultCallback(
+                  *client_call_wrapper_ptr,
+                  ibmw::rpc::Status(RpcStatusFromHttp(
+                      rsp.result_int(),
+                      status_itr == rsp.end() ? std::string_view{}
+                                              : ibmw::common::net::ToStdStringView(status_itr->value()))));
               co_return;
             }
 

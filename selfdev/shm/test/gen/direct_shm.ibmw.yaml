@@ -1,0 +1,22 @@
+schema_version: 2
+project:
+  name: gc_direct_shm
+  namespace: ibmw::gencheck::direct
+messages:
+  geometry_msgs::msg::Point: {}
+modules:
+  - name: DirectShmPub
+    type: direct_shm_publisher
+    topic: /gc/point
+    message: geometry_msgs::msg::Point
+  - name: DirectShmSub
+    type: direct_shm_subscriber
+    topic: /gc/point
+    message: geometry_msgs::msg::Point
+apps:
+  - name: direct_pub_app
+    type: pubsub
+    modules: [DirectShmPub]
+  - name: direct_sub_app
+    type: pubsub
+    modules: [DirectShmSub]

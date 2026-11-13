@@ -2284,3 +2284,15 @@ def test_validation_outcomes_are_required_in_manifest(tmp_path):
         result = validate_dir(case)
         assert result["valid_for_collection"] is False
         assert f"REQUIRED_FIELD_MISSING:{field}" in result["failure_codes"]
+
+
+@pytest.mark.parametrize("command", ["touch PWNED", ["/bin/true", 1]])
+def test_run_refuses_a_shell_string_or_non_string_argv(tmp_path, capsys, command):
+    # TOOL-028: a string sut.command used to run through /bin/sh -c.
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"sut": {"mode": "managed", "command": command}}))
+    args = core.argparse.Namespace(config=str(config), adapter="generic", command=[],
+                                   override_command=False, output=str(tmp_path / "runs"))
+    assert core.run(args) != 0
+    assert "sut.command must be a list of strings" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()

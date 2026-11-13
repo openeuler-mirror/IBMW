@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <cstddef>
 #include <functional>
 #include <new>
@@ -29,7 +30,8 @@ struct InvokerTraitsHelper<R (*)(void*, Args...)> {
 template <typename T>
 concept DecayedType = std::is_same_v<std::decay_t<T>, T>;
 
-// TODO: Parameter types must be in plain C-style form (no references, STL containers, etc.)
+// Note: invoker parameter types are expected to be plain C-style types (no references, STL
+// containers, etc.) because NativeHandle() is passed across the C ABI; this is not enforced yet.
 template <typename T>
 concept FunctionCStyleOps =
     std::is_same_v<void (*)(void*, void*), decltype(T::relocator)> &&
@@ -100,7 +102,7 @@ class Function<Ops> {
   template <class T,
             class = std::enable_if_t<CheckImplicitlyConvertible<T>(Indices{})>>
   Function(T&& action) {
-    if constexpr (std::is_assignable<T, std::nullptr_t>::value) {
+    if constexpr (std::is_assignable_v<std::decay_t<T>&, std::nullptr_t>) {
       if (action == nullptr) {
         base_.ops = nullptr;
         return;
@@ -113,8 +115,13 @@ class Function<Ops> {
   template <class T,
             class = std::enable_if_t<CheckImplicitlyConvertible<T>(Indices{})>>
   Function& operator=(T&& action) {
-    this->~Function();
-    new (this) Function(std::forward<T>(action));
+    // Reset first so that a throwing construction leaves *this empty
+    // (destroy + placement-new of the whole object left a dangling ops on throw).
+    *this = nullptr;
+    if constexpr (std::is_assignable_v<std::decay_t<T>&, std::nullptr_t>) {
+      if (action == nullptr) return *this;
+    }
+    ConstructorImpl<T>(std::forward<T>(action), Indices{});
     return *this;
   }
 
@@ -125,9 +132,13 @@ class Function<Ops> {
     return *this;
   }
 
-  // TODO: All Args types must be constrained to plain C-style forms (no references, STL containers, etc.)
+  // Preconditions (not checked in release builds, this is the per-callback hot path):
+  // - *this is non-empty (check with operator bool when it may be empty);
+  // - the stored callable does not throw: the invoker crosses the C ABI and is noexcept,
+  //   so an escaping exception calls std::terminate.
   template <typename... Args>
   R operator()(Args... args) const noexcept {
+    assert(base_.ops != nullptr && "calling an empty ibmw::util::Function");
     return static_cast<const OpsType*>(base_.ops)->invoker(&(base_.object_buf), args...);
   }
 
@@ -140,7 +151,13 @@ class Function<Ops> {
   void ConstructorImpl(T&& action, std::index_sequence<Idx...>) {
     using Decayed = std::decay_t<T>;
 
-    if constexpr (sizeof(Decayed) <= sizeof(base_.object_buf)) {
+    // object_buf sits at offset 0, so it is aligned like the whole struct.
+    // Inline placement is deliberately not restricted to nothrow-movable
+    // closures: e.g. a captured `const std::string` has a potentially-throwing
+    // move, and moving such closures to the heap would cost an allocation per
+    // task. A throw during relocation terminates (in practice: only on OOM).
+    if constexpr (sizeof(Decayed) <= sizeof(base_.object_buf) &&
+                  alignof(Decayed) <= alignof(ibmw_function_base_t)) {
       static constexpr OpsType kOps = {
           .invoker = [](void* object, std::tuple_element_t<Idx, ArgsTuple>... args) noexcept -> R {
             if constexpr (std::is_void_v<R>) {
@@ -154,8 +171,8 @@ class Function<Ops> {
                 static_cast<Decayed*>(from)->~Decayed(); },
           .destroyer = [](void* object) noexcept { static_cast<Decayed*>(object)->~Decayed(); }};
 
-      base_.ops = &kOps;
       new (&(base_.object_buf)) Decayed(std::forward<T>(action));
+      base_.ops = &kOps;
     } else {
       using Stored = Decayed*;
 
@@ -172,14 +189,16 @@ class Function<Ops> {
           },
           .destroyer = [](void* object) noexcept { delete *static_cast<Stored*>(object); }};
 
-      base_.ops = &kOps;
       new (&(base_.object_buf)) Stored(new Decayed(std::forward<T>(action)));
+      base_.ops = &kOps;
     }
   }
 
  private:
   mutable ibmw_function_base_t base_;
 };
+
+static_assert(offsetof(ibmw_function_base_t, object_buf) == 0);
 
 namespace details {
 

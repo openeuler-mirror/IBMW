@@ -480,6 +480,7 @@ All extensions default to OFF and require `IBMW_BUILD_RUNTIME=ON`:
 | `IBMW_BUILD_NET_EXTENSION` | HTTP/TCP/UDP transport + RPC |
 | `IBMW_BUILD_MQTT_EXTENSION` | MQTT transport |
 | `IBMW_BUILD_ICEORYX_EXTENSION` | Iceoryx shared-memory transport (zero-copy) |
+| `IBMW_BUILD_SHM_EXTENSION` | Self-developed shared-memory transport (zero-copy, no RouDi, no iceoryx; Linux/OHOS only). Can be enabled together with iceoryx; preset `shm` |
 | `IBMW_BUILD_GRPC_EXTENSION` | gRPC RPC |
 | `IBMW_BUILD_ROS2_EXTENSION` | ROS2 transport **(deprecated)** -- use DDS extension instead |
 | `IBMW_BUILD_ECHO_EXTENSION` | Echo RPC (testing) |
@@ -564,7 +565,7 @@ timed dispatch, timers, coroutines, and real-time scheduling.
 - `core_.GetExecutor().GetExecutor("name")` -- obtaining executor handles
 - `executor.Dispatch(task)` / `executor.DispatchAfter(duration, task)`
 - Strand executor for serialized (thread-safe) execution
-- `ibmw::executor::CreateTimer(executor, interval, callback)` -- recurring timers
+- `ibmw::executor::CreateTimer(executor, interval, callback)` -- recurring timers (keep the returned handle; the timer stops when it is released)
 - `co_await co::Schedule(executor)` -- coroutine scheduling
 - Real-time: `SCHED_FIFO`, `SCHED_RR` policies with CPU binding
 
@@ -1035,7 +1036,12 @@ class MultiDriverModule : public ibmw::Module {
 All IBMW configuration lives under the `ibmw:` top-level key. Module-specific
 configuration uses separate top-level keys matching the module name.
 
-Environment variables are supported: `${MY_VAR}` is substituted before parsing.
+Environment variables are supported: after the YAML is parsed, `${MY_VAR}` in a
+key or value is replaced with the variable's value (empty when unset). The value
+is inserted as plain text inside that one scalar and is never parsed as YAML
+(a value such as `[a, b]` stays a string). An unquoted value that expands to
+empty, `~` or `null` is null; a quoted one (`"${MY_VAR}"`) is a string.
+Inside flow collections (`[...]`, `{...}`) quote it, e.g. `["${MY_VAR}", b]`.
 
 ### Top-Level Structure
 
@@ -1271,7 +1277,7 @@ ibmw:
 ibmw:
   messaging:
     drivers:
-      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx
+      - type: <string>       # local, dds, mqtt, http, tcp, udp, iceoryx, shm
         options: { ... }
     publishers:
       - topic: <regex>       # Match topic names
@@ -1287,7 +1293,7 @@ ibmw:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `subscriber_use_inline_executor` | bool | `false` | Run callbacks in publisher thread |
+| `subscriber_use_inline_executor` | bool | `true` | Run callbacks in publisher thread |
 | `subscriber_executor` | string | `""` | Default subscriber callback executor |
 
 ---
@@ -1307,6 +1313,21 @@ ibmw:
         enable: <bool>                 # Enable/disable module
         cfg_file_path: <string>        # Path to module config file
 ```
+
+The runtime resolves library paths (`packages[].path`, `extensions.items[].path`,
+`runtime_graph.type_support_pkgs`) relative to the current working directory,
+so prefer absolute paths. Every library given by a path containing `/`
+(module packages, extensions, CLI providers, TypeSupport packages, including
+`ibmw topic`/`ibmw bag` `--type-support`) is only loaded when the library file
+(after resolving symlinks) and its directory are owned by the current user or
+root and are not writable by others; a world-writable directory is accepted only
+with the sticky bit (like `/tmp`). Group write is allowed. On OHOS, owners
+below the application uid range (10000) other than shell (2000) are accepted
+too, as long as the file or directory is not group writable: the libraries of
+an installed HAP belong to the installer service, not to the app. Parent
+directories further up are not checked. The resolved path is what gets loaded,
+so `$ORIGIN` in a symlinked library's RUNPATH refers to the target's directory.
+Bare names (`libfoo.so`) use the system loader search path unchanged.
 
 ---
 
@@ -1360,8 +1381,8 @@ Extension options:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `thread_num` | uint32 | `1` | gRPC thread count |
-| `listen_ip` | string | `"0.0.0.0"` | Listen address |
+| `thread_num` | uint32 | `2` | gRPC thread count |
+| `listen_ip` | string | `""` | Listen address (IPv4); the server only starts when `listen_ip` and `listen_port` are both set |
 | `listen_port` | uint16 | `0` | Listen port |
 
 gRPC RPC driver options (`type: grpc`):
@@ -1379,12 +1400,12 @@ Extension options:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `thread_num` | uint32 | -- | Network I/O threads (required) |
-| `http_options.listen_ip` | string | `"0.0.0.0"` | HTTP listen IP |
-| `http_options.listen_port` | uint16 | `0` | HTTP listen port |
-| `tcp_options.listen_ip` | string | `"0.0.0.0"` | TCP listen IP |
-| `tcp_options.listen_port` | uint16 | `0` | TCP listen port |
-| `udp_options.listen_ip` | string | `"0.0.0.0"` | UDP listen IP |
-| `udp_options.listen_port` | uint16 | `0` | UDP listen port |
+| `http_options.listen_ip` | string | `"127.0.0.1"` | HTTP listen IP (IPv4 or IPv6) |
+| `http_options.listen_port` | uint16 | -- | HTTP listen port (required when `http_options` is set) |
+| `tcp_options.listen_ip` | string | `"127.0.0.1"` | TCP listen IP (IPv4 or IPv6) |
+| `tcp_options.listen_port` | uint16 | -- | TCP listen port (required when `tcp_options` is set) |
+| `udp_options.listen_ip` | string | `"127.0.0.1"` | UDP listen IP (IPv4 or IPv6) |
+| `udp_options.listen_port` | uint16 | -- | UDP listen port (required when `udp_options` is set) |
 | `udp_options.max_pkg_size` | uint32 | `65535` | Max UDP datagram |
 
 #### MQTT Extension
@@ -1395,7 +1416,7 @@ Extension options:
 |-----|------|---------|-------------|
 | `broker_addr` | string | -- | Broker address (required) |
 | `client_id` | string | -- | Client ID (required) |
-| `max_pkg_size_k` | uint32 | `0` | Max package size KB |
+| `max_pkg_size_k` | uint32 | `1024` | Max package size KB, at most 2097151 (2 GiB - 1) |
 | `reconnect_interval_ms` | uint32 | `5000` | Reconnect interval |
 | `truststore` | string | `""` | CA cert path (TLS) |
 | `client_cert` | string | `""` | Client cert (TLS) |
@@ -1458,6 +1479,44 @@ For two-process pub/sub, give each process a **different** `runtime_id`
 (both pointing at the same RouDi) and start the subscriber **before** the
 publisher's first send.
 
+#### Shm Extension (self-developed shared memory)
+
+Zero-copy shared-memory transport that needs no RouDi daemon and does not link
+iceoryx (build option `IBMW_BUILD_SHM_EXTENSION`; Linux kernels only, including
+OHOS). It offers the iceoryx_ext API (`shm_ext/iox_style_publisher.h`), but the
+two transports do **not** interoperate: every process on a topic must use the
+same one.
+
+```yaml
+ibmw:
+  extensions:
+    items:
+      - name: shm_extension
+        path: ./libibmw_shm_transport.so
+        options:
+          runtime_id: my_shm_app
+          # driver_name: iceoryx  # drop-in for iceoryx_extension; keep type: iceoryx below
+  messaging:
+    drivers:
+      - type: shm
+    publishers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+    subscribers:
+      - topic: "(.*)"
+        enable_drivers: [shm]
+```
+
+`driver_name` defaults to `shm`. The engine uses only the first driver with a
+given name, so with `iceoryx_extension` loaded in the same process
+`driver_name: iceoryx` is refused at start-up. On OHOS set `root_dir` (or the
+`IBMW_SHM_ROOT` environment variable). `driver_name: iceoryx` covers drivers
+looked up by name only: the driver slot stays `shm`, so modules bound to the
+iceoryx driver type (`IBMW_USE_DRIVER`, generated `direct_iceoryx_*` modules) must
+switch to the shm headers or be regenerated. All options, behavior differences and
+what is not replaced yet are described (in Chinese) in
+[selfdev/shm/docs/使用与迁移.md](../../selfdev/shm/docs/使用与迁移.md).
+
 #### ROS2 Extension
 
 | Key | Type | Default | Description |
@@ -1497,7 +1556,7 @@ ibmw topic pub /header dds:ibmw::protocols::common::Header \
 ```
 
 Select exactly one of `--dds`, `--ros2`, `--zenoh`, `--mqtt`, `--tcp`, `--udp`,
-`--http`, `--iceoryx`, or `--local`. Supply message libraries with
+`--http`, `--iceoryx`, `--shm`, or `--local`. Supply message libraries with
 repeatable `--type-support`; `--transport-library` overrides the installed driver
 library. Domain and Zenoh connection options have the same meanings as observation
 commands. `--ros2-compatible` enables the existing DDS driver's ROS 2 wire naming
@@ -1512,6 +1571,7 @@ queries use wire topic names, while Registry queries use logical topic names.
 | TCP / UDP | Required `--target IPv4:port`; repeat for multiple recipients |
 | HTTP | Required `--target http://host:port`; repeat for multiple recipients |
 | Iceoryx | Start RouDi first; optional `--iceoryx-runtime-id`, `--shm-init-size` (default: 1024 bytes) |
+| Shm (self-developed) | No RouDi; optional `--shm-domain`, `--shm-root-dir`, `--shm-runtime-id`, `--shm-group`, `--shm-init-size` and the other `--shm-*` options |
 | local | Sends inside this CLI process only; cannot reach local subscribers in another process |
 
 MQTT TLS uses `ssl://host:port`, requires `--mqtt-truststore`, and accepts
@@ -1733,7 +1793,8 @@ through a queryable on its existing session. Arbitrary Zenoh applications and
 older IBMW extensions do not expose this metadata automatically.
 
 `--zenoh-domain` must exactly match the business YAML `limit_domain` value;
-omitting it selects the empty domain, not every domain. `--zenoh-config` accepts
+omitting it selects the empty domain, not every domain. The extension ignores
+leading and trailing `/` in `limit_domain`, so write the domain without them. `--zenoh-config` accepts
 a native Zenoh configuration for the observer (for example, peer/router
 connections); the observer must be able to reach the business sessions. With no
 configuration file it uses Zenoh defaults, including native scouting settings.

@@ -53,8 +53,12 @@ void PublisherModule::PublishLoop() {
     ibmw::examples::dds_native_demo::HelloMsg msg;
     // IBMW_PUBSUB_PUBLISHER_BODY_BEGIN
     // IBMW: user code begin (publish_body)
-    // TODO: populate msg fields here
     msg_count_++;
+    msg.id = msg_count_;
+    msg.message = "hello";
+    msg.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
     // IBMW: user code end (publish_body)
     // IBMW_PUBSUB_PUBLISHER_BODY_END
 

@@ -18,16 +18,17 @@ inline ibmw_string_view_t ToIbmwStringView(std::string_view s) {
   return ibmw_string_view_t{s.data(), s.size()};
 }
 
+// A null pointer is treated as an empty string.
 inline ibmw_string_view_t ToIbmwStringView(const char* s) {
-  return ibmw_string_view_t{s, strlen(s)};
+  return s ? ibmw_string_view_t{s, strlen(s)} : ibmw_string_view_t{nullptr, 0};
 }
 
 inline std::string_view ToStdStringView(ibmw_string_view_t s) {
-  return std::string_view(s.str, s.len);
+  return s.str ? std::string_view(s.str, s.len) : std::string_view();
 }
 
 inline std::string ToStdString(ibmw_string_view_t s) {
-  return std::string(s.str, s.len);
+  return s.str ? std::string(s.str, s.len) : std::string();
 }
 
 }  // namespace ibmw::util

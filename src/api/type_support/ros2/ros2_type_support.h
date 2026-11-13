@@ -192,11 +192,14 @@ class ROS2TypeSupport : public eprosima::fastdds::dds::TopicDataType {
   bool is_plain_;
 
   uint32_t CalculateMaxSerializedSize() const {
-    if constexpr (std::is_standard_layout_v<ROS2MsgType> &&
-                  std::is_trivially_copyable_v<ROS2MsgType>) {
-      return 4 + sizeof(ROS2MsgType);  // encapsulation header + struct size
+    if constexpr (std::is_trivially_copyable_v<ROS2MsgType>) {
+      // Plain loans hand out the in-memory layout: DdsTransportDriver copies
+      // type_size - 4 bytes of the struct.
+      if (is_plain_) return 4 + sizeof(ROS2MsgType);
     }
-    return 0;
+    // The CDR layout differs from the in-memory one (alignment, padding, wide
+    // chars), so serialized payloads use the generated bound.
+    return ROS2CdrSerializer::MaxSerializedSize<ROS2MsgType>();
   }
 };
 

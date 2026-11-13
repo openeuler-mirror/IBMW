@@ -220,8 +220,10 @@ if(IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE OR
 endif()
 
 # The fault candidate is a separate test-instrumented image.  It is enabled by
-# an explicit production option so an OHOS image can ship the injection lane
-# without enabling the full test suite.
+# an explicit option so an OHOS test image can ship the injection lane without
+# enabling the full test suite.  Its install rules are EXCLUDE_FROM_ALL: only
+# `cmake --install <dir> --component dds_managed_exact_fault_candidate` installs
+# it, never a plain install of a product image (HYG-041).
 if(IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE)
   add_library(ibmw_dds_extension_fault_candidate SHARED ${DDS_EXTENSION_SOURCES})
   ibmw_configure_dds_extension(
@@ -237,10 +239,10 @@ if(IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE)
   if(IBMW_INSTALL)
     install(TARGETS ibmw_dds_managed_exact_fault_candidate
       RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-      COMPONENT dds_managed_exact_fault_candidate)
+      COMPONENT dds_managed_exact_fault_candidate EXCLUDE_FROM_ALL)
     install(TARGETS ibmw_dds_extension_fault_candidate
       LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-      COMPONENT dds_managed_exact_fault_candidate)
+      COMPONENT dds_managed_exact_fault_candidate EXCLUDE_FROM_ALL)
   endif()
 endif()
 

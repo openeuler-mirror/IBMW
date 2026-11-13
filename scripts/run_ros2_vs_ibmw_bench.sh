@@ -15,6 +15,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${IBMW_BUILD_DIR:-${REPO_ROOT}/build}"
 CSV_PATH="${IBMW_BENCH_CSV:-/tmp/ibmw_bench/ros2_vs_ibmw.csv}"
+# Run logs go to a private directory (default: new mktemp -d), not to fixed
+# names in the shared /tmp.
+LOG_DIR="${IBMW_BENCH_LOG_DIR:-}"
 PAYLOAD_BYTES="${PAYLOAD_BYTES:-4096}"
 SIZE_LABEL="${SIZE_LABEL:-4KB}"
 MSG_COUNT="${MSG_COUNT:-1000}"
@@ -49,6 +52,7 @@ Usage:
 Environment:
   IBMW_BUILD_DIR="<ibmw-build-dir>"
   IBMW_BENCH_CSV=/tmp/ibmw_bench/ros2_vs_ibmw.csv
+  IBMW_BENCH_LOG_DIR=<dir>  # run logs (default: a new mktemp -d directory)
   MSG_COUNT=1000 HZ=100 WARMUP_MESSAGES=0 ROS2_WARMUP_MESSAGES=0 START_DELAY_MS=2000
   IBMW_SUB_EXECUTOR=work_thread_pool IBMW_LOAN_MODE=async IBMW_DDS_QOS_DEPTH=256
   IBMW_DDS_QOS_RELIABILITY=reliable IBMW_EXECUTOR_THREADS=<empty> IBMW_DDS_TRANSPORT_POLICY=<yaml default>
@@ -300,7 +304,7 @@ run_ibmw() {
   clean_shm
   local duration=$(( (MSG_COUNT + WARMUP_MESSAGES + HZ - 1) / HZ + START_DELAY_MS / 1000 + 8 ))
   (cd "${BUILD_DIR}" && DURATION="${duration}" ./start_dds_send_shm.sh) \
-    >"/tmp/ibmw_ros2_vs_ibmw_dds_send_shm_${SIZE_LABEL}.log" 2>&1
+    >"${LOG_DIR}/ibmw_ros2_vs_ibmw_dds_send_shm_${SIZE_LABEL}.log" 2>&1
   local validate_status=0
   validate_latest_row "dds_send_shm_${SIZE_LABEL}"
   validate_status=$?
@@ -324,7 +328,7 @@ run_ros2_native() {
     --listen-ms "${ROS2_LISTEN_MS}" \
     --label "native_ros2_${SIZE_LABEL}" \
     --csv-path "${CSV_PATH}" \
-    >"/tmp/ibmw_ros2_vs_ibmw_native_ros2_sub_${SIZE_LABEL}.log" 2>&1 &
+    >"${LOG_DIR}/ibmw_ros2_vs_ibmw_native_ros2_sub_${SIZE_LABEL}.log" 2>&1 &
   ROS2_SUB_PID=$!
   sleep 2
   "${ROS2_BIN}" \
@@ -340,12 +344,18 @@ run_ros2_native() {
     --wait-after-send-ms "${ROS2_WAIT_AFTER_SEND_MS}" \
     --wait-for-match-ms "${ROS2_WAIT_FOR_MATCH_MS}" \
     --label "native_ros2_${SIZE_LABEL}" \
-    >"/tmp/ibmw_ros2_vs_ibmw_native_ros2_pub_${SIZE_LABEL}.log" 2>&1
+    >"${LOG_DIR}/ibmw_ros2_vs_ibmw_native_ros2_pub_${SIZE_LABEL}.log" 2>&1
   wait "${ROS2_SUB_PID}"
   ROS2_SUB_PID=""
   validate_latest_row "native_ros2_${SIZE_LABEL}"
 }
 
+if [[ -z "${LOG_DIR}" ]]; then
+  LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ibmw_ros2_vs_ibmw.XXXXXX")"
+else
+  mkdir -p "${LOG_DIR}"
+fi
+echo "[ros2-vs-ibmw] logs: ${LOG_DIR}"
 IBMW_STATUS=0
 ROS2_STATUS=0
 

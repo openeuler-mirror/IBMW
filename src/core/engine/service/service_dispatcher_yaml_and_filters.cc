@@ -33,23 +33,31 @@ void ServiceDispatcher::RegisterDebugLogFilter() {
                      ptr->info.func_name, ptr->ctx_ref.ToString());
         }
 
+        // Weak capture: a strong one would make the frame own itself and leak
+        // it when a driver drops the call.
         ptr->callback =
-            [this, ptr, callback{std::move(ptr->callback)}](ibmw::rpc::Status status) {
+            [this, frame_weak{std::weak_ptr<ServiceMessageFrame>(ptr)},
+             callback{std::move(ptr->callback)}](ibmw::rpc::Status status) {
+              auto frame = frame_weak.lock();
+              if (!frame) [[unlikely]] {
+                callback(status);
+                return;
+              }
               if (!status.OK()) {
                 MW_WARN("Service client get rpc error ret. func name: {}, status: {}",
-                           ptr->info.func_name, status.ToString());
+                           frame->info.func_name, status.ToString());
               } else {
                 auto buf_ptr = TrySerializeRspWithCache(
-                    *ptr, kDebugLogSerializationFormat);
+                    *frame, kDebugLogSerializationFormat);
 
                 if (buf_ptr) {
                   auto rsp_str = buf_ptr->JoinToString();
 
                   MW_INFO("Service client get rpc ret. func name: {}, status: {}, rsp: {}",
-                             ptr->info.func_name, status.ToString(), rsp_str);
+                             frame->info.func_name, status.ToString(), rsp_str);
                 } else {
                   MW_INFO("Service client get rpc ret. func name: {}, status: {}",
-                             ptr->info.func_name, status.ToString());
+                             frame->info.func_name, status.ToString());
                 }
               }
 

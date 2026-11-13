@@ -29,7 +29,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <iostream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -50,6 +49,7 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "cpp/action/action_server_binding.h"
+#include "cpp/action/action_log.h"
 #include "cpp/action/server.h"
 #include "cpp/action/server_runtime.h"
 #include "internal/ros2_action_dds/action_wire_contract.h"
@@ -92,13 +92,13 @@ class ActionServerNode {
     pqos.name("ibmw_action_dds_server");
     participant_ = dds::DomainParticipantFactory::get_instance()->create_participant(domain_id, pqos);
     if (participant_ == nullptr) {
-      std::cerr << "[FAIL] create_participant failed" << std::endl;
+      ActionLog(ActionLogLevel::kError, "create_participant failed");
       return false;
     }
     publisher_ = participant_->create_publisher(dds::PUBLISHER_QOS_DEFAULT);
     subscriber_ = participant_->create_subscriber(dds::SUBSCRIBER_QOS_DEFAULT);
     if (publisher_ == nullptr || subscriber_ == nullptr) {
-      std::cerr << "[FAIL] create publisher/subscriber failed" << std::endl;
+      ActionLog(ActionLogLevel::kError, "create publisher/subscriber failed");
       return false;
     }
 
@@ -131,7 +131,7 @@ class ActionServerNode {
     }
 
     status_thread_ = std::thread([this] { StatusLoop(); });
-    std::cout << "[PASS] DDS-only action server started for " << action_name_ << std::endl;
+    ActionLog(ActionLogLevel::kInfo, "DDS-only action server started for " + action_name_);
     return true;
   }
 
@@ -180,12 +180,12 @@ class ActionServerNode {
         response.accepted = true;
         publish_status = true;
       } else if (decision.failure == GoalAcceptanceFailure::kInvalidGoal) {
-        std::cerr << "[WARN] Rejecting goal: validation failed" << std::endl;
+        ActionLog(ActionLogLevel::kWarn, "Rejecting goal: validation failed");
         publish_status = true;
       } else if (decision.failure == GoalAcceptanceFailure::kDuplicateGoal) {
-        std::cerr << "[WARN] Rejecting duplicate goal id" << std::endl;
+        ActionLog(ActionLogLevel::kWarn, "Rejecting duplicate goal id");
       } else if (decision.failure == GoalAcceptanceFailure::kCapacityFull) {
-        std::cerr << "[WARN] Rejecting goal because server capacity is full" << std::endl;
+        ActionLog(ActionLogLevel::kWarn, "Rejecting goal because server capacity is full");
       }
     }
 
@@ -202,7 +202,7 @@ class ActionServerNode {
       const auto decision = runtime_.GetResult(request.goal_id, PendingResult{identity});
       if (decision.immediate) {
         if (decision.queue_full) {
-          std::cerr << "[WARN] GetResult pending queue is full; returning STATUS_UNKNOWN" << std::endl;
+          ActionLog(ActionLogLevel::kWarn, "GetResult pending queue is full; returning STATUS_UNKNOWN");
         }
         response = Bind::ToGetResultResponse(decision.status, decision.result);
       }

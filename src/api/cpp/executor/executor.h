@@ -92,10 +92,17 @@ class ExecutorHandle {
     if (!latch.TryAdd()) {
       return false;
     }
-    Dispatch([&latch, task = std::move(task)]() {
-      task();
+    // Task::operator() is noexcept, so the count is only lost if Dispatch itself
+    // throws (e.g. null executor); undo the TryAdd so CloseAndWait cannot hang.
+    try {
+      Dispatch([&latch, task = std::move(task)]() {
+        task();
+        latch.CountDown();
+      });
+    } catch (...) {
       latch.CountDown();
-    });
+      throw;
+    }
     return true;
   }
 

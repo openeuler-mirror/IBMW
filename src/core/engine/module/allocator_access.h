@@ -54,6 +54,7 @@ class AllocatorAccess {
 
   static ibmw_allocator_base_t GenBase(void* ctx) {
     return ibmw_allocator_base_t{
+        .struct_size = sizeof(ibmw_allocator_base_t),
         .get_thread_local_buf = [](void* ctx, size_t buf_size) -> void* {
           return AllocatorAccess::GetThreadLocalBuf(buf_size);
         },

@@ -59,7 +59,10 @@ class TypeSupportRegistry final {
   void RegisterLoaded(
       std::string package_path,
       std::unique_ptr<ibmw::extension::TypeSupportPackageLoader> loader);
-  void RegisterSchema(ibmw::util::SchemaDescriptor descriptor);
+  static void ValidateSchema(const ibmw::util::SchemaDescriptor& descriptor);
+  static void RequireSameSchema(
+      const ibmw::util::SchemaDescriptor& old,
+      const ibmw::util::SchemaDescriptor& descriptor);
 
   mutable std::mutex mutex_;
   std::mutex load_mutex_;

@@ -3,6 +3,7 @@
 
 #include "mqtt_ext/mqtt_rpc_driver.h"
 
+#include <optional>
 #include <regex>
 
 #include "cpp/service/rpc_handle.h"
@@ -91,6 +92,10 @@ struct convert<ibmw::extensions::mqtt_extension::MqttRpcDriver::Options> {
 
 namespace ibmw::extensions::mqtt_extension {
 
+namespace {
+constexpr std::string_view kRspTopicPrefix = "ibmw_rpc_rsp/";
+}  // namespace
+
 void MqttRpcDriver::Initialize(YAML::Node options_node) {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kInit) == State::kPreInit,
@@ -143,9 +148,13 @@ void MqttRpcDriver::Initialize(YAML::Node options_node) {
           reply.payloadlen = static_cast<int>(payload.size());
           reply.qos = 1;
           const auto code = MQTTAsync_sendMessage(client, topic.c_str(), &reply, nullptr);
-          if (code != MQTTASYNC_SUCCESS) MW_WARN("Cannot send MQTT service directory: {}", code);
+          // Requests come from any broker client; rate-limit so a flood cannot flood the log.
+          if (code != MQTTASYNC_SUCCESS)
+            MW_WARN_INTERVAL(1000, "Cannot send MQTT service directory: {}", code);
         } catch (const std::exception& error) {
-          MW_WARN("Cannot produce MQTT service directory: {}", error.what());
+          MW_WARN_INTERVAL(1000, "Cannot produce MQTT service directory: {}", error.what());
+        } catch (...) {
+          MW_WARN_INTERVAL(1000, "Cannot produce MQTT service directory: unknown exception");
         }
       });
 
@@ -156,9 +165,7 @@ void MqttRpcDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
-
-  // Wait a moment  for the connection to be established
-  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  // The extension already waited (bounded) for the first connect attempt.
 }
 void MqttRpcDriver::Shutdown() {
   if (std::atomic_exchange(&state_, State::kShutdown) == State::kShutdown)
@@ -166,9 +173,22 @@ void MqttRpcDriver::Shutdown() {
 
   UnSubscribeMqttTopic();
 
-  client_tool_ptr_.reset();
-
+  // Wait for in-flight response handlers before releasing the client tool
+  // they use (TRANS-015). The catalog is shared with the transport driver:
+  // whichever shuts down first stops intake for both, so answers arriving
+  // after that end their calls by timeout.
   msg_handle_catalog_ptr_->Shutdown();
+
+  // client_tool_ptr_ stays until destruction: Call() and late handlers may
+  // still reach it after Shutdown. Calls still waiting then get their result
+  // from the destructor.
+}
+
+MqttRpcDriver::~MqttRpcDriver() {
+  if (!client_tool_ptr_) return;
+  client_tool_ptr_->AbandonAll([](auto&& client_call_wrapper_ptr) {
+    CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+  });
 }
 
 bool MqttRpcDriver::RegisterServiceFunc(
@@ -176,6 +196,11 @@ bool MqttRpcDriver::RegisterServiceFunc(
   try {
     if (state_.load() != State::kInit) {
       MW_ERROR("Service func can only be registered when state is 'Init'.");
+      return false;
+    }
+    // Before any side effect: no subscription without a catalog handle.
+    if (msg_handle_catalog_ptr_->IsSealed()) {
+      MW_ERROR("Service func can only be registered before the engine starts.");
       return false;
     }
 
@@ -225,6 +250,13 @@ bool MqttRpcDriver::RegisterServiceFunc(
         ctx_ptr->SetMetaValue(IBMW_RPC_CONTEXT_KEY_SERIALIZATION_TYPE, serialization_type);
 
         std::string mqtt_pub_topic(buf_oper.GetString(util::BufferLenType::kUInt8));
+        // Answers only go to client answer topics, never to a topic of the
+        // peer's choice (e.g. a data or request topic).
+        if (!mqtt_pub_topic.starts_with(kRspTopicPrefix)) [[unlikely]] {
+          MW_WARN_INTERVAL(5000, "Drop rpc request for '{}': answer topic must start with '{}'.",
+                           info.func_name, kRspTopicPrefix);
+          return;
+        }
 
         char req_id_buf[4];
         buf_oper.GetBuffer(req_id_buf, 4);
@@ -327,7 +359,7 @@ bool MqttRpcDriver::RegisterServiceFunc(
 
               MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
               pubmsg.payload = msg_buf_vec.data();
-              pubmsg.payloadlen = msg_buf_vec.size();
+              pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());  // <= max_pkg_size_ <= INT_MAX
               pubmsg.qos = qos;
               pubmsg.retained = 0;
 
@@ -379,6 +411,11 @@ bool MqttRpcDriver::RegisterClientFunc(
       MW_ERROR("Client func can only be registered when state is 'Init'.");
       return false;
     }
+    // Before any side effect: no subscription without a catalog handle.
+    if (msg_handle_catalog_ptr_->IsSealed()) {
+      MW_ERROR("Client func can only be registered before the engine starts.");
+      return false;
+    }
 
     namespace util = ibmw::common::util;
 
@@ -428,7 +465,7 @@ bool MqttRpcDriver::RegisterClientFunc(
 
     msg_handle_catalog_ptr_->RegisterMsgHandle(
         mqtt_sub_topic,
-        [this](MQTTAsync_message* message) {
+        [this, func = std::string(rpc::GetFuncNameWithoutPrefix(info.func_name))](MQTTAsync_message* message) {
           std::shared_ptr<runtime::core::service::ServiceMessageFrame> client_call_wrapper_ptr;
 
           try {
@@ -438,7 +475,11 @@ bool MqttRpcDriver::RegisterClientFunc(
             uint32_t req_id = buf_oper.GetUint32();
             uint32_t code = buf_oper.GetUint32();
 
-            auto msg_recorder = client_tool_ptr_->GetRecord(req_id);
+            // Only an answer on the topic of the called function completes
+            // the call (the topic is part of what the client asked for).
+            auto msg_recorder = client_tool_ptr_->GetRecordIf(req_id, [&func](const auto& record) {
+              return rpc::GetFuncNameWithoutPrefix(record->info.func_name) == func;
+            });
             if (!msg_recorder) [[unlikely]] {
               // No record is found, which means that the call has timed out. The record has been deleted after the timeout process is gone.
               MW_TRACE("Can not get req id {} from recorder.", req_id);
@@ -510,6 +551,28 @@ bool MqttRpcDriver::IsClientReady(std::string_view, std::string_view function) c
 
 void MqttRpcDriver::Call(
     const std::shared_ptr<runtime::core::service::ServiceMessageFrame>& client_call_wrapper_ptr) noexcept {
+  // Once the call is recorded, a failure must claim the record first so the
+  // result is delivered exactly once, whichever of the answer, the timeout or
+  // this path gets there first.
+  std::optional<uint32_t> recorded_req_id;
+  // Also used from the catch blocks of this noexcept function: a throwing
+  // client callback must not terminate the process.
+  auto fail = [&](uint32_t code) noexcept {
+    try {
+      if (!recorded_req_id) {
+        CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(code));
+        return;
+      }
+      if (auto record = client_tool_ptr_->GetRecord(*recorded_req_id))
+        CallResultCallback(**record, ibmw::rpc::Status(code));
+    } catch (...) {
+      try {
+        MW_ERROR("Client callback threw while reporting a failed call.");
+      } catch (...) {
+      }
+    }
+  };
+
   try {
     if (state_.load() != State::kStart) [[unlikely]] {
       MW_WARN("Method can only be called when state is 'Start'.");
@@ -610,13 +673,23 @@ void MqttRpcDriver::Call(
 
     // Record the callbacks and other contents
     auto timeout = client_call_wrapper_ptr->ctx_ref.Timeout();
-    auto record_ptr = client_call_wrapper_ptr;
-
-    bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::move(record_ptr));
+    bool ret = client_tool_ptr_->Record(cur_req_id, timeout, std::shared_ptr(client_call_wrapper_ptr));
+    if (!ret) [[unlikely]] {
+      ret = client_tool_ptr_->RetryRecord(
+          cur_req_id, timeout, client_call_wrapper_ptr, [this] { return req_id_++; });
+    }
 
     if (!ret) [[unlikely]] {
       MW_ERROR("Failed to record msg.");
       CallResultCallback(*client_call_wrapper_ptr, ibmw::rpc::Status(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR));
+      return;
+    }
+    recorded_req_id = cur_req_id;
+    // Fast fail for a call that raced Shutdown(): it would only wait for an
+    // answer that can no longer be delivered. A call that slips past this
+    // check is completed by its timeout or by the destructor.
+    if (state_.load() != State::kStart) [[unlikely]] {
+      fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
       return;
     }
 
@@ -643,7 +716,7 @@ void MqttRpcDriver::Call(
     // send
     MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
     pubmsg.payload = msg_buf_vec.data();
-    pubmsg.payloadlen = msg_buf_vec.size();
+    pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());  // <= max_pkg_size_ <= INT_MAX
     pubmsg.qos = qos;
     pubmsg.retained = 0;
 
@@ -660,11 +733,19 @@ void MqttRpcDriver::Call(
 
     MW_TRACE("Mqtt publish to '{}'", mqtt_pub_topic);
     int rc = MQTTAsync_sendMessage(client_, mqtt_pub_topic.data(), &pubmsg, NULL);
-    MW_CHECK_WARN(rc == MQTTASYNC_SUCCESS,
-                     "publish mqtt msg failed, topic: {}, code: {}",
-                     mqtt_pub_topic, rc);
+    if (rc != MQTTASYNC_SUCCESS) [[unlikely]] {
+      MW_WARN("publish mqtt msg failed, topic: {}, code: {}", mqtt_pub_topic, rc);
+      // Fail the call now instead of leaving it to the timeout (or forever
+      // when no timeout executor is configured) (TRANS-014). The record may
+      // already be gone if a timeout raced us.
+      fail(IBMW_RPC_STATUS_CLI_SEND_REQ_FAILED);
+    }
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
+    fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
+  } catch (...) {
+    MW_ERROR("Mqtt rpc call failed with a non-std exception.");
+    fail(IBMW_RPC_STATUS_CLI_DRIVER_INTERNAL_ERROR);
   }
 }
 
@@ -716,13 +797,16 @@ void MqttRpcDriver::SubscribeMqttTopic() {
 
 void MqttRpcDriver::UnSubscribeMqttTopic() {
   // todo:Replace with MQTTClient_unsubscribeMany
-  for (auto sub_info : sub_info_vec_) {
-    MQTTAsync_unsubscribe(client_, sub_info.topic.data(), NULL);
+  for (const auto& sub_info : sub_info_vec_) {
+    int rc = MQTTAsync_unsubscribe(client_, sub_info.topic.data(), NULL);
+    if (rc != MQTTASYNC_SUCCESS) {
+      MW_WARN("Failed to unsubscribe mqtt, topic: {} return code: {}", sub_info.topic, rc);
+    }
   }
 }
 
 void MqttRpcDriver::ReturnRspWithStatusCode(
-    std::string_view mqtt_pub_topic,
+    const std::string& mqtt_pub_topic,
     int qos,
     std::string_view serialization_type,
     const char* req_id_buf,
@@ -738,7 +822,7 @@ void MqttRpcDriver::ReturnRspWithStatusCode(
 
   MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
   pubmsg.payload = msg_buf_vec.data();
-  pubmsg.payloadlen = msg_buf_vec.size();
+  pubmsg.payloadlen = static_cast<int>(msg_buf_vec.size());
   pubmsg.qos = qos;
   pubmsg.retained = 0;
 

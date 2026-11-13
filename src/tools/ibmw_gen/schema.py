@@ -7,6 +7,7 @@
 """Parse and validate .ibmw.yaml project definitions."""
 
 import os
+import re
 import sys
 from typing import Any
 
@@ -167,6 +168,11 @@ _V2_WIRE_TO_V1_MODULE: dict[str, list[tuple[str, str]]] = {
         # `wire.iceoryx.msg_type` continue to parse byte-identically.
         ("msg_type", "iceoryx_msg_type"),
     ],
+    "shm": [
+        # Same role as `wire.iceoryx.msg_type`: log-only, the shm plugin
+        # defaults it to `message_type`.
+        ("msg_type", "shm_msg_type"),
+    ],
 }
 
 
@@ -229,6 +235,8 @@ def _expand_v2_messages_block(data: dict) -> None:
             implicit_transports.add("ros2")
         if mod_type.startswith("direct_iceoryx_"):
             implicit_transports.add("iceoryx")
+        if mod_type.startswith("direct_shm_"):
+            implicit_transports.add("shm")
 
         targets: set[str] = set()
         if mod_transport:
@@ -303,6 +311,7 @@ VALID_MODULE_TYPES = {
     # explicit opt-in at module-template selection time.
     "direct_ros2_publisher", "direct_ros2_subscriber",
     "direct_iceoryx_publisher", "direct_iceoryx_subscriber",
+    "direct_shm_publisher", "direct_shm_subscriber",
     # Deprecated aliases (kept for one release window; normalized to
     # direct_ros2_* below in _normalize_module_type_alias()).
     "ros2_interop_publisher", "ros2_interop_subscriber",
@@ -355,19 +364,22 @@ VALID_ZERO_COPY_CONFIG = {"auto", "strict", "compat"}
 # This is the single source of truth for the generation-time check.
 #   - iceoryx is the canonical native shared-memory transport (true zero-copy
 #     via SHM loan).
+#   - shm is the self-developed shared-memory transport (shm_ext, no RouDi);
+#     same loan contract as iceoryx, true zero-copy.
 #   - dds is treated as conditionally SHM-capable: FastDDS DataSharing supports
 #     a loan API and `loaned_message_demo.ibmw.yaml` is a working sample.
 #     It remains conditional until IBMW_HAS_SHM_DDS is concretely defined.
 # All other transports (ros2, local, mqtt, net, zenoh, http) lack the
 # shared-memory loan path and would force a memcpy — violating the zero-copy
 # absolute rule, so validation reports those combinations as errors.
-_SHM_CAPABLE_TRANSPORTS = {"iceoryx", "dds"}
+_SHM_CAPABLE_TRANSPORTS = {"iceoryx", "shm", "dds"}
 
 # The VALID_TRANSPORTS closed enum was removed. Validation
 # now queries the open transport plugin registry — see
 # tools/ibmw_gen/transports/__init__.py. Adding a new transport no
 # longer requires editing this file.
 import transports as _transports  # noqa: E402  (after constants)
+from generators.user_code import UserCodeError, validate_user_code  # noqa: E402
 VALID_APP_TYPES = {"pubsub", "rpc", "bare"}
 
 EXPERIMENTAL_ACTION_FIBONACCI = "example_interfaces/action/Fibonacci"
@@ -855,6 +867,24 @@ def _validate_experimental_actions(data: dict[str, Any]) -> None:
         action["roles"] = roles
 
 
+# Module values are emitted into C++ string literals, #include lines and YAML
+# double-quoted scalars without escaping; these characters would end the literal
+# or the line there (TOOL-023).
+_UNSAFE_MODULE_CHARS = re.compile(r'["\\\x00-\x1f\x7f]')
+
+
+def _check_module_strings(module: str, value, path: str):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _check_module_strings(module, item, f"{path}.{key}" if path else str(key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _check_module_strings(module, item, f"{path}[{index}]")
+    elif isinstance(value, str) and _UNSAFE_MODULE_CHARS.search(value):
+        _error(f"Module '{module}': '{path}' must not contain '\"', '\\' or control "
+               f"characters: {value!r}")
+
+
 def _validate_modules(data: dict):
     """Validate the modules section."""
     if "modules" not in data:
@@ -877,6 +907,10 @@ def _validate_modules(data: dict):
     for mod in data["modules"]:
         if "name" not in mod:
             _error("Each module must have a 'name' field")
+        # user_code is emitted as C++ code, not inside a string literal, so it
+        # is exempt from TOOL-023 and validated by validate_user_code() below.
+        _check_module_strings(str(mod["name"]),
+                              {k: v for k, v in mod.items() if k != "user_code"}, "")
         if "type" not in mod:
             _error(f"Module '{mod['name']}' must have a 'type' field")
         if mod["type"] not in VALID_MODULE_TYPES:
@@ -885,6 +919,10 @@ def _validate_modules(data: dict):
         # R10 alias normalization: translate deprecated
         # ros2_interop_* → direct_ros2_* in-place + emit deprecation warn.
         _normalize_module_type_alias(mod)
+        try:
+            validate_user_code(mod)
+        except UserCodeError as exc:
+            _error(str(exc))
         # R10 advisory: direct_<transport>_* templates are explicit
         # escape hatches that couple user code to a named transport. Emit
         # a one-time advisory so users know they are opting out of the
@@ -947,21 +985,22 @@ def _validate_modules(data: dict):
             elif transport == "ros2":
                 if "ros2_package" not in mod:
                     _error(f"Module '{mod['name']}' (ROS2 RPC) requires 'ros2_package'")
-                # ros2_service is optional; if provided, real code is generated
-                # instead of TODO skeletons
-                if "ros2_service" in mod:
-                    mod["_has_ros2_service_info"] = True
-                else:
-                    mod["_has_ros2_service_info"] = False
+                # Only modules with a service are generated; the project CMake
+                # and configs list every module.
+                if "ros2_service" not in mod:
+                    _error(f"Module '{mod['name']}' (ROS2 RPC) requires 'ros2_service'")
+                mod["_has_ros2_service_info"] = True
 
         # direct_* publishers/subscribers — R10 escape hatches.
         # direct_ros2_* use low-level ros2::transport API over DDS;
         # direct_iceoryx_* use publisher_for<T>/subscriber_for<T> over the
-        # iceoryx transport path. The legacy aliases ros2_interop_* were
+        # iceoryx transport path; direct_shm_* do the same over the shm
+        # transport path. The legacy aliases ros2_interop_* were
         # normalized above by _normalize_module_type_alias().
         if mod["type"] in ("direct_ros2_publisher", "direct_ros2_subscriber",
                            "ros2_interop_publisher", "ros2_interop_subscriber",
-                           "direct_iceoryx_publisher", "direct_iceoryx_subscriber"):
+                           "direct_iceoryx_publisher", "direct_iceoryx_subscriber",
+                           "direct_shm_publisher", "direct_shm_subscriber"):
             if "topic" not in mod:
                 _error(f"Module '{mod['name']}' (type={mod['type']}) requires 'topic'")
             # Derive ros2_msg_include / ros2_package from message_type
@@ -991,13 +1030,16 @@ def _validate_modules(data: dict):
                 if "ros2_package" not in mod:
                     _error(f"Module '{mod['name']}' (type={mod['type']}) requires "
                            "'ros2_package' (e.g. 'geometry_msgs')")
-                if mod.get("transport") and mod["transport"] != "iceoryx":
+                direct_transport = ("shm" if mod["type"].startswith("direct_shm_")
+                                    else "iceoryx")
+                if mod.get("transport") and mod["transport"] != direct_transport:
                     _warn(f"Module '{mod['name']}' (type={mod['type']}): transport "
-                          f"should be 'iceoryx' (got '{mod['transport']}'); forcing 'iceoryx'")
-                mod["transport"] = "iceoryx"
+                          f"should be '{direct_transport}' (got '{mod['transport']}'); "
+                          f"forcing '{direct_transport}'")
+                mod["transport"] = direct_transport
                 if "ros2_packages" not in mod:
                     mod["ros2_packages"] = [mod["ros2_package"]]
-                mod["_is_direct_iceoryx"] = True
+                mod[f"_is_direct_{direct_transport}"] = True
 
         if mod["type"] in {"loaned_publisher", "loaned_subscriber"}:
             _t = mod.get("transport", "dds")
@@ -1030,9 +1072,9 @@ def _validate_modules(data: dict):
                        "'ros2_package' (e.g. 'geometry_msgs')")
 
             transport = mod.get("transport", "dds")
-            if transport not in {"dds", "iceoryx"}:
+            if transport not in {"dds", "iceoryx", "shm"}:
                 _error(f"Module '{mod['name']}' (loaned_publisher): unsupported "
-                       f"transport '{transport}' (valid: 'dds', 'iceoryx')")
+                       f"transport '{transport}' (valid: 'dds', 'iceoryx', 'shm')")
             mod["transport"] = transport
 
             if transport == "dds":
@@ -1062,7 +1104,7 @@ def _validate_modules(data: dict):
                 # has its own dedicated _is_loaned_publisher branch which links
                 # public ROS2 TypeSupport + ${pkg}_TARGETS deps. Concrete
                 # transport selection remains in runtime configuration.
-            else:  # transport == "iceoryx"
+            else:  # transport in {"iceoryx", "shm"}
                 # iceoryx loaned_publisher: `iceoryx_msg_type` was removed from
                 # required fields because it is only a logging placeholder (the wire key is derived from
                 # ros2_type_name via "ros2:" prefix). iceoryx plugin now falls
@@ -1073,13 +1115,14 @@ def _validate_modules(data: dict):
                 # early instead of silently degrading.
                 zc = mod.get("zero_copy_config", "strict")
                 if zc != "strict":
-                    _error(f"Module '{mod['name']}' (loaned_publisher,iceoryx): "
+                    _error(f"Module '{mod['name']}' (loaned_publisher,{transport}): "
                            f"zero_copy_config must be 'strict' (got '{zc}'); "
-                           f"iceoryx transport supports only true zero-copy SHM "
+                           f"{transport} transport supports only true zero-copy SHM "
                            f"loan with no fallback path. Use transport='dds' if "
                            f"you need '{zc}' semantics.")
                 mod["zero_copy_config"] = "strict"
-                # NOTE: iceoryx branch does NOT set _is_ros2_interop. cmake_gen
+                # The shm transport has the same strict-only loan contract.
+                # NOTE: iceoryx/shm branch does NOT set _is_ros2_interop. cmake_gen
                 # has its own public TypeSupport dependency branch.
 
             mod["_is_loaned_publisher"] = True
@@ -1113,9 +1156,9 @@ def _validate_modules(data: dict):
                        "'ros2_package' (e.g. 'geometry_msgs')")
 
             transport = mod.get("transport", "dds")
-            if transport not in {"dds", "iceoryx"}:
+            if transport not in {"dds", "iceoryx", "shm"}:
                 _error(f"Module '{mod['name']}' (loaned_subscriber): unsupported "
-                       f"transport '{transport}' (valid: 'dds', 'iceoryx')")
+                       f"transport '{transport}' (valid: 'dds', 'iceoryx', 'shm')")
             mod["transport"] = transport
 
             # subscriber_style — controls user-facing API shape. Default
@@ -1147,8 +1190,8 @@ def _validate_modules(data: dict):
                                f"cannot derive ros2_type_name from message_type "
                                f"'{mt}'; please specify 'ros2_type_name' "
                                f"(e.g. 'geometry_msgs/msg/Point')")
-            else:  # transport == "iceoryx"
-                # iceoryx_msg_type is not required (see the loaned_publisher
+            else:  # transport in {"iceoryx", "shm"}
+                # iceoryx_msg_type / shm_msg_type is not required (see the loaned_publisher
                 # branch above for rationale). No validation
                 # needed here — plugin falls back to message_type.
                 pass
@@ -1180,6 +1223,14 @@ def _validate_apps(data: dict):
         for mod_name in app["modules"]:
             if mod_name not in module_names:
                 _error(f"App '{app['name']}' references unknown module '{mod_name}'")
+
+        # shm replaces iceoryx on the same topics: one app cannot load both.
+        transports = {m["name"]: m.get("transport") for m in data.get("modules", [])}
+        mixed = {t: sorted(n for n in app["modules"] if transports.get(n) == t) for t in ("iceoryx", "shm")}
+        if mixed["iceoryx"] and mixed["shm"]:
+            _error(f"App '{app['name']}' cannot mix iceoryx and shm modules (iceoryx: "
+                   f"{', '.join(mixed['iceoryx'])}; shm: {', '.join(mixed['shm'])}); "
+                   "put them in separate apps or move them to one transport")
 
         # Default app type
         if "type" not in app:
@@ -1354,6 +1405,17 @@ def _enrich(data: dict):
             for pkg in m.get("ros2_packages", []):
                 direct_iceoryx_packages.add(pkg)
     data["_direct_iceoryx_packages"] = sorted(direct_iceoryx_packages)
+
+    # Same signals for direct_shm_* (shm transport path, ROS2 package deps).
+    has_direct_shm = any(
+        m.get("_is_direct_shm") for m in data.get("modules", []))
+    data["_has_direct_shm"] = has_direct_shm
+    direct_shm_packages = set()
+    for m in data.get("modules", []):
+        if m.get("_is_direct_shm"):
+            for pkg in m.get("ros2_packages", []):
+                direct_shm_packages.add(pkg)
+    data["_direct_shm_packages"] = sorted(direct_shm_packages)
 
 
     # App enrichment

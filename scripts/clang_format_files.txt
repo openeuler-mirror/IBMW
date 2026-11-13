@@ -1,0 +1,4 @@
+# Files that must stay clang-format clean (HYG-028); checked by
+# scripts/check_clang_format.sh. Add a file once it is formatted.
+src/core/observability/core_metrics.cc
+src/core/observability/core_metrics.h

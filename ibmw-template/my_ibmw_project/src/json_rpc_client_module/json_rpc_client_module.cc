@@ -3,21 +3,13 @@
 
 #include "json_rpc_client_module/json_rpc_client_module.h"
 
-#include <chrono>
-#include <thread>
-
-#include "cpp/util/json_rpc_helpers.h"
-#include "json_custom_types.h"
+#include "json_rpc_client_module/json_rpc_client_module_typesupport.inc.cc"
 
 namespace my_project {
-
-// Service and function naming constants
-static constexpr const char* kServiceName = "my_project.ComputeService";
 
 bool JsonRpcClientModule::Setup(ibmw::Runtime core) {
   core_ = core;
   service_ref_ = core_.GetService();
-
   bool ret_compute = ibmw::json::rpc::RegisterClientFunc<ComputeRequest, ComputeResponse>(
       service_ref_, kServiceName, "Compute");
   if (!ret_compute) {
@@ -42,26 +34,6 @@ void JsonRpcClientModule::Stop() {
   MW_INFO("JsonRpcClientModule::Stop.");
 }
 
-void JsonRpcClientModule::RpcLoop() {
-  uint32_t round = 0;
-
-  while (running_) {
-      {
-        ComputeRequest req;
-        ComputeResponse rsp;
-        // TODO: populate req fields
-
-        auto status = ibmw::json::rpc::Call<ComputeRequest, ComputeResponse>(
-            service_ref_, kServiceName, "Compute", req, rsp);
-
-        MW_INFO("[Round {}] Compute => status={}", round, status.Code());
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-      }
-
-    ++round;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
-}
+IBMW_TS_RPC_CLIENT_LOOP_IMPL(JsonRpcClientModule)
 
 }  // namespace my_project

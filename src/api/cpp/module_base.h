@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdio>
+#include <optional>
 #include <string_view>
 
 #include "c/driver_slot.h"
@@ -111,14 +113,29 @@ class Module {
         },
         .setup = [](void* ctx, const ibmw_core_base_t* core_ptr) -> bool {
           auto* module_ptr = static_cast<Module*>(ctx);
+
+          // An incompatible core fails this module's setup; there is no
+          // logger to report through yet.
+          std::optional<Runtime> runtime;
+          try {
+            runtime.emplace(core_ptr);
+          } catch (const std::exception& e) {
+            std::fprintf(stderr, "[IBMW ERROR] Module setup rejected the core: %s\n", e.what());
+            return false;
+          }
           module_ptr->core_ptr_ = core_ptr;
 
           try {
-            return module_ptr->Setup(Runtime(module_ptr->core_ptr_));
+            return module_ptr->Setup(*runtime);
           } catch (const std::exception& e) {
             MW_LOG(
                 Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
                 "Setup module get exception: {}", e.what());
+            return false;
+          } catch (...) {
+            MW_LOG(
+                Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
+                "Setup module get unknown exception.");
             return false;
           }
         },
@@ -132,6 +149,11 @@ class Module {
                 Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
                 "Run module get exception: {}", e.what());
             return false;
+          } catch (...) {
+            MW_LOG(
+                Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
+                "Run module get unknown exception.");
+            return false;
           }
         },
         .stop = [](void* ctx) {
@@ -143,7 +165,17 @@ class Module {
             MW_LOG(
                 Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
                 "Stop module get exception: {}", e.what());
-          }  //
+          } catch (...) {
+            MW_LOG(
+                Runtime(module_ptr->core_ptr_).GetLogger(), ibmw::common::util::kLogLevelError,
+                "Stop module get unknown exception.");
+          }
+        },
+        .set_driver_slot = [](void* ctx, ibmw_driver_slot_t slot_id, void* driver_ptr) {
+          try {
+            static_cast<Module*>(ctx)->SetDriverSlot(slot_id, driver_ptr);
+          } catch (...) {
+          }
         },
         .ctx = ctx};
   }

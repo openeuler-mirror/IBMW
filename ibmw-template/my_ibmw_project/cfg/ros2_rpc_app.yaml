@@ -8,6 +8,13 @@ ibmw:
     backends:
       - type: console
 
+  extensions:
+    items:
+      - name: ros2_extension
+        path: libibmw_ros2_transport.so
+        options:
+          node_name: "my_project"
+
   scheduling:
     executors:
       - name: work_thread_pool
@@ -21,15 +28,18 @@ ibmw:
 
   service:
     drivers:
+      - type: ros2
+        options:
+          timeout_executor: timeout_handle
       - type: local
         options:
           timeout_executor: timeout_handle
     clients:
       - func_name: "(.*)"
-        enable_drivers: [local]
+        enable_drivers: [ros2, local]
     servers:
       - func_name: "(.*)"
-        enable_drivers: [local]
+        enable_drivers: [ros2, local]
 
   modules:
     modules:

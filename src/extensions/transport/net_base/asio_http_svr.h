@@ -4,8 +4,10 @@
 #pragma once
 
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
@@ -54,7 +56,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
   struct Options {
     /// Listening address
-    Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4(), 50080};
+    Tcp::endpoint ep = Tcp::endpoint{boost::asio::ip::address_v4::loopback(), 50080};
 
     /// Maximum number of connections
     size_t max_session_num = 1000000;
@@ -127,12 +129,27 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
     options_ = Options::Verify(options);
     session_options_ptr_ = std::make_shared<SessionOptions>(options_);
-
-    MW_REQUIRE(CheckListenAddr(options_.ep),
-                            "{} is already in use.", ibmw::common::util::SSToString(options_.ep));
   }
 
   void Start() {
+    MW_REQUIRE(
+        state_.load() == State::kInit,
+        "Method can only be called when state is 'Init'.");
+
+    // Bind synchronously (no async operation exists yet) so a failure is
+    // reported to the caller instead of being lost in a detached coroutine.
+    boost::system::error_code ec;
+    acceptor_.open(options_.ep.protocol(), ec);
+    if (!ec) acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true), ec);
+    if (!ec) acceptor_.bind(options_.ep, ec);
+    if (!ec) acceptor_.listen(boost::asio::ip::tcp::acceptor::max_listen_connections, ec);
+    if (ec) {
+      boost::system::error_code ignored;
+      acceptor_.close(ignored);
+      MW_THROW("Http svr failed to listen on {}: {}.",
+               ibmw::common::util::SSToString(options_.ep), ec.message());
+    }
+
     MW_REQUIRE(
         std::atomic_exchange(&state_, State::kStart) == State::kInit,
         "Method can only be called when state is 'Init'.");
@@ -141,11 +158,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
     boost::asio::co_spawn(
         mgr_strand_,
         [this, self]() -> Awaitable<void> {
-          acceptor_.open(options_.ep.protocol());
-          acceptor_.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-          acceptor_.bind(options_.ep);
-          acceptor_.listen();
-
           while (state_.load() == State::kStart) {
             try {
               // If the number of connections reaches the upper limit, wait for a while before trying
@@ -231,9 +243,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
             case 4:
               acceptor_.close();
               ++stop_step;
-            case 5:
-              // acceptor_.release(); // When loading using a dynamic library, it will crash here, and needs to be investigated
-              ++stop_step;
             default:
               stop_step = 0;
               break;
@@ -255,16 +264,6 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
   const ibmw::common::util::LoggerWrapper& GetLogger() const { return *logger_ptr_; }
 
  private:
-  static bool CheckListenAddr(const Tcp::endpoint& ep) {
-    try {
-      IOCtx io;
-      Tcp::acceptor acceptor(io, ep);
-      return true;
-    } catch (...) {
-      return false;
-    }
-  }
-
   struct SessionOptions {
     explicit SessionOptions(const Options& options)
         : doc_root(options.doc_root),
@@ -286,7 +285,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
           session_socket_strand_(boost::asio::make_strand(*io_ptr)),
           stream_(session_socket_strand_),
           session_mgr_strand_(boost::asio::make_strand(*io_ptr)),
-          timer_(session_socket_strand_),
+          timer_(session_mgr_strand_),  // used only on the mgr strand (TRANS-025)
           logger_ptr_(logger_ptr),
           http_dispatcher_ptr_(http_dispatcher_ptr) {}
 
@@ -340,7 +339,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
                   MW_WARN(
                       "Http svr session get bad request, remote addr {}, err msg: {}, close_connect_flag: {}",
-                      RemoteAddr(), bad_req_check_ret.data(), close_connect_flag_);
+                      RemoteAddr(), bad_req_check_ret, close_connect_flag_);
                   size_t write_data_size = co_await http::async_write(
                       stream_, rsp, boost::asio::use_awaitable);
                   MW_TRACE("Http svr session async write {} bytes to {}",
@@ -357,7 +356,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
 
                   MW_WARN(
                       "Http svr session can not parse url: {}, remote addr {}, close_connect_flag: {}",
-                      RemoteAddr(), req.target().data(), close_connect_flag_);
+                      ToStdStringView(req.target()), RemoteAddr(), close_connect_flag_);
                   size_t write_data_size = co_await http::async_write(
                       stream_, rsp, boost::asio::use_awaitable);
                   MW_TRACE("Http svr session async write {} bytes to {}",
@@ -389,7 +388,7 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 }
 
                 std::string path = PathCat(session_options_ptr_->doc_root, url_struct->path);
-                if (url_struct->path.back() == '/') path.append("index.html");
+                if (url_struct->path.empty() || url_struct->path.back() == '/') path.append("index.html");
 
                 boost::beast::error_code ec;
                 http::file_body::value_type body;
@@ -530,15 +529,12 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
                 stream_.socket().close();
                 ++stop_step;
               case 4:
-                stream_.socket().release();
-                ++stop_step;
-              case 5:
                 stream_.cancel();
                 ++stop_step;
-              case 6:
+              case 5:
                 stream_.close();
                 ++stop_step;
-              case 7:
+              case 6:
                 stream_.release_socket();
                 ++stop_step;
               default:
@@ -592,15 +588,25 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
         Response<RspBodyType> handle_rsp{boost::beast::http::status::ok, req.version()};
         HttpHandleStatus handle_status;
 
-        auto handle_timeout = std::chrono::seconds::max();
+        // seconds::max() would overflow the nanoseconds parameter.
+        auto handle_timeout = std::chrono::nanoseconds::max();
         auto req_timeout_itr = req.find(boost::beast::http::field::timeout);
         if (req_timeout_itr != req.end()) {
-          auto timeout_str = req_timeout_itr->value();
-          if (ibmw::common::util::IsDigitStr(ToStdStringView(timeout_str)))
-            handle_timeout = std::chrono::seconds(atoi(timeout_str.data()));
+          auto timeout_str = ToStdStringView(req_timeout_itr->value());
+          uint64_t timeout_s = 0;
+          auto [end, ec] = std::from_chars(timeout_str.data(), timeout_str.data() + timeout_str.size(), timeout_s);
+          constexpr uint64_t kMaxTimeoutS =
+              std::chrono::duration_cast<std::chrono::seconds>(std::chrono::nanoseconds::max()).count();
+          // 0 means "not set" (and older clients round sub-second timeouts down to 0).
+          if (ec == std::errc() && end == timeout_str.data() + timeout_str.size() && timeout_s > 0 &&
+              timeout_s < kMaxTimeoutS)
+            handle_timeout = std::chrono::seconds(timeout_s);
         }
 
         std::string err_info;
+        // An exception text can name internal paths and types: it is logged,
+        // the client only gets a generic message.
+        bool handler_threw = false;
         try {
           handle_status = co_await boost::asio::co_spawn(
               *(session_ptr->io_ptr_),
@@ -613,10 +619,16 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
             err_info = "handle failed, status: " + std::to_string(static_cast<uint8_t>(handle_status));
         } catch (const std::exception& e) {
           err_info = e.what();
+          handler_threw = true;
         }
 
         if (!err_info.empty()) [[unlikely]] {
-          const auto& rsp = ServerErrorHandle(req, err_info);
+          auto rsp = ServerErrorHandle(req, handler_threw ? "internal error" : err_info);
+          // Keep the CORS decision of the handler: a browser can read the error.
+          for (const auto field : {boost::beast::http::field::access_control_allow_origin,
+                                   boost::beast::http::field::vary}) {
+            if (auto itr = handle_rsp.find(field); itr != handle_rsp.end()) rsp.set(field, itr->value());
+          }
           session_ptr->close_connect_flag_ = rsp.need_eof();
 
           MW_LOG(
@@ -694,20 +706,10 @@ class AsioHttpServer : public std::enable_shared_from_this<AsioHttpServer> {
       if (base.empty())
         return std::string(path);
       std::string result(base);
-#ifdef _WIN32
-      char constexpr path_separator = '\\';
-      if (result.back() == path_separator)
-        result.resize(result.size() - 1);
-      result.append(path.data(), path.size());
-      for (auto& c : result)
-        if (c == '/')
-          c = path_separator;
-#else
       char constexpr kPathSeparator = '/';
       if (result.back() == kPathSeparator)
         result.resize(result.size() - 1);
       result.append(path.data(), path.size());
-#endif
       return result;
     }
 

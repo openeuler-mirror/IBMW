@@ -3,6 +3,8 @@
 
 #pragma once
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include "cpp/module_base.h"
 
 namespace ibmw::examples::cpp::executor::executor_module {
@@ -26,6 +28,11 @@ class ExecutorModule : public ibmw::Module {
   ibmw::executor::ExecutorHandle thread_safe_executor_;
   std::atomic_bool run_flag_ = true;
   uint32_t loop_count_ = 0;
+  // True while a TimeScheduleDemo re-dispatch is pending. Stop() waits for
+  // the chain to observe !run_flag_ and clear it instead of sleeping.
+  std::mutex chain_mutex_;
+  std::condition_variable chain_cv_;
+  bool chain_pending_ = false;
   ibmw::executor::ExecutorHandle time_schedule_executor_;
 };
 }

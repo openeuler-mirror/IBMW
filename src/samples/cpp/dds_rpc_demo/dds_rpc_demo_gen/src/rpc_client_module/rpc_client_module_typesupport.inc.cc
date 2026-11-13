@@ -20,7 +20,8 @@ inline ibmw::co::Task<void> _ibmw_dds_rpc_client_loop_body_impl_rpc_client_modul
         dds_rpc_demo::AddTwoInts_Request req;
         dds_rpc_demo::AddTwoInts_Response rsp;
         // IBMW_RPC_CLIENT_REQUEST_PARAMETER_BUILD_ADD_TWO_INTS_BEGIN
-        // TODO: populate req fields
+        req.a(static_cast<int64_t>(counter));
+        req.b(static_cast<int64_t>(counter) * 10);
         // IBMW_RPC_CLIENT_REQUEST_PARAMETER_BUILD_ADD_TWO_INTS_END
 
         auto status = co_await self->client_.AddTwoInts.Call(req, rsp);
@@ -29,8 +30,7 @@ inline ibmw::co::Task<void> _ibmw_dds_rpc_client_loop_body_impl_rpc_client_modul
         if (status.OK()) {
           (void)rsp;
           // IBMW_RPC_CLIENT_RESPONSE_PARAMETER_CONSUME_ADD_TWO_INTS_BEGIN
-          MW_INFO("AddTwoInts OK");
-          // TODO: consume rsp fields
+          MW_INFO("AddTwoInts OK: {} + {} = {}", req.a(), req.b(), rsp.sum());
           // IBMW_RPC_CLIENT_RESPONSE_PARAMETER_CONSUME_ADD_TWO_INTS_END
         }
 

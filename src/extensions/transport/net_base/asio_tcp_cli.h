@@ -41,6 +41,12 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
     /// Maximum package size: up to 10m
     uint32_t max_recv_size = 1024 * 1024 * 10;
 
+    /// Maximum bytes queued for sending per session (TRANS-028): a peer that
+    /// reads slower than messages are sent makes new messages be dropped
+    /// instead of growing memory without bound. A message is always queued
+    /// if the queue is empty.
+    size_t max_send_queue_size = 256 * 1024 * 1024;
+
     static Options Verify(const Options& verify_options) {
       Options options(verify_options);
 
@@ -139,11 +145,13 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
     explicit SessionOptions(const Options& options)
         : svr_ep(options.svr_ep),
           heart_beat_time(options.heart_beat_time),
-          max_recv_size(options.max_recv_size) {}
+          max_recv_size(options.max_recv_size),
+          max_send_queue_size(options.max_send_queue_size) {}
 
     Tcp::endpoint svr_ep;
     std::chrono::nanoseconds heart_beat_time;
     uint32_t max_recv_size;
+    size_t max_send_queue_size;
   };
 
   class Session : public std::enable_shared_from_this<Session> {
@@ -197,6 +205,8 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
                         while (!data_list_.empty()) {
                           std::list<std::shared_ptr<Streambuf>> tmp_data_list;
                           tmp_data_list.swap(data_list_);
+                          // Stays counted until written (TRANS-028: bounds queued + in flight).
+                          const size_t batch_size = queued_size_;
 
                           std::vector<char> head_buf(tmp_data_list.size() * kHeadSize);
 
@@ -218,11 +228,13 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
 
                           size_t write_data_size = co_await boost::asio::async_write(
                               sock_, data_buf_vec, boost::asio::use_awaitable);
+                          queued_size_ -= batch_size;
                           MW_TRACE(
                               "Tcp cli session async write {} bytes to {}.",
                               write_data_size, RemoteAddr());
                         }
 
+                        queue_full_ = false;  // drained: warn again on the next overflow
                         bool heartbeat_flag = false;
                         try {
                           send_sig_timer_.expires_after(session_options_ptr_->heart_beat_time);
@@ -357,9 +369,6 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
               case 4:
                 sock_.close();
                 ++stop_step;
-              case 5:
-                sock_.release();
-                ++stop_step;
               default:
                 stop_step = 0;
                 break;
@@ -376,16 +385,25 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
 
     void SendMsg(const std::shared_ptr<Streambuf>& msg_buf_ptr) {
       auto self = shared_from_this();
+      // Read here, next to the copy of msg_buf_ptr: a message fanned out to
+      // several sessions has its (shared) cache line contended.
+      const size_t msg_size = msg_buf_ptr->size();
       boost::asio::dispatch(
           session_socket_strand_,
-          [this, self, msg_buf_ptr]() {
+          [this, self, msg_buf_ptr, msg_size]() {
             if (state_.load() != SessionState::kStart) [[unlikely]] {
               MW_WARN("Tcp cli session is closed, will not send current msg.");
               return;
             }
 
+            if (data_list_.empty()) {
+              send_sig_timer_.cancel();
+            } else if (queued_size_ + msg_size > session_options_ptr_->max_send_queue_size) [[unlikely]] {
+              OnSendQueueFull();
+              return;
+            }
+            queued_size_ += msg_size;
             data_list_.emplace_back(msg_buf_ptr);
-            send_sig_timer_.cancel();
           });
     }
 
@@ -396,6 +414,13 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
     bool IsRunning() const { return state_.load() == SessionState::kStart; }
 
    private:
+    [[gnu::cold, gnu::noinline]] void OnSendQueueFull() {
+      if (queue_full_) return;
+      queue_full_ = true;
+      MW_WARN("Tcp cli session send queue to {} is full ({} bytes), dropping messages.", RemoteAddr(),
+              queued_size_);
+    }
+
     enum class SessionState : uint32_t {
       kPreInit,
       kInit,
@@ -424,6 +449,8 @@ class AsioTcpClient : public std::enable_shared_from_this<AsioTcpClient> {
     // misc
     std::string remote_addr_;
     std::list<std::shared_ptr<Streambuf>> data_list_;
+    size_t queued_size_ = 0;  // bytes in data_list_ and being written
+    bool queue_full_ = false;
   };
 
  private:
@@ -525,15 +552,13 @@ class AsioTcpClientPool
       const AsioTcpClient::Options& client_options) {
     return boost::asio::co_spawn(
         mgr_strand_,
-        [this, &client_options]() -> Awaitable<std::shared_ptr<AsioTcpClient>> {
+        [this, client_options]() -> Awaitable<std::shared_ptr<AsioTcpClient>> {
           if (state_.load() != State::kStart) [[unlikely]] {
             MW_WARN("Tcp cli pool is closed, will not return cli instance.");
             co_return std::shared_ptr<AsioTcpClient>();
           }
 
-          const size_t client_hash = AsioEndpointHash{}(client_options.svr_ep);
-
-          auto itr = client_map_.find(client_hash);
+          auto itr = client_map_.find(client_options.svr_ep);
           if (itr != client_map_.end()) {
             if (itr->second->IsRunning()) co_return itr->second;
             client_map_.erase(itr);
@@ -556,7 +581,7 @@ class AsioTcpClientPool
           client_ptr->Initialize(client_options);
           client_ptr->Start();
 
-          client_map_.emplace(client_hash, client_ptr);
+          client_map_.emplace(client_options.svr_ep, client_ptr);
           co_return client_ptr;
         },
         boost::asio::use_awaitable);
@@ -586,7 +611,7 @@ class AsioTcpClientPool
   std::atomic<State> state_ = State::kPreInit;
 
   // Client management
-  std::unordered_map<size_t, std::shared_ptr<AsioTcpClient>> client_map_;
+  std::unordered_map<AsioTcpClient::Tcp::endpoint, std::shared_ptr<AsioTcpClient>, AsioEndpointHash> client_map_;
 };
 
 }  // namespace ibmw::common::net

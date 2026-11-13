@@ -4,7 +4,6 @@
 #include "zenoh_discovery_responder.h"
 
 namespace ibmw::discovery {
-using namespace std::chrono_literals;
 using zenoh_detail::Check;
 using zenoh_detail::Owned;
 
@@ -35,29 +34,33 @@ void ZenohDiscoveryResponder::Start(const z_loaned_session_t* session, std::stri
   static_cast<void>(zenoh_protocol::Encode(Snapshot()));
   z_view_keyexpr_t key;
   Check(z_view_keyexpr_from_str(&key, key_.c_str()), "Create Zenoh metadata key");
+  // A ring channel never blocks the Zenoh callback thread: under a query flood
+  // the oldest pending query is dropped (answered without a reply).
   Owned<z_owned_closure_query_t> callback;
-  z_fifo_channel_query_new(&callback.value, &queries_.value, 16);
-  Check(z_declare_queryable(session, &queryable_.value, z_loan(key), z_move(callback.value), nullptr),
-        "Declare Zenoh discovery queryable");
-  worker_ = std::jthread([this](std::stop_token stop) { Serve(stop); });
+  z_ring_channel_query_new(&callback.value, &queries_.value, 16);
+  try {
+    Check(z_declare_queryable(session, &queryable_.value, z_loan(key), z_move(callback.value),
+                              nullptr),
+          "Declare Zenoh discovery queryable");
+    worker_ = std::jthread([this] { Serve(); });
+  } catch (...) {
+    Stop();  // a later Start must not overwrite a live channel or queryable
+    throw;
+  }
 }
 
-void ZenohDiscoveryResponder::Serve(std::stop_token stop) {
-  while (!stop.stop_requested()) {
+void ZenohDiscoveryResponder::Serve() {
+  // Blocks until a query arrives or Stop() drops the queryable.
+  while (true) {
     Owned<z_owned_query_t> query;
-    const auto code = z_fifo_handler_query_try_recv(z_loan(queries_.value), &query.value);
-    if (code == Z_CHANNEL_DISCONNECTED) return;
-    if (code != Z_OK) {
-      std::this_thread::sleep_for(10ms);
-      continue;
-    }
+    if (z_ring_handler_query_recv(z_loan(queries_.value), &query.value) != Z_OK) return;
     try {
       const auto payload = zenoh_protocol::Encode(Snapshot());
       z_view_keyexpr_t key;
       Check(z_view_keyexpr_from_str(&key, key_.c_str()), "Create Zenoh metadata reply key");
       Owned<z_owned_bytes_t> bytes;
       Check(z_bytes_copy_from_str(&bytes.value, payload.c_str()), "Encode Zenoh metadata reply");
-      // The owned query keeps the request alive after the native FIFO callback
+      // The owned query keeps the request alive after the native ring callback
       // returns. Dropping it below completes this queryable's response.
       Check(z_query_reply(z_loan(query.value), z_loan(key), z_move(bytes.value), nullptr), "Reply to Zenoh discovery query");
     } catch (...) {
@@ -70,14 +73,12 @@ void ZenohDiscoveryResponder::Serve(std::stop_token stop) {
 }
 
 void ZenohDiscoveryResponder::Stop() noexcept {
-  if (worker_.joinable()) {
-    worker_.request_stop();
-    worker_.join();
-  }
-  // Unblock native FIFO senders before undeclaring. No user C callbacks refer
-  // to this object; all responder code has finished when the worker joins.
-  z_drop(z_move(queries_.value));
+  // Dropping the queryable drops the channel's sending end, which ends Serve().
+  // No user C callbacks refer to this object; all responder code has finished
+  // when the worker joins.
   z_drop(z_move(queryable_.value));
+  if (worker_.joinable()) worker_.join();
+  z_drop(z_move(queries_.value));
 }
 
 void ZenohDiscoveryResponder::Clear() {

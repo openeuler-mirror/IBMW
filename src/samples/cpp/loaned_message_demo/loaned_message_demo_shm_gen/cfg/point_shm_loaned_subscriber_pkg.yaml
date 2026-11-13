@@ -1,0 +1,36 @@
+# IBMW config for loaned_sub_shm_app (Pkg mode)
+#
+# Usage: ibmw run cfg/point_shm_loaned_subscriber_pkg.yaml
+
+ibmw:
+  logging:
+    core_level: INFO
+    backends:
+      - type: console
+
+  extensions:
+    items:
+      - name: shm_extension
+        path: libibmw_shm_transport.so
+
+  scheduling:
+    executors:
+      - name: work_thread_pool
+        type: thread_pool
+        options:
+          thread_num: 2
+
+  messaging:
+    drivers:
+      - type: shm
+    subscribers:
+      - topic: "point_topic"
+        enable_drivers: [shm]
+
+  modules:
+    packages:
+      - path: libpoint_shm_loaned_subscriber_pkg.so
+        enable_modules: [PointShmLoanedSubscriber]
+    modules:
+      - name: PointShmLoanedSubscriber
+        log_level: INFO

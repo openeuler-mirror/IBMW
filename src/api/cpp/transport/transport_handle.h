@@ -9,6 +9,7 @@
 
 #include "c/transport/transport_handle_base.h"
 #include "cpp/transport/transport_context.h"
+#include "cpp/util/abi_table.h"
 #include "cpp/util/function.h"
 #include "cpp/util/string.h"
 #include "base/exception.h"
@@ -354,15 +355,25 @@ class TransportRef {
   SenderRef GetPublisher(std::string_view topic) {
     MW_ASSERT(base_ptr_, "Reference is null.");
     if (base_ptr_->get_sender == nullptr) return SenderRef();
-    return SenderRef(
-        base_ptr_->get_sender(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic)));
+    const auto* sender = base_ptr_->get_sender(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic));
+    // Entries the wrappers call unconditionally are checked once here, not
+    // per call (API-049); optional entries are checked where they are used.
+    const bool usable = ibmw::util::IsCompleteAbiTable(sender) &&
+                        sender->register_send_type != nullptr && sender->send != nullptr &&
+                        sender->get_topic != nullptr &&
+                        sender->merge_subscribe_context_to_publish_context != nullptr &&
+                        sender->loan != nullptr && sender->publish_loaned != nullptr &&
+                        sender->release_loaned != nullptr;
+    return usable ? SenderRef(sender) : SenderRef();
   }
 
   ReceiverRef GetSubscriber(std::string_view topic) {
     MW_ASSERT(base_ptr_, "Reference is null.");
     if (base_ptr_->get_receiver == nullptr) return ReceiverRef();
-    return ReceiverRef(
-        base_ptr_->get_receiver(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic)));
+    const auto* receiver = base_ptr_->get_receiver(base_ptr_->ctx, ibmw::util::ToIbmwStringView(topic));
+    const bool usable = ibmw::util::IsCompleteAbiTable(receiver) &&
+                        receiver->on_message != nullptr && receiver->get_topic != nullptr;
+    return usable ? ReceiverRef(receiver) : ReceiverRef();
   }
 
   void MergeSubscribeContextToPublishContext(
@@ -469,7 +480,6 @@ class ReceiverAccessBase {
     return subscriber_.GetTopic();
   }
 
- protected:
  protected:
   ReceiverRef subscriber_;
   const std::string msg_type_name_;

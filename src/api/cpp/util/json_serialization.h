@@ -4,6 +4,8 @@
 #pragma once
 
 #include <concepts>
+#include <cstdio>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
@@ -86,13 +88,21 @@ inline bool OnMessage(
           ibmw_function_base_t* release_callback_base) {
         ibmw::transport::SubscriberReleaseCallback release_callback(
             release_callback_base);
-        callback(
-            ibmw::transport::ContextRef(ctx_ptr),
-            std::shared_ptr<const JsonType>(
-                static_cast<const JsonType*>(msg_ptr),
-                [release_callback{std::move(release_callback)}](const JsonType*) {
-                  release_callback();
-                }));
+        // This invoker is noexcept: a throwing user callback must not terminate
+        // the transport thread.
+        try {
+          callback(
+              ibmw::transport::ContextRef(ctx_ptr),
+              std::shared_ptr<const JsonType>(
+                  static_cast<const JsonType*>(msg_ptr),
+                  [release_callback{std::move(release_callback)}](const JsonType*) {
+                    release_callback();
+                  }));
+        } catch (const std::exception& e) {
+          (void)std::fprintf(stderr, "JSON subscriber callback threw: %s\n", e.what());
+        } catch (...) {
+          (void)std::fprintf(stderr, "JSON subscriber callback threw an unknown exception.\n");
+        }
       });
 }
 

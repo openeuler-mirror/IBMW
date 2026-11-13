@@ -8,6 +8,8 @@
 #include <memory>
 #include <thread>
 
+#include <unistd.h>  // gettid()
+
 #include "c/logger/logger_base.h"
 #include "engine/logger/logger_driver_base.h"
 
@@ -52,10 +54,11 @@ class LoggerAccess {
     // Note: MW_LOG macro already checks lvl >= GetLogLevel() before calling
     // this method, so this check is redundant on the macro path. We keep it
     // as a safety net for direct C-ABI callers (cost: one relaxed atomic load).
-    if (lvl >= lvl_.load(std::memory_order_relaxed)) {
-#if defined(_WIN32)
-      thread_local size_t tid(std::hash<std::thread::id>{}(std::this_thread::get_id()));
-#elif defined(__GLIBC__)
+    // Levels from OFF up are not message levels; the drivers index per-level
+    // tables with lvl, so they are dropped here (CORE-038).
+    if (lvl >= lvl_.load(std::memory_order_relaxed) &&
+        static_cast<uint32_t>(lvl) < IBMW_LOG_LEVEL_OFF) {
+#if defined(__GLIBC__) || defined(__OHOS__)  // OHOS musl has gettid() too
       thread_local size_t tid(gettid());
 #else
       thread_local size_t tid(std::hash<std::thread::id>{}(std::this_thread::get_id()));
@@ -80,6 +83,7 @@ class LoggerAccess {
 
   static ibmw_logger_base_t GenBase(void* ctx) {
     return ibmw_logger_base_t{
+        .struct_size = sizeof(ibmw_logger_base_t),
         .get_log_level = [](void* ctx) -> ibmw_log_level_t {
           return static_cast<LoggerAccess*>(ctx)->GetLogLevel();
         },

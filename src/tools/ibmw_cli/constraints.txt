@@ -1,0 +1,11 @@
+# Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
+# All rights reserved.
+#
+# Version bounds for ibmw_cli and its extras: pip install -c constraints.txt ...
+# Lower bounds are the Ubuntu 22.04 packages; upper bounds stop at the next
+# major release, which has not been tested.
+PyYAML>=5.4.1,<7
+Jinja2>=3.0.3,<4
+setuptools>=59.6.0
+pyinstaller>=6.1.0,<7
+autopep8>=1.6.0,<3

@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -40,13 +41,18 @@ class PublishTapDriver final : public TransportDriver {
   }
   void Send(MessageFrame&) noexcept override {
     ++send_calls;
-    if (events_) events_->emplace_back("driver");
+    if (events_) {
+      std::lock_guard lock(events_mutex_);
+      events_->emplace_back("driver");
+    }
   }
 
-  int send_calls = 0;
+  // Concurrent tests send from several threads.
+  std::atomic<int> send_calls{0};
   int shutdown_calls = 0;
 
  private:
+  std::mutex events_mutex_;
   std::vector<std::string>* events_;
 };
 
@@ -238,6 +244,35 @@ TEST_F(MetricsPublishTapTest,
 }
 #endif
 
+TEST_F(PublishTapTest, TapsAreSeenAfterTheCountReturnsToZero) {
+  SendOnce();
+  int first_calls = 0;
+  int second_calls = 0;
+  const auto first = dispatcher_.RegisterPublishTap(
+      [&](MessageFrame&) { ++first_calls; });
+  const auto second = dispatcher_.RegisterPublishTap(
+      [&](MessageFrame&) { ++second_calls; });
+  SendOnce();
+  EXPECT_EQ(first_calls, 1);
+  EXPECT_EQ(second_calls, 1);
+
+  ASSERT_TRUE(dispatcher_.UnregisterPublishTap(first));
+  SendOnce();
+  EXPECT_EQ(first_calls, 1);
+  EXPECT_EQ(second_calls, 2);
+
+  ASSERT_TRUE(dispatcher_.UnregisterPublishTap(second));
+  SendOnce();
+  EXPECT_EQ(second_calls, 2);
+
+  const auto again = dispatcher_.RegisterPublishTap(
+      [&](MessageFrame&) { ++first_calls; });
+  SendOnce();
+  EXPECT_EQ(first_calls, 2);
+  EXPECT_TRUE(dispatcher_.UnregisterPublishTap(again));
+  EXPECT_EQ(driver_.send_calls, 5);
+}
+
 TEST_F(PublishTapTest, ExternalUnregisterWaitsForInFlightCallback) {
   std::mutex mutex;
   std::condition_variable release_cv;
@@ -323,6 +358,34 @@ TEST_F(PublishTapTest, RunsInRegistrationOrderAndExceptionsAreFailOpen) {
   EXPECT_EQ(events_,
             (std::vector<std::string>{"first", "second", "driver"}));
   EXPECT_EQ(driver_.send_calls, 1);
+}
+
+// COMM-021: the publish sequence is 64-bit end to end and does not wrap
+// after 2^32 messages on one topic.
+TEST_F(PublishTapTest, PublishSequenceDoesNotWrapAt32Bits) {
+  const auto* send_type = catalog_.GetSendTypeWrapperPtr(
+      info_.msg_type, info_.topic_name, info_.pkg_path, info_.module_name);
+  ASSERT_NE(send_type, nullptr);
+  ASSERT_NE(send_type->cached_seq_counter, nullptr);
+  send_type->cached_seq_counter->store(UINT32_MAX);
+
+  ibmw::transport::Context frame_context;
+  dispatcher_.Send(MessageFrame{
+      .info = info_,
+      .msg_ptr = &payload_,
+      .ctx_ref = ibmw::transport::ContextRef(frame_context)});
+  EXPECT_EQ(frame_context.GetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ), "4294967296");
+
+  ibmw::transport::Context access_context;
+  dispatcher_.Send(SendAccessInfoWrapper{
+      .pkg_path = info_.pkg_path,
+      .module_name = info_.module_name,
+      .topic_name = info_.topic_name,
+      .msg_type = ibmw_string_view_t{info_.msg_type.data(), info_.msg_type.size()},
+      .ctx_ptr = access_context.NativeHandle(),
+      .msg_ptr = &payload_});
+  EXPECT_EQ(access_context.GetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_PUB_SEQ), "4294967297");
+  EXPECT_EQ(driver_.send_calls, 2);
 }
 
 }  // namespace

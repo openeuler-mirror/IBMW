@@ -102,4 +102,29 @@ TEST_F(CliTest, LoadsProviderFromDefaultConfiguration) {
   }
 }
 
+// CORE-040: --duration must be a whole non-negative number.
+TEST_F(CliTest, InvalidDurationIsRejected) {
+  const auto config = (directory_ / "runtime.yaml").string();
+  std::ofstream(config) << "ibmw:\n  log:\n    core_lvl: Warn\n";
+  for (const char* duration : {"-1", "10abc", "1.5", "99999999999"}) {
+    EXPECT_EQ(Run({"ibmw", "run", config, "--no-signal", "--duration", duration}), 1) << duration;
+  }
+}
+
+// CORE-040: fatal errors and failed dumps go to stderr and end the process
+// with status 255 after flushing output.
+TEST_F(CliTest, FatalErrorExitsThroughStderr) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  const auto missing = (directory_ / "missing.yaml").string();
+  EXPECT_EXIT(Run({"ibmw", "run", missing, "--no-signal", "--duration", "1"}),
+              testing::ExitedWithCode(255), "IBMW fatal");
+
+  const auto config = (directory_ / "runtime.yaml").string();
+  std::ofstream(config) << "ibmw:\n  log:\n    core_lvl: Warn\n";
+  const auto unwritable = (directory_ / "no_such_dir" / "dump.yaml").string();
+  EXPECT_EXIT(Run({"ibmw", "run", config, "--no-signal", "--duration", "1",
+                   "--dump-cfg=" + unwritable}),
+              testing::ExitedWithCode(255), "failed to write");
+}
+
 }  // namespace

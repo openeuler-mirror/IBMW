@@ -27,25 +27,26 @@ class IbmwException : public std::exception {
 
 }  // namespace ibmw::common::util
 
-#define MW_ASSERT(__expr__, __fmt__, ...)                        \
-  do {                                                            \
-    if (!(__expr__)) [[unlikely]] {                               \
-      auto __mw_loc__ = ::ibmw::common::util::SourceLocation::current(); \
-      throw ibmw::common::util::IbmwException(                    \
-          ::ibmw_fmt::format("[{}:{} @{}]: " __fmt__,             \
-                              __mw_loc__.file_name(),             \
-                              __mw_loc__.line(),                  \
-                              __FUNCTION__, ##__VA_ARGS__));       \
-    }                                                             \
+// No local variables and no reserved names, so caller arguments are never
+// shadowed (API-050). Only the failing branch evaluates the location.
+#define MW_ASSERT(mw_expr, mw_fmt, ...)                                    \
+  do {                                                                    \
+    if (!(mw_expr)) [[unlikely]] {                                        \
+      throw ibmw::common::util::IbmwException(::ibmw_fmt::format(         \
+          "[{}:{} @{}]: " mw_fmt,                                         \
+          ::ibmw::common::util::SourceLocation::current().file_name(),    \
+          ::ibmw::common::util::SourceLocation::current().line(),         \
+          __FUNCTION__ __VA_OPT__(, ) __VA_ARGS__));                      \
+    }                                                                     \
   } while (0)
 
-#define MW_ASSERT_LOC(__location__, __expr__, __fmt__, ...)       \
-  do {                                                            \
-    if (!(__expr__)) [[unlikely]] {                               \
-      throw ibmw::common::util::IbmwException(                    \
-          ::ibmw_fmt::format("[{}:{}]: " __fmt__,                 \
-                              __location__.file_name(),           \
-                              __location__.line(),                \
-                              ##__VA_ARGS__));                     \
-    }                                                             \
+#define MW_ASSERT_LOC(mw_location, mw_expr, mw_fmt, ...)                   \
+  do {                                                                    \
+    if (!(mw_expr)) [[unlikely]] {                                        \
+      throw ibmw::common::util::IbmwException(                            \
+          ::ibmw_fmt::format("[{}:{}]: " mw_fmt,                          \
+                             (mw_location).file_name(),                   \
+                             (mw_location).line()                         \
+                             __VA_OPT__(, ) __VA_ARGS__));                \
+    }                                                                     \
   } while (0)

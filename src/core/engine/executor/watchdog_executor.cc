@@ -63,6 +63,7 @@ void WatchdogExecutor::Initialize(YAML::Node options_node) {
     thread_id_.store(std::this_thread::get_id(), std::memory_order_relaxed);
 
     try {
+      util::EnsureAltSignalStackForCurrentThread();
       util::SetNameForCurrentThread(name_);
       util::BindCpuForCurrentThread(options_.thread_bind_cpu);
       util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);
@@ -95,18 +96,20 @@ void WatchdogExecutor::Initialize(YAML::Node options_node) {
       }
     }
 
-    // Run once more after shutdown, no need for locks since no more tasks will enter the queue
-    while (!queue_.empty()) {
-      auto& task = queue_.front();
-
-      try {
-        task();
-        --queue_task_num_;
-      } catch (const std::exception& e) {
-        MW_FATAL("Watchdog executor run task get exception, {}", e.what());
+    // Drain what was queued before shutdown. Dispatch re-checks the state under
+    // mutex_, so once this swap observes an empty queue nothing else can enter.
+    while (true) {
+      std::queue<ibmw::executor::Task> tmp_queue;
+      {
+        std::unique_lock<std::mutex> lck(mutex_);
+        if (queue_.empty()) break;
+        queue_.swap(tmp_queue);
       }
-
-      queue_.pop();
+      while (!tmp_queue.empty()) {
+        tmp_queue.front()();
+        --queue_task_num_;
+        tmp_queue.pop();
+      }
     }
 
     thread_id_.store(std::thread::id{}, std::memory_order_relaxed);
@@ -139,7 +142,6 @@ void WatchdogExecutor::Shutdown() {
 
   MW_INFO("[Watchdog] stopped");
 }
-// todo
 void WatchdogExecutor::Dispatch(ibmw::executor::Task&& task) {
   auto cur_state = state_.load(std::memory_order_acquire);
   if (cur_state != State::kInit && cur_state != State::kStart) [[unlikely]] {
@@ -169,6 +171,11 @@ void WatchdogExecutor::Dispatch(ibmw::executor::Task&& task) {
 
   {
     std::unique_lock<std::mutex> lck(mutex_);
+    // Re-check under the lock: the worker drains the queue after shutdown.
+    if (state_.load(std::memory_order_relaxed) == State::kShutdown) [[unlikely]] {
+      MW_WARN("Watchdog executor '{}' is shutting down, the task is dropped.", name_);
+      return;
+    }
     queue_.emplace(std::move(task));
     ++queue_task_num_;
     cond_.notify_one();

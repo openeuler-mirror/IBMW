@@ -34,6 +34,11 @@ modules:
     type: rpc_server
     transport: ros2
     message: RosTestRpc
+    user_code:
+      rpc_server_handler_body.RosTestRpc: |
+        MW_INFO("RosTestRpc request with {} data bytes", req.data.size());
+        rsp.code = static_cast<int64_t>(req.data.size());
+        return ibmw::rpc::Status();
   - name: RpcClientModule
     type: rpc_client
     transport: ros2
@@ -41,6 +46,9 @@ modules:
       rpc_frq: 1.0
 
     message: RosTestRpc
+    user_code:
+      rpc_client_request_parameter_build.RosTestRpc: |
+        req.data.assign(count % 8 + 1, static_cast<uint8_t>(count));
 apps:
   - name: ros2_rpc_app
     type: rpc

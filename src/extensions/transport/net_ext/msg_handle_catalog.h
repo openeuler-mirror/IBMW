@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -15,7 +16,7 @@
 namespace ibmw::extensions::net_extension {
 
 template <typename EndPointType>
-class MsgHandleCatalog {
+class MsgHandleCatalog : public std::enable_shared_from_this<MsgHandleCatalog<EndPointType>> {
  public:
   using MsgHandleFunc =
       std::function<void(const std::shared_ptr<boost::asio::streambuf>&)>;
@@ -28,8 +29,10 @@ class MsgHandleCatalog {
   MsgHandleCatalog(const MsgHandleCatalog&) = delete;
   MsgHandleCatalog& operator=(const MsgHandleCatalog&) = delete;
 
+  // The returned function keeps the catalog alive: the server owning it decides
+  // how long messages can arrive. The catalog must be held by a shared_ptr.
   ServerMsgHandleFunc GetMsgHandleFunc() const {
-    return [this](const auto& ep, const auto& buf) { HandleServerMsg(ep, buf); };
+    return [self = this->shared_from_this()](const auto& ep, const auto& buf) { self->HandleServerMsg(ep, buf); };
   }
 
   template <typename... Args>
@@ -43,6 +46,9 @@ class MsgHandleCatalog {
   }
 
  private:
+  // Every message comes from a peer: at most one log per site and interval.
+  static constexpr uint64_t kPeerLogIntervalMs = 1000;
+
   void HandleServerMsg(const EndPointType& ep,
                        const std::shared_ptr<boost::asio::streambuf>& buf) const {
     if (shutdown_flag_.load()) [[unlikely]]
@@ -53,24 +59,28 @@ class MsgHandleCatalog {
       const void* buf_data = buf->data().data();
       size_t buf_size = buf->size();
 
-      MW_REQUIRE(buf_size > 1, "Invalid msg, buf size: {}", buf_size);
+      if (buf_size <= 1) [[unlikely]] {
+        MW_WARN_INTERVAL(kPeerLogIntervalMs, "Invalid msg, buf size: {}", buf_size);
+        return;
+      }
 
       uint8_t uri_size = static_cast<const uint8_t*>(buf_data)[0];
-      MW_REQUIRE(buf_size > static_cast<size_t>(uri_size) + 1,
-                              "Invalid msg, buf size: {}, uri size: {}",
-                              buf_size, uri_size);
+      if (buf_size <= static_cast<size_t>(uri_size) + 1) [[unlikely]] {
+        MW_WARN_INTERVAL(kPeerLogIntervalMs, "Invalid msg, buf size: {}, uri size: {}", buf_size, uri_size);
+        return;
+      }
 
       std::string_view uri = std::string_view(static_cast<const char*>(buf_data) + 1, uri_size);
       auto finditr = msg_handle_map_.find(uri);
       if (finditr == msg_handle_map_.end()) [[unlikely]] {
-        MW_WARN("Unregisted uri: {}", uri);
+        MW_WARN_INTERVAL(kPeerLogIntervalMs, "Unregisted uri: {}", uri);
         return;
       }
 
       finditr->second(buf);
 
     } catch (const std::exception& e) {
-      MW_ERROR("Handle msg failed, {}", e.what());
+      MW_ERROR_INTERVAL(kPeerLogIntervalMs, "Handle msg failed, {}", e.what());
       return;
     }
   }

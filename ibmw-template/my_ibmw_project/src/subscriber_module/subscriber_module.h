@@ -4,7 +4,10 @@
 #pragma once
 
 #include "cpp/module_base.h"
-#include "type_support/dds/dds_transport.h"
+
+// Transport-specific typesupport lives in the generated inc.h.
+// The user-facing template remains transport-agnostic.
+#include "subscriber_module_typesupport.inc.h"
 
 namespace my_project {
 

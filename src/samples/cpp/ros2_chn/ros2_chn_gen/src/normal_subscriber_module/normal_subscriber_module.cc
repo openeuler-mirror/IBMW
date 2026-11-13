@@ -24,9 +24,7 @@ bool NormalSubscriberModule::Setup(ibmw::Runtime core) {
       [this](const std::shared_ptr<const IBMW_TS_RECEIVER_MSG_TYPE>& msg) {
         // IBMW_PUBSUB_SUBSCRIBER_BODY_BEGIN
         // IBMW: user code begin (on_message_body)
-        MW_INFO("Received message.");
-        // TODO: process msg fields here
-        (void)msg;
+        MW_INFO("Received message: num={}, data size={}", msg->num, msg->data.size());
         // IBMW: user code end (on_message_body)
         // IBMW_PUBSUB_SUBSCRIBER_BODY_END
       });

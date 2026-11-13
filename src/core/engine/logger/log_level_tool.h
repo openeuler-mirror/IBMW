@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstring>
+#include <optional>
 #include <string_view>
 
 #include "c/logger/logger_base.h"
@@ -16,20 +17,21 @@ class LogLevelTool {
     return kLvlNameArray[static_cast<uint32_t>(lvl)];
   }
 
+  // Unknown names map to Off; use TryGetLogLevelFromName to detect them.
   static ibmw_log_level_t GetLogLevelFromName(std::string_view lvl_name) {
+    return TryGetLogLevelFromName(lvl_name).value_or(ibmw_log_level_t::IBMW_LOG_LEVEL_OFF);
+  }
+
+  // Case-insensitive; std::nullopt for an unknown name.
+  static std::optional<ibmw_log_level_t> TryGetLogLevelFromName(std::string_view lvl_name) {
     for (int ii = 0; ii <= ibmw_log_level_t::IBMW_LOG_LEVEL_OFF; ++ii) {
       if (lvl_name.size() != kLvlNameArray[ii].size()) {
         continue;
       }
-#if defined(_WIN32)
-      if (_strnicmp(lvl_name.data(), kLvlNameArray[ii].data(), lvl_name.size()) == 0)
-        return static_cast<ibmw_log_level_t>(ii);
-#else
       if (strncasecmp(lvl_name.data(), kLvlNameArray[ii].data(), lvl_name.size()) == 0)
         return static_cast<ibmw_log_level_t>(ii);
-#endif
     }
-    return ibmw_log_level_t::IBMW_LOG_LEVEL_OFF;
+    return std::nullopt;
   }
 
  private:

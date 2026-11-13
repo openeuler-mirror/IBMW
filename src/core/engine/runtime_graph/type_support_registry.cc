@@ -3,6 +3,8 @@
 
 #include "engine/runtime_graph/type_support_registry.h"
 
+#include <utility>
+
 #include "base/exception.h"
 
 namespace ibmw::runtime::core::runtime_graph {
@@ -44,33 +46,49 @@ bool TypeSupportRegistry::TryLoad(std::string_view package_path) {
 void TypeSupportRegistry::RegisterLoaded(
     std::string package_path,
     std::unique_ptr<ibmw::extension::TypeSupportPackageLoader> loader) {
+  // The whole package is checked before any lookup can see it: a rejected
+  // package must not leave entries that point into its unloaded library.
+  std::vector<std::pair<std::string, TypeSupportEntry>> types;
+  std::unordered_map<std::string, TypeSupportEntry> qualified;
   for (const auto* item : loader->TypeSupports()) {
     ibmw::util::TypeSupportRef type_support(item);
-    const std::string type_name(type_support.TypeName());
+    std::string type_name(type_support.TypeName());
     TypeSupportEntry entry{package_path, type_support};
+    auto key = PackageTypeKey(package_path, type_name);
     MW_ASSERT(
-        type_support_by_package_name_
-            .emplace(PackageTypeKey(package_path, type_name), entry)
-            .second,
+        !type_support_by_package_name_.contains(key) &&
+            qualified.emplace(std::move(key), entry).second,
         "Duplicate msg type '{}' in TypeSupport package {}.", type_name,
         package_path);
-    const auto [fallback, inserted] =
-        type_support_by_name_.emplace(type_name, entry);
+    types.emplace_back(std::move(type_name), std::move(entry));
+  }
+  std::unordered_map<std::string, ibmw::util::SchemaDescriptor> schemas;
+  for (const auto* item : loader->SchemaSupports()) {
+    auto descriptor = ibmw::util::SchemaSupportRef(item).ToDescriptor();
+    ValidateSchema(descriptor);
+    auto key = SchemaKey(descriptor.type_name, descriptor.serialization_type);
+    if (const auto existing = schemas_.find(key); existing != schemas_.end()) {
+      RequireSameSchema(existing->second, descriptor);
+    }
+    const auto [staged, inserted] = schemas.emplace(std::move(key), descriptor);
     if (!inserted) {
-      // Package-qualified lookup remains available; the first unqualified
-      // registration is kept deterministic.
-      static_cast<void>(fallback);
+      RequireSameSchema(staged->second, descriptor);
     }
   }
-  for (const auto* item : loader->SchemaSupports()) {
-    ibmw::util::SchemaSupportRef schema(item);
-    RegisterSchema(schema.ToDescriptor());
+
+  loaders_.reserve(loaders_.size() + 1);
+  type_support_by_package_name_.merge(qualified);
+  for (auto& [type_name, entry] : types) {
+    // Package-qualified lookup remains available; the first unqualified
+    // registration is kept deterministic.
+    type_support_by_name_.emplace(std::move(type_name), std::move(entry));
   }
+  schemas_.merge(schemas);
   loaders_.emplace_back(std::move(loader));
 }
 
-void TypeSupportRegistry::RegisterSchema(
-    ibmw::util::SchemaDescriptor descriptor) {
+void TypeSupportRegistry::ValidateSchema(
+    const ibmw::util::SchemaDescriptor& descriptor) {
   MW_ASSERT(!descriptor.type_name.empty(), "Schema type name cannot be empty.");
   MW_ASSERT(
       !descriptor.serialization_type.empty(),
@@ -92,20 +110,18 @@ void TypeSupportRegistry::RegisterSchema(
       descriptor.schema_hash ==
           ibmw::util::ComputeSchemaHash(descriptor.schema_data),
       "Schema hash mismatch for '{}'.", descriptor.type_name);
+}
 
-  const auto key = SchemaKey(
+void TypeSupportRegistry::RequireSameSchema(
+    const ibmw::util::SchemaDescriptor& old,
+    const ibmw::util::SchemaDescriptor& descriptor) {
+  MW_ASSERT(
+      old.schema_hash == descriptor.schema_hash &&
+          old.schema_name == descriptor.schema_name &&
+          old.schema_encoding == descriptor.schema_encoding &&
+          old.schema_data == descriptor.schema_data,
+      "Conflicting Schema Support for type '{}' and serialization '{}'.",
       descriptor.type_name, descriptor.serialization_type);
-  const auto [existing, inserted] = schemas_.emplace(key, descriptor);
-  if (!inserted) {
-    const auto& old = existing->second;
-    MW_ASSERT(
-        old.schema_hash == descriptor.schema_hash &&
-            old.schema_name == descriptor.schema_name &&
-            old.schema_encoding == descriptor.schema_encoding &&
-            old.schema_data == descriptor.schema_data,
-        "Conflicting Schema Support for type '{}' and serialization '{}'.",
-        descriptor.type_name, descriptor.serialization_type);
-  }
 }
 
 ibmw::util::TypeSupportRef TypeSupportRegistry::Find(

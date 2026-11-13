@@ -351,9 +351,18 @@ ibmw::transport::QosDescriptor Ros2TransportDriver::EndpointQos(
     }
     return result;
   } catch (const std::exception& error) {
-    MW_ERROR("Cannot inspect ROS 2 endpoint QoS: {}", error.what());
-    return {};
+    // Formatting the log line may itself throw; this function is noexcept.
+    try {
+      MW_ERROR("Cannot inspect ROS 2 endpoint QoS: {}", error.what());
+    } catch (...) {
+    }
+  } catch (...) {
+    try {
+      MW_ERROR("Cannot inspect ROS 2 endpoint QoS: unknown exception");
+    } catch (...) {
+    }
   }
+  return {};
 }
 
 runtime::core::transport::SerializedSubscriberHandle
@@ -391,7 +400,7 @@ Ros2TransportDriver::AttachSerializedSubscriber(
                                std::chrono::system_clock::now().time_since_epoch()).count()),
                            .source_driver = "ros2", .payload = std::move(payload)});
           } catch (const std::exception& error) {
-            MW_ERROR("Native ROS2 receive failed: {}", error.what());
+            MW_ERROR_INTERVAL(1000, "Native ROS2 receive failed: {}", error.what());
           }
         });
     const uint64_t handle = next_native_handle_++;

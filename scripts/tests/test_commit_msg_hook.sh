@@ -37,6 +37,16 @@ run_message automatic-revert 'Revert "feat(core): temporary change"' \
 run_message fixup "fixup! feat(core): add transport" \
   || fail "fixup message was rejected"
 
+run_message automatic-merge "Merge branch 'feature/x' into main" \
+  || fail "automatic merge message was rejected"
+
+# Only git-generated prefixes are exempt: "merge"/"Merge" followed by free text is not.
+for subject in "merge fix for the transport" "Merge the transport fix" "MERGE branch 'x'"; do
+  if run_message manual-merge "$subject" >"$SCRATCH/merge.out" 2>&1; then
+    fail "manual subject '$subject' bypassed validation"
+  fi
+done
+
 if run_message missing-body "fix(core): correct transport state" >"$SCRATCH/body.out" 2>&1; then
   fail "non-trivial commit without body was accepted"
 fi

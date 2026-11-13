@@ -58,8 +58,11 @@ void ThreadPoolExecutor::Initialize(std::string_view name,
 
   name_ = std::string(name);
 
-  if (options_node && !options_node.IsNull())
+  if (options_node && !options_node.IsNull()) {
     options_ = options_node.as<Options>();
+    if (options_node["shutdown_grace_ms"])
+      shutdown_grace_ms_ = options_node["shutdown_grace_ms"].as<int32_t>();
+  }
 
   start_sys_tp_ = std::chrono::system_clock::now();
   start_std_tp_ = std::chrono::steady_clock::now();
@@ -74,34 +77,57 @@ void ThreadPoolExecutor::Initialize(std::string_view name,
       io_ptr_->get_executor());
 
   for (uint32_t ii = 0; ii < options_.thread_num; ++ii) {
-    threads_.emplace_back([this, ii] {
-      tl_current_executor_ = this;
+    // Count only threads that actually start, so a failed std::thread
+    // construction cannot leave Shutdown() waiting for a thread that never ran.
+    {
+      std::lock_guard<std::mutex> lck(exit_mutex_);
+      ++running_threads_;
+    }
+    try {
+      threads_.emplace_back([this, ii] {
+        tl_current_executor_ = this;
 
-      std::string threadname = name_;
-      if (options_.thread_num > 1)
-        threadname = threadname + "." + std::to_string(ii);
+        std::string threadname = name_;
+        if (options_.thread_num > 1)
+          threadname = threadname + "." + std::to_string(ii);
 
-      try {
-        util::SetNameForCurrentThread(threadname);
-        util::BindCpuForCurrentThread(options_.thread_bind_cpu);
-        util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);
-      } catch (const std::exception& e) {
-        MW_WARN("Set thread policy for async pool executor '{}' get exception, {}",
-                   Name(), e.what());
-      }
+        try {
+          util::EnsureAltSignalStackForCurrentThread();
+          util::SetNameForCurrentThread(threadname);
+          util::BindCpuForCurrentThread(options_.thread_bind_cpu);
+          util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);
+        } catch (const std::exception& e) {
+          MW_WARN("Set thread policy for async pool executor '{}' get exception, {}",
+                     Name(), e.what());
+        }
 
-      try {
-        io_ptr_->run();
-      } catch (const std::exception& e) {
-        MW_FATAL("Async pool executor '{}' run loop get exception, {}",
-                    Name(), e.what());
-      }
+        // A task exception unwinds out of run(); run() may be called again
+        // right away, so the worker keeps serving the queue.
+        while (true) {
+          try {
+            io_ptr_->run();
+            break;
+          } catch (const std::exception& e) {
+            MW_ERROR("Async pool executor '{}' task threw an exception, {}", Name(), e.what());
+          } catch (...) {
+            MW_ERROR("Async pool executor '{}' task threw an unknown exception.", Name());
+          }
+        }
 
-      tl_current_executor_ = nullptr;
-    });
+        tl_current_executor_ = nullptr;
+
+        std::lock_guard<std::mutex> lck(exit_mutex_);
+        if (--running_threads_ == 0) exit_cv_.notify_all();
+      });
+    } catch (...) {
+      std::lock_guard<std::mutex> lck(exit_mutex_);
+      --running_threads_;
+      throw;
+    }
   }
 
   options_node = options_;
+  options_node["shutdown_grace_ms"] = shutdown_grace_ms_;
 }
 
 void ThreadPoolExecutor::Start() {
@@ -115,6 +141,26 @@ void ThreadPoolExecutor::Shutdown() {
     return;
 
   if (work_guard_ptr_) work_guard_ptr_->reset();
+
+  // Queued handlers (and tasks they chain) get 'shutdown_grace_ms' to finish.
+  // A pending DispatchAt() timer would otherwise keep run() alive until it
+  // expires, so after the grace period the io_context is stopped, which
+  // discards everything still queued (timers and ready tasks alike).
+  // Called from one of our own workers, that worker counts as running, so
+  // there is nothing to wait for (joining itself fails below as before).
+  if (io_ptr_ && !IsInCurrentExecutor()) {
+    std::unique_lock<std::mutex> lck(exit_mutex_);
+    auto all_exited = [this] { return running_threads_ == 0; };
+    if (shutdown_grace_ms_ < 0) {
+      exit_cv_.wait(lck, all_exited);
+    } else if (!exit_cv_.wait_for(lck, std::chrono::milliseconds(shutdown_grace_ms_), all_exited)) {
+      lck.unlock();
+      MW_WARN("Async pool executor '{}' still busy {} ms after shutdown, stopping it; "
+              "tasks and timers still queued are discarded (see 'shutdown_grace_ms').",
+              name_, shutdown_grace_ms_);
+      io_ptr_->stop();
+    }
+  }
 
   for (auto itr = threads_.begin(); itr != threads_.end();) {
     if (itr->joinable()) itr->join();

@@ -4,10 +4,14 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <mutex>
 #include <sstream>
+#include <thread>
 
 #include "engine/transport/transport_driver_dispatcher.h"
 #ifdef IBMW_ENABLE_CORE_METRICS
@@ -17,7 +21,7 @@
 namespace ibmw::runtime::core::transport {
 namespace {
 
-class FakeUserLoanDriver final : public TransportDriver {
+class FakeUserLoanDriver : public TransportDriver {
  public:
   enum class Result { kFailDirty, kWrongSource, kMinimalSuccess, kSuccess };
 
@@ -80,6 +84,80 @@ LoanAccessInfoWrapper LoanRequest() {
                                .mode = LoanMode::kCtxMetaThenPayload};
 }
 
+#ifdef IBMW_ENABLE_CORE_METRICS
+// Parks the caller inside Controller::Register, which holds the controller
+// mutex while it reads the driver name.
+class NameBlockingDriver final : public FakeUserLoanDriver {
+ public:
+  NameBlockingDriver() : FakeUserLoanDriver("name-blocking", Result::kSuccess) {}
+  std::string_view Name() const noexcept override {
+    std::call_once(entered_once, [this] { entered.set_value(); });
+    released.wait();
+    return "name-blocking";
+  }
+  mutable std::once_flag entered_once;
+  mutable std::promise<void> entered;
+  std::shared_future<void> released;
+};
+
+TEST(UserLoanDispatcher, LoanCompletionDoesNotTakeTheControllerMutex) {
+  ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
+  auto& metrics = observability::CoreMetricsController();
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  FrameworkAsyncTransportFilterBus publish_filters;
+  FakeUserLoanDriver good("good", FakeUserLoanDriver::Result::kSuccess);
+
+  metrics.Initialize(&dispatcher);
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&publish_filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"good"}}});
+  dispatcher.RegisterTransportDriver(&good);
+  dispatcher.Initialize();
+  SendTypeWrapper wrapper;
+  wrapper.info.msg_type = "Frame";
+  wrapper.info.topic_name = "camera";
+  wrapper.info.pkg_path = "pkg";
+  wrapper.info.module_name = "module";
+  ASSERT_TRUE(dispatcher.RegisterSendType(std::move(wrapper)));
+  dispatcher.Start();
+  auto publish = dispatcher.Loan(LoanRequest());
+  auto release_handle = dispatcher.Loan(LoanRequest());
+  ASSERT_EQ(publish.source_driver, &good);
+  ASSERT_EQ(release_handle.source_driver, &good);
+
+  std::promise<void> release;
+  NameBlockingDriver blocker;
+  blocker.released = release.get_future().share();
+  int other_dispatcher = 0;
+  std::thread holder([&] {
+    (void)metrics.Register(&other_dispatcher, nullptr, "other-pkg", "other-module",
+                           "other", "Frame", {&blocker});
+  });
+  blocker.entered.get_future().wait();
+
+  auto task = std::async(std::launch::async, [&] {
+    dispatcher.PublishLoaned(publish);
+    dispatcher.ReleaseLoaned(release_handle);
+  });
+  const auto status = task.wait_for(std::chrono::seconds(10));
+  release.set_value();
+  holder.join();
+  task.get();
+  EXPECT_EQ(status, std::future_status::ready)
+      << "Loan completion blocked on the controller mutex";
+  EXPECT_EQ(good.publish_calls, 1);
+  EXPECT_EQ(good.release_calls, 1);
+
+  const auto json = metrics.registry().SnapshotJsonl();
+  EXPECT_NE(json.find("\"loan_publish_called\":1"), std::string::npos);
+  EXPECT_NE(json.find("\"loan_release_called\":1"), std::string::npos);
+  dispatcher.Shutdown();
+  EXPECT_TRUE(metrics.FinalizeSnapshot(&dispatcher));
+  unsetenv("IBMW_CORE_METRICS");
+}
+#endif
+
 TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
 #ifdef IBMW_ENABLE_CORE_METRICS
   ASSERT_EQ(setenv("IBMW_CORE_METRICS", "counters", 1), 0);
@@ -138,20 +216,19 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
   EXPECT_EQ(good.release_calls, 1);
   EXPECT_TRUE(dispatcher.UnregisterPublishTap(tap_handle));
 
-  // The established handle contract routes solely by source_driver. Side data
-  // and dispatcher membership are driver-private and must not be validated by
-  // observability or dispatcher glue.
+  // A handle from a driver this dispatcher does not know is dropped without
+  // calling into that driver. Other side data stays driver-private.
   FakeUserLoanDriver outsider("outsider", FakeUserLoanDriver::Result::kSuccess);
   LoanedSampleHandle forged;
   forged.source_driver = &outsider;
   dispatcher.PublishLoaned(forged);
   EXPECT_EQ(forged.source_driver, nullptr);
-  EXPECT_EQ(outsider.publish_calls, 1);
+  EXPECT_EQ(outsider.publish_calls, 0);
 
   forged.source_driver = &outsider;
   dispatcher.ReleaseLoaned(forged);
   EXPECT_EQ(forged.source_driver, nullptr);
-  EXPECT_EQ(outsider.release_calls, 1);
+  EXPECT_EQ(outsider.release_calls, 0);
 
 #ifdef IBMW_ENABLE_CORE_METRICS
   const auto json = metrics.registry().SnapshotJsonl();
@@ -163,6 +240,37 @@ TEST(UserLoanDispatcher, IsolatesFailedAttemptsAndConsumesOnce) {
   EXPECT_TRUE(metrics.FinalizeSnapshot(&dispatcher));
   unsetenv("IBMW_CORE_METRICS");
 #endif
+}
+
+TEST(UserLoanDispatcher, ReleaseAfterShutdownDropsHandleWithoutDriverCall) {
+  TransportCatalog catalog;
+  TransportDriverDispatcher dispatcher;
+  FrameworkAsyncTransportFilterBus publish_filters;
+  FakeUserLoanDriver good("good", FakeUserLoanDriver::Result::kSuccess);
+
+  dispatcher.SetTransportCatalog(&catalog);
+  dispatcher.SetPublishFrameworkAsyncTransportFilterBus(&publish_filters);
+  dispatcher.SetPubTopicsDriversRules({{".*", {"good"}}});
+  dispatcher.RegisterTransportDriver(&good);
+  dispatcher.Initialize();
+
+  SendTypeWrapper wrapper;
+  wrapper.info.msg_type = "Frame";
+  wrapper.info.topic_name = "camera";
+  wrapper.info.pkg_path = "pkg";
+  wrapper.info.module_name = "module";
+  ASSERT_TRUE(dispatcher.RegisterSendType(std::move(wrapper)));
+  dispatcher.Start();
+
+  auto outstanding = dispatcher.Loan(LoanRequest());
+  ASSERT_EQ(outstanding.source_driver, &good);
+  dispatcher.Shutdown();
+
+  // After Shutdown the source driver may already be destroyed by its owner.
+  dispatcher.ReleaseLoaned(outstanding);
+  EXPECT_EQ(outstanding.source_driver, nullptr);
+  EXPECT_EQ(outstanding.driver_token, nullptr);
+  EXPECT_EQ(good.release_calls, 0);
 }
 
 TEST(UserLoanDispatcher, BooleanSuccessIsNotRejectedByMetricsSideInvariants) {

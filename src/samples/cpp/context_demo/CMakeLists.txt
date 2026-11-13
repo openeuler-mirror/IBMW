@@ -16,7 +16,7 @@ set_namespace()
 
 # Modules
 add_subdirectory(managed/chn_publisher_module)
-add_subdirectory(managed/chn_subscriber_on_exeutor_module)
+add_subdirectory(managed/chn_subscriber_on_executor_module)
 add_subdirectory(managed/chn_subscriber_inline_module)
 add_subdirectory(managed/rpc_client_module)
 add_subdirectory(managed/rpc_server_inline_module)
@@ -30,8 +30,6 @@ add_subdirectory(package)
 # Install resources
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   set(CUR_INSTALL_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/config/linux)
-elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
-  set(CUR_INSTALL_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/config/win)
 else()
   message(FATAL_ERROR "Unsupported os")
 endif()

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stddef.h>
+
 #include "c/util/function_base.h"
 #include "c/util/string.h"
 
@@ -35,6 +37,13 @@ typedef struct {
 
 /// Parameter handle
 typedef struct {
+  /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
   /**
    * @brief Get parameter reference
    * @note

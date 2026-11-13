@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "c/core_base.h"
+#include "c/driver_slot.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,6 +75,19 @@ typedef struct {
    * Input 1: Pointer to module ctx
    */
   void (*stop)(void* ctx);
+
+  /**
+   * @brief OPTIONAL (may be null). Receives a transport driver for a typed slot.
+   * @note
+   * 1. Called for directly registered modules after initialization and before
+   *    run; the framework never casts ctx to a C++ type itself.
+   *
+   * Parameter definition:
+   * Input 1: Pointer to module ctx
+   * Input 2: Driver slot id
+   * Input 3: Driver pointer
+   */
+  void (*set_driver_slot)(void* ctx, ibmw_driver_slot_t slot_id, void* driver_ptr);
 
   /// Implement pointer
   void* ctx;

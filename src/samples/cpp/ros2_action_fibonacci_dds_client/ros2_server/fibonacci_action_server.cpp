@@ -1,10 +1,11 @@
 // Copyright (c) 2025-2026, IB-Robot Group & openEuler Embedded SIG & openharmony-robot sig_RoboFrame.
 // All rights reserved.
 
+#include <charconv>
 #include <chrono>
-#include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <atomic>
 #include <iostream>
 #include <memory>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -25,14 +27,8 @@ namespace {
 using Fibonacci = example_interfaces::action::Fibonacci;
 using GoalHandleFibonacci = rclcpp_action::ServerGoalHandle<Fibonacci>;
 
-volatile std::sig_atomic_t g_should_stop = 0;
-
 constexpr int32_t kMaxFibonacciOrder = 47;
 constexpr int32_t kMaxConcurrentGoals = 4;
-
-void HandleSignal(int) {
-  g_should_stop = 1;
-}
 
 struct Options {
   std::string action_name = "/fibonacci";
@@ -51,6 +47,19 @@ std::string JoinSequence(const std::vector<int32_t> &sequence) {
   }
   oss << "]";
   return oss.str();
+}
+
+// Parses the whole of `text` as a base-10 int; reports `flag` on failure.
+bool ParseIntArg(const char *flag, const char *text, int &out) {
+  const char *end = text + std::strlen(text);
+  int value = 0;
+  const auto [ptr, ec] = std::from_chars(text, end, value);
+  if (*text == '\0' || ec != std::errc() || ptr != end) {
+    std::cerr << "[FAIL] Invalid value for " << flag << ": '" << text << "'" << std::endl;
+    return false;
+  }
+  out = value;
+  return true;
 }
 
 std::optional<Options> ParseArgs(int argc, char *argv[]) {
@@ -77,7 +86,9 @@ std::optional<Options> ParseArgs(int argc, char *argv[]) {
       if (value == nullptr) {
         return std::nullopt;
       }
-      options.feedback_delay_ms = std::stoi(value);
+      if (!ParseIntArg("--feedback-delay-ms", value, options.feedback_delay_ms)) {
+        return std::nullopt;
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::cout
           << "Usage: fibonacci_action_server [options]\n"
@@ -252,20 +263,15 @@ int main(int argc, char *argv[]) {
     return 0;
   }
 
-  std::signal(SIGINT, HandleSignal);
-  std::signal(SIGTERM, HandleSignal);
-
-  rclcpp::init(argc, argv);
+  // rclcpp's SIGINT/SIGTERM handlers shut the context down, which wakes and
+  // ends spin(); no flag polling or spin_some()/sleep loop is needed.
+  rclcpp::init(argc, argv, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::All);
   auto server = std::make_shared<FibonacciActionServer>(*options);
   server->PrintReady();
 
   rclcpp::executors::SingleThreadedExecutor executor;
   executor.add_node(server);
-
-  while (rclcpp::ok() && g_should_stop == 0) {
-    executor.spin_some();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
+  executor.spin();
 
   server->Stop();
   rclcpp::shutdown();

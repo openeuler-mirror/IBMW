@@ -68,11 +68,14 @@ def _is_ros2_message_module(module: dict) -> bool:
         or module.get("_is_loaned_publisher")
         or module.get("_is_loaned_subscriber")
         or module.get("_is_direct_iceoryx")
+        or module.get("_is_direct_shm")
         or module.get("type") in {
             "direct_ros2_publisher",
             "direct_ros2_subscriber",
             "direct_iceoryx_publisher",
             "direct_iceoryx_subscriber",
+            "direct_shm_publisher",
+            "direct_shm_subscriber",
             "loaned_publisher",
             "loaned_subscriber",
         }
@@ -278,7 +281,7 @@ def generate_type_support_package_source(spec: PackageTypeSupport) -> str:
         "};",
         "",
         "const ibmw_type_support_package_v1_t type_support_package{",
-        "    .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,",
+        "    .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,",
         "    .struct_size = sizeof(ibmw_type_support_package_v1_t),",
         "    .entry_count = sizeof(type_support_array) / sizeof(type_support_array[0]),",
         "    .entries = type_support_array,",

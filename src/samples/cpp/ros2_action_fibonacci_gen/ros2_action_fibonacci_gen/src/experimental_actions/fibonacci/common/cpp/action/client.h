@@ -24,7 +24,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -42,6 +41,7 @@
 #include <fastdds/dds/topic/Topic.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
+#include "cpp/action/action_log.h"
 #include "internal/ros2_action_dds/fastdds_typesupport.h"
 #include "internal/ros2_action_dds/fastdds_wire_contract.h"
 
@@ -144,7 +144,7 @@ class ServiceClientEndpoint {
     req_topic_ = participant->create_topic(request_topic_name, req_ts_.get_type_name(), dds::TOPIC_QOS_DEFAULT);
     rsp_topic_ = participant->create_topic(reply_topic_name, rsp_ts_.get_type_name(), dds::TOPIC_QOS_DEFAULT);
     if (req_topic_ == nullptr || rsp_topic_ == nullptr) {
-      std::cerr << "[FAIL] create service topics failed: " << request_topic_name << std::endl;
+      ActionLog(ActionLogLevel::kError, "create service topics failed: " + request_topic_name);
       return false;
     }
 
@@ -156,7 +156,7 @@ class ServiceClientEndpoint {
     writer_ = publisher->create_datawriter(req_topic_, writer_qos);
     reader_ = subscriber->create_datareader(rsp_topic_, reader_qos);
     if (writer_ == nullptr || reader_ == nullptr) {
-      std::cerr << "[FAIL] create service client writer/reader failed: " << request_topic_name << std::endl;
+      ActionLog(ActionLogLevel::kError, "create service client writer/reader failed: " + request_topic_name);
       return false;
     }
     reply_reader_guid_ = ReaderGuid(reader_);
@@ -233,7 +233,7 @@ ServiceCallResult<RspT> CallService(ServiceClientEndpoint<ReqT, RspT>& endpoint,
   endpoint.AttachListener(std::make_unique<ReplyListener<RspT>>(endpoint.reply_reader_guid(), sequence, slot));
   ScopeExit listener_guard([&endpoint]() { endpoint.DetachListener(); });
   if (!endpoint.Send(request, sequence)) {
-    std::cerr << write_failure_message << std::endl;
+    ActionLog(ActionLogLevel::kError, write_failure_message);
     return ServiceCallResult<RspT>{.write_ok = false, .response = std::nullopt};
   }
   return ServiceCallResult<RspT>{.write_ok = true, .response = WaitForResponse(slot, timeout)};

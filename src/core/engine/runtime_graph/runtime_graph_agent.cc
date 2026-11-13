@@ -5,10 +5,12 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -30,7 +32,9 @@ void SendAll(int fd, std::string_view data) {
   while (offset < data.size()) {
     const ssize_t written =
         ::send(fd, data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
-    MW_ASSERT(written > 0, "Failed to send Runtime Agent response.");
+    if (written < 0 && errno == EINTR) continue;
+    MW_ASSERT(written > 0, "Failed to send Runtime Agent response: {}.",
+              std::strerror(errno));
     offset += static_cast<size_t>(written);
   }
 }
@@ -57,8 +61,18 @@ class RuntimeIdLock {
                   status.st_uid == ::geteuid() && (status.st_mode & 077) == 0 &&
                   status.st_nlink == 1,
               "Unsafe Runtime ID lock '{}'.", path.string());
-    MW_ASSERT(::flock(fd_.Get(), LOCK_EX) == 0,
-              "Failed to lock Runtime ID '{}'.", path.string());
+    // Bounded: a stuck or stopped lock holder must not hang Shutdown().
+    const auto deadline = std::chrono::steady_clock::now() + kRuntimeIdLockTimeout;
+    while (::flock(fd_.Get(), LOCK_EX | LOCK_NB) != 0) {
+      const int error = errno;
+      MW_ASSERT(error == EINTR || error == EWOULDBLOCK,
+                "Failed to lock Runtime ID '{}': {}.", path.string(), std::strerror(error));
+      MW_ASSERT(std::chrono::steady_clock::now() < deadline,
+                "Timed out locking Runtime ID '{}'.", path.string());
+      if (error != EINTR) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
   }
 
   RuntimeIdLock(const RuntimeIdLock&) = delete;
@@ -205,7 +219,7 @@ void RuntimeGraphAgent::Initialize() {
         registration.runtime_id);
     std::filesystem::remove(registration.control_socket);
     std::filesystem::remove(registration_path_);
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     MW_ASSERT(fd >= 0, "Failed to create Runtime Agent socket.");
     server_fd_ = fd;
     const auto address = MakeSocketAddress(registration.control_socket);
@@ -266,15 +280,20 @@ void RuntimeGraphAgent::Shutdown() {
     ::close(client);
   }
   if (!registration_path_.empty()) {
-    RuntimeIdLock runtime_lock(
-        options_.registry_path /
-        (options_.registration.runtime_id + ".lock"));
-    const auto existing = ReadRegistrationFile(registration_path_);
-    if (!existing || SameRegistrationOwner(*existing, options_.registration)) {
-      std::error_code error;
-      std::filesystem::remove(
-          options_.registration.control_socket, error);
-      std::filesystem::remove(registration_path_, error);
+    // Shutdown() runs from the destructor: a leftover registration is only
+    // stale (discovery drops it once this process is gone), not an error.
+    try {
+      RuntimeIdLock runtime_lock(
+          options_.registry_path /
+          (options_.registration.runtime_id + ".lock"));
+      const auto existing = ReadRegistrationFile(registration_path_);
+      if (!existing || SameRegistrationOwner(*existing, options_.registration)) {
+        std::error_code error;
+        std::filesystem::remove(
+            options_.registration.control_socket, error);
+        std::filesystem::remove(registration_path_, error);
+      }
+    } catch (...) {
     }
   }
 }
@@ -285,7 +304,7 @@ void RuntimeGraphAgent::Serve() {
     if (fd < 0) {
       break;
     }
-    const int client = ::accept(fd, nullptr, nullptr);
+    const int client = ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
     if (client < 0) {
       if (errno == EINTR) {
         continue;
@@ -302,9 +321,12 @@ void RuntimeGraphAgent::Serve() {
     }
     try {
       RequireSameUid(client);
-      ConfigureRuntimeSocket(client);
+      ConfigureRuntimeSocket(client, kRuntimeRequestTimeout);
       HandleClient(client);
+    } catch (const std::exception& error) {
+      ReportDroppedClient(error.what());
     } catch (...) {
+      ReportDroppedClient("unknown error");
     }
     const int active = client_fd_.exchange(-1);
     if (active >= 0) {
@@ -313,23 +335,39 @@ void RuntimeGraphAgent::Serve() {
   }
 }
 
+// A client dropped before its answer was delivered (foreign UID, socket
+// errors, peer gone) is logged at most once per second, with the total count.
+void RuntimeGraphAgent::ReportDroppedClient(std::string_view reason) {
+  ++dropped_clients_;
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_drop_log_ < std::chrono::seconds(1)) return;
+  last_drop_log_ = now;
+  MW_LOG(options_.logger, ibmw::common::util::kLogLevelWarn,
+         "Runtime Agent '{}' dropped a client: {} ({} dropped so far).",
+         options_.registration.runtime_id, reason, dropped_clients_);
+}
+
 void RuntimeGraphAgent::HandleClient(int client_fd) {
   nlohmann::json response;
   try {
     std::string request_data;
     std::array<char, 4096> buffer{};
-    while (request_data.size() < kRuntimeMaxControlMessage) {
+    const auto deadline = std::chrono::steady_clock::now() + kRuntimeRequestTimeout;
+    bool complete = false;
+    while (!complete && request_data.size() < kRuntimeMaxControlMessage) {
       const ssize_t received = ::recv(client_fd, buffer.data(), buffer.size(), 0);
-      if (received <= 0) {
-        break;
+      if (received < 0 && errno == EINTR) {
+        continue;
       }
+      MW_ASSERT(received >= 0, "Runtime Agent request timed out.");
+      MW_ASSERT(received > 0, "Runtime Agent request ended without a newline.");
+      complete = std::memchr(buffer.data(), '\n', static_cast<size_t>(received)) != nullptr;
       request_data.append(buffer.data(), static_cast<size_t>(received));
-      if (request_data.find('\n') != std::string::npos) {
-        break;
-      }
+      MW_ASSERT(complete || std::chrono::steady_clock::now() < deadline,
+                "Runtime Agent request timed out.");
     }
     MW_ASSERT(
-        !request_data.empty() && request_data.size() < kRuntimeMaxControlMessage,
+        complete && request_data.size() < kRuntimeMaxControlMessage,
         "Invalid Runtime Agent request size.");
     response = HandleRequest(nlohmann::json::parse(request_data));
   } catch (const std::exception& error) {

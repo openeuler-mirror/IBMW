@@ -107,11 +107,13 @@ class TimeManipulatorServiceImpl : public ibmw::rpc::ServiceBase {
   enum class ErrorCode : uint32_t {
     kSuc = 0,
     kInvalidExecutorName = 1,
+    kInvalidTimeRatio = 2,
   };
 
   static constexpr std::string_view kErrorInfoArray[] = {
       "",
-      "INVALID_EXECUTOR_NAME"};
+      "INVALID_EXECUTOR_NAME",
+      "INVALID_TIME_RATIO"};
 
   static void SetErrorCode(
       ErrorCode code,

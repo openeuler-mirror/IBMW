@@ -2,6 +2,9 @@
 // All rights reserved.
 
 // IBMW_GEN_EXPERIMENTAL_ACTION_FIBONACCI_DDS_ONLY
+#include <pthread.h>
+#include <signal.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -59,12 +62,6 @@ using SystemClock = std::chrono::system_clock;
 using Fibonacci = example_interfaces::action::Fibonacci;
 using Traits = ibmw::action::ActionTraits<Fibonacci>;
 namespace action_common = ibmw::samples::ros2_action_fibonacci;
-
-std::atomic_bool g_stop{false};
-
-void HandleSignal(int) {
-  g_stop.store(true);
-}
 
 template <typename T>
 using UuidMap = std::unordered_map<std::string, T>;
@@ -393,30 +390,56 @@ class FibonacciActionServer {
   std::condition_variable status_cv_;
 };
 
-uint32_t ParseDomainId(int argc, char** argv) {
+std::optional<uint32_t> ParseDomainId(int argc, char** argv) {
+  const char* flag = "--domain-id";
+  const char* text = nullptr;
   for (int i = 1; i + 1 < argc; ++i) {
     if (std::strcmp(argv[i], "--domain-id") == 0) {
-      return static_cast<uint32_t>(std::stoul(argv[i + 1]));
+      text = argv[i + 1];
+      break;
     }
   }
-  const char* domain = std::getenv("ROS_DOMAIN_ID");
-  if (domain == nullptr || std::strlen(domain) == 0U) {
-    return 0;
+  if (text == nullptr) {
+    flag = "ROS_DOMAIN_ID";
+    text = std::getenv("ROS_DOMAIN_ID");
+    if (text == nullptr || std::strlen(text) == 0U) {
+      return 0U;
+    }
   }
-  return static_cast<uint32_t>(std::stoul(domain));
+  uint32_t domain_id = 0;
+  if (!action_common::ParseInteger<uint32_t>(text, 0, action_common::kMaxDomainId, domain_id)) {
+    std::cerr << "[FAIL] Invalid value for " << flag << ": '" << text << "'" << std::endl;
+    return std::nullopt;
+  }
+  return domain_id;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::signal(SIGINT, HandleSignal);
-  std::signal(SIGTERM, HandleSignal);
-  FibonacciActionServer server;
-  if (!server.Start(ParseDomainId(argc, argv))) {
+  const auto domain_id = ParseDomainId(argc, argv);
+  if (!domain_id.has_value()) {
+    return 2;
+  }
+  // Block SIGINT/SIGTERM before Start() spawns any thread (FastDDS, status,
+  // workers) so every thread inherits the mask, then take them synchronously
+  // with sigwait() instead of polling a flag set by a handler.
+  sigset_t stop_signals;
+  sigemptyset(&stop_signals);
+  sigaddset(&stop_signals, SIGINT);
+  sigaddset(&stop_signals, SIGTERM);
+  if (pthread_sigmask(SIG_BLOCK, &stop_signals, nullptr) != 0) {
+    std::cerr << "[FAIL] Cannot block SIGINT/SIGTERM" << std::endl;
     return 1;
   }
-  while (!g_stop.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  FibonacciActionServer server;
+  if (!server.Start(*domain_id)) {
+    return 1;
+  }
+  int signal_number = 0;
+  if (sigwait(&stop_signals, &signal_number) != 0) {
+    std::cerr << "[FAIL] sigwait failed" << std::endl;
+    return 1;
   }
   return 0;
 }

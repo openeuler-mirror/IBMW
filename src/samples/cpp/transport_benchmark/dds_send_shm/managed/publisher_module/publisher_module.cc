@@ -7,6 +7,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <string>
+#include <thread>
+
+// IBMW_R1_EXEMPT_BEGIN
+#include "dds_ext/dds_transport_driver.h"
+// IBMW_R1_EXEMPT_END
 
 namespace ibmw::samples::transport_benchmark::dds_send_shm {
 
@@ -24,6 +30,20 @@ constexpr std::string_view kTopic = "dds_bench_send_shm_topic";
 // qualification.
 using dds_send_bank::SendPayloadSizeLabel;
 using dds_send_bank::FillBenchSendPayload;
+
+// DDS topic of the DataWriter registered for SendT on kTopic. Mirrors
+// DdsTransportDriver::GetDdsTopicName() in native mode (every dds_send_shm
+// config uses ros2_compatible: false):
+//   kTopic + "_native_" + msg_type with ':' and '.' replaced by '_'.
+// IBMW_R2_EXEMPT_BEGIN: dds-only sample, topic name needed for the match wait
+template <typename SendT>
+std::string NativeDdsTopicName() {
+  std::string encoded = "dds:" + ibmw::dds::DdsTypeName<SendT>::get();
+  std::replace(encoded.begin(), encoded.end(), ':', '_');
+  std::replace(encoded.begin(), encoded.end(), '.', '_');
+  return std::string(kTopic) + "_native_" + encoded;
+}
+// IBMW_R2_EXEMPT_END
 
 bool IsPublisherProfileEnabled() noexcept {
   const char* value = std::getenv("IBMW_DDS_SEND_SHM_PUBLISHER_PROFILE");
@@ -88,11 +108,51 @@ void PublisherModule::Stop() {
   if (thread_.joinable()) thread_.join();
 }
 
+bool PublisherModule::WaitForSelectedPublisherMatch() {
+  using clock = std::chrono::steady_clock;
+  constexpr auto kWriterMatchTimeout = std::chrono::seconds(10);
+  constexpr auto kWriterMatchPoll = std::chrono::milliseconds(50);
+
+  std::string dds_topic;
+#define IBMW_PUB_MATCH_TOPIC(LBL, N, ALIAS)                                    \
+  if (opts_.payload_bytes == (N)) dds_topic = NativeDdsTopicName<ALIAS>();
+  IBMW_BENCH_SEND_FOR_EACH(IBMW_PUB_MATCH_TOPIC)
+#undef IBMW_PUB_MATCH_TOPIC
+
+  const auto deadline = clock::now() + kWriterMatchTimeout;
+  int matched_count = -1;
+  while (running_ && clock::now() <= deadline) {
+    matched_count = driver_->GetPublicationMatchedCount(dds_topic);
+    if (matched_count > 0) {
+      MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelInfo,
+             "PublisherModule: {} matched subscriber current_count={}",
+             dds_topic, matched_count);
+      return true;
+    }
+    std::this_thread::sleep_for(kWriterMatchPoll);
+  }
+
+  MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+         "PublisherModule: {} failed to match a subscriber before publish "
+         "timeout_ms={} current_count={}",
+         dds_topic,
+         std::chrono::duration_cast<std::chrono::milliseconds>(
+             kWriterMatchTimeout).count(),
+         matched_count);
+  return false;
+}
+
 void PublisherModule::PublishLoop() {
   using clock = std::chrono::steady_clock;
 
   const auto period_ns = std::chrono::nanoseconds(
       static_cast<int64_t>(1'000'000'000ULL / std::max<uint32_t>(opts_.hz, 1)));
+  if (driver_ != nullptr && !WaitForSelectedPublisherMatch()) {
+    MW_LOG(core_.GetLogger(), ibmw::common::util::kLogLevelError,
+           "PublisherModule: aborting publish loop because the selected DDS "
+           "writer did not match a subscriber");
+    return;
+  }
   const auto deadline = clock::now() + std::chrono::seconds(opts_.duration_sec);
 
   uint32_t seq = 0;
@@ -103,6 +163,8 @@ void PublisherModule::PublishLoop() {
   uint64_t send_count = 0;
   uint64_t send_total_ns = 0;
   uint64_t send_max_ns = 0;
+  // Optional extra delay after the match (still inside the duration window,
+  // as before) for configs that want the subscriber side to settle further.
   if (opts_.start_delay_ms > 0) {
     std::this_thread::sleep_for(std::chrono::milliseconds(opts_.start_delay_ms));
   }

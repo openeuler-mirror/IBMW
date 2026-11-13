@@ -4,11 +4,7 @@
 #include "iceoryx_ext/iceoryx_extension.h"
 #include "iceoryx_ext/global.h"
 #include "iceoryx_ext/iceoryx_transport_driver.h"
-#if defined(_WIN32)
-  #include <windows.h>
-#else
-  #include <unistd.h>
-#endif
+#include <unistd.h>
 
 namespace YAML {
 template <>
@@ -52,11 +48,7 @@ bool IceoryxExtension::OnInit(runtime::core::Engine *core_ptr) {
     options_ = extension_options_node.as<Options>();
   }
 
-#if defined(_WIN32)
-  std::string runtime_id = "iceoryx" + std::to_string(GetProcessId(GetCurrentProcess()));
-#else
   std::string runtime_id = "iceoryx" + std::to_string(getpid());
-#endif
 
   if (!options_.runtime_id.empty()) {
     runtime_id = options_.runtime_id;
@@ -113,4 +105,4 @@ void IceoryxExtension::RegisterIceoryxTransportDriver() {
 
 }  // namespace ibmw::extensions::iceoryx_extension
 
-IBMW_EXT_ENTRY_V2(ibmw::extensions::iceoryx_extension::IceoryxExtension)
+IBMW_EXT_ENTRY(ibmw::extensions::iceoryx_extension::IceoryxExtension)

@@ -3,6 +3,13 @@ include(FetchContent)
 
 message(STATUS "get {{ depends_std_module.name }} ...")
 
+# A tag or branch can be moved upstream; set git_tag to a reviewed commit sha.
+string(LENGTH "{{ depends_std_module.git_version }}" _git_tag_length)
+if(NOT _git_tag_length EQUAL 40 OR NOT "{{ depends_std_module.git_version }}" MATCHES "^[0-9a-fA-F]+$")
+  message(WARNING "{{ depends_std_module.name }}: git_tag '{{ depends_std_module.git_version }}' is not a commit sha; "
+                  "the fetched source can change upstream. Pin a reviewed commit sha.")
+endif()
+
 FetchContent_Declare(
   {{ depends_std_module.name }} #
   GIT_REPOSITORY {{ depends_std_module.git_repository }} #

@@ -10,7 +10,7 @@ echo "=========================================="
 # 检查ROS2环境
 if [ -z "$ROS_DISTRO" ]; then
   echo "Error: ROS2 not sourced. Please run:"
-  echo "  source /opt/ros/humble/setup.bash"
+  echo "  source /opt/ros/${ROS_DISTRO:-humble}/setup.bash"
   exit 1
 fi
 

@@ -4,6 +4,7 @@
 #include "bag_command.h"
 
 #include <string>
+#include <utility>
 
 #include "gtest/gtest.h"
 
@@ -61,6 +62,37 @@ TEST(BagCommandRecordRegression, RegistryPathRequiresRegistryDiscovery) {
     testing::internal::CaptureStderr();
     EXPECT_EQ(IbmwRunBagCommand(6, argv), 1);
     EXPECT_NE(testing::internal::GetCapturedStderr().find("--registry-path requires --registry"), std::string::npos);
+  }
+}
+
+// EXT-046: numeric options reject partial, signed, out-of-range and
+// non-finite values instead of truncating them or throwing out of the parser.
+TEST(BagCommandRecordRegression, RejectsInvalidNumericOptions) {
+  const std::pair<const char*, const char*> cases[] = {
+      {"--max-cache-size", "10abc"},        {"--max-cache-size", "-1"},
+      {"--polling-interval", "4294967296"}, {"--polling-interval", "1.5"},
+      {"--max-bag-size", "99999999999999999999"}, {"--max-bag-duration", "nan"},
+      {"--max-bag-duration", "3s"},         {"--compression-threads", " 2"}};
+  for (const auto& [option, value] : cases) {
+    const char* argv[] = {"ibmw", "record", "/topic", option, value};
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(IbmwRunBagCommand(5, argv), 1) << option << " " << value;
+    EXPECT_NE(testing::internal::GetCapturedStderr().find(option), std::string::npos)
+        << option << " " << value;
+  }
+  const std::string joined = "--max-cache-size=12x";
+  const char* argv[] = {"ibmw", "record", "/topic", joined.c_str()};
+  testing::internal::CaptureStderr();
+  EXPECT_EQ(IbmwRunBagCommand(4, argv), 1);
+  EXPECT_NE(testing::internal::GetCapturedStderr().find(joined), std::string::npos);
+}
+
+TEST(BagCommandPlayRegression, RejectsInvalidRate) {
+  for (const char* value : {"inf", "2x", ""}) {
+    const char* argv[] = {"ibmw", "play", "unused-bag", "--rate", value};
+    testing::internal::CaptureStderr();
+    EXPECT_EQ(IbmwRunBagCommand(5, argv), 1) << value;
+    EXPECT_NE(testing::internal::GetCapturedStderr().find("--rate"), std::string::npos) << value;
   }
 }
 

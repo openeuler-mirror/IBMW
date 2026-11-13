@@ -3,6 +3,7 @@
 
 #include "extension_api/ibmw_discovery_provider.h"
 #include "zenoh_discovery_util.h"
+#include "../key_expr.h"
 
 #include <map>
 #include <mutex>
@@ -18,9 +19,12 @@ class Provider final : public DiscoveryProvider {
  public:
   ~Provider() override { Stop(); }
 
-  void Start(const DiscoveryOptions& options) override {
+  void Start(const DiscoveryOptions& requested) override {
     if (z_internal_check(session_.value)) throw std::logic_error("Zenoh discovery is already started.");
-    if (options.backend != DiscoveryBackend::kZenoh) throw std::invalid_argument("Invalid Zenoh discovery source.");
+    if (requested.backend != DiscoveryBackend::kZenoh) throw std::invalid_argument("Invalid Zenoh discovery source.");
+    // Same domain spelling as the drivers' limit_domain: surrounding slashes ignored (TRANS-047).
+    auto options = requested;
+    options.zenoh_domain = extensions::zenoh_extension::NormalizeLimitDomain(requested.zenoh_domain);
     source_ = DescribeSource(options);
     selector_ = zenoh_protocol::DomainPrefix(options.zenoh_domain) + "*/snapshot";
     zenoh_detail::OpenSession(session_.value, options.zenoh_config);

@@ -234,19 +234,47 @@ DdsLoanedSubscriberModule:
     csv_path: ""
 EOF
 
+# Poll <file> every 0.1 s until it matches the ERE <pattern>. Fail loudly
+# (log tail, non-zero exit) if <pid> dies first or <timeout_sec> elapses.
+wait_for_log() {
+  local file="$1"
+  local pattern="$2"
+  local pid="$3"
+  local name="$4"
+  local timeout_sec="$5"
+  local deadline=$((SECONDS + timeout_sec))
+  until grep -qE -- "$pattern" "$file" 2>/dev/null; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      local status=0
+      wait "$pid" || status=$?
+      echo "FAIL: ${name} exited with status ${status} before logging '${pattern}'" >&2
+      tail -n 40 "$file" >&2 || true
+      exit 1
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "FAIL: ${name} did not log '${pattern}' within ${timeout_sec}s" >&2
+      tail -n 40 "$file" >&2 || true
+      exit 1
+    fi
+    sleep 0.1
+  done
+}
+
+READY_TIMEOUT_SEC="${READY_TIMEOUT_SEC:-15}"
+# Upper bound for the publisher's "done" line: DDS discovery (the loaned and
+# send_shm publishers wait up to 10 s for their writer to match), the
+# duration window itself, plus slack.
+DONE_TIMEOUT_SEC=$((DURATION_SEC + 15))
+ENGINE_RUNNING_PATTERN='Running( \(async\))?\. Waiting for shutdown signal\.'
+
 "$SUB_APP" "$SUB_CFG" >"$SUB_LOG" 2>&1 &
 SUB_PID=$!
-sleep 1
-if ! kill -0 "$SUB_PID" 2>/dev/null; then
-  wait "$SUB_PID" || sub_status=$?
-  echo "FAIL: subscriber exited early with status ${sub_status:-0}" >&2
-  cat "$SUB_LOG" >&2
-  exit 1
-fi
+# The engine logs "Running..." once Start() has wired every subscription.
+wait_for_log "$SUB_LOG" "$ENGINE_RUNNING_PATTERN" "$SUB_PID" subscriber "$READY_TIMEOUT_SEC"
 
 "$PUB_APP" "$PUB_CFG" >"$PUB_LOG" 2>&1 &
 PUB_PID=$!
-sleep $((DURATION_SEC + 4))
+wait_for_log "$PUB_LOG" "PublisherModule done:" "$PUB_PID" publisher "$DONE_TIMEOUT_SEC"
 
 kill -KILL "$PUB_PID" 2>/dev/null || true
 wait "$PUB_PID" 2>/dev/null || true

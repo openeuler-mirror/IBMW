@@ -282,8 +282,6 @@ bool TransportBus::TryShutdown() {
         transport_driver_vec_.size());
   }
 
-  transport_access_wrap_map_.clear();
-
   transport_driver_dispatcher_.Shutdown();
 
   if (shutdown_profile) {
@@ -292,6 +290,10 @@ bool TransportBus::TryShutdown() {
 
   transport_driver_vec_.clear();
   used_transport_driver_vec_.clear();
+  // Access wrappers back the C ABI ctx pointers (SenderAccess/ReceiverAccess)
+  // that user-held RAII objects such as LoanedSample still dereference after
+  // Shutdown. Keep them until the bus itself is destroyed; the dispatcher
+  // turns post-Shutdown calls into no-ops.
   transport_driver_capabilities_map_.clear();
   serialized_transport_capabilities_map_.clear();
   prepared_shutdown_drivers_.clear();
@@ -616,13 +618,13 @@ void TransportBus::RegisterDebugLogFilter() {
         if (buf_ptr) {
           auto msg_str = buf_ptr->JoinToString();
 
-          MW_INFO("Transport message handlerr handle a new msg. msg type: {}, topic name: {}, context: {}, msg: {}",
+          MW_INFO("Transport message handler handle a new msg. msg type: {}, topic name: {}, context: {}, msg: {}",
                      msg_wrapper.info.msg_type,
                      msg_wrapper.info.topic_name,
                      msg_wrapper.ctx_ref.ToString(),
                      msg_str);
         } else {
-          MW_INFO("Transport message handlerr handle a new msg. msg type: {}, topic name: {}, context: {}",
+          MW_INFO("Transport message handler handle a new msg. msg type: {}, topic name: {}, context: {}",
                      msg_wrapper.info.msg_type,
                      msg_wrapper.info.topic_name,
                      msg_wrapper.ctx_ref.ToString());

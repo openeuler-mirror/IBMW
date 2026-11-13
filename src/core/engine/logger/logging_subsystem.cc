@@ -106,10 +106,18 @@ void LoggingSubsystem::Initialize(YAML::Node options_node) {
   MW_CHECK_WARN(!logger_driver_vec_.empty(), "No log driver!");
 
   if (options_.enable_crash_log) {
+    crash_signal_handling_.reset();  // restores what it replaced first
     crash_signal_handling_ = std::make_unique<CrashSignalHandling>();
     CrashSignalHandling::SetLogger(logger_ptr_);
+    // The drivers write on their log executor: wait (bounded) for the report
+    // to be written before the handler ends the process.
+    CrashSignalHandling::SetCrashFlush(&crash_flush_hook_);
   } else {
     crash_signal_handling_.reset();
+    // The crash flush hook is left alone: Initialize() runs once per object,
+    // so this one never published its hook, and another owner's hook (an
+    // earlier LoggingSubsystem whose handler and logger are still in place)
+    // must stay.
   }
 
   options_node = options_;
@@ -152,6 +160,22 @@ void LoggingSubsystem::Flush() {
   for (auto& driver : logger_driver_vec_) {
     driver->Flush();
   }
+}
+
+bool LoggingSubsystem::FlushForCrash(std::chrono::milliseconds timeout) noexcept {
+  // One deadline for all drivers, so the total wait is bounded by timeout.
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  bool all_written = true;
+  for (auto& driver : logger_driver_vec_) {
+    all_written = driver->FlushForCrash(deadline) && all_written;
+  }
+  return all_written;
+}
+
+LoggingSubsystem::~LoggingSubsystem() {
+  // The handler stays installed after this object is gone; drop the hook
+  // that points to it (if still published) and wait out a running one.
+  CrashSignalHandling::ClearCrashFlush(&crash_flush_hook_);
 }
 
 void LoggingSubsystem::RegisterGetExecutorFunc(

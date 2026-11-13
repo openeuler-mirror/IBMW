@@ -4,11 +4,13 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -38,12 +40,21 @@ class RecorderCoordinator {
   void Start();
   RecordQueue::PushResult Accept(
       ibmw::transport::SerializedMessage message);
-  void RegisterChannel(StorageChannelDescriptor channel);
-  void TriggerSnapshot();
+  // False when the channel's Schema conflicts with the one already recorded
+  // for its type and serialization; the channel is not registered.
+  bool RegisterChannel(StorageChannelDescriptor channel);
+  // Waits up to timeout for the snapshot to be written. False on timeout: the
+  // snapshot is still written once the storage catches up.
+  bool TriggerSnapshot(std::chrono::milliseconds timeout);
   void AddDroppedMessages(uint64_t count = 1) {
     external_dropped_.fetch_add(count);
   }
   void Close();
+  // Messages dropped because their Schema conflicts with the one already
+  // recorded for the same type and serialization. Counted as dropped.
+  uint64_t SchemaConflictMessages() const noexcept {
+    return schema_conflict_messages_.load();
+  }
 
   const StorageSummary& Summary() const noexcept { return storage_->Summary(); }
   RecordQueue::Statistics QueueStatistics() const;
@@ -64,7 +75,7 @@ class RecorderCoordinator {
       uint64_t queue_sequence);
   void FlushSnapshot(uint64_t queue_target);
   void FlushReadySnapshots(uint64_t popped_messages);
-  StorageSchemaId FindOrRegisterSchema(
+  std::optional<StorageSchemaId> FindOrRegisterSchema(
       const ibmw::transport::TopicDescriptor& topic);
   StorageChannelId FindOrRegisterChannel(
       const ibmw::transport::SerializedMessage& message,
@@ -89,6 +100,7 @@ class RecorderCoordinator {
   mutable std::mutex error_mutex_;
   std::exception_ptr writer_error_;
   std::atomic<uint64_t> writer_failed_messages_{0};
+  std::atomic<uint64_t> schema_conflict_messages_{0};
   struct SnapshotBufferedMessage {
     uint64_t queue_sequence;
     ibmw::transport::SerializedMessage message;

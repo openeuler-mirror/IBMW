@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
+#include <string>
 
 #include "engine/extension/extension_base.h"
 #include "grpc_ext/client/client_pool.h"
@@ -19,6 +21,13 @@ class GrpcExtension : public ExtensionBase {
     uint32_t thread_num = 2;
     std::string listen_ip = "";
     uint16_t listen_port = 0;
+    // Largest accepted request body (bytes) of the server.
+    uint32_t max_request_body_size = 16U << 20;
+    // Server connection limit (also capped by the listen backlog limit).
+    uint32_t max_connection_num = 1024;
+    // Streams per server connection. Buffered request bodies per connection
+    // are bounded by max_concurrent_streams * max_request_body_size.
+    uint32_t max_concurrent_streams = 100;
   };
 
  public:
@@ -26,6 +35,16 @@ class GrpcExtension : public ExtensionBase {
   ~GrpcExtension() override = default;
 
   [[nodiscard]] std::string_view Name() const noexcept override { return "grpc_extension"; }
+
+  // The server has neither TLS nor authentication (EXT-001): whether a
+  // listen address is reachable from this host only. Throws on an invalid
+  // address.
+  static bool IsLoopbackListenAddress(const std::string& listen_ip) {
+    boost::system::error_code ec;
+    const auto address = boost::asio::ip::make_address_v4(listen_ip, ec);
+    if (ec) throw std::invalid_argument("invalid grpc listen_ip '" + listen_ip + "': " + ec.message());
+    return address.is_loopback();
+  }
 
   bool OnInit(runtime::core::Engine* core_ptr) override;
   void OnShutdown() override;

@@ -27,6 +27,7 @@ class ExtensionLogger {
  public:
   ExtensionLogger()
       : fallback_base_{
+            .struct_size = sizeof(ibmw_logger_base_t),
             .get_log_level = [](void* ctx) -> ibmw_log_level_t {
               return static_cast<ibmw_log_level_t>(
                   static_cast<ExtensionLogger*>(ctx)->fallback_level_.load(

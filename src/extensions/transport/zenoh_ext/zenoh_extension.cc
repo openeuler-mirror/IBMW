@@ -3,6 +3,7 @@
 
 #include "zenoh_ext/zenoh_extension.h"
 #include "zenoh_ext/global.h"
+#include "zenoh_ext/key_expr.h"
 
 namespace YAML {
 template <>
@@ -27,7 +28,7 @@ struct convert<ibmw::extensions::zenoh_extension::ZenohExtension::Options> {
       rhs.native_cfg_path = node["native_cfg_path"].as<std::string>();
 
     if (node["limit_domain"])
-      rhs.limit_domain = '/' + node["limit_domain"].as<std::string>();
+      rhs.limit_domain = ibmw::extensions::zenoh_extension::NormalizeLimitDomain(node["limit_domain"].as<std::string>());
 
     if (node["shm_pool_size"])
       rhs.shm_pool_size = node["shm_pool_size"].as<size_t>();
@@ -53,7 +54,6 @@ bool ZenohExtension::OnInit(runtime::core::Engine *core_ptr) {
     options_ = extension_options_node.as<Options>();
   }
 
-  // todo remove role
   zenoh_bus_ptr_->Initialize(options_.native_cfg_path, options_.shm_pool_size);
 
   core_ptr_->RegisterHook(runtime::core::Before(runtime::core::Phase::kInitialize,

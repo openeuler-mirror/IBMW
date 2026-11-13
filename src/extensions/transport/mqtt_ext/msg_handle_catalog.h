@@ -3,8 +3,13 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
+#include <functional>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <utility>
 
 #include "MQTTAsync.h"
 #include "cpp/executor/executor.h"
@@ -19,58 +24,97 @@ class MsgHandleCatalog {
   using MsgHandleFunc = std::function<void(MQTTAsync_message* message)>;
 
   MsgHandleCatalog() = default;
-  ~MsgHandleCatalog() = default;
+  ~MsgHandleCatalog() {
+    // The catalog holds one count itself; whoever drops the last count frees
+    // the state, so a task the executor still holds (shutdown skipped the
+    // drain) can release its count after the catalog is gone.
+    state_->shutdown.store(true);
+    if (state_->active.fetch_sub(1, std::memory_order_acq_rel) == 1) delete state_;
+  }
 
   MsgHandleCatalog(const MsgHandleCatalog&) = delete;
   MsgHandleCatalog& operator=(const MsgHandleCatalog&) = delete;
 
+  // Must be called before the client can deliver messages: the map is not
+  // synchronized and is read-only once sealed.
   template <typename... Args>
     requires std::constructible_from<MsgHandleFunc, Args...>
   void RegisterMsgHandle(std::string_view topic, Args&&... args) {
+    MW_REQUIRE(!sealed_, "Mqtt msg handle for '{}' registered after the client was connected.", topic);
     msg_handle_map_.emplace(topic, std::forward<Args>(args)...);
   }
 
-  void HandleServerMsg(std::string_view topic, MQTTAsync_message* message) const {
-    if (shutdown_flag_.load()) [[unlikely]]
+  // Called before the first connect: no handler may be added afterwards.
+  void Seal() noexcept { sealed_ = true; }
+  bool IsSealed() const noexcept { return sealed_; }
+
+  // Takes ownership of the Paho message and topic buffer and frees them on
+  // every path (TRANS-010), including drops, unknown topics, exceptions and
+  // tasks discarded by the executor.
+  void HandleServerMsg(std::string_view topic, char* topic_raw, MQTTAsync_message* message) const noexcept {
+    // One in-flight count per message, released after the Paho buffers.
+    // Pairs with Shutdown(): either the flag is seen here or the count there.
+    InflightGuard guard(state_);
+    PahoMessage owned(message, topic_raw);
+    if (state_->shutdown.load()) [[unlikely]]
       return;
 
-    MW_TRACE("Mqtt recv msg, topic: {}", topic);
-
     try {
+      MW_TRACE("Mqtt recv msg, topic: {}", topic);
+
       auto find_topic_itr = msg_handle_map_.find(topic);
       if (find_topic_itr == msg_handle_map_.end()) [[unlikely]] {
-        MW_WARN("Unregisted topic: {}", topic);
+        MW_WARN_INTERVAL(1000, "Unregisted topic: {}", topic);
         return;
       }
 
       if (executor_) {
-        auto& handler = find_topic_itr->second;
-
-        active_tasks_++;
-
-        // Capture the handler by value [handler]
-        executor_.Dispatch([this, handler, message, topic]() mutable {
-          handler(message);
-          MQTTAsync_freeMessage(&message);
-          MQTTAsync_free(const_cast<char*>(topic.data()));
-
-          if (--active_tasks_ == 0) {
-            std::lock_guard<std::mutex> lock(wait_mtx_);
-            wait_cv_.notify_all();
-          }
-        });
+        executor_.Dispatch(
+            [guard = std::move(guard), handler = find_topic_itr->second, owned = std::move(owned)]() mutable {
+              // Queued behind a shutdown: the handler's owner may be gone.
+              if (guard.State()->shutdown.load(std::memory_order_acquire)) [[unlikely]]
+                return;
+              RunningOnThisThread running(guard.State());
+              RunHandler(handler, owned.message);
+            });
         return;
       }
-      find_topic_itr->second(message);
-
+      RunningOnThisThread running(state_);
+      RunHandler(find_topic_itr->second, owned.message);
     } catch (const std::exception& e) {
-      MW_ERROR("Handle msg failed, topic: {}, exception info: {}", topic, e.what());
-      return;
+      // The topic buffer may already be released with a failed task.
+      MW_ERROR("Handle msg failed, exception info: {}", e.what());
+    } catch (...) {
+      MW_ERROR("Handle msg failed, unknown exception.");
     }
   }
 
+  // Stops intake and waits until no handler runs any more, so the drivers
+  // whose handlers capture `this` can be destroyed afterwards. A handler of
+  // this catalog running on the calling thread (shutdown from inside a
+  // callback) is not waited for. Called from the callback executor, queued
+  // tasks cannot run before this returns: they are dropped instead of waited
+  // for (as in InProcessTransport::DrainInflight).
   void Shutdown() {
-    if (std::atomic_exchange(&shutdown_flag_, true)) return;
+    state_->shutdown.store(true);
+    const int self = tl_running_ == state_ ? 1 : 0;
+    if (executor_ && executor_.IsInCurrentExecutor()) {
+      MW_WARN("Mqtt msg catalog shut down from its callback executor; running handlers are not drained.");
+      return;
+    }
+    // Pairs with the seq_cst increment in HandleServerMsg(). One count is
+    // the catalog's own.
+    const int idle = 1 + self;
+    if (state_->active.load() <= idle) return;
+    auto next_warn = std::chrono::steady_clock::now() + kSlowShutdownWarn;
+    while (state_->active.load(std::memory_order_acquire) > idle) {
+      if (std::chrono::steady_clock::now() >= next_warn) {
+        MW_WARN("Mqtt msg catalog shutdown is waiting for {} message handler(s).",
+                state_->active.load(std::memory_order_relaxed) - idle);
+        next_warn += kSlowShutdownWarn;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
   }
 
   void RegisterGetExecutorFunc(
@@ -83,21 +127,70 @@ class MsgHandleCatalog {
     MW_REQUIRE(executor_, "Can not get executor {}.", executor_name);
   }
 
-  void WaitForAllTasks() const {
-    if (active_tasks_.load() == 0) return;
+ private:
+  static constexpr auto kSlowShutdownWarn = std::chrono::seconds(5);
 
-    std::unique_lock<std::mutex> lock(wait_mtx_);
-    wait_cv_.wait(lock, [this]() {
-      return active_tasks_.load() == 0;
-    });
+  // Separately allocated so that a task released after the catalog is gone
+  // still has valid memory to touch.
+  struct alignas(64) SharedState {
+    std::atomic<int> active{1};  // the catalog's own count
+    std::atomic<bool> shutdown{false};
+  };
+
+  struct PahoMessage {
+    PahoMessage(MQTTAsync_message* m, char* t) noexcept : message(m), topic(t) {}
+    PahoMessage(PahoMessage&& other) noexcept
+        : message(std::exchange(other.message, nullptr)), topic(std::exchange(other.topic, nullptr)) {}
+    PahoMessage& operator=(PahoMessage&&) = delete;
+    ~PahoMessage() {
+      if (message) MQTTAsync_freeMessage(&message);
+      if (topic) MQTTAsync_free(topic);
+    }
+    MQTTAsync_message* message;
+    char* topic;
+  };
+
+  class InflightGuard {
+   public:
+    explicit InflightGuard(SharedState* state) noexcept : state_(state) { state_->active.fetch_add(1); }
+    InflightGuard(InflightGuard&& other) noexcept : state_(std::exchange(other.state_, nullptr)) {}
+    InflightGuard& operator=(InflightGuard&&) = delete;
+    // The decrement is the last access: Shutdown() may return right after it.
+    ~InflightGuard() {
+      if (state_ && state_->active.fetch_sub(1, std::memory_order_acq_rel) == 1) delete state_;
+    }
+    SharedState* State() const noexcept { return state_; }
+
+   private:
+    SharedState* state_;
+  };
+
+  // Marks the current thread as running a handler of this catalog.
+  class RunningOnThisThread {
+   public:
+    explicit RunningOnThisThread(const SharedState* state) noexcept : prev_(std::exchange(tl_running_, state)) {}
+    ~RunningOnThisThread() { tl_running_ = prev_; }
+    RunningOnThisThread(const RunningOnThisThread&) = delete;
+    RunningOnThisThread& operator=(const RunningOnThisThread&) = delete;
+
+   private:
+    const SharedState* prev_;
+  };
+
+  static void RunHandler(const MsgHandleFunc& handler, MQTTAsync_message* message) noexcept {
+    try {
+      handler(message);
+    } catch (const std::exception& e) {
+      MW_ERROR("Mqtt msg handler failed: {}", e.what());
+    } catch (...) {
+      MW_ERROR("Mqtt msg handler failed with an unknown exception.");
+    }
   }
 
- private:
-  std::atomic_bool shutdown_flag_ = false;
+  static inline thread_local const SharedState* tl_running_ = nullptr;
 
-  mutable std::atomic_int active_tasks_ = 0;
-  mutable std::mutex wait_mtx_;
-  mutable std::condition_variable wait_cv_;
+  SharedState* const state_ = new SharedState();
+  bool sealed_ = false;
 
   using UriMsgHandleMap = std::unordered_map<std::string, MsgHandleFunc, ibmw::common::util::StringHash, std::equal_to<>>;
   UriMsgHandleMap msg_handle_map_;

@@ -72,16 +72,20 @@ if(IBMW_THIRD_PARTY_SOURCE_BUILD_ONLY)
 endif()
 
 option(IBMW_BUILD_WITH_WERROR "IBMW build with -Werror option." ON)
+option(IBMW_ENABLE_HARDENING "IBMW build with stack protector, FORTIFY_SOURCE, PIE, full RELRO and non-executable stack." OFF)
 option(IBMW_INSTALL "Enable installation of IBMW." ON)
 
 cmake_dependent_option(IBMW_BUILD_EXAMPLES "IBMW build examples." OFF "IBMW_BUILD_RUNTIME" OFF)
 
 # Multi-transport end-to-end benchmark suite (src/samples/cpp/transport_benchmark).
-# Compares iceoryx / DDS (FastDDS) / native net_extension paths across seven
-# pub/sub sample pairs. Gated on iceoryx extension because 3 of 7 samples need
-# it; DDS extension should also be enabled to build all 7 samples. Off by
-# default to keep regular CI builds light.
-cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+# Compares iceoryx / self-developed shm / DDS (FastDDS) / native net_extension
+# paths across the pub/sub sample pairs. Gated on a shared-memory extension
+# (iceoryx or shm): each lane skips itself when its transport is off, so a
+# shm-only Linux build gets the shm_* lanes without iceoryx (the OHOS cross build
+# of the benchmark tree has only iox_loaned_ctx). The DDS extension should
+# also be enabled to build the DDS lanes. Off by default to keep regular CI
+# builds light.
+cmake_dependent_option(IBMW_BUILD_BENCHMARKS "IBMW build multi-transport end-to-end benchmark suite." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION" OFF)
 if(CMAKE_CROSSCOMPILING)
   set(_IBMW_ROS2_SAMPLE_DEFAULT OFF)
 else()
@@ -98,8 +102,9 @@ unset(_IBMW_ROS2_SAMPLE_DEFAULT)
 # IbmwR82SlotMixCheck<> static_assert; no_anchor_fail produces a fresh R1
 # violation). Gated OFF so default CI keeps building clean. The Gate 9
 # dual-build matrix opts in via -DIBMW_BUILD_R8_FAIL_SAMPLES=ON and asserts
-# expected build failures.
-cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deliberate-fail samples (used by Gate 9 dual-build matrix)." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+# expected build failures. Each shared-memory transport (iceoryx, shm) brings
+# its own pair of fail samples.
+cmake_dependent_option(IBMW_BUILD_R8_FAIL_SAMPLES "IBMW build r8_validation deliberate-fail samples (used by Gate 9 dual-build matrix)." OFF "IBMW_BUILD_EXAMPLES;IBMW_BUILD_ICEORYX_EXTENSION OR IBMW_BUILD_SHM_EXTENSION" OFF)
 
 option(IBMW_USE_FMT_LIB "IBMW use fmt library." ON)
 option(IBMW_ENABLE_DLOPEN_DEEPBIND "IBMW enable dlopen deepbind." ON)
@@ -118,7 +123,9 @@ cmake_dependent_option(IBMW_BUILD_NET_EXTENSION "IBMW build net extension." OFF 
 cmake_dependent_option(IBMW_BUILD_MQTT_EXTENSION "IBMW build mqtt extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ZENOH_EXTENSION "IBMW build zenoh extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ICEORYX_EXTENSION "IBMW build iceoryx extension." OFF "IBMW_BUILD_RUNTIME" OFF)
+cmake_dependent_option(IBMW_BUILD_SHM_EXTENSION "IBMW build self-developed zero-copy shm extension (iceoryx replacement, no RouDi)." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_RETAINED_LOAN_E2E "IBMW build retained-loan iceoryx E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_ICEORYX_EXTENSION" OFF)
+cmake_dependent_option(IBMW_BUILD_SHM_RETAINED_LOAN_E2E "IBMW build retained-loan shm E2E validator." OFF "IBMW_BUILD_RUNTIME;IBMW_BUILD_SHM_EXTENSION" OFF)
 option(IBMW_ICEORYX_USE_PACKAGE "Use a prebuilt target iceoryx package instead of FetchContent." OFF)
 cmake_dependent_option(IBMW_BUILD_OPENTELEMETRY_EXTENSION "IBMW build opentelemetry extension." OFF "IBMW_BUILD_RUNTIME" OFF)
 cmake_dependent_option(IBMW_BUILD_ECHO_EXTENSION "IBMW build echo extension." OFF "IBMW_BUILD_RUNTIME" OFF)
@@ -154,6 +161,29 @@ option(IBMW_ZENOH_USE_PACKAGE "IBMW use an existing/prebuilt zenohc CMake packag
 
 option(IBMW_EXECUTOR_USE_STDEXEC "IBMW use stdexec as executor impl. (Experimental)" OFF)
 
+# Self-developed replacements for third-party components (see selfdev/).
+option(IBMW_SELFDEV_CRASH_HANDLER
+  "IBMW use the selfdev crash handler instead of backward-cpp (drops libdw/libelf/libbfd)." ON)
+option(IBMW_SELFDEV_CONCURRENT
+  "IBMW use selfdev concurrent containers instead of oneTBB." ON)
+# Default ON, except when stdexec was selected (the two are exclusive).
+if(IBMW_EXECUTOR_USE_STDEXEC)
+  set(_ibmw_selfdev_coro_default OFF)
+else()
+  set(_ibmw_selfdev_coro_default ON)
+endif()
+option(IBMW_EXECUTOR_USE_SELFDEV_CORO
+  "IBMW use selfdev coroutines (selfdev/coro) as executor impl instead of libunifex." ${_ibmw_selfdev_coro_default})
+# Executor end-to-end benchmark (selfdev vs third-party backends); not a ctest.
+option(IBMW_BUILD_SELFDEV_E2E_BENCH
+  "IBMW build ibmw_selfdev_e2e_bench (executor / coroutine / RpcClientTool throughput)." OFF)
+if(IBMW_EXECUTOR_USE_STDEXEC AND IBMW_EXECUTOR_USE_SELFDEV_CORO)
+  # The coro default is cached on the first configure, so switching an
+  # existing build dir to stdexec needs the explicit OFF.
+  message(FATAL_ERROR "IBMW_EXECUTOR_USE_STDEXEC and IBMW_EXECUTOR_USE_SELFDEV_CORO are mutually exclusive. "
+                      "To use stdexec, also pass -DIBMW_EXECUTOR_USE_SELFDEV_CORO=OFF.")
+endif()
+
 # ============================================================================
 # Compiler settings
 # ============================================================================
@@ -165,6 +195,70 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
+
+# gcov instrumentation slows the binaries down and writes .gcda files at run
+# time, so it is only on by default for Debug test builds.
+if(IBMW_BUILD_TESTS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(_ibmw_coverage_default ON)
+else()
+  set(_ibmw_coverage_default OFF)
+endif()
+option(IBMW_ENABLE_COVERAGE "IBMW build with gcov coverage instrumentation." ${_ibmw_coverage_default})
+unset(_ibmw_coverage_default)
+# The option value is cached, so it survives a later change of build type.
+if(IBMW_ENABLE_COVERAGE AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(WARNING "IBMW_ENABLE_COVERAGE is ON for a ${CMAKE_BUILD_TYPE} build: "
+                  "binaries are instrumented and slower. Pass -DIBMW_ENABLE_COVERAGE=OFF to disable.")
+endif()
+
+# Sanitizer builds, all off by default. ASan and TSan can not be combined. The
+# older ADDRESS_SANITIZER / THREAD_SANITIZER variables (flags passed by hand)
+# still turn coverage off.
+option(IBMW_ENABLE_ASAN "IBMW build with AddressSanitizer." OFF)
+option(IBMW_ENABLE_TSAN "IBMW build with ThreadSanitizer." OFF)
+option(IBMW_ENABLE_UBSAN "IBMW build with UndefinedBehaviorSanitizer." OFF)
+if(IBMW_ENABLE_ASAN AND IBMW_ENABLE_TSAN)
+  message(FATAL_ERROR "IBMW_ENABLE_ASAN and IBMW_ENABLE_TSAN can not be combined.")
+endif()
+set(_ibmw_sanitizers)
+if(IBMW_ENABLE_ASAN)
+  list(APPEND _ibmw_sanitizers address)
+endif()
+if(IBMW_ENABLE_TSAN)
+  list(APPEND _ibmw_sanitizers thread)
+endif()
+if(IBMW_ENABLE_UBSAN)
+  list(APPEND _ibmw_sanitizers undefined)
+endif()
+if(_ibmw_sanitizers OR ADDRESS_SANITIZER OR THREAD_SANITIZER)
+  set(IBMW_SANITIZER_BUILD ON)
+else()
+  set(IBMW_SANITIZER_BUILD OFF)
+endif()
+if(_ibmw_sanitizers)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "IBMW_ENABLE_ASAN/TSAN/UBSAN need GCC or Clang.")
+  endif()
+  list(JOIN _ibmw_sanitizers "," _ibmw_sanitize)
+  set(_ibmw_sanitizer_flags "-fsanitize=${_ibmw_sanitize} -fno-omit-frame-pointer")
+  if(IBMW_ENABLE_UBSAN)
+    string(APPEND _ibmw_sanitizer_flags " -fno-sanitize-recover=undefined")
+  endif()
+  string(APPEND CMAKE_C_FLAGS " ${_ibmw_sanitizer_flags}")
+  string(APPEND CMAKE_CXX_FLAGS " ${_ibmw_sanitizer_flags}")
+  foreach(_ibmw_link_kind EXE SHARED MODULE)
+    string(APPEND CMAKE_${_ibmw_link_kind}_LINKER_FLAGS " -fsanitize=${_ibmw_sanitize}")
+  endforeach()
+  # The ASan/TSan interceptors do not work with RTLD_DEEPBIND plugins.
+  if((IBMW_ENABLE_ASAN OR IBMW_ENABLE_TSAN) AND IBMW_ENABLE_DLOPEN_DEEPBIND)
+    message(STATUS "IBMW_ENABLE_DLOPEN_DEEPBIND is turned off for this sanitizer build.")
+    set(IBMW_ENABLE_DLOPEN_DEEPBIND OFF)
+  endif()
+  unset(_ibmw_link_kind)
+  unset(_ibmw_sanitize)
+  unset(_ibmw_sanitizer_flags)
+endif()
+unset(_ibmw_sanitizers)
 
 file(READ "${PROJECT_SOURCE_DIR}/VERSION" IBMW_RUNTIME_VERSION)
 string(STRIP "${IBMW_RUNTIME_VERSION}" IBMW_RUNTIME_VERSION)
@@ -249,7 +343,7 @@ if(IBMW_MASTER_PROJECT)
   set(CMAKE_CXX_VISIBILITY_INLINES_HIDDEN ON)
 
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(IBMW_BUILD_TESTS AND NOT ADDRESS_SANITIZER AND NOT THREAD_SANITIZER)
+    if(IBMW_ENABLE_COVERAGE AND NOT IBMW_SANITIZER_BUILD)
       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --coverage")
       set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
     endif()
@@ -258,16 +352,43 @@ if(IBMW_MASTER_PROJECT)
   set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 endif()
 
+# Installed executables and extension modules (bin/) load the shared
+# libraries installed to lib/ (libibmw_selfdev_coro, see selfdev/coro).
+# Relative, so the install tree stays relocatable and carries no build path.
+# Set for sub-project builds too (add_subdirectory): the variable is scoped to
+# this directory, so it only applies to IBMW's own targets.
+if(APPLE)
+  list(APPEND CMAKE_INSTALL_RPATH "@loader_path/../lib")
+elseif(UNIX)
+  list(APPEND CMAKE_INSTALL_RPATH "$ORIGIN/../lib")
+endif()
+list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-  add_compile_options(/utf-8 /wd4819)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zc:__cplusplus")
 endif()
 
-if(WIN32)
-  add_compile_definitions(NOMINMAX)
+# Security hardening baseline (checksec). Off by default: the stack protector
+# and eager symbol binding cost some run/startup time, and many toolchains
+# already enable part of it. Enable for artifacts bound to a hardening policy.
+if(IBMW_ENABLE_HARDENING AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+   AND NOT APPLE)
+  set(_ibmw_hardening_flags "-fstack-protector-strong")
+  if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    # FORTIFY_SOURCE needs optimization; replace any toolchain default level.
+    string(APPEND _ibmw_hardening_flags " -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2")
+  endif()
+  string(APPEND CMAKE_C_FLAGS " ${_ibmw_hardening_flags}")
+  string(APPEND CMAKE_CXX_FLAGS " ${_ibmw_hardening_flags}")
+  foreach(_ibmw_link_kind EXE SHARED MODULE)
+    string(APPEND CMAKE_${_ibmw_link_kind}_LINKER_FLAGS
+           " -Wl,-z,relro,-z,now -Wl,-z,noexecstack")
+  endforeach()
+  # Objects are built with -fPIC above, which also satisfies PIE.
+  string(APPEND CMAKE_EXE_LINKER_FLAGS " -pie")
+  unset(_ibmw_link_kind)
+  unset(_ibmw_hardening_flags)
 endif()
 
 # ============================================================================
@@ -275,8 +396,12 @@ endif()
 # ============================================================================
 include(NamespaceTool)
 
+# The benchmark payloads are CDR-serialized (bench_payload links dds_types).
+# dds_types is also built for iceoryx and its replacement, the shm extension
+# (src/extensions/CMakeLists.txt).
 if(IBMW_BUILD_PROTOCOLS OR IBMW_BUILD_DDS_EXTENSION OR
-   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION)
+   IBMW_BUILD_ROS2_TYPES OR IBMW_BUILD_ICEORYX_EXTENSION OR
+   IBMW_BUILD_SHM_EXTENSION OR IBMW_BUILD_BENCHMARKS)
   # Resolve the explicitly selected DDS provider before loading code-generation
   # helpers. Those helpers must never perform an independent provider search.
   include(GetFastDDS)
@@ -305,8 +430,8 @@ if(IBMW_BUILD_TESTS)
                 ${PROJECT_SOURCE_DIR}/scripts/tests/test_installed_typesupport_package.sh)
       set(IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
           "IBMW_INSTALLED_TYPESUPPORT_IBMW_BUILD=${CMAKE_BINARY_DIR}")
-      if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND NOT ADDRESS_SANITIZER
-                                                     AND NOT THREAD_SANITIZER)
+      if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND IBMW_ENABLE_COVERAGE
+         AND NOT IBMW_SANITIZER_BUILD)
         list(APPEND IBMW_INSTALLED_TYPESUPPORT_TEST_ENVIRONMENT
              "IBMW_INSTALLED_TYPESUPPORT_LOADER_LINK_COVERAGE=1")
       endif()
@@ -322,12 +447,29 @@ if(IBMW_BUILD_TESTS)
         WARNING
           "Skipping installed TypeSupport package test: bash, ldd, and python3 are required.")
     endif()
+    # bin/ibmw must load libibmw_selfdev_coro at startup so user packages
+    # (with or without a RUNPATH) resolve it from the installed tree.
+    find_program(IBMW_TEST_READELF_EXECUTABLE NAMES readelf)
+    if(IBMW_EXECUTOR_USE_SELFDEV_CORO AND IBMW_TEST_BASH_EXECUTABLE AND
+       IBMW_TEST_READELF_EXECUTABLE)
+      add_test(
+        NAME ibmw_installed_coro_package_test
+        COMMAND ${IBMW_TEST_BASH_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/scripts/tests/test_installed_coro_package.sh)
+      set_tests_properties(
+        ibmw_installed_coro_package_test
+        PROPERTIES ENVIRONMENT "IBMW_INSTALLED_CORO_IBMW_BUILD=${CMAKE_BINARY_DIR}"
+                   LABELS "integration;install;coro"
+                   PROCESSORS 2
+                   RUN_SERIAL TRUE
+                   TIMEOUT 900)
+    endif()
   endif()
 endif()
 
 if(IBMW_EXECUTOR_USE_STDEXEC)
   include(GetStdexec)
-else()
+elseif(NOT IBMW_EXECUTOR_USE_SELFDEV_CORO)
   include(GetLibUnifex)
 endif()
 
@@ -339,9 +481,9 @@ if(IBMW_BUILD_CLI_TOOLS)
   find_package(Python3 REQUIRED)
 
   include(CheckPythonPackage)
-  check_python_package(pyinstaller PYINSTALLER_FOUND)
+  check_python_package(PyInstaller PYINSTALLER_FOUND)
   check_python_package(jinja2 JINJA2_FOUND)
-  check_python_package(pyyaml PYYAML_FOUND)
+  check_python_package(yaml PYYAML_FOUND)
 
   if(NOT PYINSTALLER_FOUND
      OR NOT JINJA2_FOUND
@@ -394,8 +536,12 @@ if(IBMW_BUILD_RUNTIME)
   include(GetAsio)
   include(GetGFlags)
   include(GetYamlCpp)
-  include(GetTBB)
-  include(GetBackward)
+  if(NOT IBMW_SELFDEV_CONCURRENT)
+    include(GetTBB)
+  endif()
+  if(NOT IBMW_SELFDEV_CRASH_HANDLER)
+    include(GetBackward)
+  endif()
 endif()
 
 # FastDDS/FastCDR is required by both:
@@ -435,11 +581,18 @@ if(IBMW_BUILD_RUNTIME)
       "IBMW_BUILD_RETAINED_LOAN_E2E requires IBMW_BUILD_ICEORYX_EXTENSION")
   endif()
 
+  if(IBMW_BUILD_SHM_RETAINED_LOAN_E2E AND NOT IBMW_BUILD_SHM_EXTENSION)
+    message(FATAL_ERROR
+      "IBMW_BUILD_SHM_RETAINED_LOAN_E2E requires IBMW_BUILD_SHM_EXTENSION")
+  endif()
+
   if(IBMW_BUILD_MQTT_EXTENSION)
     include(GetPahoMqttC)
   endif()
 
   if(IBMW_BUILD_ZENOH_EXTENSION)
+    # The extension and its discovery protocol link jsoncpp::jsoncpp.
+    include(GetJsonCpp)
     if(IBMW_ZENOH_USE_PACKAGE OR TARGET zenohc::lib)
       include(GetZenoh)
     else()
@@ -491,6 +644,18 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/IbmwTransportFlags.cmake)
 # ============================================================================
 # Add subdirectory
 # ============================================================================
+# Self-developed components must exist before src/ links them.
+if(IBMW_BUILD_SHM_EXTENSION)
+  # OHOS runs a Linux kernel (musl userland); CMake reports it as "OHOS".
+  if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|OHOS)$")
+    message(FATAL_ERROR "IBMW_BUILD_SHM_EXTENSION requires a Linux kernel (memfd/futex/epoll).")
+  endif()
+  set(IBMW_SELFDEV_SHM ON)
+endif()
+if(IBMW_BUILD_RUNTIME OR IBMW_EXECUTOR_USE_SELFDEV_CORO OR IBMW_SELFDEV_SHM)
+  add_subdirectory(selfdev)
+endif()
+
 add_subdirectory(src)
 add_subdirectory(tools)
 
@@ -508,7 +673,9 @@ if(IBMW_INSTALL)
     PATTERN "*.cmake"
     PATTERN "*.py"
     PATTERN "*.stg"
-    PATTERN "ibmw-config.cmake.in" EXCLUDE)
+    PATTERN "ibmw-config.cmake.in" EXCLUDE
+    # Tool state such as cmake/.omc/ is not part of the install.
+    PATTERN ".*" EXCLUDE)
 
   # Install the generated targets file (note: renamed from ibmw-config to
   # ibmw-targets so the hand-written config wrapper can call find_dependency()
@@ -619,6 +786,7 @@ list(
   ibmw_vars
   IBMW_RUNTIME_VERSION
   IBMW_BUILD_TESTS
+  IBMW_ENABLE_COVERAGE
   IBMW_BUILD_RUNTIME
   IBMW_BUILD_PROTOCOLS
   IBMW_DDS_PROVIDER
@@ -637,6 +805,7 @@ list(
   IBMW_BUILD_MQTT_EXTENSION
   IBMW_BUILD_ZENOH_EXTENSION
   IBMW_BUILD_ICEORYX_EXTENSION
+  IBMW_BUILD_SHM_EXTENSION
   IBMW_BUILD_OPENTELEMETRY_EXTENSION
   IBMW_BUILD_ECHO_EXTENSION
   IBMW_BUILD_ROS2_EXTENSION
@@ -652,11 +821,18 @@ list(
   IBMW_BUILD_DDS_MANAGED_EXACT_CANDIDATE
   IBMW_BUILD_DDS_MANAGED_EXACT_FAULT_CANDIDATE
   IBMW_EXECUTOR_USE_STDEXEC
+  IBMW_SELFDEV_CRASH_HANDLER
+  IBMW_SELFDEV_CONCURRENT
+  IBMW_EXECUTOR_USE_SELFDEV_CORO
   IBMW_ENABLE_DLOPEN_DEEPBIND
   IBMW_ENABLE_CORE_METRICS
   IBMW_ENABLE_COMM_TRACE
   IBMW_ENABLE_REPORTER_V1
-  IBMW_BUILD_WITH_WERROR)
+  IBMW_BUILD_WITH_WERROR
+  IBMW_ENABLE_HARDENING
+  IBMW_ENABLE_ASAN
+  IBMW_ENABLE_TSAN
+  IBMW_ENABLE_UBSAN)
 
 foreach(var ${ibmw_vars})
   string(LENGTH ${var} var_length)

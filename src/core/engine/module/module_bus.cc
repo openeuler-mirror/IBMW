@@ -8,6 +8,7 @@
 
 #include "cpp/module_base.h"
 #include "cpp/util/string.h"
+#include "engine/logger/crash_signal_handling.h"
 #include "engine/logger/log_level_tool.h"
 
 namespace YAML {
@@ -127,6 +128,11 @@ void ModuleBus::Initialize(YAML::Node options_node) {
 
     package_loader_map_.emplace(pkg_options.path, std::move(module_loader_ptr));
   }
+
+  // The crash handler was installed by the logger subsystem before the
+  // packages were loaded; record them so a crash in package code (from the
+  // module Initialize() calls below on) names the package module.
+  logger::CrashSignalHandling::RefreshModules();
 
   // Initialize the module directly registered
   for (const auto& item : registered_module_vec_) {
@@ -266,7 +272,14 @@ void ModuleBus::Shutdown() {
     }
 
     MW_TRACE("Start shutdown module '{}'.", module_name);
-    find_itr->second->module_ptr->stop(find_itr->second->module_ptr->ctx);
+    // One misbehaving module must not keep the remaining ones running.
+    try {
+      find_itr->second->module_ptr->stop(find_itr->second->module_ptr->ctx);
+    } catch (const std::exception& e) {
+      MW_ERROR("Shutdown module '{}' threw: {}", module_name, e.what());
+    } catch (...) {
+      MW_ERROR("Shutdown module '{}' threw an unknown exception.", module_name);
+    }
     MW_TRACE("Shutdown module '{}'.", module_name);
   }
 
@@ -289,16 +302,13 @@ void ModuleBus::BroadcastDriverSlot(ibmw_driver_slot_t slot_id,
     itr.second->BroadcastDriverSlot(slot_id, driver_ptr);
   }
 
-  // (2) Standalone-mode: directly-registered modules expose their
-  //     ibmw_module_base_t whose `ctx` field is the Module* itself
-  //     (set by Module::GenBase). Call the C++ SetDriverSlot() override
-  //     directly via the typed slot id — no pkg ABI roundtrip needed
-  //     because we already hold the typed pointer.
+  // (2) Standalone-mode: directly-registered modules receive the slot
+  //     through their own optional set_driver_slot callback. Their ctx may
+  //     belong to any language binding, so it is never cast here (CORE-024).
   for (auto& [pkg, module_base] : registered_module_vec_) {
     (void)pkg;
-    if (module_base != nullptr && module_base->ctx != nullptr) {
-      auto* mod_cpp = static_cast<ibmw::Module*>(module_base->ctx);
-      mod_cpp->SetDriverSlot(slot_id, driver_ptr);
+    if (module_base != nullptr && module_base->set_driver_slot != nullptr) {
+      module_base->set_driver_slot(module_base->ctx, slot_id, driver_ptr);
     }
   }
 }

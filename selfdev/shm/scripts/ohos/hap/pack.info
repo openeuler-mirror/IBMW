@@ -1,0 +1,18 @@
+{
+  "summary": {
+    "app": {"bundleName": "@BUNDLE@", "version": {"code": 1, "name": "1.0.0"}},
+    "modules": [
+      {
+        "mainAbility": "EntryAbility",
+        "deviceType": ["2in1", "default", "tablet"],
+        "distro": {"moduleName": "entry", "moduleType": "entry", "deliveryWithInstall": true, "installationFree": false},
+        "abilities": [{"name": "EntryAbility", "label": "$string:app_name"}],
+        "extensionAbilities": [],
+        "apiVersion": {"compatible": 13, "target": 18, "releaseType": "Release"}
+      }
+    ]
+  },
+  "packages": [
+    {"deviceType": ["2in1", "default", "tablet"], "moduleType": "entry", "deliveryWithInstall": true, "name": "entry-default"}
+  ]
+}

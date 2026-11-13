@@ -28,6 +28,7 @@
 #include "cpp/core.h"
 #include "cpp/executor/executor.h"
 #include "cpp/service/rpc_status.h"
+#include "cpp/util/stable_vector.h"
 
 #include "base/exception.h"
 
@@ -43,10 +44,10 @@ class OpLog;
 
 class Context : public std::enable_shared_from_this<Context> {
  public:
+  // Does not make itself current: weak_from_this() is still empty inside the
+  // constructor, so that would only clear the thread's current context.
   Context() noexcept
-      : id_(++global_unique_id_) {
-    LetMe();
-  }
+      : id_(++global_unique_id_) {}
 
   explicit Context(ibmw::Runtime core) noexcept
       : core_(core), id_(++global_unique_id_) {}
@@ -172,8 +173,10 @@ class Context : public std::enable_shared_from_this<Context> {
   ibmw::util::DynamicLatch dynamic_latch_;
   int id_{0};
 
-  std::vector<TransportResource> transport_resources_;
-  std::vector<RpcResource> rpc_resources_;
+  // Stable storage: resources may be created at runtime while callback threads
+  // hold references obtained via GetTransportResource/GetRpcResource.
+  ibmw::util::StableVector<TransportResource> transport_resources_;
+  ibmw::util::StableVector<RpcResource> rpc_resources_;
 
   inline static std::atomic_int global_unique_id_{0};
 };
@@ -249,13 +252,13 @@ std::pair<res::Publisher<T>, TransportResource&> OpPub::DoInit(std::string_view 
   const bool registered = transport_ctx.pub.RegisterSendType(ibmw::GetMessageTypeSupport<T>());
   MW_ASSERT_LOC(loc_, registered, "Register publish type for topic [{}] failed.", topic_name);
 
-  ctx_.transport_resources_.push_back(std::move(transport_ctx));
+  const size_t idx = ctx_.transport_resources_.emplace_back(std::move(transport_ctx));
 
   res::Publisher<T> res;
   res.name_ = std::string(topic_name);
-  res.idx_ = ctx_.transport_resources_.size() - 1;
+  res.idx_ = idx;
   res.context_id_ = ctx_.id_;
-  return {res, ctx_.transport_resources_.back()};
+  return {res, ctx_.transport_resources_[idx]};
 }
 
 // publisher publish
@@ -289,13 +292,13 @@ std::pair<res::Subscriber<T>, TransportResource&> OpSub::DoInit(std::string_view
   transport_ctx.sub = ctx_.core_.GetTransport().GetSubscriber(topic_name);
   MW_ASSERT_LOC(loc_, transport_ctx.sub, "Get subscriber for topic [{}] failed.", topic_name);
 
-  ctx_.transport_resources_.push_back(std::move(transport_ctx));
+  const size_t idx = ctx_.transport_resources_.emplace_back(std::move(transport_ctx));
 
   res::Subscriber<T> res;
   res.name_ = std::string(topic_name);
-  res.idx_ = ctx_.transport_resources_.size() - 1;
+  res.idx_ = idx;
   res.context_id_ = ctx_.id_;
-  return {res, ctx_.transport_resources_.back()};
+  return {res, ctx_.transport_resources_[idx]};
 }
 
 // Context CreateSubscriber helpers impls
@@ -330,12 +333,26 @@ void OpSub::SubscribeOn(const res::Subscriber<T>& ch, ibmw::executor::ExecutorHa
   DoOnMessage(ch, std::move(callback), std::move(exe));
 }
 
+namespace details {
+// User callbacks run inside noexcept C-ABI invokers: an escaping exception
+// would std::terminate the driver thread, so log and drop it here instead.
+template <class F>
+inline void InvokeSubscriberCallback(Context& ctx, F&& f) noexcept {
+  try {
+    std::forward<F>(f)();
+  } catch (const std::exception& e) {
+    ctx.log().Error("Subscriber callback threw: {}", e.what());
+  } catch (...) {
+    ctx.log().Error("Subscriber callback threw an unknown exception.");
+  }
+}
+}  // namespace details
+
 // subscriber subscribe
 template <class T, concepts::SupportedSubscriber<T> TCallback>
 void OpSub::DoOnMessage(const res::Subscriber<T>& ch, TCallback callback, ibmw::executor::ExecutorHandle exe) {
   auto& transport_ctx = ctx_.GetTransportResource(ch, loc_);
   auto& sub_fn = std::any_cast<typename Context::SubscribeFunction<T>&>(transport_ctx.sub_f);
-  auto ctx = details::GetCurrentContext();
   const bool ok = sub_fn(transport_ctx.sub,
                          StandardizeSubscriber<T>(std::move(callback)),
                          std::move(exe));
@@ -372,22 +389,23 @@ bool OpSub::RawOnMessage(
           transport::SubscriberReleaseCallback release_callback(release_callback_base);
 
           // Save and restore the caller's thread-local context around
-          // inline dispatch so we don't clobber the publisher's context.
-          auto prev_ctx = details::g_thread_ctx;
+          // inline dispatch so we don't clobber the publisher's context
+          // (on every exit path, including a throwing user callback).
+          details::ScopedThreadContextRestore restore_ctx;
           ctx_ptr->LetMe();
 
           if (!ctx_ptr->Running() || ctx_ptr->GetSubState() != context::TransportState::kOn) [[unlikely]] {
             ctx_ptr->log().Trace("Subscriber is not ready.");
-            details::g_thread_ctx = prev_ctx;
-            release_callback();
+            if (release_callback) release_callback();
             return;
           }
-          (*cb_ptr)(
-              ibmw::transport::ContextRef(chn_ctx_ptr),
-              std::shared_ptr<const T>(
-                  static_cast<const T*>(msg_ptr),
-                  [release_callback{std::move(release_callback)}](const T*) { release_callback(); }));
-          details::g_thread_ctx = prev_ctx;
+          details::InvokeSubscriberCallback(*ctx_ptr, [&] {
+            (*cb_ptr)(
+                ibmw::transport::ContextRef(chn_ctx_ptr),
+                std::shared_ptr<const T>(
+                    static_cast<const T*>(msg_ptr),
+                    [release_callback{std::move(release_callback)}](const T*) { release_callback(); }));
+          });
         });
   }
 
@@ -397,12 +415,14 @@ bool OpSub::RawOnMessage(
           const ibmw_transport_context_base_t* chn_ctx_ptr,
           const void* msg_ptr,
           ibmw_function_base_t* release_callback_base) mutable {
+        // Take ownership of the driver buffer first so the early return below releases it.
+        transport::SubscriberReleaseCallback release_callback(release_callback_base);
         if (!ctx_ptr->Running() || ctx_ptr->GetSubState() != context::TransportState::kOn) [[unlikely]] {
           ctx_ptr->log().Trace("Subscriber is not ready.");
+          if (release_callback) release_callback();
           return;
         }
 
-        transport::SubscriberReleaseCallback release_callback(release_callback_base);
         auto msg = std::shared_ptr<const T>(
             static_cast<const T*>(msg_ptr),
             [release_callback{std::move(release_callback)}](const T*) { release_callback(); });
@@ -412,7 +432,9 @@ bool OpSub::RawOnMessage(
             ctx_ptr->log().Trace("Subscriber is not ready.");
             return;
           }
-          (*cb_ptr)(ibmw::transport::ContextRef(chn_ctx_ptr), std::move(msg));
+          details::InvokeSubscriberCallback(*ctx_ptr, [&] {
+            (*cb_ptr)(ibmw::transport::ContextRef(chn_ctx_ptr), std::move(msg));
+          });
         });
       });
 }
@@ -446,7 +468,7 @@ inline void OpLog::Log(std::uint32_t level, fmt::format_string<Args...> fmt, Arg
   const auto& cur_lgr = ctx_.GetLogger();
   if (level >= cur_lgr.GetLogLevel()) {
     std::string log_str = ::ibmw_fmt::format(fmt, std::forward<Args>(args)...);
-    cur_lgr.Log(level, loc_.line(), loc_.file_name(), __FUNCTION__, log_str.c_str(), log_str.size());
+    cur_lgr.Log(level, loc_.line(), loc_.file_name(), loc_.function_name(), log_str.c_str(), log_str.size());
   }
 }
 
@@ -473,11 +495,11 @@ res::Client<Q, P> OpCli::Init(std::string_view service_name, TClient&& client) {
 
   rpc_ctx.func_name = std::string(service_name);
 
-  ctx_.rpc_resources_.push_back(std::move(rpc_ctx));
+  const size_t idx = ctx_.rpc_resources_.emplace_back(std::move(rpc_ctx));
 
   res::Client<Q, P> res;
   res.name_ = std::string(service_name);
-  res.idx_ = ctx_.rpc_resources_.size() - 1;
+  res.idx_ = idx;
   res.context_id_ = ctx_.id_;
 
   return res;
@@ -508,11 +530,11 @@ res::Service<Q, P> OpSrv::Init(std::string_view service_name) {
   RpcResource rpc_ctx;
   rpc_ctx.func_name = std::string(service_name);
 
-  ctx_.rpc_resources_.push_back(std::move(rpc_ctx));
+  const size_t idx = ctx_.rpc_resources_.emplace_back(std::move(rpc_ctx));
 
   res::Service<Q, P> res;
   res.name_ = std::string(service_name);
-  res.idx_ = ctx_.rpc_resources_.size() - 1;
+  res.idx_ = idx;
   res.context_id_ = ctx_.id_;
 
   return res;

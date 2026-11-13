@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include "cpp/executor/executor.h"
 #include "cpp/executor/timer.h"
+#include "engine/logger/crash_flush.h"
 #include "engine/logger/formatter.h"
 #include "engine/logger/logger_driver_base.h"
 #include "engine/logger/os.h"
@@ -47,8 +48,13 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
     }
   }
 
-  void Flush() noexcept override {
-    if (ofs_.is_open()) ofs_.flush();
+  // Runs on the log executor after the entries queued so far (bounded wait).
+  void Flush() noexcept override;
+
+  bool FlushForCrash(std::chrono::steady_clock::time_point deadline) noexcept override {
+    if (!run_flag_.load()) return false;
+    // Runs after the queued writes, on the thread that owns ofs_ / file_.
+    return FlushOnLogExecutor(log_executor_, [this]() { FlushStreams(); }, deadline);
   }
 
   void RegisterGetExecutorFunc(
@@ -62,6 +68,8 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
 
  private:
   bool OpenNewFile();
+  // Writes out ofs_ / file_; only on the log executor.
+  void FlushStreams() noexcept;
   void CleanLogFile();
   uint32_t GetNextIndex();
   bool CheckLog(const LogDataWrapper& log_data_wrapper);
@@ -70,11 +78,12 @@ class RotateFileLoggerDriver : public LoggerDriverBase {
  private:
   Options options_;
   std::function<ibmw::executor::ExecutorHandle(std::string_view)> get_executor_func_;
-  executor::ExecutorHandle log_executor_;
-  executor::ExecutorHandle timer_executor_;
+  ibmw::executor::ExecutorHandle log_executor_;
+  ibmw::executor::ExecutorHandle timer_executor_;
 
   std::string base_file_name_;
   std::ofstream ofs_;
+  int64_t max_file_size_bytes_ = 0;  // 64 bit: max_file_size_m may be >= 4096
 
   std::atomic_bool run_flag_ = false;
 

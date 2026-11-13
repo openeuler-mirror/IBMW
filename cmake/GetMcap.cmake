@@ -12,6 +12,15 @@ set(MCAP_TAG "releases/cpp/v${MCAP_VERSION}")
 set(mcap_DOWNLOAD_URL
     "https://github.com/foxglove/mcap/archive/refs/tags/${MCAP_TAG}.tar.gz"
     CACHE STRING "")
+# The default hash belongs to the default version only.
+if(MCAP_VERSION STREQUAL "2.0.0")
+  set(_ibmw_mcap_sha256 "064ff3a99b06e93cba1fe6ed61fbada1e47b9a0b1a03b73a0864eedeaaf80f28")
+else()
+  set(_ibmw_mcap_sha256 "")
+endif()
+set(mcap_DOWNLOAD_SHA256
+    "${_ibmw_mcap_sha256}"
+    CACHE STRING "SHA256 of mcap_DOWNLOAD_URL (update both together)")
 
 if(mcap_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -19,9 +28,13 @@ if(mcap_LOCAL_SOURCE)
     SOURCE_DIR ${mcap_LOCAL_SOURCE}
     OVERRIDE_FIND_PACKAGE)
 else()
+  if(NOT mcap_DOWNLOAD_SHA256 AND NOT FETCHCONTENT_SOURCE_DIR_MCAP)
+    message(FATAL_ERROR "Set mcap_DOWNLOAD_SHA256 to the SHA256 of ${mcap_DOWNLOAD_URL}")
+  endif()
   FetchContent_Declare(
     mcap
     URL ${mcap_DOWNLOAD_URL}
+    URL_HASH SHA256=${mcap_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()
@@ -32,6 +45,15 @@ set(ZSTD_VERSION
 set(zstd_DOWNLOAD_URL
     "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"
     CACHE STRING "")
+# The default hash belongs to the default version only.
+if(ZSTD_VERSION STREQUAL "1.5.7")
+  set(_ibmw_zstd_sha256 "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3")
+else()
+  set(_ibmw_zstd_sha256 "")
+endif()
+set(zstd_DOWNLOAD_SHA256
+    "${_ibmw_zstd_sha256}"
+    CACHE STRING "SHA256 of zstd_DOWNLOAD_URL (update both together)")
 
 if(zstd_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -39,9 +61,13 @@ if(zstd_LOCAL_SOURCE)
     SOURCE_DIR ${zstd_LOCAL_SOURCE}
     OVERRIDE_FIND_PACKAGE)
 else()
+  if(NOT zstd_DOWNLOAD_SHA256 AND NOT FETCHCONTENT_SOURCE_DIR_ZSTD)
+    message(FATAL_ERROR "Set zstd_DOWNLOAD_SHA256 to the SHA256 of ${zstd_DOWNLOAD_URL}")
+  endif()
   FetchContent_Declare(
     zstd
     URL ${zstd_DOWNLOAD_URL}
+    URL_HASH SHA256=${zstd_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     OVERRIDE_FIND_PACKAGE)
 endif()
@@ -75,6 +101,15 @@ set(LZ4_VERSION
 set(lz4_DOWNLOAD_URL
     "https://github.com/lz4/lz4/releases/download/v${LZ4_VERSION}/lz4-${LZ4_VERSION}.tar.gz"
     CACHE STRING "")
+# The default hash belongs to the default version only.
+if(LZ4_VERSION STREQUAL "1.10.0")
+  set(_ibmw_lz4_sha256 "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b")
+else()
+  set(_ibmw_lz4_sha256 "")
+endif()
+set(lz4_DOWNLOAD_SHA256
+    "${_ibmw_lz4_sha256}"
+    CACHE STRING "SHA256 of lz4_DOWNLOAD_URL (update both together)")
 
 if(lz4_LOCAL_SOURCE)
   FetchContent_Declare(
@@ -82,9 +117,13 @@ if(lz4_LOCAL_SOURCE)
     SOURCE_DIR ${lz4_LOCAL_SOURCE}
     OVERRIDE_FIND_PACKAGE)
 else()
+  if(NOT lz4_DOWNLOAD_SHA256 AND NOT FETCHCONTENT_SOURCE_DIR_LZ4)
+    message(FATAL_ERROR "Set lz4_DOWNLOAD_SHA256 to the SHA256 of ${lz4_DOWNLOAD_URL}")
+  endif()
   FetchContent_Declare(
     lz4
     URL ${lz4_DOWNLOAD_URL}
+    URL_HASH SHA256=${lz4_DOWNLOAD_SHA256}
     DOWNLOAD_EXTRACT_TIMESTAMP ON
     OVERRIDE_FIND_PACKAGE)
 endif()
@@ -119,9 +158,14 @@ function(get_mcap)
     FetchContent_Populate(mcap)
 
     if(UNIX)
+      # Runs at every configure on the same (possibly user supplied) source
+      # tree: patch only once, or every reconfigure adds another fsync.
       file(READ ${mcap_SOURCE_DIR}/cpp/mcap/include/mcap/writer.inl CONTENT)
-      string(REPLACE "std::fflush(file_);" "std::fflush(file_); ::fsync(fileno(file_));" CONTENT "${CONTENT}")
-      file(WRITE ${mcap_SOURCE_DIR}/cpp/mcap/include/mcap/writer.inl "${CONTENT}")
+      string(FIND "${CONTENT}" "::fsync(fileno(file_));" _ibmw_mcap_fsync_pos)
+      if(_ibmw_mcap_fsync_pos EQUAL -1)
+        string(REPLACE "std::fflush(file_);" "std::fflush(file_); ::fsync(fileno(file_));" CONTENT "${CONTENT}")
+        file(WRITE ${mcap_SOURCE_DIR}/cpp/mcap/include/mcap/writer.inl "${CONTENT}")
+      endif()
     endif()
 
     add_library(mcap INTERFACE)

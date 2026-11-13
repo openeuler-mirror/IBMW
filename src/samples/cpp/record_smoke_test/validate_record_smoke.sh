@@ -16,16 +16,24 @@ ROUDI_BIN="${ROUDI_BIN:-$BUILD_DIR/bin/iox-roudi}"
 [[ -x "$ROUDI_BIN" ]] || ROUDI_BIN="$BUILD_DIR/iox-roudi"
 
 set +u
-source /opt/ros/humble/setup.bash
+source /opt/ros/${ROS_DISTRO:-humble}/setup.bash
 set -u
 export ROS_DOMAIN_ID=87
 export AMENT_PREFIX_PATH="$BUILD_DIR/record_smoke_ros2_runtime:${AMENT_PREFIX_PATH:-}"
-export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/record_smoke_ros2_runtime/lib:/usr/lib/x86_64-linux-gnu:/opt/ros/humble/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$BUILD_DIR:$BUILD_DIR/lib:$BUILD_DIR/record_smoke_ros2_runtime/lib:/usr/lib/$(uname -m)-linux-gnu:/opt/ros/${ROS_DISTRO:-humble}/lib:${LD_LIBRARY_PATH:-}"
+
+# Shared-memory transports built into this tree. The record_smoke_test target
+# writes one marker per built transport; a tree without either marker predates
+# them and always required Iceoryx.
+ICEORYX_BUILT=0
+SHM_BUILT=0
+[[ -f "$BUILD_DIR/record_smoke_iceoryx_required" ]] && ICEORYX_BUILT=1
+[[ -f "$BUILD_DIR/record_smoke_shm_required" ]] && SHM_BUILT=1
+[[ "$ICEORYX_BUILT" == 1 || "$SHM_BUILT" == 1 ]] || ICEORYX_BUILT=1
 
 required_configs=(
   record_smoke_local.yaml
   record_smoke_dds.yaml
-  record_smoke_iceoryx.yaml
   record_smoke_mqtt.yaml
   record_smoke_zenoh.yaml
   record_smoke_ros2.yaml
@@ -46,22 +54,31 @@ required_artifacts=(
   libcommon_dds_ts.so
   libibmw_record_playback.so
   libibmw_dds_transport.so
-  libibmw_iceoryx_transport.so
   libibmw_mqtt_transport.so
   libibmw_zenoh_transport.so
   libibmw_ros2_transport.so
   libibmw_net_transport.so
 )
-required_commands=(jq mosquitto mosquitto_pub python3 ss timeout)
+required_commands=(jq mosquitto mosquitto_pub python3 ss stdbuf timeout)
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  required_configs+=(record_smoke_iceoryx.yaml)
+  required_artifacts+=(libibmw_iceoryx_transport.so)
+fi
+if [[ "$SHM_BUILT" == 1 ]]; then
+  required_configs+=(record_smoke_shm.yaml)
+  required_artifacts+=(libibmw_shm_transport.so)
+fi
 
 [[ -x "$IBMW_BIN" ]] || {
   echo "record smoke: missing ibmw binary: $IBMW_BIN" >&2
   exit 2
 }
-[[ -x "$ROUDI_BIN" ]] || {
-  echo "record smoke: missing iox-roudi binary: $ROUDI_BIN" >&2
-  exit 2
-}
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  [[ -x "$ROUDI_BIN" ]] || {
+    echo "record smoke: missing iox-roudi binary: $ROUDI_BIN" >&2
+    exit 2
+  }
+fi
 for item in "${required_configs[@]}"; do
   [[ -f "$CFG_DIR/$item" ]] || {
     echo "record smoke: missing config: $CFG_DIR/$item" >&2
@@ -84,6 +101,8 @@ done
 mkdir -p "$RUN_PARENT"
 RUN_DIR="$(mktemp -d "$RUN_PARENT/run.XXXXXX")"
 cd "$BUILD_DIR"
+
+SHM_ROOT_OWNED=""
 
 RUNTIME_PID=""
 RECORD_PID=""
@@ -126,9 +145,19 @@ cleanup() {
   if [[ "$CASE_CHILD" == 0 ]]; then
     stop_pid "$ROUDI_PID" TERM
     stop_pid "$MOSQUITTO_PID" TERM
+    [[ -z "$SHM_ROOT_OWNED" ]] || rm -rf -- "$SHM_ROOT_OWNED"
   fi
 }
 trap cleanup EXIT INT TERM
+
+# The shm transport needs no daemon. Unless the caller chose a root, give this
+# run a private one so it never shares segments with another shm user. It is
+# under /tmp, not $TMPDIR: root + "/ibmw_shm.<uid>.<domain>" must fit in 63 bytes.
+if [[ "$SHM_BUILT" == 1 && -z "${IBMW_SHM_ROOT:-}" ]]; then
+  IBMW_SHM_ROOT="$(mktemp -d /tmp/ibmw-rs.XXXXXX)"
+  SHM_ROOT_OWNED="$IBMW_SHM_ROOT"
+  export IBMW_SHM_ROOT
+fi
 
 fail_case() {
   echo "FAIL: $CURRENT_CASE: $*" >&2
@@ -161,18 +190,31 @@ wait_for_log() {
 }
 
 start_services() {
-  if ! pgrep -x iox-roudi >/dev/null 2>&1; then
+  if [[ "$ICEORYX_BUILT" == 1 ]] && ! pgrep -x iox-roudi >/dev/null 2>&1; then
     "$ROUDI_BIN" >"$RUN_DIR/iox-roudi.log" 2>&1 &
     ROUDI_PID=$!
-    sleep 1
-    kill -0 "$ROUDI_PID" 2>/dev/null || fail_case "iox-roudi failed to start"
+    wait_for_log "$RUN_DIR/iox-roudi.log" "RouDi is ready for clients" "$ROUDI_PID" || {
+      tail -n 20 "$RUN_DIR/iox-roudi.log" >&2
+      fail_case "iox-roudi did not become ready"
+    }
   fi
 
   if ! ss -ltn '( sport = :18884 )' 2>/dev/null | tail -n +2 | grep -q .; then
     mosquitto -p 18884 -v >"$RUN_DIR/mosquitto.log" 2>&1 &
     MOSQUITTO_PID=$!
-    sleep 1
-    kill -0 "$MOSQUITTO_PID" 2>/dev/null || fail_case "Mosquitto failed to start"
+    local listening=0
+    for _ in {1..100}; do
+      kill -0 "$MOSQUITTO_PID" 2>/dev/null || break
+      if ss -ltn '( sport = :18884 )' 2>/dev/null | tail -n +2 | grep -q .; then
+        listening=1
+        break
+      fi
+      sleep 0.1
+    done
+    [[ "$listening" == 1 ]] || {
+      tail -n 20 "$RUN_DIR/mosquitto.log" >&2
+      fail_case "Mosquitto did not listen on port 18884"
+    }
   fi
   mosquitto_pub -h 127.0.0.1 -p 18884 \
     -t /ibmw_record_smoke/startup -m ready -q 1 ||
@@ -237,21 +279,23 @@ start_record() {
   LAST_RECORD_LOG="$RUN_DIR/${CURRENT_CASE}.record.log"
   LAST_INFO=""
   LAST_OUT="$RUN_DIR/${CURRENT_CASE}.bag"
-  "$IBMW_BIN" bag record "$@" --output "$LAST_OUT" \
+  # Line-buffer stdout so the recorder's progress lines can be waited on.
+  stdbuf -oL "$IBMW_BIN" bag record "$@" --output "$LAST_OUT" \
     >"$LAST_RECORD_LOG" 2>&1 &
   RECORD_PID=$!
-  for _ in {1..150}; do
-    [[ -d "$LAST_OUT" ]] && {
-      sleep 0.2
-      kill -0 "$RECORD_PID" 2>/dev/null ||
-        fail_case "recorder exited immediately after creating output"
-      return 0
-    }
-    kill -0 "$RECORD_PID" 2>/dev/null ||
-      fail_case "recorder exited before creating output"
-    sleep 0.1
-  done
-  fail_case "recorder did not create output"
+  # Printed after the initial discovery query and storage setup.
+  wait_for_log "$LAST_RECORD_LOG" "Recording to '$LAST_OUT'" "$RECORD_PID" ||
+    fail_case "recorder did not start recording"
+  [[ -d "$LAST_OUT" ]] || fail_case "recorder did not create output"
+}
+
+# Wait until the recorder subscribed to a topic, then record for a fixed
+# window: the publishers run at 10 Hz and the checks need at least 5 messages.
+record_after_start() {
+  local topic="$1"
+  wait_for_log "$LAST_RECORD_LOG" "  started $topic -> " "$RECORD_PID" ||
+    fail_case "recorder did not start capturing $topic"
+  sleep 1.0
 }
 
 stop_record() {
@@ -413,7 +457,7 @@ run_transport_case() {
     "$driver" "$topic" "$mode"
   start_record --registry "$topic" --polling-interval 20 \
     --storage mcap --serialization-format "$serialization"
-  sleep 1.0
+  record_after_start "$topic"
   stop_record
   require_record_log "$topic"
   require_record_log "$description"
@@ -452,11 +496,15 @@ run_feature_case() {
     none) ;;
     resume)
       kill -USR2 "$RECORD_PID"
+      wait_for_log "$LAST_RECORD_LOG" "Recording resumed." "$RECORD_PID" ||
+        fail_case "recorder did not resume"
+      # Real recording window after the resume.
       sleep 0.8
       ;;
     snapshot)
       kill -USR1 "$RECORD_PID"
-      sleep 0.3
+      wait_for_log "$LAST_RECORD_LOG" "Snapshot completed." "$RECORD_PID" ||
+        fail_case "recorder did not complete the snapshot"
       ;;
     *) fail_case "unknown feature action: $action" ;;
   esac
@@ -477,10 +525,15 @@ run_late_case() {
   cleanup_runtime_files record-smoke-late
   local args=(/ibmw_record_smoke/features/late --polling-interval 50)
   [[ "$no_discovery" == true ]] && args+=(--no-discovery)
+  # start_record returns after the initial discovery, so the topic is late.
   start_record "${args[@]}"
-  sleep 0.4
   start_runtime record_smoke_late.yaml record-smoke-late
-  sleep 1.2
+  if [[ "$no_discovery" == true ]]; then
+    # Negative window: the recorder must not pick up the late topic.
+    sleep 1.2
+  else
+    record_after_start /ibmw_record_smoke/features/late
+  fi
   stop_record
   stop_runtime
   read_info
@@ -492,8 +545,14 @@ run_case transport_local run_transport_case local runtime_tap \
   "runtime tap (runtime record-smoke-local)" auto
 run_case transport_dds run_transport_case dds native_serialized \
   "dds subscriber (/ibmw_record_smoke/transport/dds)" cdr
-run_case transport_iceoryx run_transport_case iceoryx cached_serialized \
-  "iceoryx cached serialized subscriber (runtime record-smoke-iceoryx)" cdr
+if [[ "$ICEORYX_BUILT" == 1 ]]; then
+  run_case transport_iceoryx run_transport_case iceoryx cached_serialized \
+    "iceoryx cached serialized subscriber (runtime record-smoke-iceoryx)" cdr
+fi
+if [[ "$SHM_BUILT" == 1 ]]; then
+  run_case transport_shm run_transport_case shm cached_serialized \
+    "shm cached serialized subscriber (runtime record-smoke-shm)" cdr
+fi
 run_case transport_mqtt run_transport_case mqtt cached_serialized \
   "mqtt cached serialized subscriber (runtime record-smoke-mqtt)" cdr
 run_case transport_zenoh run_transport_case zenoh native_serialized \
@@ -761,8 +820,8 @@ run_feature_test() {
       echo "record smoke: feature polling_interval"
       cleanup_runtime_files record-smoke-late
       start_record /ibmw_record_smoke/features/late --polling-interval 1500
-      sleep 0.2
       start_runtime record_smoke_late.yaml record-smoke-late
+      # Negative window, shorter than the 1.5 s polling interval.
       sleep 0.6
       stop_record
       stop_runtime

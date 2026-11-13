@@ -10,23 +10,75 @@
 #include <string>
 #include <utility>
 
-#if defined(_WIN32)
-  #include <windows.h>
-#else
-  #include <dlfcn.h>
+#include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
+// RTLD_DI_* are enumerators on glibc, so test for the libc, not the macro.
+// OHOS musl defines RTLD_DI_LINKMAP but does not declare dlinfo.
+#if defined(__GLIBC__) || (defined(RTLD_DI_LINKMAP) && !defined(__OHOS__))
+  #define IBMW_DYNAMIC_LIB_HAS_DLINFO 1
+  #include <link.h>
 #endif
 
 namespace ibmw::common::util {
 
+// CORE-017: a library given by path (anything with a '/') must not be
+// replaceable by other users. The file and its directory (after resolving
+// symlinks) must be owned by the effective user or root and not writable by
+// others; a sticky directory such as /tmp may be. Group write is allowed.
+// On OHOS the libraries of an installed HAP belong to the installer service
+// (uid 3060), not to the app uid, so platform service uids (below the
+// application range) are trusted too, without group write; the shell uid used
+// by hdc is not.
+// Ancestor directories are not checked. Bare names keep the loader search path.
+// Returns the refusal reason, or an empty string and sets dlopen_name to the
+// checked (resolved) path, so a symlink re-pointed after the check is not
+// followed. One canonical() and two stat() calls per load. A path that cannot
+// be resolved is left to dlopen to report, unless fail_closed is set.
+inline std::string CheckLibraryTrust(const std::string& lib_name, std::string& dlopen_name,
+                                     bool fail_closed = false) {
+  dlopen_name = lib_name;
+  if (lib_name.find('/') == std::string::npos) return {};
+  std::error_code ec;
+  const auto file = std::filesystem::canonical(lib_name, ec);
+  struct stat status {};
+  if (ec || ::stat(file.c_str(), &status) != 0) {
+    return fail_closed ? "Refusing to load '" + lib_name + "': it cannot be resolved."
+                       : std::string();
+  }
+  const auto trusted_owner = [](const struct stat& st) {
+#if defined(__OHOS__)
+    constexpr uid_t kShellUid = 2000;
+    constexpr uid_t kFirstAppUid = 10000;
+    if (st.st_uid != ::geteuid() && st.st_uid != 0 && st.st_uid < kFirstAppUid && st.st_uid != kShellUid) {
+      return (st.st_mode & S_IWGRP) == 0;
+    }
+#endif
+    return st.st_uid == ::geteuid() || st.st_uid == 0;
+  };
+#if defined(__OHOS__)
+  constexpr const char* kTrustedOwners = "the current user, root or a system service";
+#else
+  constexpr const char* kTrustedOwners = "the current user or root";
+#endif
+  if (!trusted_owner(status) || (status.st_mode & S_IWOTH) != 0) {
+    return "Refusing to load '" + file.string() +
+           "': the library must be owned by " + kTrustedOwners + " and not writable by others.";
+  }
+  const auto directory = file.parent_path();
+  if (::stat(directory.c_str(), &status) != 0 || !trusted_owner(status) ||
+      ((status.st_mode & S_IWOTH) != 0 && (status.st_mode & S_ISVTX) == 0)) {
+    return "Refusing to load '" + file.string() + "': directory '" + directory.string() +
+           "' must be owned by " + kTrustedOwners + " and not writable by others.";
+  }
+  dlopen_name = file.string();
+  return {};
+}
+
 class DynamicLib {
  public:
-#if defined(_WIN32)
-  typedef FARPROC SymbolType;
-  typedef HINSTANCE DynlibHandle;
-#else
   typedef void* SymbolType;
   typedef void* DynlibHandle;
-#endif
 
  public:
   DynamicLib() = default;
@@ -45,38 +97,38 @@ class DynamicLib {
   bool Load(const std::string& lib_name) {
     Unload();
     lib_name_ = lib_name;
-
-#if defined(_WIN32)
-    handle_ = LoadLibraryEx(lib_name_.c_str(), NULL, 0);
-
-    if (nullptr == handle_) return false;
-
-    TCHAR buf[MAX_PATH];
-    DWORD re = GetModuleFileName(handle_, buf, MAX_PATH);
-    if (re != 0) lib_full_path_ = std::string(buf);
-#else
-  #if defined(IBMW_ENABLE_DLOPEN_DEEPBIND) && defined(RTLD_DEEPBIND)
-    handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
-  #else
-    handle_ = dlopen(lib_name_.c_str(), RTLD_NOW | RTLD_LOCAL);
-  #endif
-
-    if (nullptr == handle_) return false;
-
-  #if defined(RTLD_DI_ORIGIN)
-    char buf[1024] = {};
-    if (dlinfo(handle_, RTLD_DI_ORIGIN, &buf) == 0) {
-      lib_full_path_ = std::filesystem::canonical(std::filesystem::path(buf) / lib_name_).string();
-    } else {
-      lib_full_path_ = lib_name_;
+    std::string dlopen_name;
+    LoadError() = CheckLibraryTrust(lib_name_, dlopen_name);
+    if (!LoadError().empty()) {
+      (void)dlerror();  // GetErr() must not report an older error next time
+      return false;
     }
-  #else
+
+#if defined(IBMW_ENABLE_DLOPEN_DEEPBIND) && defined(RTLD_DEEPBIND)
+    handle_ = dlopen(dlopen_name.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
+#else
+    handle_ = dlopen(dlopen_name.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+
+    if (nullptr == handle_) return false;
+
+#if defined(IBMW_DYNAMIC_LIB_HAS_DLINFO)
+    // l_name is the path the loader actually opened (after search-path
+    // resolution). Never throw here: dlopen has already succeeded.
+    lib_full_path_ = lib_name_;
+    struct link_map* lm = nullptr;
+    if (dlinfo(handle_, RTLD_DI_LINKMAP, &lm) == 0 && lm != nullptr && lm->l_name != nullptr &&
+        lm->l_name[0] != '\0') {
+      std::error_code ec;
+      auto full_path = std::filesystem::canonical(std::filesystem::path(lm->l_name), ec);
+      lib_full_path_ = ec ? std::string(lm->l_name) : full_path.string();
+    }
+#else
     try {
       lib_full_path_ = std::filesystem::absolute(lib_name_).string();
     } catch (...) {
       lib_full_path_ = lib_name_;
     }
-  #endif
 #endif
 
     return true;
@@ -86,11 +138,7 @@ class DynamicLib {
     if (nullptr == handle_) return;
 
     bool ret = false;
-#if defined(_WIN32)
-    ret = FreeLibrary(handle_);
-#else
     ret = (0 == dlclose(handle_));
-#endif
 
     if (!ret) {
       return;
@@ -110,11 +158,7 @@ class DynamicLib {
     if (nullptr == handle_)
       throw std::runtime_error("DynamicLib does not load any lib.");
 
-#if defined(_WIN32)
-    return GetProcAddress(handle_, symbol_name.c_str());
-#else
     return dlsym(handle_, symbol_name.c_str());
-#endif
   }
 
   const std::string& GetLibName() const { return lib_name_; }
@@ -122,24 +166,18 @@ class DynamicLib {
   const std::string& GetLibFullPath() const { return lib_full_path_; }
 
   static std::string GetErr() {
-#if defined(_WIN32)
-    LPTSTR lp_msg_buf;
-    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                  NULL,
-                  GetLastError(),
-                  MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-                  (LPTSTR)&lp_msg_buf,
-                  0,
-                  NULL);
-    std::string ret(lp_msg_buf);
-    LocalFree(lp_msg_buf);
-    return ret;
-#else
-    return std::string(dlerror());
-#endif
+    if (!LoadError().empty()) return std::exchange(LoadError(), std::string());
+    // dlerror() returns NULL when no error is pending (or it was already read).
+    const char* err = dlerror();
+    return err != nullptr ? std::string(err) : std::string("no dynamic library error pending");
   }
 
  private:
+  static std::string& LoadError() {
+    thread_local std::string error;
+    return error;
+  }
+
   DynlibHandle handle_ = nullptr;
   std::string lib_name_;
   std::string lib_full_path_;

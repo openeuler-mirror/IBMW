@@ -58,6 +58,7 @@ void ZenohTransportDriver::Start() {
   MW_REQUIRE(
       std::atomic_exchange(&state_, State::kStart) == State::kInit,
       "Method can only be called when state is 'Init'.");
+  zenoh_bus_ptr_->Freeze();
   zenoh_bus_ptr_->StartDiscovery(limit_domain_);
 }
 
@@ -71,6 +72,8 @@ void ZenohTransportDriver::Shutdown() {
     for (const auto& [handle, subscriber] : native_subscribers_) handles.push_back(handle);
   }
   for (const auto handle : handles) DetachSerializedSubscriber({handle});
+  // The handlers use this driver: none may run once it is destroyed.
+  for (const auto& [pattern, tool] : message_handler_map_) zenoh_bus_ptr_->UnregisterSubscriber(pattern);
 }
 
 runtime::core::transport::SerializedTransportOperationsV2
@@ -127,7 +130,9 @@ ZenohTransportDriver::AttachSerializedSubscriber(
                                std::chrono::system_clock::now().time_since_epoch()).count()),
                            .source_driver = "zenoh", .payload = std::move(payload)});
           } catch (const std::exception& error) {
-            MW_ERROR("Native Zenoh receive failed: {}", error.what());
+            MW_ERROR_INTERVAL(1000, "Native Zenoh receive failed: {}", error.what());
+          } catch (...) {
+            MW_ERROR_INTERVAL(1000, "Native Zenoh receive failed with an unknown exception.");
           }
         }, subscriber->subscription);
     MW_ASSERT(attached, "Cannot declare native Zenoh subscriber.");
@@ -184,13 +189,13 @@ bool ZenohTransportDriver::RegisterSendType(
     std::string pattern = std::string("transport/") +
                           util::UrlEncode(info.topic_name) + "/" +
                           util::UrlEncode(info.msg_type) +
-                          limit_domain_;
+                          key_suffix_;
 
     if (!zenoh_bus_ptr_->RegisterPublisher(pattern, shm_enabled)) return false;
     zenoh_bus_ptr_->RecordDiscoveryEndpoint(ibmw::discovery::EndpointRole::kPublisher,
                                           info.topic_name, info.msg_type, pattern);
 
-    z_pub_shm_size_map_[pattern] = shm_init_loan_size_;
+    shm_loan_sizes_.Set(pattern, shm_init_loan_size_);
 
     MW_INFO("Register publish type to zenoh transport, url: {}, shm_enabled: {}", pattern, shm_enabled);
 
@@ -213,7 +218,7 @@ bool ZenohTransportDriver::OnMessage(
     std::string pattern = std::string("transport/") +
                           util::UrlEncode(info.topic_name) + "/" +
                           util::UrlEncode(info.msg_type) +
-                          limit_domain_;
+                          key_suffix_;
 
     auto find_itr = message_handler_map_.find(pattern);
     if (find_itr != message_handler_map_.end()) {
@@ -238,13 +243,12 @@ bool ZenohTransportDriver::OnMessage(
             std::vector<char> serialized_data(serialized_size);
 
             // read data from payload
-            z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size);
+            serialized_data.resize(
+                z_bytes_reader_read(&reader, reinterpret_cast<uint8_t*>(serialized_data.data()), serialized_size));
 
-            // get real size of serialized data
-            util::ConstBufferOperator buf_oper_tmp(serialized_data.data(), 4);
-            uint32_t serialized_size_with_len = buf_oper_tmp.GetUint32();
-
-            util::ConstBufferOperator buf_oper(serialized_data.data() + 4, serialized_size_with_len);
+            // The length prefix comes from the peer: validate it against the bytes actually received.
+            auto frame = util::GetLengthPrefixedPayload(serialized_data.data(), serialized_data.size());
+            util::ConstBufferOperator buf_oper(frame.data(), frame.size());
 
             // get serialization type
             std::string serialization_type(buf_oper.GetString(util::BufferLenType::kUInt8));
@@ -266,7 +270,9 @@ bool ZenohTransportDriver::OnMessage(
                 ctx_ptr, serialization_type, static_cast<const void*>(remaining_buf.data()), remaining_buf.size());
 
           } catch (const std::exception& e) {
-            MW_WARN("Handle Zenoh transport msg failed, exception info: {}", e.what());
+            MW_WARN_INTERVAL(1000, "Handle Zenoh transport msg failed, exception info: {}", e.what());
+          } catch (...) {
+            MW_WARN_INTERVAL(1000, "Handle Zenoh transport msg failed with an unknown exception.");
           }
         };
 
@@ -294,7 +300,7 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
     std::string zenoh_pub_topic = std::string("transport/") +
                                   util::UrlEncode(info.topic_name) + "/" +
                                   util::UrlEncode(info.msg_type) +
-                                  limit_domain_;
+                                  key_suffix_;
 
     // find publisher with zenoh_pub_topic
     const auto& zenoh_pub_catalog_ptr = zenoh_bus_ptr_->GetPublisherRegisterMap();
@@ -332,33 +338,19 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
       bool is_shm_pool_size_enough = true;
 
       uint64_t msg_size = 0;
-      z_buf_layout_alloc_result_t loan_result;
+      ShmLoan loan;
+      const uint64_t pool_size = zenoh_bus_ptr_->ShmPoolSize();
 
       do {
-        // release old shm
-        if (z_pub_loaned_shm_ptr != nullptr) {
-          z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-          z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
-        }
-
-        // load a new size shm
-        uint64_t loan_size = 0;
-        {
-          std::shared_lock lock(z_shared_mutex_);
-          loan_size = z_pub_shm_size_map_[zenoh_pub_topic];
-        }
-        z_shm_provider_alloc(&loan_result, z_loan(zenoh_bus_ptr_->shm_provider_), loan_size, zenoh_bus_ptr_->alignment_);
+        // loan a new size shm (a loan that was too small is dropped)
+        const uint64_t loan_size = shm_loan_sizes_.Get(zenoh_pub_topic, shm_init_loan_size_);
+        z_pub_loaned_shm_ptr = loan.Alloc(z_loan(zenoh_bus_ptr_->shm_provider_), loan_size, zenoh_bus_ptr_->alignment_);
 
         // if shm pool is not enough, use net buffer instead
-        if (loan_result.status != ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
+        if (z_pub_loaned_shm_ptr == nullptr) {
           is_shm_pool_size_enough = false;
-          z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-          z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
-          MW_WARN("Zenoh Extension shm pool is not enough, use net buffer instead.");
           break;
         }
-
-        z_pub_loaned_shm_ptr = z_shm_mut_data_mut(z_loan_mut(loan_result.buf));
 
         // write info pkg on loaned shm : the first FIXED_LEN bytes needs to write the length of pkg
         util::BufferOperator buf_oper(reinterpret_cast<char*>(z_pub_loaned_shm_ptr) + 4, loan_size - 4);
@@ -387,9 +379,9 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
               if (msg_size > buf_oper.GetRemainingSize()) {
                 // in this case means the msg has serialization cache but the size is too large, then expand suitable size
                 is_shm_loan_size_enough = false;
-                {
-                  std::unique_lock lock(z_shared_mutex_);
-                  z_pub_shm_size_map_[zenoh_pub_topic] = msg_size + type_and_ctx_len + 4;
+                if (!shm_loan_sizes_.Need(zenoh_pub_topic, msg_size + type_and_ctx_len + 4, pool_size)) {
+                  is_shm_pool_size_enough = false;
+                  break;
                 }
               } else {
                 // in this case means the msg has serialization cache and the size is suitable, then use cachema
@@ -399,12 +391,12 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
 
           } catch (const std::exception& e) {
             if (!z_allocator.IsShmEnough()) {
-              // the shm is not enough, need to expand a double size
-              {
-                std::unique_lock lock(z_shared_mutex_);
-                z_pub_shm_size_map_[zenoh_pub_topic] = z_pub_shm_size_map_[zenoh_pub_topic] << 1;
-              }
+              // the shm is not enough, need to expand a double size (within the pool)
               is_shm_loan_size_enough = false;
+              if (!shm_loan_sizes_.Grow(zenoh_pub_topic, loan_size, pool_size)) {
+                is_shm_pool_size_enough = false;
+                break;
+              }
             } else {
               MW_ERROR(
                   "Msg serialization failed, serialization_type {}, pkg_path: {}, module_name: {}, topic_name: {}, msg_type: {}, exception: {}",
@@ -412,39 +404,43 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
               return;
             }
           }
+        } else {
+          // the cache was loaned its size (Need above): it fits now
+          is_shm_loan_size_enough = true;
         }
 
       } while (!is_shm_loan_size_enough);
 
+      // too long for its length prefix: refused by the network path below
+      const uint64_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
+      if (is_shm_pool_size_enough && !FitsFrame(data_size)) [[unlikely]]
+        is_shm_pool_size_enough = false;
+
       if (is_shm_pool_size_enough) {
         // if has cache, the copy it to shm to replace the serialization
         if (buffer_array_cache_ptr != nullptr) {
-          unsigned char* strat_pos = z_pub_loaned_shm_ptr + 4 + context_meta_kv_size + serialization_type.size() + 1;
-          for (size_t ii = 0; ii < buffer_array_cache_ptr->Size(); ++ii) {
-            std::memcpy(strat_pos, buffer_array_cache_ptr.get()[ii].Data()->data, buffer_array_cache_ptr.get()[ii].Data()->len);
-            strat_pos += buffer_array_cache_ptr.get()[ii].Data()->len;
-          }
+          CopyBuffers(*buffer_array_cache_ptr, z_pub_loaned_shm_ptr + 4 + context_meta_kv_size + serialization_type.size() + 1);
 
           buffer_array_cache_ptr = nullptr;
         }
         // write info pkg length on loaned shm
-        uint32_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
         util::SetBufFromUint32(reinterpret_cast<char*>(z_pub_loaned_shm_ptr), data_size);
 
         z_owned_bytes_t z_payload;
-        if (loan_result.status == ZC_BUF_LAYOUT_ALLOC_STATUS_OK) {
-          z_bytes_from_shm_mut(&z_payload, z_move(loan_result.buf));
-        }
+        loan.MoveTo(&z_payload);
         z_publisher_put(z_loan(z_pub_ctx_ptr->z_pub), z_move(z_payload), &zenoh_bus_ptr_->z_pub_options_);
 
-        // collect garbage and defragment shared memory, whose reference counting is zero
+        // collect shared memory whose reference counting is zero (defragment only when short)
         z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
-        z_shm_provider_defragment(z_loan(zenoh_bus_ptr_->shm_provider_));
 
         MW_TRACE("Zenoh publish to '{}'", zenoh_pub_topic);
 
         return;
       }
+      // the loan that did not fit (up to the whole pool) is collected now, not at the next shortage
+      loan.Reset();
+      z_shm_provider_garbage_collect(z_loan(zenoh_bus_ptr_->shm_provider_));
+      MW_WARN_INTERVAL(5000, "Zenoh Extension shm pool is not enough, use net buffer instead.");
     }
 
     // shm disabled
@@ -459,8 +455,9 @@ void ZenohTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrap
     const size_t buffer_array_len = buffer_array_view_ptr->Size();
     size_t msg_size = buffer_array_view_ptr->BufferSize();
 
-    int32_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
-    int32_t pkg_size = data_size + 4;
+    const size_t data_size = 1 + serialization_type.size() + context_meta_kv_size + msg_size;
+    MW_REQUIRE(FitsFrame(data_size), "Zenoh message of {} bytes is too long, topic_name: {}", msg_size, info.topic_name);
+    const size_t pkg_size = data_size + 4;
 
     // create buffer for serialization
     std::vector<char> serialized_data(pkg_size);

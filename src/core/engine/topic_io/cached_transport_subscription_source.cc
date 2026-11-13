@@ -4,7 +4,9 @@
 #include "engine/topic_io/cached_transport_subscription_source.h"
 
 #include <charconv>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 #include "base/exception.h"
 #include "base/time_util.h"
@@ -51,6 +53,17 @@ struct ReleaseGuard {
 struct InFlightGuard {
   std::shared_ptr<SubscriptionState> state;
   bool armed = false;
+  SubscriptionState::Delivery delivery;
+
+  // Called with state->mutex held.
+  void Arm() {
+    delivery.thread = std::this_thread::get_id();
+    delivery.next = state->deliveries;
+    if (delivery.next) delivery.next->prev = &delivery;
+    state->deliveries = &delivery;
+    ++state->in_flight;
+    armed = true;
+  }
 
   ~InFlightGuard() {
     if (!armed) {
@@ -58,11 +71,33 @@ struct InFlightGuard {
     }
     std::lock_guard lock(state->mutex);
     --state->in_flight;
+    (delivery.prev ? delivery.prev->next : state->deliveries) = delivery.next;
+    if (delivery.next) delivery.next->prev = delivery.prev;
     if (state->in_flight == 0) {
       state->idle_cv.notify_all();
     }
   }
 };
+
+// Waits until only the deliveries running on this thread (Stop() from a
+// callback) are left. Cold and out of line: Stop() is not on the delivery path.
+[[gnu::cold, gnu::noinline]] void WaitForOtherDeliveries(
+    SubscriptionState& state, std::unique_lock<std::mutex>& lock) {
+  size_t own_depth = 0;
+  for (auto* d = state.deliveries; d; d = d->next) {
+    own_depth += d->thread == std::this_thread::get_id();
+  }
+  while (!state.idle_cv.wait_for(lock, std::chrono::seconds(5), [&] {
+    return state.in_flight <= own_depth;
+  })) {
+    // Returning early would let a running callback outlive its owner.
+    if (state.logger) {
+      MW_LOG(*state.logger, ibmw::common::util::kLogLevelWarn,
+             "Stopping cached {} subscription for topic '{}': still waiting for {} running callback(s).",
+             state.driver_name, state.advertisement.topic.topic, state.in_flight - own_depth);
+    }
+  }
+}
 
 void DeliverFrame(
     const std::shared_ptr<SubscriptionState>& state,
@@ -81,8 +116,7 @@ void DeliverFrame(
       if (!state->active) {
         return;
       }
-      ++state->in_flight;
-      in_flight_guard.armed = true;
+      in_flight_guard.Arm();
       logger = state->logger;
       advertisement = state->advertisement;
       driver_name = state->driver_name;
@@ -227,34 +261,71 @@ CachedTransportSubscriptionRegistry::Attach(
         DeliverFrame(state, frame, false, std::move(release));
       };
 
-  MW_ASSERT(
-      driver.OnMessage(*handler),
-      "Driver '{}' rejected cached serialized subscription for '{}'.",
-      driver.Name(), advertisement.topic.topic);
-  auto loaned_handler = std::make_unique<
-      ibmw::runtime::core::transport::LoanedMessageHandlerWrapper>();
-  loaned_handler->info = handler->info;
-  loaned_handler->callback =
-      [state, info = loaned_handler->info](
-          const ibmw_transport_context_base_t* context,
-          const void* payload,
-          size_t payload_size,
-          std::function<void()>&& release) {
-        static_cast<void>(payload_size);
-        ibmw::runtime::core::transport::MessageFrame frame{
-            .info = info,
-            .msg_ptr = payload,
-            .ctx_ref = ibmw::transport::ContextRef(context)};
-        DeliverFrame(state, frame, true, std::move(release));
-      };
-  const bool loaned_attached = driver.AttachLoaned(*loaned_handler);
+  // The driver keeps references to the handlers, so they are owned by this
+  // source before the driver sees them: a later throw (rejection, bad_alloc)
+  // must not destroy a handler the driver may still call.
+  auto* handler_ptr = handler.get();
   {
     std::lock_guard lock(mutex_);
-    states_.emplace(subscription_key, state);
     handlers_.emplace_back(std::move(handler));
-    if (loaned_attached) {
+  }
+  try {
+    MW_ASSERT(
+        driver.OnMessage(*handler_ptr),
+        "Driver '{}' rejected cached serialized subscription for '{}'.",
+        driver.Name(), advertisement.topic.topic);
+    auto loaned_handler = std::make_unique<
+        ibmw::runtime::core::transport::LoanedMessageHandlerWrapper>();
+    loaned_handler->info = handler_ptr->info;
+    loaned_handler->callback =
+        [state, info = loaned_handler->info, min_size = type_support.NativeHandle()->msg_min_size](
+            const ibmw_transport_context_base_t* context,
+            const void* payload,
+            size_t payload_size,
+            std::function<void()>&& release) {
+          // The payload is read as one typed message: a loan smaller than the
+          // type, or of a type whose size is unknown, is dropped (COMM-024).
+          if (payload == nullptr || min_size == 0 || payload_size < min_size) [[unlikely]] {
+            ReleaseGuard release_guard{std::move(release)};
+            if (!state->undersized_loan_reported.exchange(true, std::memory_order_relaxed)) {
+              const ibmw::common::util::LoggerWrapper* logger = nullptr;
+              {
+                std::lock_guard lock(state->mutex);
+                logger = state->logger;
+              }
+              if (logger != nullptr) {
+                MW_LOG(*logger, ibmw::common::util::kLogLevelWarn,
+                       "Dropping loaned message of {} bytes on topic '{}': type '{}' needs {} bytes{}. "
+                       "Further drops on this subscription are not reported.",
+                       payload_size, info.topic_name, info.msg_type, min_size,
+                       min_size == 0 ? " (size unknown)" : "");
+              }
+            }
+            return;
+          }
+          ibmw::runtime::core::transport::MessageFrame frame{
+              .info = info,
+              .msg_ptr = payload,
+              .ctx_ref = ibmw::transport::ContextRef(context)};
+          DeliverFrame(state, frame, true, std::move(release));
+        };
+    auto* loaned_handler_ptr = loaned_handler.get();
+    {
+      std::lock_guard lock(mutex_);
       loaned_handlers_.emplace_back(std::move(loaned_handler));
     }
+    // Kept even if rejected: a driver may have stored the callback anyway.
+    static_cast<void>(driver.AttachLoaned(*loaned_handler_ptr));
+    {
+      std::lock_guard lock(mutex_);
+      states_.emplace(subscription_key, state);
+    }
+  } catch (...) {
+    // The driver may still hold (and call) the handlers: make sure a failed
+    // subscription never reaches the user callback.
+    std::lock_guard lock(state->mutex);
+    state->active = false;
+    throw;
   }
   return state;
 }
@@ -298,7 +369,7 @@ void CachedTransportSubscriptionSource::Stop() {
   {
     std::unique_lock lock(state_->mutex);
     state_->active = false;
-    state_->idle_cv.wait(lock, [this] { return state_->in_flight == 0; });
+    WaitForOtherDeliveries(*state_, lock);
     error = state_->error;
   }
   if (error) {

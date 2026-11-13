@@ -118,7 +118,8 @@ ibmw:
 - `set` 可更新或创建已有模块的键，不会创建模块。模块名和键不能为空。
   空字符串是有效值，不表示删除。原有模块 C++ API 对已存在键的空值删除语义保留；
   旧 `Load` RPC 仍沿用该 API 的语义。本次未新增 `delete`、`dump` 或 `load` CLI。
-- 新服务端会明确区分 `PARAMETER_NOT_FOUND` 与成功读取空值。
+- 新服务端会明确区分 `PARAMETER_NOT_FOUND` 与成功读取空值。服务尚未绑定参数存储时
+  返回 `NOT_READY`（5）；处理异常时返回 `INTERNAL_ERROR`（4），RPC 状态为服务端处理失败。
   旧服务端的缺失值/空值行为不同；需要上述语义时应同时升级服务端。
 - 成功返回退出码 0；传输失败或业务错误返回非零，诊断写入 stderr。
   `--timeout` 默认 5 秒，`--discovery-timeout` 默认 2 秒，均为每次 RPC 的上限；

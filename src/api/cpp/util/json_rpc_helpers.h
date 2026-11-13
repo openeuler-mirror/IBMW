@@ -171,16 +171,13 @@ ibmw::rpc::Status Call(
   ctx_ptr->SetTimeout(timeout);
   ctx_ptr->SetFunctionName(full_func_name);
 
-  std::promise<ibmw::rpc::Status> result_promise;
-  auto result_future = result_promise.get_future();
+  auto result = std::make_shared<ibmw::rpc::details::SyncCallResult>();
 
   service_ref.Call(
       full_func_name, *ctx_ptr, &req, &rsp,
-      [ctx_ptr, &result_promise](uint32_t code) {
-        result_promise.set_value(ibmw::rpc::Status(code));
-      });
+      [ctx_ptr, result](uint32_t code) { result->Set(ibmw::rpc::Status(code)); });
 
-  return result_future.get();
+  return result->Get();
 }
 
 /**

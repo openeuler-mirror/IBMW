@@ -48,9 +48,13 @@ set(EXTENSION_V2_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/extension/test/extension_v2_fixture.cc)
 set(TYPE_SUPPORT_V1_FIXTURE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/type_support/test/type_support_pkg_v1_fixture.cc)
+set(PKG_FIXTURE_SRC ${CMAKE_CURRENT_SOURCE_DIR}/module/test/package_fixture.cc)
 list(REMOVE_ITEM src ${EXTENSION_V2_FIXTURE_SRC}
-                     ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+                     ${TYPE_SUPPORT_V1_FIXTURE_SRC}
+                     ${PKG_FIXTURE_SRC})
 list(REMOVE_ITEM src ${CMAKE_CURRENT_SOURCE_DIR}/reporter_query.cc)
+set(SELFDEV_E2E_BENCH_SRC ${CMAKE_CURRENT_SOURCE_DIR}/executor/selfdev_e2e_bench.cc)
+list(REMOVE_ITEM src ${SELFDEV_E2E_BENCH_SRC})
 if(NOT IBMW_ENABLE_CORE_METRICS)
   list(REMOVE_ITEM test_files ${CMAKE_CURRENT_SOURCE_DIR}/core_metrics_test.cc)
 endif()
@@ -110,14 +114,28 @@ target_include_directories(
          $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../..>
          $<INSTALL_INTERFACE:include/ibmw>)
 
+# Selfdev replacements (selfdev/) or the original third-party libraries.
+# Chosen with if() rather than generator expressions so that install(EXPORT)
+# maps the target names (a name inside $<IF:...> is exported verbatim).
+if(IBMW_SELFDEV_CONCURRENT)
+  set(_ibmw_engine_concurrent_lib ibmw::selfdev::concurrent)
+else()
+  set(_ibmw_engine_concurrent_lib TBB::tbb)
+endif()
+if(IBMW_SELFDEV_CRASH_HANDLER)
+  set(_ibmw_engine_crash_lib ibmw::selfdev::crash_handler)
+else()
+  set(_ibmw_engine_crash_lib backward_iface)
+endif()
+
 # Set link libraries of target
 target_link_libraries(
   ${CUR_TARGET_NAME}
   PUBLIC ${CMAKE_DL_LIBS}
          asio::asio
          yaml-cpp::yaml-cpp
-         TBB::tbb
-         backward_iface
+         ${_ibmw_engine_concurrent_lib}
+         ${_ibmw_engine_crash_lib}
          ibmw::api::cpp
          ibmw::core::extension_api
          ibmw::core::extension_support
@@ -174,7 +192,11 @@ if(IBMW_BUILD_TESTS)
 endif()
 
 if(IBMW_BUILD_TESTS AND test_files)
+  # The extension_v2_* fixtures export the current (V3) entry; the names
+  # predate V3. extension_legacy_fixture and extension_v2_entry_fixture export
+  # the entries of earlier extension ABIs, which the loader must reject.
   foreach(fixture IN ITEMS extension_legacy_fixture
+                           extension_v2_entry_fixture
                            extension_v2_fixture
                            extension_v2_bad_version_fixture
                            extension_v2_bad_size_fixture
@@ -194,6 +216,10 @@ if(IBMW_BUILD_TESTS AND test_files)
               ${TYPE_SUPPORT_V1_FIXTURE_SRC})
   add_library(type_support_null_type_v1_fixture MODULE
               ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  add_library(type_support_duplicate_type_v1_fixture MODULE
+              ${TYPE_SUPPORT_V1_FIXTURE_SRC})
+  add_library(type_support_old_package_fixture MODULE
+              ${TYPE_SUPPORT_V1_FIXTURE_SRC})
   target_compile_definitions(type_support_bad_v1_fixture
                               PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_VERSION)
   target_compile_definitions(type_support_bad_size_v1_fixture
@@ -203,16 +229,35 @@ if(IBMW_BUILD_TESTS AND test_files)
     PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_BAD_PACKAGE_SIZE)
   target_compile_definitions(type_support_null_type_v1_fixture
                              PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_NULL_TYPE)
+  target_compile_definitions(type_support_duplicate_type_v1_fixture
+                             PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_DUPLICATE_TYPE)
+  target_compile_definitions(type_support_old_package_fixture
+                             PRIVATE IBMW_TYPE_SUPPORT_FIXTURE_OLD_PACKAGE_VERSION)
   foreach(fixture IN ITEMS type_support_v1_fixture type_support_bad_v1_fixture
                            type_support_bad_size_v1_fixture
                            type_support_bad_package_size_v1_fixture
-                           type_support_null_type_v1_fixture)
+                           type_support_null_type_v1_fixture
+                           type_support_duplicate_type_v1_fixture
+                           type_support_old_package_fixture)
     target_link_libraries(${fixture} PRIVATE ibmw::api::type_support)
     set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                 VISIBILITY_INLINES_HIDDEN ON)
   endforeach()
+  foreach(fixture IN ITEMS pkg_fixture pkg_too_many_fixture pkg_legacy_fixture
+                           pkg_bad_version_fixture pkg_short_fixture)
+    add_library(${fixture} MODULE ${PKG_FIXTURE_SRC})
+    target_link_libraries(${fixture} PRIVATE ibmw::api::cpp)
+    set_target_properties(${fixture} PROPERTIES CXX_VISIBILITY_PRESET hidden
+                                                VISIBILITY_INLINES_HIDDEN ON)
+  endforeach()
+  target_compile_definitions(pkg_too_many_fixture PRIVATE IBMW_PKG_FIXTURE_TOO_MANY)
+  target_compile_definitions(pkg_legacy_fixture PRIVATE IBMW_PKG_FIXTURE_LEGACY)
+  target_compile_definitions(pkg_bad_version_fixture PRIVATE IBMW_PKG_FIXTURE_BAD_VERSION)
+  target_compile_definitions(pkg_short_fixture PRIVATE IBMW_PKG_FIXTURE_SHORT)
   target_compile_definitions(extension_legacy_fixture
                              PRIVATE IBMW_EXT_FIXTURE_LEGACY)
+  target_compile_definitions(extension_v2_entry_fixture
+                             PRIVATE IBMW_EXT_FIXTURE_ENTRY_V2)
   target_compile_definitions(extension_v2_bad_version_fixture
                              PRIVATE IBMW_EXT_FIXTURE_BAD_VERSION)
   target_compile_definitions(extension_v2_bad_size_fixture
@@ -231,6 +276,7 @@ if(IBMW_BUILD_TESTS AND test_files)
   set_tests_properties(${CUR_TARGET_NAME}_test PROPERTIES TIMEOUT 120)
   add_dependencies(${CUR_TARGET_NAME}_test
                    extension_legacy_fixture
+                   extension_v2_entry_fixture
                    extension_v2_fixture
                    extension_v2_bad_version_fixture
                    extension_v2_bad_size_fixture
@@ -241,11 +287,15 @@ if(IBMW_BUILD_TESTS AND test_files)
                    type_support_bad_v1_fixture
                    type_support_bad_size_v1_fixture
                    type_support_bad_package_size_v1_fixture
-                   type_support_null_type_v1_fixture)
+                   type_support_null_type_v1_fixture
+                   type_support_duplicate_type_v1_fixture
+                   pkg_fixture
+                   pkg_too_many_fixture)
   target_compile_definitions(
     ${CUR_TARGET_NAME}_test
     PRIVATE
       "EXTENSION_LEGACY_FIXTURE_PATH=\"$<TARGET_FILE:extension_legacy_fixture>\""
+      "EXTENSION_V2_ENTRY_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_entry_fixture>\""
       "EXTENSION_V2_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_fixture>\""
       "EXTENSION_V2_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_version_fixture>\""
       "EXTENSION_V2_BAD_SIZE_FIXTURE_PATH=\"$<TARGET_FILE:extension_v2_bad_size_fixture>\""
@@ -256,7 +306,14 @@ if(IBMW_BUILD_TESTS AND test_files)
       "TYPE_SUPPORT_BAD_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_v1_fixture>\""
       "TYPE_SUPPORT_BAD_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_size_v1_fixture>\""
       "TYPE_SUPPORT_BAD_PACKAGE_SIZE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_bad_package_size_v1_fixture>\""
-      "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\"")
+      "TYPE_SUPPORT_NULL_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_null_type_v1_fixture>\""
+      "TYPE_SUPPORT_DUPLICATE_TYPE_V1_FIXTURE_PATH=\"$<TARGET_FILE:type_support_duplicate_type_v1_fixture>\""
+      "TYPE_SUPPORT_OLD_PACKAGE_FIXTURE_PATH=\"$<TARGET_FILE:type_support_old_package_fixture>\""
+      "PKG_FIXTURE_PATH=\"$<TARGET_FILE:pkg_fixture>\""
+      "PKG_TOO_MANY_FIXTURE_PATH=\"$<TARGET_FILE:pkg_too_many_fixture>\""
+      "PKG_LEGACY_FIXTURE_PATH=\"$<TARGET_FILE:pkg_legacy_fixture>\""
+      "PKG_BAD_VERSION_FIXTURE_PATH=\"$<TARGET_FILE:pkg_bad_version_fixture>\""
+      "PKG_SHORT_FIXTURE_PATH=\"$<TARGET_FILE:pkg_short_fixture>\"")
 
   set(COMM_TRACE_COMPILE_OUT_TEST_TARGET
       ${CUR_TARGET_NAME}_comm_trace_compile_out_test)
@@ -283,4 +340,16 @@ if(IBMW_BUILD_TESTS AND test_files)
     add_test(NAME ${COMM_TRACE_TEST_TARGET}
              COMMAND $<TARGET_FILE:${COMM_TRACE_TEST_TARGET}>)
   endif()
+endif()
+
+# Executor end-to-end benchmark; run by hand, not registered with ctest.
+if(IBMW_BUILD_SELFDEV_E2E_BENCH)
+  add_executable(ibmw_selfdev_e2e_bench ${SELFDEV_E2E_BENCH_SRC})
+  target_link_libraries(ibmw_selfdev_e2e_bench PRIVATE ${CUR_TARGET_NAME})
+  # Test builds add --coverage globally; keep this TU uninstrumented (the
+  # engine archive still is, so prefer a build with IBMW_BUILD_TESTS=OFF).
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(ibmw_selfdev_e2e_bench PRIVATE -fno-profile-arcs -fno-test-coverage)
+  endif()
+  add_werror(ibmw_selfdev_e2e_bench)
 endif()

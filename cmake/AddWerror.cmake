@@ -11,8 +11,6 @@ macro(add_werror target)
                 -Wno-unused-parameter
                 -Wno-missing-field-initializers
                 -Wno-implicit-fallthrough
-                -Wno-maybe-uninitialized
-                -Wno-stringop-overflow
                 -Werror)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
       if(CMAKE_CROSSCOMPILING AND DEFINED OHOS_PLATFORM AND NOT "${OHOS_PLATFORM}" STREQUAL "")
@@ -35,8 +33,6 @@ macro(add_werror target)
                   -Wno-implicit-fallthrough
                   -Werror)
       endif()
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-      # target_compile_options(${target} PRIVATE /W3 /WX)
     endif()
   endif()
 endmacro()

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include <thread>
 
 #include "cpp/module_base.h"
 #include "type_support/dds/dds_transport.h"
@@ -31,6 +32,7 @@ class PublisherModule : public ibmw::Module {
   ibmw::transport::SenderRef publisher_;
   uint32_t msg_count_ = 0;
   std::atomic<bool> running_{false};
+  std::thread publish_thread_;
 };
 
 }  // namespace iceoryx_inproc_demo

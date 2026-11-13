@@ -7,10 +7,22 @@
 
 namespace ibmw::extensions::log_control_extension {
 
+void LogControlServiceImpl::LogHandlerFailure(const char* what) noexcept {
+  try {
+    MW_ERROR_INTERVAL(1000, "Log control service handler failed: {}", what);
+  } catch (...) {
+  }
+}
+
 void LogControlServiceImpl::HandleGetModuleLogLevel(
     const ibmw::protocols::log_control_extension::GetModuleLogLevelReq& req,
     ibmw::protocols::log_control_extension::GetModuleLogLevelRsp& rsp) {
   rsp = {};
+  if (logging_subsystem_ptr_ == nullptr) [[unlikely]] {
+    SetErrorCode(ErrorCode::kNotReady, rsp);
+    return;
+  }
+
   const auto& log_lvl_map = logging_subsystem_ptr_->GetAllLoggerLevels();
 
   // if empty, then get all modules
@@ -41,6 +53,10 @@ void LogControlServiceImpl::HandleSetModuleLogLevel(
     const ibmw::protocols::log_control_extension::SetModuleLogLevelReq& req,
     ibmw::protocols::log_control_extension::SetModuleLogLevelRsp& rsp) {
   rsp = {};
+  if (logging_subsystem_ptr_ == nullptr) [[unlikely]] {
+    SetErrorCode(ErrorCode::kNotReady, rsp);
+    return;
+  }
   if (req.module_log_level_map.empty()) {
     SetErrorCode(ErrorCode::kEmptySettings, rsp);
     return;

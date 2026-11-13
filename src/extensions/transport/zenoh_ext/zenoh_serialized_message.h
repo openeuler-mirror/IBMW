@@ -17,11 +17,9 @@ struct ZenohPayloadView {
 
 inline ZenohPayloadView DecodeZenohPayload(std::string_view bytes) {
   using namespace ibmw::common::util;
-  if (bytes.size() < 4) throw std::invalid_argument("Truncated Zenoh envelope length.");
-  ConstBufferOperator header(bytes.data(), 4);
-  const auto length = header.GetUint32();
-  if (length > bytes.size() - 4) throw std::invalid_argument("Truncated Zenoh envelope.");
-  ConstBufferOperator body(bytes.data() + 4, length);
+  // Throws BufferOutOfBoundsException on a truncated prefix or envelope.
+  const auto envelope = GetLengthPrefixedPayload(bytes.data(), bytes.size());
+  ConstBufferOperator body(envelope.data(), envelope.size());
   const auto format = body.GetString(BufferLenType::kUInt8);
   if (format.empty()) throw std::invalid_argument("Missing Zenoh serialization format.");
   const auto count = body.GetUint8();

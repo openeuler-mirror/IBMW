@@ -30,6 +30,7 @@ class ConfiguratorAccess {
  private:
   static ibmw_configurator_base_t GenBase(void* ctx) {
     return ibmw_configurator_base_t{
+        .struct_size = sizeof(ibmw_configurator_base_t),
         .config_file_path = [](void* ctx) -> ibmw_string_view_t {
           auto* access = static_cast<ConfiguratorAccess*>(ctx);
           return ibmw::util::ToIbmwStringView(access->config_file_path_);

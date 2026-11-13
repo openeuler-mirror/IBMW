@@ -53,6 +53,7 @@ class WatchdogExecutor : public ISubsystem {
  private:
   static ibmw_executor_base_t GenBase(void* ctx) {
     return ibmw_executor_base_t{
+        .struct_size = sizeof(ibmw_executor_base_t),
         .type = [](void* ctx) -> ibmw_string_view_t {
           return ibmw::util::ToIbmwStringView(
               static_cast<WatchdogExecutor*>(ctx)->Type());

@@ -1,0 +1,24 @@
+schema_version: 2
+project:
+  name: gc_loaned_shm
+  namespace: ibmw::gencheck::loaned
+messages:
+  geometry_msgs::msg::Point: {}
+modules:
+  - name: ShmLoanPub
+    type: loaned_publisher
+    transport: shm
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+  - name: ShmLoanSub
+    type: loaned_subscriber
+    transport: shm
+    topic: point_topic
+    message: geometry_msgs::msg::Point
+apps:
+  - name: loan_pub_app
+    type: pubsub
+    modules: [ShmLoanPub]
+  - name: loan_sub_app
+    type: pubsub
+    modules: [ShmLoanSub]

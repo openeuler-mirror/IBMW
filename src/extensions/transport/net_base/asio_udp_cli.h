@@ -103,9 +103,11 @@ class AsioUdpClient : public std::enable_shared_from_this<AsioUdpClient> {
         return;
       }
 
-      MW_CHECK_ERROR(msg_buf_ptr->size() <= options_.max_package_size,
-                        "Msg too large for udp package, size {}, limit {}.",
-                        msg_buf_ptr->size(), options_.max_package_size);
+      if (msg_buf_ptr->size() > options_.max_package_size) [[unlikely]] {
+        MW_ERROR("Msg too large for udp package, dropped, size {}, limit {}.",
+                 msg_buf_ptr->size(), options_.max_package_size);
+        return;
+      }
 
       if (!session_ptr_ || !session_ptr_->IsRunning()) {
         session_ptr_ = std::make_shared<Session>(io_ptr_, logger_ptr_);
@@ -160,7 +162,7 @@ class AsioUdpClient : public std::enable_shared_from_this<AsioUdpClient> {
           std::atomic_exchange(&state_, SessionState::kStart) == SessionState::kInit,
           "Method can only be called when state is 'Init'.");
 
-      sock_.open(boost::asio::ip::udp::v4());
+      sock_.open(session_options_ptr_->svr_ep.protocol());
 
       auto self = shared_from_this();
 
@@ -213,9 +215,6 @@ class AsioUdpClient : public std::enable_shared_from_this<AsioUdpClient> {
                 ++stop_step;
               case 3:
                 sock_.close();
-                ++stop_step;
-              case 4:
-                sock_.release();
                 ++stop_step;
               default:
                 stop_step = 0;
@@ -419,15 +418,13 @@ class AsioUdpClientPool
       const AsioUdpClient::Options& client_options) {
     return boost::asio::co_spawn(
         mgr_strand_,
-        [this, &client_options]() -> Awaitable<std::shared_ptr<AsioUdpClient>> {
+        [this, client_options]() -> Awaitable<std::shared_ptr<AsioUdpClient>> {
           if (state_.load() != State::kStart) [[unlikely]] {
             MW_WARN("Udp cli pool is closed, will not return cli instance.");
             co_return std::shared_ptr<AsioUdpClient>();
           }
 
-          const size_t client_hash = AsioEndpointHash{}(client_options.svr_ep);
-
-          auto itr = client_map_.find(client_hash);
+          auto itr = client_map_.find(client_options.svr_ep);
           if (itr != client_map_.end()) {
             if (itr->second->IsRunning()) co_return itr->second;
             client_map_.erase(itr);
@@ -450,7 +447,7 @@ class AsioUdpClientPool
           client_ptr->Initialize(client_options);
           client_ptr->Start();
 
-          client_map_.emplace(client_hash, client_ptr);
+          client_map_.emplace(client_options.svr_ep, client_ptr);
           co_return client_ptr;
         },
         boost::asio::use_awaitable);
@@ -480,7 +477,7 @@ class AsioUdpClientPool
   std::atomic<State> state_ = State::kPreInit;
 
   // Client management
-  std::unordered_map<size_t, std::shared_ptr<AsioUdpClient>> client_map_;
+  std::unordered_map<AsioUdpClient::Udp::endpoint, std::shared_ptr<AsioUdpClient>, AsioEndpointHash> client_map_;
 };
 
 }  // namespace ibmw::common::net

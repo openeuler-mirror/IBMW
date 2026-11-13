@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "c/util/buffer_base.h"
 #include "c/util/string.h"
 
@@ -112,6 +114,13 @@ typedef struct {
    * Output: Custom type support
    */
   const void* (*custom_type_support_ptr)(void* ctx);
+
+  /**
+   * @brief Smallest byte size of one in-memory message, normally sizeof(T).
+   * 0 means unknown. A loaned payload smaller than this is never read as a
+   * message; loaned capture drops payloads whose type reports 0.
+   */
+  size_t msg_min_size;
 
   /// Implement pointer
   void* ctx;

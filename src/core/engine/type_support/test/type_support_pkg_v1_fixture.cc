@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <atomic>
+#include <iterator>
 #include <utility>
 
 #include "type_support/type_support_pkg_main.h"
@@ -76,6 +77,8 @@ const ibmw_type_support_base_t type_support{
     .ctx = nullptr};
 #if defined(IBMW_TYPE_SUPPORT_FIXTURE_NULL_TYPE)
 const ibmw_type_support_base_t* type_support_array[]{nullptr};
+#elif defined(IBMW_TYPE_SUPPORT_FIXTURE_DUPLICATE_TYPE)
+const ibmw_type_support_base_t* type_support_array[]{&type_support, &type_support};
 #else
 const ibmw_type_support_base_t* type_support_array[]{&type_support};
 #endif
@@ -127,9 +130,13 @@ const ibmw_type_support_package_v1_t* IbmwDynlibGetTypeSupportPackageV1() {
   ++load_count;
   if (load_hook) load_hook(load_hook_context);
   static const ibmw_type_support_package_v1_t package{
+#if defined(IBMW_TYPE_SUPPORT_FIXTURE_OLD_PACKAGE_VERSION)
       .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V1,
+#else
+      .abi_version = IBMW_TYPE_SUPPORT_PACKAGE_ABI_VERSION_V2,
+#endif
       .struct_size = sizeof(ibmw_type_support_package_v1_t),
-      .entry_count = 1,
+      .entry_count = std::size(type_support_array),
       .entries = type_support_array,
       .schema_support = &schema_support_package,
       .reserved = {}};

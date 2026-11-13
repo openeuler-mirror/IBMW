@@ -79,17 +79,33 @@ void TimerExecutor::Initialize(std::string_view name,
   dt_count_ = static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(options_.dt).count());
 
+  // dt_count_ and every wheel size are used as divisors on the dispatch path.
+  MW_REQUIRE(dt_count_ > 0, "Timer executor '{}': dt_us must be greater than 0.", name_);
+  MW_REQUIRE(!options_.wheel_size.empty(), "Timer executor '{}': wheel_size must not be empty.", name_);
+  for (size_t sz : options_.wheel_size) {
+    MW_REQUIRE(sz >= 2, "Timer executor '{}': every wheel_size entry must be at least 2.", name_);
+  }
+
   uint64_t cur_scale = 1;
   for (size_t ii = 0; ii < options_.wheel_size.size(); ++ii) {
     uint64_t start_pos = (ii == 0) ? 0 : 1;
+    const uint64_t unit = cur_scale;
     timing_wheel_vec_.emplace_back(TimingWheelTool{
         .current_pos = start_pos,
         .scale = (cur_scale *= options_.wheel_size[ii]),
+        .unit = unit,
+        // Slot 0 counts as pulled: the next wheel_size slots are free.
+        .limit = (options_.wheel_size[ii] + 1) * unit,
         .wheel = std::vector<TaskList>(options_.wheel_size[ii]),
         .borrow_func = [ii, this]() {
           TaskList task_list;
           if (ii < options_.wheel_size.size() - 1) {
-            task_list = timing_wheel_vec_[ii + 1].Tick();
+            // A slot of the level above is pulled down here, before it
+            // starts (when every level below wraps): one more slot of it is
+            // free from now on.
+            auto& upper = timing_wheel_vec_[ii + 1];
+            upper.limit += upper.unit;
+            task_list = upper.Tick();
           } else {
             auto itr = timing_task_map_.find(timing_task_map_pos_);
             ++timing_task_map_pos_;
@@ -99,17 +115,19 @@ void TimerExecutor::Initialize(std::string_view name,
             }
           }
 
+          // Slot of a task within this level: its tick in units of the
+          // level below, as in DispatchAt().
+          auto& level = timing_wheel_vec_[ii];
           while (!task_list.empty()) {
             auto itr = task_list.begin();
-            auto& cur_list =
-                timing_wheel_vec_[ii]
-                    .wheel[itr->tick_count % timing_wheel_vec_[ii].wheel.size()];
+            auto& cur_list = level.wheel[(itr->tick_count / level.unit) % level.wheel.size()];
             cur_list.splice(cur_list.end(), task_list, itr);
           }
         }});
   }
 
   timing_task_map_pos_ = 1;
+  timing_task_map_unit_ = cur_scale;
 
   options_node = options_;
 }
@@ -132,8 +150,17 @@ void TimerExecutor::Shutdown() {
     timer_thread_ptr_->join();
 
   timer_thread_ptr_.reset();
-  timing_task_map_.clear();
-  timing_wheel_vec_.clear();
+  // The dropped tasks are destroyed after the lock is released: a task's
+  // destructor may call back into this executor.
+  decltype(timing_task_map_) dropped_map;
+  decltype(timing_wheel_vec_) dropped_wheels;
+  {
+    // DispatchAt() checks start_flag_ under this lock.
+    std::unique_lock<std::shared_mutex> lck(tick_mutex_);
+    start_flag_.store(false, std::memory_order_relaxed);
+    dropped_map.swap(timing_task_map_);
+    dropped_wheels.swap(timing_wheel_vec_);
+  }
   get_executor_func_ = nullptr;
 }
 
@@ -172,37 +199,59 @@ std::chrono::system_clock::time_point TimerExecutor::Now() const noexcept {
 void TimerExecutor::DispatchAt(
     std::chrono::system_clock::time_point tp, ibmw::executor::Task&& task) noexcept {
   try {
-    uint64_t virtual_tp = ibmw::common::util::GetTimestampNs(tp) - start_time_point_;
+    const uint64_t tp_ns = ibmw::common::util::GetTimestampNs(tp);
 
     std::unique_lock<std::shared_mutex> lck(tick_mutex_);
 
-    if (virtual_tp < current_tick_count_ * dt_count_) {
+    // Before the timer thread has set the time origin, a task would be
+    // scheduled against origin 0 and never run; after Shutdown() (which
+    // clears the flag under this lock) the wheels are gone. start_flag_
+    // (acquire) publishes start_time_point_.
+    if (!start_flag_.load(std::memory_order_acquire)) [[unlikely]] {
+      WarnTimedTaskDropped();
+      return;
+    }
+
+    // Compare before subtracting: a time point before the start is due.
+    if (tp_ns < start_time_point_ || tp_ns - start_time_point_ < current_tick_count_ * dt_count_) {
       lck.unlock();
       Dispatch(std::move(task));
       return;
     }
 
-    uint64_t target_tick = virtual_tp / dt_count_;
-    uint64_t diff_tick_count = target_tick - current_tick_count_;
+    const uint64_t target_tick = (tp_ns - start_time_point_) / dt_count_;
 
-    const size_t len = options_.wheel_size.size();
-    for (size_t ii = 0; ii < len; ++ii) {
-      if (diff_tick_count < options_.wheel_size[ii]) {
-        auto pos = target_tick % options_.wheel_size[ii];
-
-        // TODO(): Sorting tasks based on time and inserting them into it
-        timing_wheel_vec_[ii].wheel[pos].emplace_back(
-            TaskWithTimestamp{virtual_tp / dt_count_, std::move(task)});
+    // Level 0 holds the next wheel_size[0] ticks. A slot of a higher level
+    // is pulled one level down before it starts, so a task goes to the
+    // first level whose slot for it is not pulled yet and comes up within
+    // one rotation (target below the level's limit), otherwise to the far map.
+    auto& level0 = timing_wheel_vec_[0];
+    if (target_tick - current_tick_count_ < level0.wheel.size()) {
+      level0.wheel[target_tick % level0.wheel.size()].emplace_back(TaskWithTimestamp{target_tick, std::move(task)});
+      return;
+    }
+    for (size_t ii = 1; ii < timing_wheel_vec_.size(); ++ii) {
+      auto& level = timing_wheel_vec_[ii];
+      if (target_tick < level.limit) {
+        // Unsorted: the pull-down places each task by its own tick; the order
+        // within one tick is not guaranteed.
+        level.wheel[(target_tick / level.unit) % level.wheel.size()].emplace_back(
+            TaskWithTimestamp{target_tick, std::move(task)});
         return;
       }
-      diff_tick_count /= options_.wheel_size[ii];
-      target_tick /= options_.wheel_size[ii];
     }
 
-    timing_task_map_[target_tick].emplace_back(
-        TaskWithTimestamp{virtual_tp / dt_count_, std::move(task)});
+    timing_task_map_[target_tick / timing_task_map_unit_].emplace_back(
+        TaskWithTimestamp{target_tick, std::move(task)});
   } catch (const std::exception& e) {
     MW_ERROR("{}", e.what());
+  }
+}
+
+void TimerExecutor::WarnTimedTaskDropped() const noexcept {
+  try {
+    MW_WARN_INTERVAL(1000, "Timer executor '{}' is not running, timed task dropped.", name_);
+  } catch (...) {
   }
 }
 
@@ -220,6 +269,7 @@ void TimerExecutor::TimerLoop() {
   std::string threadname = name_;
 
   try {
+    ibmw::runtime::core::util::EnsureAltSignalStackForCurrentThread();
     ibmw::runtime::core::util::SetNameForCurrentThread(threadname);
     ibmw::runtime::core::util::BindCpuForCurrentThread(options_.thread_bind_cpu);
     ibmw::runtime::core::util::SetCpuSchedForCurrentThread(options_.thread_sched_policy);
@@ -231,11 +281,11 @@ void TimerExecutor::TimerLoop() {
   auto last_loop_sys_tp = std::chrono::system_clock::now();
   auto last_loop_std_tp = std::chrono::steady_clock::now();
 
-  // Record the initial time
+  // Record the initial time. Ticks follow the steady clock unless
+  // use_system_clock is set, but Now() and DispatchAt() always speak system
+  // time (like the thread pool executor), so system_clock::now() + d works.
   start_time_point_ =
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          (options_.use_system_clock ? last_loop_sys_tp.time_since_epoch() : last_loop_std_tp.time_since_epoch()))
-          .count();
+      std::chrono::duration_cast<std::chrono::nanoseconds>(last_loop_sys_tp.time_since_epoch()).count();
 
   start_flag_.store(true);
   start_flag_.notify_all();

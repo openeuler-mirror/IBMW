@@ -46,17 +46,79 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <exception>
 #include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include "c/transport/transport_handle_base.h"
 #include "c/transport/transport_context_base.h"
+#include "base/log_util.h"
 #include "cpp/transport/transport_handle.h"
 
 namespace ibmw::transport {
+
+namespace details {
+// Receives the error reports of LoanedSubscriber callbacks; tests may
+// replace its functions.
+inline ibmw::common::util::LoggerWrapper& LoanedCallbackErrorLogger() {
+  static ibmw::common::util::LoggerWrapper logger;
+  return logger;
+}
+
+// Runs a user callback inside the noexcept C-ABI bridge of one subscription.
+// An exception is reported (at most once per second per subscription, so a
+// callback that always throws cannot flood the log) and the sample is
+// dropped (API-031). The normal path costs nothing extra.
+class LoanedCallbackGuard {
+ public:
+  explicit LoanedCallbackGuard(std::string_view msg_type) : msg_type_(msg_type) {}
+
+  template <class F>
+  void Invoke(F&& f) noexcept {
+    try {
+      std::forward<F>(f)();
+    } catch (const std::exception& e) {
+      Report(e.what());
+    } catch (...) {
+      Report("unknown exception");
+    }
+  }
+
+ private:
+  void Report(const char* what) noexcept {
+    try {
+      const auto now_ms = static_cast<int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count());
+      auto next = next_report_ms_.load(std::memory_order_relaxed);
+      if (now_ms < next ||
+          !next_report_ms_.compare_exchange_strong(next, now_ms + 1000, std::memory_order_relaxed)) {
+        return;
+      }
+      MW_LOG(LoanedCallbackErrorLogger(), ibmw::common::util::kLogLevelError,
+             "LoanedSubscriber callback for '{}' threw: {}; the sample was dropped.",
+             msg_type_, what);
+    } catch (...) {
+    }
+  }
+
+  const std::string msg_type_;
+  std::atomic<int64_t> next_report_ms_{0};
+};
+}  // namespace details
 
 template <typename T>
 class LoanedSubscriber {
@@ -93,18 +155,18 @@ class LoanedSubscriber {
       //   void(ctx_ptr, payload_ptr, payload_size, release_callback)
       // We bridge it into TypedCallback after a sizeof(T) sanity check.
       LoanedMessageCallback bridged(
-        [cb_holder = std::move(cb_holder)](
+        [cb_holder = std::move(cb_holder),
+         guard = std::make_shared<details::LoanedCallbackGuard>(msg_type)](
             const ibmw_transport_context_base_t* /*ctx_ptr*/,
             const void* payload_ptr,
             size_t payload_size,
             ibmw_function_base_t* /*release_callback*/) {
           if (payload_ptr == nullptr || payload_size < sizeof(T)) return;
-          try {
+          // Public callback boundary: user exceptions must not cross the
+          // noexcept Function invoker used by the C ABI bridge.
+          guard->Invoke([&] {
             cb_holder(*static_cast<const T*>(payload_ptr));
-          } catch (...) {
-            // Public callback boundary: user exceptions must not cross the
-            // noexcept Function invoker used by the C ABI bridge.
-          }
+          });
         });
 
       // msg_type_support is required by the dispatcher for symmetry with
@@ -129,17 +191,17 @@ class LoanedSubscriber {
       auto cb_holder = std::move(cb);
 
       LoanedMessageCallback bridged(
-        [cb_holder = std::move(cb_holder)](
+        [cb_holder = std::move(cb_holder),
+         guard = std::make_shared<details::LoanedCallbackGuard>(msg_type)](
             const ibmw_transport_context_base_t* /*ctx_ptr*/,
             const void* payload_ptr,
             size_t payload_size,
             ibmw_function_base_t* /*release_callback*/) {
           if (payload_ptr == nullptr || payload_size < sizeof(T)) return;
-          try {
+          // See Attach(): this bridge is a noexcept callback boundary.
+          guard->Invoke([&] {
             cb_holder(*static_cast<const T*>(payload_ptr), payload_size);
-          } catch (...) {
-            // See Attach(): this bridge is a noexcept callback boundary.
-          }
+          });
         });
 
       return receiver.AttachLoaned(GetPodTypeSupport(msg_type),
@@ -161,19 +223,19 @@ class LoanedSubscriber {
       }
 
       LoanedMessageCallback bridged(
-        [cb_holder = std::move(cb)](
+        [cb_holder = std::move(cb),
+         guard = std::make_shared<details::LoanedCallbackGuard>(msg_type)](
             const ibmw_transport_context_base_t* /*ctx_ptr*/,
             const void* payload_ptr,
             size_t payload_size,
             ibmw_function_base_t* release_callback) {
           ReceivedLoan loan(payload_ptr, payload_size, release_callback);
           if (payload_ptr == nullptr || payload_size < sizeof(T)) return;
-          try {
+          // Local/moved ReceivedLoan destruction releases exactly once.
+          guard->Invoke([&] {
             cb_holder(*static_cast<const T*>(payload_ptr), payload_size,
                       std::move(loan));
-          } catch (...) {
-            // Local/moved ReceivedLoan destruction releases exactly once.
-          }
+          });
         });
 
       return receiver.AttachLoanedRetained(
@@ -185,27 +247,56 @@ class LoanedSubscriber {
   }
 
  private:
-  // The loan fast lane is keyed on (topic, msg_type) strings only —
-  // SHM-capable drivers that override AttachLoaned do not deserialize
-  // the payload, so they only need the type-name string for URL
-  // composition, not a full type-support vtable. We hand them a thin
-  // static stub that carries the type-name and trivially noop-reports
-  // for size, so the dispatcher's TypeSupportRef::TypeName() lookup
-  // succeeds.
+  // The loan fast lane is keyed on (topic, msg_type) strings only: SHM-capable
+  // drivers that override AttachLoaned do not deserialize the payload. The
+  // dispatcher still keeps the type support in every driver's handler info,
+  // so each (T, msg_type) gets a complete one that lives for the process
+  // (API-030). POD payloads are never serialized: those ops report failure.
   static const ibmw_type_support_base_t* GetPodTypeSupport(
       std::string_view msg_type) {
-    // Per-call thread-local stub: msg_type lifetime is the caller's
-    // responsibility (typically a string literal).
-    thread_local ibmw_type_support_base_t stub{};
-    thread_local std::string ts_storage;
-    ts_storage.assign(msg_type);
-    stub.type_name = [](void* ctx) -> ibmw_string_view_t {
-      auto* s = static_cast<std::string*>(ctx);
-      return ibmw_string_view_t{s->data(), s->size()};
+    struct Entry {
+      std::string name;
+      ibmw_type_support_base_t base;
     };
-    stub.ctx = &ts_storage;
-    return &stub;
+    static std::mutex mutex;
+    // Leaked on purpose: drivers may use the pointers during static destruction.
+    static auto& entries = *new std::map<std::string, std::unique_ptr<Entry>, std::less<>>();
+
+    // Built before the lookup so an unrepresentable name throws first.
+    std::string name(msg_type);
+    std::lock_guard lock(mutex);
+    auto itr = entries.find(name);
+    if (itr == entries.end()) {
+      auto entry = std::make_unique<Entry>(Entry{.name = std::move(name), .base = kPodTypeSupportOps});
+      entry->base.ctx = &entry->name;
+      itr = entries.emplace(entry->name, std::move(entry)).first;
+    }
+    return &itr->second->base;
   }
+
+  static constexpr ibmw_type_support_base_t kPodTypeSupportOps{
+      .type_name = [](void* ctx) -> ibmw_string_view_t {
+        const auto* name = static_cast<const std::string*>(ctx);
+        return ibmw_string_view_t{name->data(), name->size()};
+      },
+      .create = [](void*) -> void* {
+        if constexpr (std::is_default_constructible_v<T>) {
+          return new (std::nothrow) T();
+        } else {
+          return nullptr;
+        }
+      },
+      .destroy = [](void*, void* msg) { delete static_cast<T*>(msg); },
+      .copy = [](void*, const void* from, void* to) { std::memcpy(to, from, sizeof(T)); },
+      .move = [](void*, void* from, void* to) { std::memcpy(to, from, sizeof(T)); },
+      .serialize = [](void*, ibmw_string_view_t, const void*, const ibmw_buffer_array_allocator_t*,
+                      ibmw_buffer_array_t*) -> bool { return false; },
+      .deserialize = [](void*, ibmw_string_view_t, ibmw_buffer_array_view_t, void*) -> bool { return false; },
+      .serialization_types_supported_num = [](void*) -> size_t { return 0; },
+      .serialization_types_supported_list = [](void*) -> const ibmw_string_view_t* { return nullptr; },
+      .custom_type_support_ptr = [](void*) -> const void* { return nullptr; },
+      .msg_min_size = sizeof(T),
+      .ctx = nullptr};
 };
 
 }  // namespace ibmw::transport

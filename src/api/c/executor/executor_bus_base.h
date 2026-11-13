@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stddef.h>
+
 #include "c/executor/executor_base.h"
 #include "c/util/string.h"
 
@@ -15,6 +17,13 @@ extern "C" {
  *
  */
 typedef struct {
+  /**
+   * @brief Size of this table in bytes (sizeof of the provider's struct).
+   * Must be the first field. Consumers reject a table smaller than the
+   * struct they were compiled against.
+   */
+  size_t struct_size;
+
   /**
    * @brief Function to get executor
    * @note

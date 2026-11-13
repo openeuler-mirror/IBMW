@@ -78,7 +78,8 @@ class AsioHttp2ClientPool
             co_return std::shared_ptr<AsioHttp2Client>();
           }
 
-          auto client_key = client_options.host + client_options.service;
+          // The separator keeps host "10.0.0.1" service "23" apart from "10.0.0.12" "3".
+          auto client_key = client_options.host + '\n' + client_options.service;
 
           auto itr = client_map_.find(client_key);
           if (itr != client_map_.end()) {

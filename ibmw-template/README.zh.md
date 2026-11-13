@@ -199,7 +199,7 @@ python3 "$IBMW_SOURCE_DIR/src/tools/ibmw_gen/ibmw_gen.py" \
 my_ibmw_project/
   CMakeLists.txt          # 可直接构建的 CMake 工程
   cfg/                    # 每个 Demo 的 YAML 配置（app + pkg）
-  src/                    # 带 TODO 标记的 module 脚手架
+  src/                    # module 源码；Demo 逻辑来自 yaml 的 user_code
 ```
 
 ### 构建并运行
@@ -223,7 +223,7 @@ make -j$(nproc)
 | 手写（本模板） | ibmw-gen |
 |----------------|----------|
 | 手写 module `.h`/`.cc`、CMake target、YAML 配置、type bridge | 在一份 `.ibmw.yaml` 里声明，其余全自动生成 |
-| 每行代码完全可控 | 生成的脚手架带 TODO 标记，你只填业务逻辑 |
+| 每行代码完全可控 | 业务逻辑写在 `user_code`（或生成的 TODO 区域） |
 | 适合学习 IBMW 内部机制 | 适合快速起新项目 |
 
 两条路径产出代码等价。本模板里的手写 Demo 与生成出来的 `my_ibmw_project/`

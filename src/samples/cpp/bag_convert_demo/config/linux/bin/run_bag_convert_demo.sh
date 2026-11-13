@@ -25,7 +25,7 @@ fi
 ROS2_STORAGE_PLUGINS="$(ros2 bag list storage 2>/dev/null)"
 if ! grep -Fx mcap <<< "${ROS2_STORAGE_PLUGINS}" >/dev/null; then
   echo "bag_convert_demo: the rosbag2 MCAP storage plugin is not available." >&2
-  echo "Install ros-humble-rosbag2-storage-mcap and source ROS2 again." >&2
+  echo "Install ros-${ROS_DISTRO:-humble}-rosbag2-storage-mcap and source ROS2 again." >&2
   exit 1
 fi
 

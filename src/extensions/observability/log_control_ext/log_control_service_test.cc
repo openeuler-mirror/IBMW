@@ -120,8 +120,10 @@ TEST_F(LogControlServiceTest, InvalidBatchesDoNotMutateAnyLogger) {
 
 TEST(LogControlFailureTest, HandlerExceptionsCompleteTheRpcWithFailure) {
   TestService service;
-  service.Call<protocol::GetModuleLogLevelRsp>("GetModuleLogLevel", protocol::GetModuleLogLevelReq{},
-                                             IBMW_RPC_STATUS_SVR_HANDLE_FAILED);
+  // Without a logging subsystem the call is answered with NOT_READY (EXT-014).
+  const auto not_ready = service.Call<protocol::GetModuleLogLevelRsp>(
+      "GetModuleLogLevel", protocol::GetModuleLogLevelReq{});
+  EXPECT_EQ(not_ready.msg, "NOT_READY");
   logger::LoggingSubsystem logging;
   service.SetLoggingSubsystem(&logging);
   // The subsystem rejects calls before Start; the RPC must still complete once.

@@ -6,6 +6,8 @@
 #include "cpp/util/type_support.h"
 #include "net_ext/global.h"
 #include "base/url_encode.h"
+#include "net_base/http_media_type.h"
+#include "net_ext/meta_filter.h"
 
 namespace YAML {
 template <>
@@ -185,14 +187,13 @@ bool HttpTransportDriver::OnMessage(
 
       auto req_content_type_boost_sw = req_content_type_itr->value();
       std::string_view req_content_type(req_content_type_boost_sw.data(), req_content_type_boost_sw.size());
-      if (req_content_type == "application/json" ||
-          req_content_type == "application/json charset=utf-8") {
+      if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/json")) {
         serialization_type = "json";
         rsp.set(http::field::content_type, "application/json");
-      } else if (req_content_type == "application/cdr") {
+      } else if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/cdr")) {
         serialization_type = "cdr";
         rsp.set(http::field::content_type, "application/cdr");
-      } else if (req_content_type == "application/ros2") {
+      } else if (ibmw::common::net::HttpMediaTypeIs(req_content_type, "application/ros2")) {
         serialization_type = "ros2";
         rsp.set(http::field::content_type, "application/ros2");
       } else {
@@ -205,17 +206,19 @@ bool HttpTransportDriver::OnMessage(
       // context
       auto ctx_ptr = std::make_shared<ibmw::transport::Context>(ibmw_transport_context_type_t::IBMW_TRANSPORT_SUBSCRIBER_CONTEXT);
 
-      ctx_ptr->SetSerializationType(serialization_type);
-
-      // Read other fields from http header into context
+      // Read other fields from http header into context; framework fields are
+      // set afterwards so a peer cannot override them.
       for (auto const& field : req) {
+        auto key = ibmw::common::util::HttpHeaderDecode(
+            ibmw::common::net::ToStdStringView(field.name_string()));
+        if (!IsPeerMetaKeyAllowed(key)) continue;
         ctx_ptr->SetMetaValue(
-            ibmw::common::util::HttpHeaderDecode(
-                ibmw::common::net::ToStdStringView(field.name_string())),
+            key,
             ibmw::common::util::HttpHeaderDecode(
                 ibmw::common::net::ToStdStringView(field.value())));
       }
 
+      ctx_ptr->SetSerializationType(serialization_type);
       ctx_ptr->SetMetaValue(IBMW_TRANSPORT_CONTEXT_KEY_DRIVER, Name());
 
       // Get message buf
@@ -293,10 +296,20 @@ void HttpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
                           util::UrlEncode(info.topic_name) + "/" +
                           util::UrlEncode(info.msg_type);
 
-    // http req
-    auto req_ptr = std::make_shared<http::request<http::dynamic_body>>(
-        http::verb::post, pattern, 11);
-    req_ptr->set(http::field::user_agent, "ibmw");
+    // http req. The body bytes are shared read-only by all targets; each
+    // target gets its own header (Host) so no request is mutated after its
+    // coroutine is spawned.
+    using ReqType = http::request<http::span_body<const char>>;
+    // One allocation holds the request and owns the body, matching the old
+    // single-target allocation count; extra targets copy only the header.
+    struct OwnedReq {
+      explicit OwnedReq(std::string_view target) : req(http::verb::post, target, 11) {}
+      ReqType req;
+      std::unique_ptr<char[]> body;
+    };
+    auto owned_ptr = std::make_shared<OwnedReq>(pattern);
+    ReqType& base_req = owned_ptr->req;
+    base_req.set(http::field::user_agent, "ibmw");
 
     // Determine the data serialization type, first look for ctx. If it is not configured in ctx, use the first supported serialization type.
     auto publish_type_support_ref = info.msg_type_support_ref;
@@ -310,22 +323,22 @@ void HttpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
     }
 
     if (serialization_type == "json") {
-      req_ptr->set(http::field::content_type, "application/json");
+      base_req.set(http::field::content_type, "application/json");
     } else if (serialization_type == "cdr") {
-      req_ptr->set(http::field::content_type, "application/cdr");
+      base_req.set(http::field::content_type, "application/cdr");
     } else if (serialization_type == "ros2") {
-      req_ptr->set(http::field::content_type, "application/ros2");
+      base_req.set(http::field::content_type, "application/ros2");
     } else {
-      req_ptr->set(http::field::content_type, "application/" + std::string(serialization_type));
+      base_req.set(http::field::content_type, "application/" + std::string(serialization_type));
     }
 
     // Set other context meta fields to http header
     if (msg_wrapper.ctx_ref) {
       auto meta_key_vals_array = msg_wrapper.ctx_ref.GetMetaKeyValsArray();
-      for (size_t ii = 0; ii < meta_key_vals_array.len; ii += 2) {
+      for (size_t ii = 0; ii + 1 < meta_key_vals_array.len; ii += 2) {
         auto key = ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii]);
         auto val = ibmw::util::ToStdStringView(meta_key_vals_array.str_array[ii + 1]);
-        req_ptr->set(
+        base_req.set(
             ibmw::common::util::HttpHeaderEncode(key),
             ibmw::common::util::HttpHeaderEncode(val));
       }
@@ -338,66 +351,57 @@ void HttpTransportDriver::Send(runtime::core::transport::MessageFrame& msg_wrapp
         "Msg serialization failed, serialization_type {}, pkg_path: {}, module_name: {}, topic_name: {}, msg_type: {}",
         serialization_type, info.pkg_path, info.module_name, info.topic_name, info.msg_type);
 
-    // Fill the http req package and copy it directly
+    // Copy the serialized buffers into one contiguous, shared body
     size_t msg_size = buffer_array_view_ptr->BufferSize();
-    auto req_beast_buf = req_ptr->body().prepare(msg_size);
-
+    owned_ptr->body.reset(new char[msg_size]);
     const auto* data = buffer_array_view_ptr->Data();
-    auto buffer_array_pos = 0;
-    size_t buffer_pos = 0;
-
-    for (auto buf : boost::beast::buffers_range_ref(req_beast_buf)) {
-      size_t cur_beast_buf_pos = 0;
-      while (cur_beast_buf_pos < buf.size()) {
-        size_t cur_beast_buffer_size = buf.size() - cur_beast_buf_pos;
-        size_t cur_buffer_size = data[buffer_array_pos].len - buffer_pos;
-
-        size_t cur_copy_size = std::min(cur_beast_buffer_size, cur_buffer_size);
-
-        memcpy(static_cast<char*>(buf.data()) + cur_beast_buf_pos,
-               static_cast<const char*>(data[buffer_array_pos].data) + buffer_pos,
-               cur_copy_size);
-
-        buffer_pos += cur_copy_size;
-        if (buffer_pos == data[buffer_array_pos].len) {
-          ++buffer_array_pos;
-          buffer_pos = 0;
-        }
-
-        cur_beast_buf_pos += cur_copy_size;
-      }
+    for (size_t ii = 0, pos = 0; ii < buffer_array_view_ptr->Size(); ++ii) {
+      if (data[ii].len == 0) continue;
+      memcpy(owned_ptr->body.get() + pos, data[ii].data, data[ii].len);
+      pos += data[ii].len;
     }
-    req_ptr->body().commit(msg_size);
-
-    req_ptr->keep_alive(true);
+    base_req.body() = {owned_ptr->body.get(), msg_size};
+    base_req.keep_alive(true);
+    base_req.prepare_payload();
+    // base_req is complete and never written again once the first coroutine
+    // is spawned; later header copies only read it.
+    const std::string& base_host = urls_to_use->front().host;
+    base_req.set(http::field::host, base_host);
 
     for (const auto& server_url : *urls_to_use) {
       MW_TRACE("Publish to server_url: {}", server_url.host + ":" + server_url.service);
+      // Targets on the base host share base_req (aliasing owned_ptr); other
+      // hosts get a header copy and keep owned_ptr alive for the body.
+      std::shared_ptr<ReqType> req_ptr;
+      if (server_url.host == base_host) {
+        req_ptr = std::shared_ptr<ReqType>(owned_ptr, &owned_ptr->req);
+      } else {
+        req_ptr = std::make_shared<ReqType>(base_req);
+        req_ptr->set(http::field::host, server_url.host);
+      }
       asio::co_spawn(
           *io_ptr_,
-          [this, server_url, req_ptr]() -> asio::awaitable<void> {
-            ibmw::common::net::AsioHttpClient::Options cli_options{
-                .host = server_url.host,
-                .service = server_url.service};
+          [this, server_url, req_ptr, owned_ptr]() -> asio::awaitable<void> {
+            try {
+              ibmw::common::net::AsioHttpClient::Options cli_options{
+                  .host = server_url.host,
+                  .service = server_url.service};
 
-            auto client_ptr = co_await http_cli_pool_ptr_->GetClient(cli_options);
-            if (!client_ptr) [[unlikely]] {
-              MW_WARN("Can not get http client!");
-              co_return;
-            }
+              auto client_ptr = co_await http_cli_pool_ptr_->GetClient(cli_options);
+              if (!client_ptr) [[unlikely]] {
+                MW_WARN("Can not get http client!");
+                co_return;
+              }
 
-            // todo:
-            // To solve thread safety issues when setting the host in requests for multiple addresses: use value copies for all except the last one, which uses a direct pointer
-            // Host and other header fields should be configured dynamically, not hardcoded.
-            req_ptr->set(http::field::host, server_url.host);
-            req_ptr->prepare_payload();
+              auto rsp = co_await client_ptr->HttpSendRecvCo<http::span_body<const char>, http::dynamic_body>(*req_ptr);
 
-            auto rsp = co_await client_ptr->HttpSendRecvCo<http::dynamic_body, http::dynamic_body>(*req_ptr);
-
-            if (rsp.result() != http::status::ok) {
-              MW_WARN("http transport send get error: {} {}",
-                         rsp.result_int(),
-                         std::string(rsp.reason().data(), rsp.reason().size()));
+              if (rsp.result() != http::status::ok) {
+                MW_WARN("http transport send get error: {} {}",
+                           rsp.result_int(),
+                           std::string(rsp.reason().data(), rsp.reason().size()));
+              }
+            } catch (const std::exception& e) {
+              MW_WARN("http transport send to {}:{} failed: {}", server_url.host, server_url.service, e.what());
             }
           },
           asio::detached);

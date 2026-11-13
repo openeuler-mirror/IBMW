@@ -4,84 +4,103 @@
 #include "engine/logger/crash_signal_handling.h"
 
 #include "base/log_util.h"
+#include "engine/thread_tools.h"
 
+// Handlers are not installed on OHOS until the unwinder is validated on
+// target boards (same gate for backward-cpp and the selfdev handler).
 #if !defined(__OHOS__) && !defined(__OHOS)
-  #define IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD 1
+  #define IBMW_CRASH_SIGNAL_HANDLING_ENABLED 1
 #else
+  #define IBMW_CRASH_SIGNAL_HANDLING_ENABLED 0
+#endif
+
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
   #define IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD 0
+  #include <string_view>
+
+  #include "ibmw_selfdev/crash_handler/crash_handler.h"
+#else
+  #define IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD IBMW_CRASH_SIGNAL_HANDLING_ENABLED
 #endif
 
 #if IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
+#include <execinfo.h>
+
 #include "backward.hpp"
 #endif
 
-#if defined(_WIN32)
-  #include <windows.h>
-  #include <cstdint>
-  #include <cstdlib>
-  #include <sstream>
-
-#else
-  #include <signal.h>
-  #include <ucontext.h>
-  #include <unistd.h>
-  #include <cstring>
-#endif
+#include <errno.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <unistd.h>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace ibmw::runtime::core::logger {
 
-#if defined(_WIN32)
+#if defined(IBMW_SELFDEV_CRASH_HANDLER)
 
-void CrashSignalHandling::PrintStacktrace(CONTEXT* ctx, int skip_frames) {
-  backward::Printer printer;
-
-  backward::StackTrace st;
-  st.set_machine_type(printer.resolver().machine_type());
-
-  HANDLE real_thd = nullptr;
-  DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                  GetCurrentProcess(), &real_thd, 0, FALSE,
-                  DUPLICATE_SAME_ACCESS);
-  if (real_thd) st.set_thread_handle(real_thd);
-
-  st.load_here(32 + skip_frames, ctx);
-  st.skip_n_firsts(skip_frames);
-
-  printer.address = true;
-  std::stringstream ss;
-  printer.print(st, ss);
-
-  MW_ERROR("CRASH SIGNAL HANDLING STACKTRACE:\n{}", ss.str());
-
-  if (real_thd) CloseHandle(real_thd);
-}
-
-LONG WINAPI CrashSignalHandling::UnhandledExceptionFilter(EXCEPTION_POINTERS* info) {
-  if (info && info->ExceptionRecord) {
-    MW_ERROR("CRASH SIGNAL HANDLING EXCEPTION CODE: 0x{:08X}", static_cast<uint32_t>(info->ExceptionRecord->ExceptionCode));
-  } else {
-    MW_ERROR("CRASH SIGNAL HANDLING: unhandled exception (no exception record)");
-  }
-
-  if (info && info->ContextRecord) {
-    PrintStacktrace(info->ContextRecord, 0);
-  }
-
-  // Let other handlers / default Windows error reporting continue.
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-
-void CrashSignalHandling::AbortHandler(int) {
-  CONTEXT ctx;
-  RtlCaptureContext(&ctx);
-  MW_ERROR("CRASH SIGNAL HANDLING: SIGABRT");
-  PrintStacktrace(&ctx, 0);
-  std::abort();
+void CrashSignalHandling::ReportToLog(const char* report, size_t len, void*) {
+  MW_ERROR("Crash signal handling stacktrace: \n{}", std::string_view(report, len));
+  // The handler ends the process as soon as this returns.
+  RunCrashFlush();
 }
 
 CrashSignalHandling::CrashSignalHandling() {
-  ::SetUnhandledExceptionFilter(&UnhandledExceptionFilter);
-  std::signal(SIGABRT, &AbortHandler);
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  // Counted once installed: a constructor that throws has no destructor.
+  if (instances_ != 0) {
+    ++instances_;
+    return;
+  }
+  #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  ibmw::selfdev::crash::Options options;
+  options.alt_stack_size = 1024 * 1024 * 8;  // same as the backward-cpp path
+  options.report_callback = &ReportToLog;
+  // The raw report also goes to stderr (async-signal-safe) in case logging
+  // itself is what crashed.
+  options.output_fd = STDERR_FILENO;
+  // Install() replaces the calling thread's alternate stack; the last owner
+  // puts this one back.
+  (void)sigaltstack(nullptr, &selfdev_previous_alt_stack_);
+  selfdev_alt_stack_thread_ = std::this_thread::get_id();
+  (void)ibmw::selfdev::crash::Install(options);
+  stack_t installed{};
+  if (sigaltstack(nullptr, &installed) == 0 && (installed.ss_flags & SS_DISABLE) == 0) {
+    selfdev_alt_stack_ = installed.ss_sp;
+  }
+  util::EnableAltSignalStacks(true);  // executor threads started from now on
+  #endif
+  instances_ = 1;
+}
+
+CrashSignalHandling::~CrashSignalHandling() {
+  // An earlier owner leaves everything to the owners still alive.
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (--instances_ != 0) return;
+  #if IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  util::EnableAltSignalStacks(false);
+  // Restores the actions from before Install() where the handler is still
+  // ours, so no crash reports through a logger that is gone.
+  ibmw::selfdev::crash::Uninstall();
+  // The selfdev stack itself is never freed (another thread may still be on
+  // it); only the installing thread can switch back.
+  stack_t current{};
+  if (selfdev_alt_stack_ != nullptr && std::this_thread::get_id() == selfdev_alt_stack_thread_ &&
+      sigaltstack(nullptr, &current) == 0 && current.ss_sp == selfdev_alt_stack_ &&
+      (current.ss_flags & SS_DISABLE) == 0) {
+    if ((selfdev_previous_alt_stack_.ss_flags & SS_DISABLE) != 0) {
+      stack_t off{};
+      off.ss_flags = SS_DISABLE;
+      (void)sigaltstack(&off, nullptr);
+    } else {
+      (void)sigaltstack(&selfdev_previous_alt_stack_, nullptr);
+    }
+  }
+  selfdev_alt_stack_ = nullptr;
+  #endif
+  PublishLogger(nullptr);
 }
 
 #elif IBMW_CRASH_SIGNAL_HANDLING_HAS_BACKWARD
@@ -90,22 +109,52 @@ std::vector<int> DefaultSignals() {
   return backward::SignalHandling::make_default_signals();
 }
 
-void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
-  // [Intentional Leak]
-  // This memory is registered via sigaltstack() as the alternative signal stack.
-  // The kernel retains this address independent of this object's lifecycle.
-  //
-  // Freeing this memory poses a critical risk: if a signal occurs after destruction,
-  // the kernel will write to the freed memory, causing heap corruption.
-  // This memory must remain valid for the entire process lifetime.
+CrashSignalHandling::CrashSignalHandling() {
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  // Counted once installed: a constructor that throws has no destructor.
+  if (instances_ != 0) {
+    ++instances_;
+    return;
+  }
+  InstallHandlers(DefaultSignals());
+  util::EnableAltSignalStacks(true);  // executor threads started from now on
+  instances_ = 1;
 }
 
-CrashSignalHandling::CrashSignalHandling() { InstallHandlers(DefaultSignals()); }
+CrashSignalHandling::~CrashSignalHandling() {
+  // An earlier owner leaves everything to the owners still alive.
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (--instances_ != 0) return;
+  util::EnableAltSignalStacks(false);
+  for (auto it = previous_actions_.rbegin(); it != previous_actions_.rend(); ++it) {
+    struct sigaction current;
+    // SA_RESETHAND or a later installer may have replaced ours: keep that.
+    if (sigaction(it->first, nullptr, &current) == 0 && (current.sa_flags & SA_SIGINFO) != 0 &&
+        current.sa_sigaction == &SigHandler) {
+      (void)sigaction(it->first, &it->second, nullptr);
+    }
+  }
+  previous_actions_.clear();
+  PublishLogger(nullptr);
 
-void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
+  if (alt_stack_ == nullptr) return;
+  // The alternate stack belongs to the installing thread. Free it only when
+  // that thread can switch back to its previous one; otherwise the kernel
+  // may still use it, so it stays allocated for the process lifetime.
+  stack_t current{};
+  if (std::this_thread::get_id() != alt_stack_thread_ || sigaltstack(nullptr, &current) != 0 ||
+      current.ss_sp != alt_stack_ || sigaltstack(&previous_alt_stack_, nullptr) != 0) {
+    alt_stack_ = nullptr;  // leaked on purpose
+    return;
+  }
+  std::free(alt_stack_);
+  alt_stack_ = nullptr;
+}
+
+namespace {
+// Program counter at the fault, or nullptr where it is not known.
+void* FaultingPc(void* _ctx) {
   ucontext_t* uctx = static_cast<ucontext_t*>(_ctx);
-
-  backward::StackTrace st;
   void* error_addr = nullptr;
 
   #ifdef REG_RIP          // x86_64
@@ -135,6 +184,17 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   error_addr = reinterpret_cast<void*>(uctx->uc_mcontext->__ss.__eip);
   #endif
 
+  (void)uctx;
+  return error_addr;
+}
+}  // namespace
+
+void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
+  ucontext_t* uctx = static_cast<ucontext_t*>(_ctx);
+
+  backward::StackTrace st;
+  void* error_addr = FaultingPc(_ctx);
+
   if (error_addr) {
     st.load_from(error_addr, 32, reinterpret_cast<void*>(uctx), info->si_addr);
   } else {
@@ -145,19 +205,96 @@ void CrashSignalHandling::HandleSignal(int, siginfo_t* info, void* _ctx) {
   std::stringstream ss;
   printer.print(st, ss);
   MW_ERROR("Crash signal handling signal: {}, stacktrace: \n{}", info->si_signo, ss.str());
-
-  #if _XOPEN_SOURCE >= 700 || _POSIX_C_SOURCE >= 200809L
-  psiginfo(info, nullptr);
-  #else
-  (void)info;
-  #endif
+  // SigHandler re-raises the signal right after this returns.
+  RunCrashFlush();
 }
+
+namespace {
+volatile sig_atomic_t g_crash_signo = 0;
+
+void WriteStderr(const char* text, size_t size) noexcept {
+  while (size > 0) {
+    const ssize_t written = write(STDERR_FILENO, text, size);
+    if (written < 0 && errno == EINTR) continue;
+    if (written <= 0) return;
+    text += written;
+    size -= static_cast<size_t>(written);
+  }
+}
+
+// Appends "0x" and `value` in hex to `out`; returns the end.
+char* AppendHex(char* out, uintptr_t value) noexcept {
+  *out++ = '0';
+  *out++ = 'x';
+  int shift = static_cast<int>(sizeof(value) * 8) - 4;
+  while (shift > 0 && ((value >> shift) & 0xf) == 0) shift -= 4;
+  for (; shift >= 0; shift -= 4) *out++ = "0123456789abcdef"[(value >> shift) & 0xf];
+  return out;
+}
+
+// Where it crashed (async-signal-safe; `addr` is the fault address only when
+// `code` is positive, i.e. sent by the kernel) and a raw trace, one
+// "binary(symbol+offset)[address]" line per frame. backtrace() is not
+// async-signal-safe by the letter, only in practice once preloaded, so this
+// runs under the watchdog too.
+void WriteRawCrashReport(const siginfo_t* info, void* _ctx) noexcept {
+  char line[96];
+  char* end = line;
+  for (const char* text = "IBMW crash pc: "; *text != '\0';) *end++ = *text++;
+  end = AppendHex(end, reinterpret_cast<uintptr_t>(FaultingPc(_ctx)));
+  for (const char* text = " addr: "; *text != '\0';) *end++ = *text++;
+  end = AppendHex(end, reinterpret_cast<uintptr_t>(info->si_addr));
+  for (const char* text = " code: "; *text != '\0';) *end++ = *text++;
+  end = AppendHex(end, static_cast<uintptr_t>(static_cast<unsigned>(info->si_code)));
+  *end++ = '\n';
+  WriteStderr(line, static_cast<size_t>(end - line));
+
+  void* frames[64];
+  const int count = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, count, STDERR_FILENO);
+}
+
+// Watchdog for a hung crash report: terminate with the original signal (now
+// SIG_DFL thanks to SA_RESETHAND) so the core dump and exit status are kept.
+void CrashReportTimeout(int) {
+  const int signo = g_crash_signo;
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, signo);
+  (void)sigprocmask(SIG_UNBLOCK, &set, nullptr);
+  raise(signo);
+  _exit(EXIT_FAILURE);
+}
+}  // namespace
 
   #ifdef __GNUC__
 __attribute__((noreturn))
   #endif
 void
 CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
+  // Nothing below may hang the process: even a write to a stderr pipe nobody
+  // reads blocks. Bound it all with a watchdog (SIGALRM is left unblocked by
+  // InstallHandlers).
+  g_crash_signo = signo;
+  struct sigaction on_timeout;
+  std::memset(&on_timeout, 0, sizeof on_timeout);
+  on_timeout.sa_handler = &CrashReportTimeout;
+  sigemptyset(&on_timeout.sa_mask);
+  (void)sigaction(SIGALRM, &on_timeout, nullptr);
+  alarm(10);
+
+  // The raw part first: the crash is reported even if the symbolized trace
+  // below never completes.
+  char msg[] = "IBMW crash signal: 00\n";
+  msg[sizeof(msg) - 4] = static_cast<char>('0' + (signo / 10) % 10);
+  msg[sizeof(msg) - 3] = static_cast<char>('0' + signo % 10);
+  WriteStderr(msg, sizeof(msg) - 1);
+  WriteRawCrashReport(info, _ctx);
+
+  // HandleSignal() allocates, symbolizes and logs, none of which is
+  // async-signal-safe: if the crash happened while malloc or the log lock was
+  // held it would hang. It gets a full watchdog period of its own.
+  alarm(10);
   HandleSignal(signo, info, _ctx);
 
   // Forward the signal (SA_RESETHAND makes it use default on re-raise).
@@ -166,25 +303,32 @@ CrashSignalHandling::SigHandler(int signo, siginfo_t* info, void* _ctx) {
 }
 
 void CrashSignalHandling::EnsureAltStack() {
-  const size_t stack_size = 1024 * 1024 * 8;
-  alt_stack_.reset(static_cast<char*>(std::malloc(stack_size)));
-  if (!alt_stack_) {
-    loaded_ = false;
+  const size_t stack_size = util::kCrashAltStackSize;
+  alt_stack_ = static_cast<char*>(std::malloc(stack_size));
+  if (alt_stack_ == nullptr) {
     return;
   }
 
   stack_t ss;
-  ss.ss_sp = alt_stack_.get();
+  ss.ss_sp = alt_stack_;
   ss.ss_size = stack_size;
   ss.ss_flags = 0;
-  if (sigaltstack(&ss, nullptr) < 0) {
-    loaded_ = false;
+  if (sigaltstack(&ss, &previous_alt_stack_) < 0) {
+    std::free(alt_stack_);  // never installed
+    alt_stack_ = nullptr;
+    return;
   }
+  alt_stack_thread_ = std::this_thread::get_id();
 }
 
 void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
-  loaded_ = true;
+  // Reserved first, so no handler is installed without being recorded.
+  previous_actions_.reserve(signals.size());
   EnsureAltStack();
+  // The first backtrace() loads libgcc_s, which allocates: do it here, not in
+  // the handler.
+  void* frame = nullptr;
+  (void)backtrace(&frame, 1);
 
   for (int sig : signals) {
     struct sigaction action;
@@ -192,11 +336,14 @@ void CrashSignalHandling::InstallHandlers(const std::vector<int>& signals) {
     action.sa_flags = static_cast<int>(SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESETHAND);
     sigfillset(&action.sa_mask);
     sigdelset(&action.sa_mask, sig);
+    sigdelset(&action.sa_mask, SIGALRM);  // crash-report watchdog, see SigHandler
     action.sa_sigaction = &SigHandler;
 
-    if (sigaction(sig, &action, nullptr) < 0) {
-      loaded_ = false;
+    struct sigaction previous;
+    if (sigaction(sig, &action, &previous) < 0) {
+      continue;
     }
+    previous_actions_.emplace_back(sig, previous);
   }
 }
 
@@ -206,20 +353,30 @@ std::vector<int> DefaultSignals() {
   return {};
 }
 
-void CrashSignalHandling::FreeDeleter::operator()(char* p) const noexcept {
-  (void)p;
+CrashSignalHandling::CrashSignalHandling() {
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  ++instances_;
 }
 
-CrashSignalHandling::CrashSignalHandling() { loaded_ = false; }
+CrashSignalHandling::~CrashSignalHandling() {
+  std::lock_guard<std::mutex> lock(lifecycle_mu_);
+  if (--instances_ == 0) PublishLogger(nullptr);
+}
 
 void CrashSignalHandling::HandleSignal(int, siginfo_t*, void*) {}
 
 void CrashSignalHandling::SigHandler(int, siginfo_t*, void*) {}
 
-void CrashSignalHandling::EnsureAltStack() { loaded_ = false; }
+void CrashSignalHandling::EnsureAltStack() {}
 
-void CrashSignalHandling::InstallHandlers(const std::vector<int>&) { loaded_ = false; }
+void CrashSignalHandling::InstallHandlers(const std::vector<int>&) {}
 
 #endif
+
+void CrashSignalHandling::RefreshModules() {
+#if defined(IBMW_SELFDEV_CRASH_HANDLER) && IBMW_CRASH_SIGNAL_HANDLING_ENABLED
+  ibmw::selfdev::crash::RefreshModules();
+#endif
+}
 
 }  // namespace ibmw::runtime::core::logger

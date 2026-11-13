@@ -10,14 +10,40 @@
 #include <iterator>
 #include <stdexcept>
 
+#include <sys/auxv.h>
+#include <unistd.h>
+
 #include "engine/discovery/registry_discovery_provider.h"
+#include "engine/dynamic_lib.h"
 
 namespace ibmw::discovery {
 
 namespace {
 
+// The override for tests and development setups, ignored in setuid processes
+// as secure_getenv does (which OHOS musl does not declare).
+const char* PluginDirectoryOverride() {
+  if (::getauxval(AT_SECURE) != 0) return nullptr;
+  const char* value = std::getenv("IBMW_DISCOVERY_PLUGIN_DIR");
+  return value && *value ? value : nullptr;
+}
+
+// An overridden plugin must not let another user plant code, for example
+// through an environment kept by sudo: the same rule as every library loaded by
+// path (CORE-017); the directory may be sticky like /tmp. A plugin that cannot
+// be resolved is refused, not left to dlopen. Returns the checked path, which
+// is the one to load.
+std::filesystem::path RequireTrustedPlugin(const std::filesystem::path& path) {
+  std::string checked;
+  const auto untrusted = ibmw::common::util::CheckLibraryTrust(path.string(), checked, true);
+  if (!untrusted.empty()) {
+    throw std::runtime_error("Untrusted discovery plugin '" + path.string() + "': " + untrusted);
+  }
+  return checked;
+}
+
 std::filesystem::path PluginDirectory() {
-  if (const char* value = std::getenv("IBMW_DISCOVERY_PLUGIN_DIR"); value && *value) {
+  if (const char* value = PluginDirectoryOverride()) {
     return value;
   }
   static const char anchor = 0;
@@ -115,7 +141,10 @@ std::unique_ptr<DiscoveryProvider> CreateDiscoveryProvider(DiscoveryBackend back
   }
   if (library) {
     const auto path = PluginDirectory() / library;
-    if (std::filesystem::exists(path)) return std::make_unique<PluginProvider>(path, backend);
+    if (std::filesystem::exists(path)) {
+      return std::make_unique<PluginProvider>(
+          PluginDirectoryOverride() ? RequireTrustedPlugin(path) : path, backend);
+    }
   }
   return nullptr;
 }
