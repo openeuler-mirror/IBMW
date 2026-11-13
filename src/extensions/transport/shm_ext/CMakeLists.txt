@@ -159,7 +159,8 @@ if(IBMW_BUILD_SHM_EXT_BENCH)
     target_compile_definitions(ibmw_shm_ext_bench PRIVATE IBMW_SHM_EXT_BENCH_REPORTER_HOST)
     set_target_properties(ibmw_shm_ext_bench PROPERTIES ENABLE_EXPORTS ON)
     if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
-      # No OHOS platform module: ENABLE_EXPORTS does not add export-dynamic there.
+      # Our OHOS toolchain makes ENABLE_EXPORTS add this; kept for trees configured
+      # with another toolchain file (run_shm_ohos.sh baseline trees).
       target_link_options(ibmw_shm_ext_bench PRIVATE "LINKER:--export-dynamic")
       set(shm_ext_bench_verify_export
           ${CMAKE_CURRENT_SOURCE_DIR}/../../../samples/cpp/retained_loan_e2e/verify_reporter_export.cmake)

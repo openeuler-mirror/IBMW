@@ -19,8 +19,8 @@ if(IBMW_BUILD_RETAINED_LOAN_E2E)
   # becoming a second reporter owner.
   set_target_properties(retained_loan_e2e PROPERTIES ENABLE_EXPORTS ON)
   if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
-    # CMake has no built-in OHOS platform module, so ENABLE_EXPORTS does not add
-    # the export-dynamic linker option that the Reporter host ABI requires.
+    # The Reporter host ABI requires export-dynamic. Our OHOS toolchain makes
+    # ENABLE_EXPORTS add it; kept for trees configured with another toolchain.
     target_link_options(retained_loan_e2e PRIVATE
       "LINKER:--export-dynamic")
     add_custom_command(TARGET retained_loan_e2e POST_BUILD

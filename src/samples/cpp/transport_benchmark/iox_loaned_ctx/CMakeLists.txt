@@ -46,8 +46,8 @@ target_link_libraries(iox_loaned_ctx_publisher_app PRIVATE
   ibmw_samples_cpp_transport_benchmark_iox_loaned_ctx_publisher_module)
 set_target_properties(iox_loaned_ctx_publisher_app PROPERTIES ENABLE_EXPORTS ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
-  # CMake has no built-in OHOS platform module, so ENABLE_EXPORTS does not add
-  # the export-dynamic linker option that the Reporter host ABI requires.
+  # The Reporter host ABI requires export-dynamic. Our OHOS toolchain makes
+  # ENABLE_EXPORTS add it; kept for trees configured with another toolchain.
   target_link_options(iox_loaned_ctx_publisher_app PRIVATE
     "LINKER:--export-dynamic")
 endif()
