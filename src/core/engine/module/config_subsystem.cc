@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <charconv>
 
 #include "engine/yaml_tools.h"
 #include "base/string_util.h"
@@ -79,7 +80,22 @@ void ConfigSubsystem::Initialize(
   cfg_file_path_ = cfg_file_path;
   YAML::Node root;
   if (!cfg_file_path_.empty()) {
-    cfg_file_path_ = std::filesystem::canonical(std::filesystem::absolute(cfg_file_path_));
+    // A sealed descriptor is an immutable Linux file, but canonical() follows
+    // its proc symlink to the non-pathname "memfd:... (deleted)" target.
+    // Preserve only this exact, fully sealed descriptor form; legacy paths
+    // keep their canonical-path behavior.
+    const auto supplied=cfg_file_path_.string();
+    constexpr std::string_view prefix="/proc/self/fd/";
+    if(supplied.compare(0,prefix.size(),prefix)==0) {
+      int fd=-1;const auto text=std::string_view(supplied).substr(prefix.size());
+      const auto parsed=std::from_chars(text.data(),text.data()+text.size(),fd);
+      const int seals=fcntl(fd,F_GET_SEALS);
+      constexpr int required=F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL;
+      MW_REQUIRE(parsed.ec==std::errc{} && parsed.ptr==text.data()+text.size() && fd>=0 &&
+                 seals>=0 && (seals&required)==required,"Config descriptor must be fully sealed");
+    } else {
+      cfg_file_path_ = std::filesystem::canonical(std::filesystem::absolute(cfg_file_path_));
+    }
     MW_INFO("Cfg file path: {}", cfg_file_path_.string());
     default_cfg_access_.SetConfigFilePath(cfg_file_path_.string());
     std::ifstream file_stream(cfg_file_path_);

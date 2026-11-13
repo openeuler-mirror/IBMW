@@ -218,6 +218,8 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   eprosima::fastdds::dds::DataWriter* GetDataWriter(const std::string& dds_topic_name);
   // Returns -1 if the topic is unknown or the DDS status query fails.
   int GetPublicationMatchedCount(const std::string& dds_topic_name) const;
+  // Queries the actual registered reader; returns -1 after retirement or on failure.
+  int GetSubscriptionMatchedCount(const std::string& dds_topic_name) const;
   const ZeroCopyStats* GetZeroCopyStats(const std::string& dds_topic_name) const;
   void UpdateStats(const std::string& dds_topic_name, bool is_zero_copy);
   const ZeroCopyConfig& GetZeroCopyConfig(const std::string& dds_topic_name) const;
@@ -430,6 +432,7 @@ class __attribute__((visibility("default"))) DdsTransportDriver
   std::unordered_map<std::string, PublisherInfo> publisher_map_;
   // topic_name -> SubscriberInfo
   std::unordered_map<std::string, SubscriberInfo> subscriber_map_;
+  // Also protects native reader registration, status queries and retirement.
   mutable std::mutex serialized_subscriber_mutex_;
   std::unordered_map<uint64_t, SerializedSubscriberInfo>
       serialized_subscriber_map_;
