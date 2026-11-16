@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 
+#include "fastdds_compat.h"
 #include "loaned_message.h"
 #include "loaned_message_impl.h"
 
@@ -53,14 +54,14 @@ class Ros2StylePublisher {
     if (writer_ == nullptr) {
       return false;
     }
-    return writer_->write(const_cast<MsgType*>(&msg));
+    return fastdds_compat::Write(writer_, const_cast<MsgType*>(&msg));
   }
 
   bool publish(MsgType&& msg) {
     if (writer_ == nullptr) {
       return false;
     }
-    return writer_->write(&msg);
+    return fastdds_compat::Write(writer_, &msg);
   }
 
   const std::string& get_topic_name() const {

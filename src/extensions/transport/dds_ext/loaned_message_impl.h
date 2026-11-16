@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "dds_ext/fastdds_compat.h"
 #include "dds_ext/loaned_message.h"
 
 // Compatibility for ReturnCode_t (fastdds 3.x vs fastrtps 2.x)
@@ -107,13 +108,13 @@ bool SendLoaned(LoanedMessage<MsgType>&& loaned) {
   loaned.MarkPublished();
 
   if (is_loaned && writer != nullptr) {
-    bool success = writer->write(msg_ptr);
+    bool success = fastdds_compat::Write(writer, msg_ptr);
     if (success) return true;
     writer->discard_loan(msg_ptr);
     return false;
   } else {
     if (writer != nullptr) {
-      bool success = writer->write(msg_ptr);
+      bool success = fastdds_compat::Write(writer, msg_ptr);
       delete static_cast<MsgType*>(msg_ptr);
       return success;
     } else {
