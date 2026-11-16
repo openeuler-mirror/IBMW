@@ -19,6 +19,7 @@
 #include <fastdds/dds/topic/TypeSupport.hpp>
 
 #include "dds_ext/loaned_message_impl.h"
+#include "dds_ext/ros2_style_publisher.h"
 #include "dds/plain_dds_pubsub_type.h"
 
 namespace ibmw::extensions::dds_extension {
@@ -90,6 +91,26 @@ TEST_F(LoanedMessageFallbackTest, StrictNonPlainStillRefuses) {
       ZeroCopyConfig::Strict());
   EXPECT_FALSE(msg.is_valid());
   EXPECT_FALSE(SendLoaned(std::move(msg)));
+}
+
+// Fast DDS 3 write() returns RETCODE_OK (0) on success; reading it as a bool
+// turned every successful publish into a failure.
+TEST_F(LoanedMessageFallbackTest, PlainLoanPublishesThroughWriter) {
+  auto msg = BorrowLoanedMessage<LoanTestPayload>(
+      writer_, "ibmw_loaned_message_fallback_test", /*is_plain=*/true,
+      ZeroCopyConfig::Auto());
+  ASSERT_TRUE(msg.is_valid());
+  msg->value = 9;
+  EXPECT_TRUE(SendLoaned(std::move(msg)));
+}
+
+TEST_F(LoanedMessageFallbackTest, Ros2StylePublisherReportsSuccessfulWrites) {
+  Ros2StylePublisher<LoanTestPayload> publisher(
+      writer_, "ibmw_loaned_message_fallback_test", /*is_plain=*/false);
+  const LoanTestPayload copy{3};
+  EXPECT_TRUE(publisher.publish(copy));
+  EXPECT_TRUE(publisher.publish(LoanTestPayload{5}));
+  EXPECT_TRUE(publisher.publish(publisher.borrow_loaned_message()));
 }
 
 TEST(LoanedMessageFallbackNoWriterTest, NullWriterFallbackDoesNotPublish) {

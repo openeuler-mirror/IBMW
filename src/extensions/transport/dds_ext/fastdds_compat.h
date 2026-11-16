@@ -60,6 +60,16 @@ inline constexpr auto kReturnCodePreconditionNotMet = eprosima::fastrtps::types:
 using SampleIdentity = rtps::SampleIdentity;
 using WriteParams = rtps::WriteParams;
 
+// Fast DDS 3 returns ReturnCode_t (RETCODE_OK == 0) where 2.x returns bool,
+// so the raw result must never be read as a bool.
+inline bool Write(eprosima::fastdds::dds::DataWriter* writer, void* sample) {
+#if IBMW_FASTDDS_V3_PLUS
+  return writer->write(sample) == kReturnCodeOk;
+#else
+  return writer->write(sample);
+#endif
+}
+
 inline bool WriteWithParams(eprosima::fastdds::dds::DataWriter* writer,
                             void* sample, WriteParams& params) {
 #if IBMW_FASTDDS_V3_PLUS

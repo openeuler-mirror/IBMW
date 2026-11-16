@@ -6,6 +6,9 @@
 #include "dds_ext/detail/qos_observation.h"
 #include "dds_ext/global.h"
 #include "dds_ext/ros2_type_helper.h"
+#ifdef IBMW_TF_RECEIPT_HEADER
+#include IBMW_TF_RECEIPT_HEADER
+#endif
 #ifdef IBMW_ENABLE_COMM_TRACE
 #include "dds_ext/internal/dds_comm_trace.h"
 #endif
@@ -87,6 +90,27 @@
     return std::to_string(ret());
   }
   #define COMPAT_WRITE_SUCCESS(ret) (CompatWriteSuccess(ret))
+#endif
+
+#ifdef IBMW_TF_RECEIPT_HEADER
+namespace {
+ibmw_tf::Client tf_receipt_client;
+bool TfWriterReceipt(unsigned char event, eprosima::fastdds::dds::DataWriter* writer,
+                     eprosima::fastdds::dds::DomainParticipant* participant,
+                     const std::string& logical, const std::string& topic,
+                     const std::string& type) {
+  if (!std::getenv("IBMW_TF_FD") || (logical != "/tf" && logical != "/tf_static")) return true;
+  unsigned char gid[24]{}, pg[16]{};
+  const auto wg = writer->guid();
+  const auto p = participant->guid();
+  std::memcpy(gid, wg.guidPrefix.value, 12);
+  std::memcpy(gid + 12, wg.entityId.value, 4);
+  std::memcpy(pg, p.guidPrefix.value, 12);
+  std::memcpy(pg + 12, p.entityId.value, 4);
+  return tf_receipt_client.emit(event, 2, gid, pg, logical.c_str(), type.c_str(),
+                                "", "", "fastdds", topic.c_str());
+}
+}
 #endif
 
 namespace YAML {
@@ -525,17 +549,34 @@ void DdsTransportDriver::Start() {
 }
 
 void DdsTransportDriver::Shutdown() {
-  if (state_ == State::kShutdown)
-    return;
+  decltype(subscriber_map_) retiring_subscribers;
+  {
+    std::lock_guard lock(serialized_subscriber_mutex_);
+    if (state_ == State::kShutdown) return;
+    state_ = State::kShutdown;
+    // Retire readers atomically with status queries. Drain callbacks outside
+    // the lock: a callback may itself query subscription status.
+    retiring_subscribers.swap(subscriber_map_);
+  }
 
-  state_ = State::kShutdown;
+#ifdef IBMW_TF_RECEIPT_HEADER
+  // Retire before any potentially blocking drain, including abandoned teardown.
+  for (auto& [topic, info] : publisher_map_) {
+    if (info.writer) {
+      const auto logical = dds_topic_to_ibmw_topic_.find(topic);
+      if (logical != dds_topic_to_ibmw_topic_.end())
+        TfWriterReceipt(2, info.writer, dds_bus_.GetParticipant(), logical->second,
+                        topic, info.native_type_support.get_type_name());
+    }
+  }
+#endif
 
   const bool shutdown_profile = DdsDataReaderListener::IsAsyncProfileEnabled();
   if (shutdown_profile) {
     MW_INFO(
         "DDS shutdown profile [enter]: data_sharing={} subscribers={} publishers={} topics={}",
         options_.enable_data_sharing,
-        subscriber_map_.size(),
+        retiring_subscribers.size(),
         publisher_map_.size(),
         topic_map_.size());
   }
@@ -578,15 +619,15 @@ void DdsTransportDriver::Shutdown() {
   // a fresh on_data_available while shutdown is waiting on the previous batch,
   // and delete_datareader may deadlock with a callback thread returning a loan.
   const bool abandon_fastdds_teardown =
-      options_.enable_data_sharing && !subscriber_map_.empty();
+      options_.enable_data_sharing && !retiring_subscribers.empty();
 
   if (shutdown_profile) {
     MW_INFO(
         "DDS shutdown profile [listener-detach-start]: subscribers={} abandon_fastdds_teardown={}",
-        subscriber_map_.size(),
+        retiring_subscribers.size(),
         abandon_fastdds_teardown);
   }
-  for (auto& [key, sub_info] : subscriber_map_) {
+  for (auto& [key, sub_info] : retiring_subscribers) {
     if (sub_info.reader) {
       sub_info.reader->set_listener(nullptr);
     }
@@ -598,7 +639,7 @@ void DdsTransportDriver::Shutdown() {
   // Clean up subscribers after the callback/loan drain has reached a stable
   // zero. The listener has already been detached, so no new loan batches can be
   // created while we wait.
-  for (auto& [key, sub_info] : subscriber_map_) {
+  for (auto& [key, sub_info] : retiring_subscribers) {
     if (sub_info.reader) {
       bool drained = true;
       if (sub_info.listener) {
@@ -632,14 +673,14 @@ void DdsTransportDriver::Shutdown() {
   }
 
   if (abandon_fastdds_teardown) {
-    subscriber_map_.clear();
+    retiring_subscribers.clear();
     dds_bus_.AbandonShutdown();
     MW_WARN(
         "DDS DataSharing subscriber shutdown: skipped FastDDS entity deletion to avoid known DataSharing teardown deadlock; OS will reclaim resources.");
     MW_INFO("DDS transport driver shutdown.");
     return;
   }
-  subscriber_map_.clear();
+  retiring_subscribers.clear();
 
   // Clean up publishers after readers have been detached/deleted. This avoids
   // reliable/DataSharing writer teardown waiting on an active local reader.
@@ -967,11 +1008,12 @@ DdsTransportDriver::SubscriberQos(
   try {
     const std::string topic_name(topic);
     const std::string type_name(msg_type);
+    // The native reader map is retired under this mutex too.
+    std::lock_guard lock(serialized_subscriber_mutex_);
     const auto it = subscriber_map_.find(GetDdsTopicName(topic_name, type_name));
     if (it != subscriber_map_.end() && it->second.reader && it->second.topic) {
       return detail::observation::Actual(*it->second.reader, *subscriber_, *it->second.topic);
     }
-    std::lock_guard lock(serialized_subscriber_mutex_);
     runtime::core::transport::QosDescriptor result;
     for (const auto& [handle, entry] : serialized_subscriber_map_) {
       if (entry.descriptor.topic != topic || entry.descriptor.msg_type != msg_type || !entry.reader || !entry.topic) continue;
@@ -1166,6 +1208,21 @@ bool DdsTransportDriver::RegisterSendType(
       return false;
     }
 
+#ifdef IBMW_TF_RECEIPT_HEADER
+    auto retire_unregistered = [&](eprosima::fastdds::dds::DataWriter* pending) {
+      TfWriterReceipt(2, pending, dds_bus_.GetParticipant(), info.topic_name,
+                      dds_topic_name, type.get_type_name());
+      publisher_->delete_datawriter(pending);
+    };
+    std::unique_ptr<eprosima::fastdds::dds::DataWriter, decltype(retire_unregistered)>
+        unregistered(writer, retire_unregistered);
+    if (!TfWriterReceipt(1, writer, dds_bus_.GetParticipant(), info.topic_name,
+                         dds_topic_name, type.get_type_name())) {
+      MW_ERROR("Owned TF writer receipt failed for '{}'.", dds_topic_name);
+      return false;
+    }
+#endif
+
     // Detect plain type
     bool is_plain = COMPAT_IS_PLAIN(type);
     uint32_t type_size = static_cast<uint32_t>(COMPAT_TYPE_SIZE(type));
@@ -1184,8 +1241,12 @@ bool DdsTransportDriver::RegisterSendType(
       pub_info.publish_profile_stats = std::make_shared<PublishProfileStats>();
     }
 
-    publisher_map_.emplace(dds_topic_name, std::move(pub_info));
     dds_topic_to_ibmw_topic_[dds_topic_name] = info.topic_name;
+    publisher_map_.emplace(dds_topic_name, std::move(pub_info));
+
+#ifdef IBMW_TF_RECEIPT_HEADER
+    unregistered.release();
+#endif
 
     return true;
   } catch (const std::exception& e) {
@@ -1201,6 +1262,7 @@ bool DdsTransportDriver::RegisterSendType(
 bool DdsTransportDriver::OnMessage(
     const runtime::core::transport::MessageHandlerWrapper& message_handler) noexcept {
   try {
+    std::lock_guard lock(serialized_subscriber_mutex_);
     MW_REQUIRE(state_ == State::kInit,
                             "Method can only be called when state is 'Init'.");
 
@@ -2505,6 +2567,18 @@ int DdsTransportDriver::GetPublicationMatchedCount(
 
   eprosima::fastdds::dds::PublicationMatchedStatus status;
   const auto ret = it->second.writer->get_publication_matched_status(status);
+  if (ret != compat_dds::RETCODE_OK) return -1;
+  return status.current_count;
+}
+
+int DdsTransportDriver::GetSubscriptionMatchedCount(
+    const std::string& dds_topic_name) const {
+  std::lock_guard lock(serialized_subscriber_mutex_);
+  const auto it = subscriber_map_.find(dds_topic_name);
+  if (it == subscriber_map_.end() || it->second.reader == nullptr) return -1;
+
+  eprosima::fastdds::dds::SubscriptionMatchedStatus status;
+  const auto ret = it->second.reader->get_subscription_matched_status(status);
   if (ret != compat_dds::RETCODE_OK) return -1;
   return status.current_count;
 }

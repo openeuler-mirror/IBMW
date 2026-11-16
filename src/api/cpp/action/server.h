@@ -156,12 +156,19 @@ bool CreatePublisher(dds::DomainParticipant* participant, dds::Publisher* publis
 // Write a service response stamped with the canonical request identity so the
 // requester's reply matcher pairs it with the originating request.
 template <typename RspT>
-void WriteResponse(dds::DataWriter* writer, RspT& response, const rtps::SampleIdentity& identity) {
+bool TryWriteResponse(dds::DataWriter* writer, RspT& response, const rtps::SampleIdentity& identity) {
+  if (!writer) return false;
   auto params = ibmw::internal::ros2_action_dds::MakeServiceResponseWriteParams(identity);
   const auto ret = writer->write(&response, params);
   if (!ret) {
     ActionLog(ActionLogLevel::kWarn, "response write failed");
   }
+  return ret;
+}
+
+template <typename RspT>
+void WriteResponse(dds::DataWriter* writer, RspT& response, const rtps::SampleIdentity& identity) {
+  (void)TryWriteResponse(writer, response, identity);
 }
 
 }  // namespace ibmw::action::server
